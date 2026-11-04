@@ -69,7 +69,13 @@ def test_capture_measures_actual_imports_and_both_coordinates(bound):
 
 
 @pytest.mark.parametrize("mutation", ["missing", "changed", "symlink"])
-def test_frozen_fixture_refuses_missing_or_changed_file(bound, mutation):
+def test_frozen_fixture_difference_is_observed_as_data(bound, mutation):
+    """Owner ruling 2026-11-04: reviewed bytes vs observed bytes is DATA.
+
+    A fixture file that moved, changed or is not a regular file used to raise
+    inside `capture` (exit 69 before the stage ran). It is now recorded: the
+    gate runs, and the verdict is marked `platform_unreviewed`.
+    """
     manifest, binding, fixture = bound
     target = fixture / gb.FILES[1]
     if mutation == "changed":
@@ -78,8 +84,11 @@ def test_frozen_fixture_refuses_missing_or_changed_file(bound, mutation):
         target.unlink()
         if mutation == "symlink":
             target.symlink_to(SOURCE / gb.FILES[1])
-    with pytest.raises(ValueError, match="frozen|identity|regular"):
-        gb.capture(binding, gb.digest(manifest), str(SOURCE), str(fixture))
+    captured = gb.capture(binding, gb.digest(manifest), str(SOURCE), str(fixture))
+    assert (captured["source"]["fixture"]["files"][gb.FILES[1]]
+            != binding["files"][gb.FILES[1]])
+    fields = {item["field"] for item in gb.compare_to_binding(binding, captured)}
+    assert f"fixture.files[{gb.FILES[1]}]" in fields
 
 
 @pytest.mark.parametrize("bound", ["1.5.85", "1.5.99"], indirect=True)
@@ -108,17 +117,29 @@ def test_real_stage_exit_and_changed_after_identity_are_retained(bound, tmp_path
 
 
 @pytest.mark.parametrize("bound", ["1.5.85", "1.5.99"], indirect=True)
-def test_sdk_mismatch_refuses_before_stage(bound, tmp_path, monkeypatch):
+def test_sdk_difference_is_recorded_and_the_stage_still_runs(bound, tmp_path, monkeypatch):
+    """The pinned SDK is a REVIEW literal: a different image is still measured."""
     manifest, binding, fixture = bound
     other = "1.5.99" if binding["sdk"] == "1.5.85" else "1.5.85"
     version = gb.metadata.version
     monkeypatch.setattr(gb.metadata, "version",
                         lambda name: other if name == "skillflow-py" else version(name))
+    game = tmp_path / "game"
+    game.mkdir()
+    run = game / "run_tests.sh"
+    run.write_text("#!/bin/sh\nexit 0\n")
+    run.chmod(0o755)
+    monkeypatch.chdir(game)
     report = tmp_path / "mismatch.json"
-    assert gb.run_bound(manifest, report, str(SOURCE), str(fixture), gb.digest(manifest)) == 69
+    sha256 = gb.digest(manifest)
+    assert gb.run_bound(manifest, report, str(SOURCE), str(fixture), sha256) == 0
     receipt = json.loads(report.read_text())
-    assert receipt["identity"] == "mismatch" and receipt["raw_exit"] is None
-    assert f"expected {binding['sdk']}, observed {other}" in receipt["error"]
+    assert receipt["identity"] == "unchanged" and receipt["raw_exit"] == 0
+    assert receipt["platform"]["status"] == "unreviewed"
+    differences = {item["field"]: item for item in receipt["platform"]["differences"]}
+    assert differences["sdk"]["bound"] == binding["sdk"]
+    assert differences["sdk"]["observed"] == other
+    assert gb.receipt_identity(report, 0, manifest, sha256) == "unchanged"
 
 
 @pytest.mark.parametrize("pin", [None, 85, "", "1.5.*", ">=1.5.85", "1.5.99 "])
@@ -187,7 +208,15 @@ def test_manifest_path_swap_during_parse_keeps_one_raw_witness(bound, tmp_path, 
 
 
 @pytest.mark.parametrize("field", ["sdk", "image", "binding_sha256", "rebuilt"])
-def test_receipt_requires_original_frozen_pin_hash_and_image(bound, tmp_path, field):
+def test_receipt_settlement_and_review_are_separate_questions(bound, tmp_path, field):
+    """A receipt authorizes reclamation on SETTLEMENT, not on the review literal.
+
+    Owner ruling 2026-11-04: the pinned SDK, the bound engine hash and the file
+    digests are review literals. Requiring them to equal the observation here is
+    what turned every stale binding into an unmeasurable platform. A receipt
+    still settles against the bytes frozen before dispatch (`binding_sha256`),
+    and `platform_status` is what says whether the run is release evidence.
+    """
     manifest, binding, fixture = bound
     frozen, sha256 = gb.read_binding(manifest)
     observation = gb.capture(frozen, sha256, str(SOURCE), str(fixture))
@@ -204,7 +233,13 @@ def test_receipt_requires_original_frozen_pin_hash_and_image(bound, tmp_path, fi
         observation[field] = {"sdk": "1.5.85", "image": "sha256:" + "f" * 64,
                               "binding_sha256": "f" * 64}[field]
     report.write_text(json.dumps(receipt))
-    assert gb.receipt_identity(report, 23, manifest, sha256) == "unknown"
+    if field == "sdk":
+        # Settles, but no longer the reviewed SDK: an unreviewed measurement.
+        assert gb.receipt_identity(report, 23, manifest, sha256) == "unchanged"
+        fields = {item["field"] for item in gb.compare_to_binding(frozen, receipt["before"])}
+        assert "sdk" in fields
+    else:
+        assert gb.receipt_identity(report, 23, manifest, sha256) == "unknown"
 
 
 def test_capture_compares_callers_binding_instead_of_rebuilding_it(bound):
@@ -284,7 +319,12 @@ else:
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(bins) + ":" + __import__("os").environ["PATH"])
     result = subprocess.run([str(launcher), str(game), str(reports), "owned"], capture_output=True, text=True)
-    retained = change_sidecar or sdk_state == "mismatch"
+    # Only a sidecar identity that MOVED withholds the verdict (that guard is not
+    # about a review literal). A different SDK is recorded as data: the stage exit
+    # stands and the verdict is flagged `platform_unreviewed` (owner ruling
+    # 2026-11-04). A malformed binding still refuses before dispatch: it names no
+    # Source and no image to run.
+    retained = change_sidecar
     assert result.returncode == (69 if retained or sdk_state == "missing" else 23), result.stderr
     if sdk_state == "missing":
         assert not calls.exists()
@@ -292,10 +332,17 @@ else:
         assert not (tmp_path / "snapshots").exists()
         return
     assert (reports / "owned.gate.head").read_text().strip() == head
-    exit_value = (reports / "owned.gate.exit").read_text().strip()
-    assert exit_value.startswith("mismatch-platform-identity;") if retained else exit_value == "23"
+    lines = (reports / "owned.gate.exit").read_text().splitlines()
+    if retained:
+        assert lines[0].startswith("mismatch-platform-identity;")
+    else:
+        assert lines[0] == "23"
+        assert (len(lines) > 1) is (sdk_state == "mismatch")
+        if sdk_state == "mismatch":
+            assert lines[1].startswith("platform_unreviewed")
+            assert "sdk" in lines[1]
     receipt = json.loads((reports / "owned.platform-identity.json").read_text())
-    assert receipt["raw_exit"] == (None if sdk_state == "mismatch" else 23)
+    assert receipt["raw_exit"] == 23
     assert gb.git(game, "rev-parse", "HEAD") == head
     assert gb.git(game, "status", "--porcelain") == ""
     snapshots = list((tmp_path / "snapshots").iterdir())

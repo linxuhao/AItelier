@@ -73,13 +73,35 @@ equal the explicit pin. Unit controls use 1.5.85 and 1.5.99 pins; those controls
 do not establish runtime compatibility or approve either image.
 
 Manifest parsing and SHA256 consume the same single read from an opened regular
-non-symlink file. The launcher freezes that hash before dispatch and requires
-it for Source/image selection, execution and receipt authorization. Capture
-compares observations with the caller's original binding and hash. A receipt
-can authorize cleanup only against that original hash, SDK pin and image;
-newly observed or rebuilt expectations cannot authorize it. Each invocation
-requires fresh report paths; unknown or mismatched terminal identity retains
-its snapshot and preserves the observed raw exit.
+non-symlink file. The launcher freezes that hash before dispatch and uses it for
+Source/image selection, execution and receipt authorization. The binding is a
+RECORD OF REVIEW, not a pre-dispatch licence: it is never a reason to refuse.
+That was the 2026-11-04 owner ruling (wuxia `iss-5e51a56608c64f60`) -- refusing
+while one literal was stale stopped every project's every gate after a platform
+rebuild, in seconds, and made "did not measure" look exactly like "measured and
+failed". So:
+
+- the identity actually in front of the gate is observed at dispatch
+  (`*.platform-binding.json`) and inside the container before and after
+  `run_tests.sh` (`*.platform-identity.json`), and the fields that differ from
+  the reviewed binding are recorded as data -- field, bound value, observed value;
+- a RED verdict is the gate's own exit code whatever the identity: "the code is
+  broken" is a property of the code, not of who measured it;
+- a GREEN whose identity is not the reviewed binding carries
+  `platform_unreviewed` on the line after the exit code in `<suffix>.gate.exit`,
+  and the host queue records `platform_unreviewed`/`platform_unreviewed_evidence`
+  on the ticket beside `verdict`. It is a measurement, not release evidence. It
+  is not silently accepted and not turned into a failure;
+- an explicit binding (or its sha256) can still be passed in to judge a run
+  against a historical review.
+
+The frozen bytes still matter: a receipt can authorize cleanup only against the
+hash (and image) frozen before dispatch, never against a newly observed or
+rebuilt one, and an SDK pin mismatch, a bound file digest or the engine hash is
+recorded as an unreviewed difference rather than becoming an unmeasurable
+platform. Each invocation requires fresh report paths; unknown or mismatched
+terminal identity (the instrument could not be observed, or moved under the
+gate) still retains its snapshot and preserves the observed raw exit.
 
 The same Source is mounted readonly at
 `/app` and `/home/linxuhao/AItelier`, with explicit `PYTHONPATH=/app`.
@@ -87,9 +109,11 @@ The actual imports, both fixture coordinates, manifest hash, actual pinned SDK a
 actual engine `/srv/godot_harness.py` loaded/disk hash and process identity are
 recorded before and after `run_tests.sh` in `*.platform-identity.json`.
 Named Docker sidecar CID/image/PID/start identity is recorded separately before
-and after. Incomplete observations remain unknown; observed differences remain
-mismatches. Both refuse acceptance and retain the snapshot while preserving the
-raw stage exit in the receipt. Source movement, snapshot poisoning, queue ticket and
+and after. Incomplete observations remain unknown and retain the snapshot; a
+sidecar identity that moves withholds the verdict the same way. An observed
+difference from the REVIEWED binding is different: it is a measurement, marked
+`platform_unreviewed` (see above), and the raw stage exit is both the reported
+verdict and the recorded one. Source movement, snapshot poisoning, queue ticket and
 normal stage exits retain their existing meaning. No absent-path skip is used.
 
 `aitelier recreate-godot` is a closed operation on the existing initialized

@@ -35,7 +35,7 @@ elif mode == "image":
     print({image!r})
 elif mode == "sha256":
     print({binding_sha256!r})
-elif mode in ("sidecar", "receipt"):
+elif mode in ("sidecar", "receipt", "platform"):
     sys.exit(subprocess.run([sys.executable, {observer!r}, *args]).returncode)
 else:
     sys.exit(2)
@@ -88,11 +88,19 @@ def _git(cwd, *args):
 
 
 def _observation(sdk="1.5.85", binding_sha256="c" * 64):
+    # The receipt records the identity of both readonly mounts (head/tree/files),
+    # so a stand-in receipt must carry that block too. It matches the fixture
+    # binding built below, which is what `reviewed` means.
+    roots = {name: dict(head="0" * 40, tree="0" * 40, dirty=0,
+                        files={path: "a" * 64 for path in
+                               ("docker/godot/godot_harness.py",
+                                "aitelier/tools/godot_playtest/impl.py")})
+             for name in ("root", "fixture")}
     return dict(files=[dict(path=f"/fixture/source-{i}", sha256="a" * 64) for i in range(4)],
                 engine=dict(path="/srv/godot_harness.py", sha256="b" * 64,
                             loaded_sha256="b" * 64, pid=123),
                 sdk=sdk, binding_sha256=binding_sha256,
-                python=sys.executable, pid=456, image=IMAGE)
+                python=sys.executable, pid=456, image=IMAGE, source=roots)
 
 
 def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23,
@@ -126,7 +134,13 @@ def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23
         observer=str(SOURCE / "tools/gate_binding.py")))
     receipt = dict(identity=identity, raw_exit=stage,
                    before=_observation(sdk, binding_sha256),
-                   after=_observation(sdk, binding_sha256))
+                   after=_observation(sdk, binding_sha256),
+                   # The frozen manifest this receipt is judged against: the
+                   # answer to "which platform measured this?" (owner ruling
+                   # 2026-11-04). Matches the fixture binding, so: reviewed.
+                   platform=dict(binding_sha256=binding_sha256,
+                                 frozen_sha256=binding_sha256,
+                                 status="reviewed", differences=[]))
     if identity == "mismatch":
         receipt["after"]["engine"]["pid"] += 1
         receipt["error"] = "IdentityMismatch: observed engine PID differs"
@@ -249,7 +263,11 @@ def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monke
     assert args[args.index("-w") + 1] != str(fx["game"])
     assert IMAGE in args and f"{SOURCE}:/app:ro" in args
     modes = [c[0] for c in _lines(fx["binding_calls"])]
-    assert modes == ["sha256", "source", "image", "sidecar", "receipt", "sidecar"]
+    # sha256/source/image are the dispatch coordinates; the second sha256 is the
+    # dispatch-time observation record (owner ruling 2026-11-04); `platform` is
+    # the review question asked of the receipt, after the stage ran.
+    assert modes == ["sha256", "source", "image", "sha256", "sidecar", "receipt",
+                     "sidecar", "platform"]
     _assert_clean_source_and_snapshot(fx)
 
 

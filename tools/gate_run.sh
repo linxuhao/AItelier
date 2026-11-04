@@ -6,10 +6,6 @@
 WORKTREE="${1:?abs path to the worktree}"
 BINDING="${GATE_BINDING_FILE:?frozen platform Source binding required}"
 BINDING_TOOL="$(dirname "$0")/gate_binding.py"
-# Freeze the complete operator binding before dispatch, including SDK and image.
-BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
-PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
-PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 REPORTS="${2:?abs path to the gate-report parent dir}"
 SUFFIX="${3:-$(basename "$WORKTREE")}"
 NAME="wuxia-gate-$SUFFIX-$$"
@@ -18,6 +14,33 @@ EXITF="$REPORTS/$SUFFIX.gate.exit"
 HEADF="$REPORTS/$SUFFIX.gate.head"
 SNAPROOT="/home/linxuhao/.AItelier/gate-snapshots"
 SNAP="$SNAPROOT/$SUFFIX-$$"
+
+# A suffix names one invocation. Refuse prior evidence without altering it.
+# Checked before anything is observed or written, so a second invocation cannot
+# overwrite the record of the first.
+for report in "$LOG" "$EXITF" "$HEADF" "$REPORTS/$SUFFIX.platform-identity.json" \
+  "$REPORTS/$SUFFIX.platform-binding.json" \
+  "$REPORTS/$SUFFIX.sidecar-before.json" "$REPORTS/$SUFFIX.sidecar-after.json"; do
+  if [ -e "$report" ] || [ -L "$report" ]; then
+    echo "refusing: existing gate report $report; prior evidence retained" >&2
+    exit 69
+  fi
+done
+
+# 2026-11-04 (owner ruling, wuxia iss-5e51a56608c64f60): the frozen binding is a
+# RECORD OF REVIEW, not a pre-dispatch licence to refuse. This used to `exit 69`
+# here -- before running anything -- whenever one literal was stale, so a single
+# platform rebuild (2026-10-24 -> 11-03) stopped EVERY project's every gate in
+# seconds and made "did not measure" look exactly like "measured and failed".
+# So the binding is read, the platform identity is OBSERVED and recorded beside
+# the receipt ($SUFFIX.platform-binding.json), and the gate ALWAYS runs.
+#
+# What is still fatal here is only "there is nothing to dispatch": an unreadable
+# or malformed binding names no Source and no image, and inventing either from
+# whatever is on disk would measure a platform nobody reviewed.
+BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
+PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
+PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 
 # NOTE: a linked worktree's `.git` is a FILE ("gitdir: …"), not a directory, so
 # `-d` is wrong here — it refused both real round worktrees. Ask git instead.
@@ -46,14 +69,14 @@ if [ -n "$(git -C "$WORKTREE" status --porcelain)" ]; then
   echo "refusing: $WORKTREE is dirty — the gate gates a commit, so a dirty tree gates nothing reproducible" >&2
   exit 65
 fi
-# A suffix names one invocation. Refuse prior evidence without altering it.
-for report in "$LOG" "$EXITF" "$HEADF" "$REPORTS/$SUFFIX.platform-identity.json" \
-  "$REPORTS/$SUFFIX.sidecar-before.json" "$REPORTS/$SUFFIX.sidecar-after.json"; do
-  if [ -e "$report" ] || [ -L "$report" ]; then
-    echo "refusing: existing gate report $report; prior evidence retained" >&2
-    exit 69
-  fi
-done
+# Now that this invocation is going to run, record what the platform looked like
+# at dispatch: which reviewed fields already differ, observed vs bound. Recorded,
+# not refused -- the receipt carries the same comparison from inside the gate.
+python3 "$BINDING_TOOL" sha256 "$BINDING" --observe "$REPORTS/$SUFFIX.platform-binding.json" \
+  --binding-sha256 "$BINDING_SHA256" > /dev/null 2>> "$LOG" || {
+  echo "refusing: the binding could not be observed at dispatch; see $SUFFIX.gate.log" >&2
+  exit 69
+}
 HEAD_BEFORE="$(git -C "$WORKTREE" rev-parse HEAD)"
 echo "$HEAD_BEFORE" > "$HEADF"
 
@@ -105,6 +128,16 @@ if [ "$identity" != "unchanged" ]; then
   exit 69
 fi
 
+# `unchanged` only says the instrument did not MOVE while the gate ran. Whether
+# it is the platform a human reviewed is a second question, answered from the
+# receipt against the hash frozen before dispatch. It is never a reason to stop
+# or to relabel the verdict:
+#   reviewed            -> the real stage exit is release evidence when green
+#   unreviewed/unknown  -> the real stage exit stays the verdict, and the flag
+#                          sits on the line after it: a MEASUREMENT, not
+#                          release evidence (owner ruling, 2026-11-04).
+platform="$(python3 "$BINDING_TOOL" platform "$REPORTS/$SUFFIX.platform-identity.json" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || platform="unknown platform record unavailable"
+
 # The snapshot is unreachable by the round, so a change here would mean the gate
 # itself moved the tree. Still checked: an unverified assumption is how the last
 # two holes got in.
@@ -127,7 +160,13 @@ fi
 
 git -C "$WORKTREE" worktree remove --force "$SNAP" >/dev/null 2>&1
 rm -rf "$SNAP"
-echo "$rc" > "$EXITF"
+case "$platform" in
+  reviewed)
+    echo "$rc" > "$EXITF" ;;
+  *)
+    printf '%s\nplatform_unreviewed %s\n' "$rc" "$platform" > "$EXITF"
+    echo "NOTE: identity is not the reviewed binding ($platform); the real stage exit was $rc and it is a MEASUREMENT, not release evidence. See $SUFFIX.platform-binding.json and $SUFFIX.platform-identity.json" >> "$LOG" ;;
+esac
 
 # 2026-09-20: for its whole life this script RETURNED the status of the `echo`
 # above -- i.e. 0 -- no matter what the gate did. The caller printed GATE_RC=0

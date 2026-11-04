@@ -32,6 +32,12 @@ States:
            `cancellation`. Not done/failed: no exit code, no verdict, no report.
 
 `done` is about DELIVERY, not about the game passing. Read `verdict`.
+A `done` ticket also carries `platform_unreviewed` (bool) and, when it is True,
+`platform_unreviewed_evidence`: the identity that measured the gate was not the
+reviewed binding, so the verdict is a measurement, not release evidence. Since
+the 2026-11-04 owner ruling (wuxia iss-5e51a56608c64f60) a stale binding never
+stops a gate; it only marks what the verdict is worth. A `failed` verdict with
+that flag is still evidence that the code is broken.
 Ordinary submit requires --registrations/--purpose and the existing CLI venv plus
 GATE_QUEUE_AITELIER_ROOT and own AITELIER_DRIVER_ID. Explicit submit-unowned and
 read-only/v1 commands remain stdlib-only. See docs/host-gate-queue.md.
@@ -85,6 +91,11 @@ PIDFILE = ROOT / "daemon.pid"
 STOPFILE = ROOT / "stop"
 DAEMON_LOG = ROOT / "daemon.log"
 SUFFIX = "gate"  # gate_run.sh writes <SUFFIX>.gate.{log,exit,head}
+# `gate_run.sh` writes the gate's real stage exit on the FIRST line of
+# <SUFFIX>.gate.exit, and -- since the 2026-11-04 owner ruling -- a second line
+# starting with this flag when the identity that measured the gate is not the
+# reviewed binding. Such a verdict is a measurement, not release evidence.
+PLATFORM_UNREVIEWED = "platform_unreviewed"
 POLL_SECONDS = float(os.environ.get("GATE_QUEUE_POLL", "2"))
 TICKET_ID = re.compile(r"gq-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")  # what cmd_submit mints
 FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -1082,11 +1093,28 @@ def finalize(record: dict, runner_rc: int | None = None) -> dict:
         return _finalize(current, runner_rc)
 
 
+def exit_file_verdict(exitf: Path) -> tuple[str, str | None]:
+    """The gate's own exit line, and the platform flag line written under it.
+
+    `gate_run.sh` writes the real stage exit on the FIRST line. Since the
+    2026-11-04 owner ruling a second line -- `platform_unreviewed ...` -- is
+    written when the identity that measured the gate is not the reviewed
+    binding: the verdict stands, but it is a measurement, not release evidence.
+    A single-line file is every gate written before that ruling, and every
+    green whose identity is reviewed.
+    """
+    raw = exitf.read_text().strip() if exitf.exists() else ""
+    lines = raw.splitlines()
+    verdict = lines[0].strip() if lines else ""
+    return verdict, next((line for line in lines[1:]
+                          if line.startswith(PLATFORM_UNREVIEWED)), None)
+
+
 def _finalize(record: dict, runner_rc: int | None = None) -> dict:
     """Read the exit FILE and flatten while the caller holds mutation.lock."""
     parent = report_parent(record["ticket"])
     exitf = parent / ("%s.gate.exit" % SUFFIX)
-    raw = exitf.read_text().strip() if exitf.exists() else ""
+    raw, platform = exit_file_verdict(exitf)
     inner = sorted(parent.glob("wuxia-godot-gate-*"))
     if len(inner) > 1:
         # A test inside the gated tree can leave its own wuxia-godot-gate-* dirs
@@ -1107,6 +1135,16 @@ def _finalize(record: dict, runner_rc: int | None = None) -> dict:
         record.update(state="done", gate_exit_code=int(raw),
                       verdict={"0": "passed", "1": "failed"}[raw],
                       report_dir=str(parent))
+        # A verdict measured on an identity that is not the reviewed binding is
+        # a MEASUREMENT, not release evidence. The flag travels with the verdict
+        # so that whoever reads `verdict == "passed"` cannot miss it: a red still
+        # stands as evidence, and a green is not silently accepted.
+        record["platform_unreviewed"] = platform is not None
+        if platform is not None:
+            record["platform_unreviewed_evidence"] = platform[:400]
+            log("verdict %s for %s is platform_unreviewed (%s): a measurement, "
+                "not release evidence" % (record["verdict"], record["ticket"],
+                                          platform[:200]))
     else:
         record.update(state="failed", gate_exit_code=raw or runner_rc,
                       error=record.get("error") or

@@ -143,6 +143,18 @@ ownership. Unknown execution becomes `held/recovery_unknown` and blocks further 
 live consumer may remain. Known adopted work finishes once; no automatic retry
 or duplicate launch. Gate exit 1 plus a real manifest remains a delivered native
 red (`done`, `verdict:failed`), distinct from no execution and infrastructure loss.
+
+Read `platform_unreviewed` with every verdict. Since the 2026-11-04 owner ruling
+(wuxia `iss-5e51a56608c64f60`) a stale frozen binding never stops a gate: the
+identity is observed and recorded instead, and when it is not the reviewed
+binding `gate_run.sh` writes `platform_unreviewed ...` on the second line of
+`<suffix>.gate.exit`. Finalization keeps the verdict exactly as the gate reported
+it (a red stays `verdict:failed`, a green stays `verdict:passed`) and adds
+`platform_unreviewed: true`, `platform_unreviewed_evidence`, and a daemon-log
+line. `platform_unreviewed: true` with `verdict:passed` is a measurement, not
+release evidence; with `verdict:failed` it is still evidence that the code is
+broken. A single-line exit file -- every gate before that ruling -- is read the
+same way, with `platform_unreviewed: false`.
 State and filesystem snapshots are not a global transaction: the local lock orders
 the covered report producer, while a separate State writer can race afterward.
 

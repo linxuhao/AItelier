@@ -308,11 +308,44 @@ def test_restart_finalizes_existing_exit_preserving_started_history(queue):
     queue.finish_process(daemon)
     final = queue.record(ticket)
     assert final["state"] == "done" and final["verdict"] == "passed"
+    assert final["platform_unreviewed"] is False  # a reviewed green, as before
     assert final["started_at"] == record["started_at"]
     before = queue.raw(ticket)
     queue.cancel(ticket, rc=5)
     assert queue.raw(ticket) == before
     assert not any(r.get("event") == "start" for r in queue.timeline)
+
+
+@pytest.mark.parametrize("verdict,rc", [("passed", 0), ("failed", 1)])
+def test_platform_unreviewed_travels_with_the_verdict(queue, verdict, rc):
+    """Owner ruling 2026-11-04: the flag must reach whoever reads `verdict`.
+
+    `gate_run.sh` writes the real stage exit on the first line of the exit file
+    and, when the identity that measured the gate is not the reviewed binding, a
+    `platform_unreviewed ...` line under it. The verdict stands (a red is still
+    evidence) and the ticket says the verdict is a measurement, not release
+    evidence.
+    """
+    ticket = queue.submit("unreviewed platform verdict")
+    path = queue.root / "tickets" / ticket / "ticket.json"
+    record = queue.record(ticket)
+    record.update(state="running", started_at="2000-01-01T00:00:00+00:00")
+    path.write_text(json.dumps(record) + "\n")
+    parent = queue.reports / ticket
+    parent.mkdir(parents=True)
+    flag = ("platform_unreviewed binding=0123456789ab differs=2 "
+            "engine.sha256:cb3c7e97d63a->ebdb2e31a2b2 files[docker/godot/godot_harness.py]:cb3c7e97d63a->ebdb2e31a2b2")
+    (parent / "gate.gate.exit").write_text(f"{rc}\n{flag}\n")
+    (parent / "manifest.json").write_text("{}\n")
+    queue.finish_process(queue.daemon(once=True))
+    final = queue.record(ticket)
+    assert final["state"] == "done"
+    assert final["verdict"] == verdict and final["gate_exit_code"] == rc
+    assert final["platform_unreviewed"] is True
+    assert final["platform_unreviewed_evidence"].startswith("platform_unreviewed ")
+    assert "engine.sha256" in final["platform_unreviewed_evidence"]
+    # Visible in the daemon log too, not only in the ticket.
+    assert "platform_unreviewed" in (queue.root / "daemon.log").read_text()
 
 
 @pytest.mark.parametrize("damage", ["hash", "field"])

@@ -138,7 +138,19 @@ def test_native_typed_error_cannot_buy_json_fallback(error_type):
 
 @pytest.fixture(scope='session',autouse=True)
 def retained_process_identity():
+    # This fixture records the identity of ONE measurement campaign: it asserts a
+    # specific mount (/work), a specific evidence path (/raw) and a specific SDK
+    # (1.5.97), and it writes its receipt outside the repository. Those are facts
+    # about that campaign, not about the product, so outside it the fixture must
+    # say so instead of failing the whole module - being autouse and session
+    # scoped, its error took every test here down with it.
     import importlib.metadata, os, subprocess
+    # Outside the campaign there is no receipt to take, and that is not a reason
+    # to withhold the tests themselves: yield and let them run. Only the identity
+    # assertions below belong to the campaign.
+    if not os.environ.get('BOUNDARY_TEST_SHA'):
+        yield
+        return
     import core.dpe_pipeline
     head=subprocess.check_output(['git','-C','/work','rev-parse','HEAD'],text=True).strip()
     identity={'sdk':importlib.metadata.version('skillflow-py'),'module':core.dpe_pipeline.__file__,
@@ -191,7 +203,11 @@ def test_unprovisioned_nested_cpu_gate_retains_nonpassing_reason(tmp_path):
     out=tmp_path/'gate-output'
     result=rt.run_tests(project_root=str(repo),out_dir=str(out))
     report=json.loads((out/'test_report.json').read_text())
-    Path('/raw/nested-cpu-gate-report.json').write_text(json.dumps({'result':result,'report':report},indent=2))
+    # The receipt is campaign output: it is retained where the campaign mounts
+    # /raw, and its absence elsewhere says nothing about the product, so it must
+    # not turn an assertion about failure reporting into a FileNotFoundError.
+    if Path('/raw').is_dir():
+        Path('/raw/nested-cpu-gate-report.json').write_text(json.dumps({'result':result,'report':report},indent=2))
     assert result['passed']is False and report['passed']is False
     assert report.get('infrastructure_unavailable')is True
     assert report.get('skipped_because')=='cpu_executor_unavailable'

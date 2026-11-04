@@ -34,6 +34,8 @@ def test_measured_failed_gate_stays_nonpassing_at_tool_and_final_consumer(tmp_pa
     retained=json.loads((workspace/'5_evidence/evidence_report.json').read_text())
     assert verdict['passed']is False and retained['passed']is False
     assert any(row['step']=='5_test'for row in retained['failed_gates'])
-    Path('/raw/measured-failed-gate.json').write_text(json.dumps({
-        'actual_process':gate,'tool_result':result,'test_report':report,
-        'consumer_result':verdict,'consumer_report':retained},indent=2))
+    # Campaign receipt only; see the note in test_boundaries.py.
+    if Path('/raw').is_dir():
+        Path('/raw/measured-failed-gate.json').write_text(json.dumps({
+            'actual_process':gate,'tool_result':result,'test_report':report,
+            'consumer_result':verdict,'consumer_report':retained},indent=2))

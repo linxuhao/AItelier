@@ -1,4 +1,6 @@
 {
+  "verdict": "pass - all three criteria hold; no blocking defect",
+  "summary": "The guard does what the node asks. A document that records a library version other than the running one is refused by library_mismatch with the recorded version, the running version and the plan identity, and the refusal is reached before the plan is parsed and before any TodoRun exists; a library that genuinely binds the same predicate name never gets to evaluate it (marker file), while the matching library and a gate command at its own version both do (positive controls). The running version is untouched: 74 passed at the base commit, 81 at the artifact, 37 documents already in the two driver stores all record \"2\" and all load through the real CLI from a read-only mount, and a document with no version is refused as unmeasured rather than assumed current. All eight rehydrating entry points refuse with a structured JSON refusal at exit 2 with no traceback, rewrite nothing, create no out dir, leave no lock held, and the store works again afterwards. Five reviewer-planted mutants: each guard call is pinned by exactly one shipped test, and a weakened comparison lets the wrong library evaluate (M1b). Two non-blocking notes: `list` reports the refusal as an error string at exit 0 (its pre-existing shape), and the appended `deliver` bindings are not validated against the library, which makes a synthetic-library test unable to distinguish a version comparison from a missing name (measured as M1a).",
   "attempt_id": "attempt-b987d7375dfc4c44b87f02a82d444ac6",
   "artifact_commit": "724836696dd1ee854b67759890ec99c84ced0d2b",
   "base_commit": "16e51f370578ad361b3752ca1d7362d4bad41f22",
@@ -352,5 +354,47 @@
       "all_pass_require_library_version": true,
       "all_load_through_cli_status": 37
     }
-  }
+  },
+  "commands_run": [
+    {
+      "command": "git archive 16e51f3705 | tar -x -C /tmp/review-base-72483669",
+      "why": "the worktree is at the artifact, so the base had to be exported"
+    },
+    {
+      "container": "pytest -q -p no:cacheprovider tests/unit/test_todo_plan_cli.py tests/unit/test_todo_runtime.py on /tmp/review-base-72483669",
+      "result": "74 passed, 1 warning in 19.58s"
+    },
+    {
+      "container": "same two files on the worktree (72483669)",
+      "result": "81 passed, 1 warning in 21.53s"
+    },
+    {
+      "container": "python /probes/probe_libraries.py",
+      "result": "17 checks, 0 failures; marker ['L@A/v2', 'L@B/v1']"
+    },
+    {
+      "container": "python /probes/probe_cli.py (real CLI, 8 entry points + end to end + gate control)",
+      "result": "29 checks, 0 failures"
+    },
+    {
+      "container": "python /probes/probe_order.py (which finding wins when a document is wrong twice)",
+      "result": "7 cases, 0 failures"
+    },
+    {
+      "container": "python /probes/probe_stores.py (stores mounted :ro)",
+      "result": "37/37 documents record '2', require_library_version passes, CLI status exit 0 for all 37"
+    },
+    {
+      "container": "pytest -q tests/unit/test_todo_finish_on_real_state.py",
+      "result": "1 passed in 1.64s"
+    },
+    {
+      "mutants": "pytest -q -p no:cacheprovider tests/unit/test_todo_plan_cli.py under M1a/M1b/M2/M3/M4",
+      "result": "4 failed / 6 failed / 1 failed / 2 failed / 1 failed respectively; file restored byte-for-byte after each"
+    },
+    {
+      "container": "same two files again after all restores",
+      "result": "81 passed, 1 warning in 21.43s"
+    }
+  ]
 }

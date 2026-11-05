@@ -5,7 +5,7 @@ import { installToolDiscovery } from './tool-discovery.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, appendFile, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';

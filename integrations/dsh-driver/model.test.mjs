@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openaiMessages, installHostModel } from './model.mjs';
+import { openaiMessages, installHostModel, rootReasoningEffort } from './model.mjs';
 
 test('host bridge preserves tools, tool results, reasoning, session identity and usage', async () => {
   let adapter, payload;
@@ -17,6 +17,7 @@ test('host bridge preserves tools, tool results, reasoning, session identity and
     tools: [{ name: 'wait', description: 'wait', parameters: { type: 'object' } }] };
   const chunks = []; for await (const chunk of adapter.stream(options)) chunks.push(chunk);
   assert.equal(payload.session_id, 'native-child');
+  assert.equal(payload.reasoning_effort, 'high', 'a native child keeps high');
   assert.deepEqual(payload.messages[0], { role: 'system', content: 'rules' });
   assert.equal(payload.messages[2].reasoning_content, 'prior thought');
   assert.equal(payload.messages[2].tool_calls[0].id, 'call');
@@ -25,6 +26,26 @@ test('host bridge preserves tools, tool results, reasoning, session identity and
   assert.equal(chunks.find(c => c.type === 'usage').usage.inputTokens, 100);
   assert.ok(chunks.some(c => c.type === 'tool-call-delta' && c.id === 'next'));
   assert.equal(chunks.at(-1).reason.kind, 'tool-calls');
+});
+
+test('the root director defaults to max effort, children to high, and an explicit effort always wins', async () => {
+  const sent = [];
+  const install = rootEffort => {
+    let adapter;
+    installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } } }, { LlmAdapter: class {} },
+      { project: 'alpha', session: 'root', ...(rootEffort ? { rootEffort } : {}), async request(_path, body) { sent.push(body); return { text: 'ok', tool_calls: [], usage: {} }; } });
+    return adapter;
+  };
+  const run = async (adapter, extra) => { for await (const _ of adapter.stream({ provider: 'aitelier', model: 'driver', system: 's',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], ...extra })); return sent.at(-1).reasoning_effort; };
+  const fallback = install();
+  assert.equal(await run(fallback, { sessionId: 'root' }), 'max');
+  assert.equal(await run(fallback, {}), 'max', 'no session id means the root session');
+  assert.equal(await run(fallback, { sessionId: 'child-1' }), 'high');
+  assert.equal(await run(fallback, { sessionId: 'root', reasoningEffort: 'low' }), 'low');
+  assert.equal(await run(fallback, { sessionId: 'child-1', reasoningEffort: 'max' }), 'max');
+  assert.equal(await run(install('high'), { sessionId: 'root' }), 'high', 'configured root effort');
+  assert.deepEqual(['off', 'low', 'high', 'max', undefined, '', 'MAX', 'xhigh'].map(rootReasoningEffort), ['off', 'low', 'high', 'max', 'max', 'max', 'max', 'max']);
 });
 
 test('unsupported dynamic tool blocks fail explicitly', () => {

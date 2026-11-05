@@ -1,6 +1,6 @@
 /** A resident State DAG driver composed over the pinned DSH base profile. */
 import { historyPage } from './history.mjs';
-import { installHostModel } from './model.mjs';
+import { installHostModel, rootReasoningEffort } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
@@ -357,7 +357,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     }
     return response.json();
   });
-  installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION });
+  installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION,
+    rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT) });
   // Resolve the existing mounted secret file into DSH's private credential
   // store, never into the environment inherited by test/build subprocesses.
   const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';

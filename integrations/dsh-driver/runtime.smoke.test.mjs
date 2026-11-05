@@ -284,6 +284,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
     assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'state_read')), JSON.stringify(completions));
+    assert.ok(completions.filter(c => c.session_id === 'host-root').every(c => c.reasoning_effort === 'max'), 'root completions must ask for max: ' + JSON.stringify(completions.map(c => [c.session_id, c.reasoning_effort])));
     while (Date.now() < deadline && !inboxWait) await new Promise(resolve => setTimeout(resolve, 50));
     const errorIndex = activity.findIndex(a => a.error?.includes('AItelier event subscription: fetch failed'));
     assert.ok(errorIndex >= 0, 'transport error was not diagnosed');

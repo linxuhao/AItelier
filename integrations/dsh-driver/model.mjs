@@ -52,7 +52,14 @@ async function requestImageUrls(ctx, options, signal) {
   return urls;
 }
 
-export function installHostModel(ctx, { LlmAdapter }, { request, project, session }) {
+/** Reasoning efforts the completion bridge accepts. */
+export const REASONING_EFFORTS = ['off', 'low', 'high', 'max'];
+/** The root director's default effort: the configured one when valid, else max. */
+export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? value : 'max';
+
+/** Root completions default to rootEffort (the director plans and judges); native
+ *  children default to high. An explicit DSH reasoningEffort is passed through. */
+export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max' }) {
   class HostAdapter extends LlmAdapter {
     async resolveModel(provider, model) {
       return { provider, id: model, name: model, context: { contextWindow: 1000000 }, defaultMaxTokens: 32768,
@@ -67,7 +74,8 @@ export function installHostModel(ctx, { LlmAdapter }, { request, project, sessio
         session_id: options.sessionId ?? session,
         messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id)),
         tools: options.tools?.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
-        max_tokens: options.maxTokens ?? 32768, reasoning_effort: options.reasoningEffort ?? 'high',
+        max_tokens: options.maxTokens ?? 32768,
+        reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : 'high'),
       }, options.signal ?? AbortSignal.timeout(1800000));
       const blocks = [];
       if (result.reasoning_content) blocks.push({ type: 'reasoning', text: result.reasoning_content });

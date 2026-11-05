@@ -1,0 +1,300 @@
+{
+  "attempt_id": "attempt-c2e3c9d9a2634765903b331cfa1d5d60",
+  "artifact_commit": "021cae0cf9e27716a245251c936e9c7d80d6b0a7",
+  "node_key": "driver.own-state-echo-and-waiting-continuation-20261105",
+  "review_branch": "dsh/ack-actor-review-20261105",
+  "reviewer": "independent non-author DSH subagent (parent aitelier-dsh-c61eed4a13ba4aaaae96)",
+  "range": "08a34c15eb..021cae0c (6 files: core/director_messaging.py, integrations/dsh-driver/{runtime.mjs,runtime.test.mjs,runtime.wake-echo.test.mjs,driver.md}, tests/unit/test_private_director_ack_tables.py)",
+  "runtime": {
+    "node": "/home/linxuhao/.local/share/aitelier-dsh/bin/node v24.22.2 (v24; /usr/bin/node is v22 and was not used)",
+    "dsh": "pinned install via integrations/dsh-driver/node_modules -> /home/linxuhao/.local/share/aitelier-dsh/node_modules (gitignored symlink, kept, not committed)",
+    "env_stripped": [
+      "AITELIER_DSH_EXECUTION",
+      "DSH_PERMISSION_MODE",
+      "AITELIER_TODO_CWD",
+      "AITELIER_DSH_SESSION",
+      "DSH_SESSION_ID"
+    ],
+    "pytest_container": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v <worktree>:/w -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider <files>; single worker, one run at a time",
+    "file_sha256_at_head": {
+      "core/director_messaging.py": "ebe90db5cbb2d1a67d73b0bef98cc02b08635d3bf23aafcc51a055dfddec6d57",
+      "integrations/dsh-driver/runtime.mjs": "af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945",
+      "integrations/dsh-driver/driver.md": "2002bfbbfbaf6b333c94ea18ece1b711e59473843f62d6521fc58d1d3be4800f",
+      "integrations/dsh-driver/runtime.test.mjs": "15bdc849027481257746352a52322ab5b0db553b1a45e57f6928320081b4c038",
+      "integrations/dsh-driver/runtime.wake-echo.test.mjs": "1641988d82772d055747e9e95aa03dc669ea35215c4b0f6cc71f6ae38cfcd6a2",
+      "tests/unit/test_private_director_ack_tables.py": "5b79d7534e3186c47e5bec4bbfbf9ecb849867fdc4f282f18b563f3682cb5d43"
+    }
+  },
+  "baseline": {
+    "node_unit": {
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD -u AITELIER_DSH_SESSION -u DSH_SESSION_ID <pinned node> --test integrations/dsh-driver/runtime.test.mjs",
+      "result": {
+        "tests": 30,
+        "pass": 30,
+        "fail": 0,
+        "duration_ms": 79.5
+      }
+    },
+    "node_e2e_pinned_dsh": {
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD -u AITELIER_DSH_SESSION -u DSH_SESSION_ID <pinned node> --test integrations/dsh-driver/runtime.wake-echo.test.mjs",
+      "result": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "duration_ms": 4313.1,
+        "rerun_on_restored_tree_ms": 4614.0
+      }
+    },
+    "python_ack_tables_in_container": {
+      "command": "pytest -q -p no:cacheprovider tests/unit/test_private_director_ack_tables.py",
+      "result": {
+        "passed": 2,
+        "deselected": 2,
+        "failed": 0,
+        "note": "the 2 deselected are @pytest.mark.docker rows that shell out to git (pytest.ini addopts deselects them); the new row runs."
+      }
+    },
+    "python_messaging_neighbourhood": {
+      "command": "pytest -q -p no:cacheprovider tests/unit/test_private_director_ack_tables.py tests/unit/test_driver_p2.py tests/unit/test_driver_message_refs_schema.py tests/unit/test_relay_acknowledgement_gate.py -m \"not network and not baked_toolchain\" -- with -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro",
+      "result": {
+        "passed": 86,
+        "failed": 0,
+        "seconds": 55.7
+      }
+    },
+    "environment_trap_measured": "Without the read-only .git mount, tests/unit/test_driver_p2.py::test_migration_preserves_existing_status_version_events_and_idempotency fails with subprocess.CalledProcessError: 'fatal: not a git repository: /home/linxuhao/AItelier/.git/worktrees/ack-actor-review-20261105' (git exit 128) before it touches any changed line. It reads commit 100a1886, far below this range. With the .git mount it passes (1 passed, 1.27 s). This is the false red the brief warned about, not a regression; both of the ack-table rows that shell out to git are @pytest.mark.docker and were never run unfiltered."
+  },
+  "answer_to_the_main_question": {
+    "short": "Yes to the first half, and yes to the second half, and they are disjoint: each reddens only for its own reason. The emitter half (missing `actor`) is caught by the new Python row alone - with the actor removed, pytest reddens KeyError: 'actor' while node unit stays 30/30 and the node e2e stays green. The filter half is caught by the node tests alone - a filter that treats the director's own ack as input reddens the e2e at 'an own ack tick must not start a turn' (6 !== 5) while unit stays 30/30, and the authorless-driver_id filter mutant reddens node unit + e2e while pytest stays 2/2.",
+    "why_two_languages_are_needed": "The node suites hand-build the payloads they feed ownEchoOnly, so no node test can observe the real Python emitter; the Python row never runs the JS filter, so no pytest row can observe the filter. Measured both ways below (M1 and M5).",
+    "contract_is_only_a_literal": "The join between the halves is the string format 'driver:<id>': the emitter writes self.actor, the row pins the literal 'driver:bob', the filter concatenates 'driver:' + driverId, the unit table pins 'driver:dsh-x'. No single test spans both sides; see unverified and M1b."
+  },
+  "criteria": [
+    {
+      "id": "own-echo-does-not-wake",
+      "verdict": "PASS",
+      "summary": "All three shapes behave as the brief requires at 021cae0c, and each of the brief's three history holes is re-opened by a mutant that reddens a shipped test. The predicate is exactly ownEchoOnly(result, id) = every event has payload.actor === 'driver:'+id, with any driver/project inbox item making the tick input, evaluated at one call site (runtime.mjs:740) before notify(); the cursor advance in pump() (runtime.mjs:549-553) is outside that early return, so a silent tick still advances both in-memory and on-disk cursor state.",
+      "evidence": {
+        "own_claim_tick_silent_cursor_advances": "e2e real pinned DSH: seq 11 claim_acquired with payload {actor:'driver:dsh-fixture', driver_id:'dsh-fixture'} -> no user/message, next long poll uses after=11 (assert waits.at(-1)===11 'the own tick still advances the cursor'), and later delivered('OWN_ECHO_NODE')===undefined. Unit table rows 'all own', 'own ack is echo', 'own ack + own write' are true; 17-row direct evaluation: 0 failing at HEAD.",
+        "authorless_lease_expired_names_the_driver_and_wakes": "e2e seq 12 lease_expired with {subject:'node:alpha/LEASE_NODE', lease_id:'lease-1', driver_id:'dsh-fixture', phase:'expired', fence:4} and NO actor (the core/state_claims.py shape) -> the turn runs (STOP1b, tool root-lease), the payload arrives whole (delivered('LEASE_NODE'), delivered('lease-1'), delivered('expired')), cursor after=12. 9 unit rows assert the false side, incl. 'driver_id alone never makes an event own' and 'someone else's lease expiry is input too'.",
+        "own_ack_resolve_tick_silent_because_the_emitter_stamps_actor": "Emitter now stores exactly {delivery_id, driver_id:<acker>, actor:'driver:<acker>', acks} (measured, see payload_shapes). e2e seq 13 feeds that shape as director_message_acked -> no turn within the 500 ms window (count unchanged) and delivered('delivery-1')===undefined after the later foreign turn; cursor after=13. Python row drives the REAL send->acknowledge and send->acknowledge->resolve paths and asserts actor=='driver:bob' and the exact key set on both stored events.",
+        "mutant_sensitivity": "M2 (count an authorless event as own) reddens node unit 29/30 and the e2e at 'the authorless lease_expired did not wake the director' -> the 08a34c15 hole. M3 (count everything as own) reddens node unit 29/30 and the same e2e line. M1 (drop the actor at the emitter) reddens the Python row only -> the 4a318868 hole. All restored byte-for-byte.",
+        "three_mutants_three_distinct_catchers": "M1 reddens pytest only; M2/M3 redden node only; M5 (filter exempts event_type==='director_message_acked') reddens the e2e only, at the new ack assertion, proving that assertion is load-bearing rather than decorative.",
+        "no_wake_on_empty_or_resolved": "eventCarriesSomething gates an empty tick (runtime.mjs:738), pump() filters resolved driver_inbox rows before onEvent (runtime.mjs:544), and project_inbox is only fetched for a director_message_received event; the shipped rows 'nothing is not an echo', 'driver inbox is input', 'project inbox is input' pass."
+      }
+    },
+    {
+      "id": "one-question-per-wait",
+      "verdict": "PASS",
+      "summary": "Unchanged by 935daf15/021cae0c (the runtime diff touches only ownEchoOnly and its doc comment) and still mutant-sensitive: dropping the answered-wait hold reddens one shipped unit test and the e2e at the wait assertions.",
+      "evidence": {
+        "untouched": "git diff 08a34c15eb..021cae0c -- integrations/dsh-driver/runtime.mjs changes only lines 49-60 (ownEchoOnly doc + predicate). Continuation.turnEnded (runtime.mjs:144-156) and the answeredWait field have no hunk.",
+        "mutant_M4": "Removing `if (wait && wait === this.answeredWait) return false;` -> runtime.test.mjs 'continuation while waiting: one NOTHING_LEFT holds for the wait, a changed wait is asked again' fails (AssertionError: same wait, already answered: not asked; 29/30) and runtime.wake-echo.test.mjs fails in 1.7 s at line 156 'still the same, already answered wait: not asked again' (2 !== 1). Restored to af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945.",
+        "positive_e2e_path": "The same e2e also pins the other direction: when the job ends the wait key changes and the director IS asked again (questions().length===2, questions()[1].seq > STOP3.seq), so the hold is not a blanket silence."
+      }
+    },
+    {
+      "id": "independent-review",
+      "verdict": "PASS_WITH_NOTE",
+      "summary": "No assertion was weakened or made vacuous and no other wake source is reachable by the change. Two notes: (1) driver.md's inserted paragraph leaves a sentence fragment that is injected verbatim into the director's system prompt; (2) the new Python row pins 'an actor field equal to driver:<id> for driver callers', which a guess ('driver:'+acker) also satisfies - it cannot see the owner-browser principal (M1b).",
+      "evidence": {
+        "no_weakened_assertion": "Read the whole diff. The only removed rows are the parent's `[own, claim, acked({driver_id only})] -> true` and `[ev({actor:null, driver_id:me})] -> true` ('null actor falls back to driver_id'); both are replaced by rows asserting false, which is the fix itself, plus four stricter ack rows and one extra 'someone else's lease expiry' assertion. Every retained row and every e2e assertion is unchanged. The e2e kept 'an own-writes tick must never reach the session' and 'a foreign tick is delivered'.",
+        "e2e_ack_assertion_is_not_vacuous": "It is a 500 ms window plus a later delivered('delivery-1')===undefined check. M5 makes the filter exempt director_message_acked and the e2e reddens at exactly that line in 2.7 s, so the window is wide enough to catch a real wake on this fixture.",
+        "other_wake_sources_untouched": "ownEchoOnly has exactly one call site (runtime.onEvent, runtime.mjs:740). watch_process completion notices (694), idle-review notification (939) and both todo handbacks (979, 993) call notify() directly, below no echo filter. wakeSources and endsDormancy (runtime.mjs:105-108) have no hunk, and their unit row ('only real input ends dormancy' incl. agent-message, subagent-settled, child) passes 30/30.",
+        "worker_own_write_cannot_hide_a_result": "A native child shares the director's token, so its State write is stamped driver:<director> and is silenced as an own echo - intended, the director caused it. The result still arrives: child settlement is a DSH session message with source kind child/subagent-settled, which never passes through ownEchoOnly and is a wake source by endsDormancy. A worker on another driver identity is foreign and wakes. Verified by reading the single call site and the wake-source table; not exercised by an e2e where a child writes State and then settles (see unverified).",
+        "note_driver_md": "integrations/dsh-driver/driver.md:100-106 now reads '... (including new issues). Your own writes carry your actor - including your acknowledge and resolve of a message - so a tick of only those does not wake you. An event with no actor is a system event (...), so it always reaches you, whatever ids it names; an event naming you is not your own write unless its actor says so.' followed by a new line 'project/driver inbox messages, and native worker messages/completion.' The insertion split the original sentence 'The runtime stays subscribed to project State changes (including new issues), project/driver inbox messages, and native worker messages/completion.' - line 106 is now an orphaned fragment starting lowercase after a full stop, and it is part of the system prompt the director reads. Content of the inserted rule is correct against the code; only the stitching is broken. Cosmetic, not criterion-blocking, but it is a shipped prompt defect.",
+        "note_owner_browser_sentence": "The brief asks whether stamping self.actor rather than 'driver:'+acker is wrong because _acker() (core/director_messaging.py:254-265) returns bare 'owner' for owner-browser callers. It is not wrong. Measured: a driver ack stores {driver_id:'bob', actor:'driver:bob'}; an owner-browser ack stores {driver_id:'owner', actor:'owner:human@example.test'}. Under the filter, the owner ack is not 'driver:<director>' and therefore wakes the director - which is correct, because a human in the dashboard acted, not the director; and 'driver:'+acker would have produced the false principal 'driver:owner' while waking exactly the same way. The emitter records what the transaction actually authenticated, and driver_id keeps the legacy 'owner' marker the ack tables read."
+      }
+    }
+  ],
+  "mutants": [
+    {
+      "id": "M1",
+      "criterion": "own-echo-does-not-wake",
+      "description": "History hole 4a318868, re-opened: drop the actor from the ack/resolve emitter (the new Python row's target).",
+      "file": "core/director_messaging.py:584",
+      "patch": "- {\"delivery_id\":delivery_id,\"driver_id\":acker,\"actor\":self.actor,\"acks\":...}\n+ {\"delivery_id\":delivery_id,\"driver_id\":acker,\"acks\":...}",
+      "result": "reddened pytest ONLY",
+      "output": "tests/unit/test_private_director_ack_tables.py::test_own_ack_and_resolve_events_carry_the_acting_driver_actor\n>       assert acked['actor']=='driver:bob' and acked['driver_id']=='bob'\nE       KeyError: 'actor'\ntests/unit/test_private_director_ack_tables.py:58: KeyError\n1 failed, 1 passed, 2 deselected",
+      "node_under_M1": "runtime.test.mjs 30/30 pass; runtime.wake-echo.test.mjs 1/1 pass (4209 ms). The node suites never run the emitter, so they are blind to it.",
+      "restored_sha256": "ebe90db5cbb2d1a67d73b0bef98cc02b08635d3bf23aafcc51a055dfddec6d57"
+    },
+    {
+      "id": "M1b",
+      "criterion": "independent-review (gap probe, not required by the brief)",
+      "description": "Guess the actor from the acker instead of recording the principal: \"actor\":\"driver:\"+acker.",
+      "file": "core/director_messaging.py:584",
+      "patch": "- \"actor\":self.actor\n+ \"actor\":\"driver:\"+acker",
+      "result": "NOT caught by any shipped test",
+      "output": "3 passed, 2 deselected (ack tables + a probe) - the row passes because acker=='bob' for driver callers. With an owner-browser caller the same code stores actor='driver:owner' (probe: OWNER_ACK_PAYLOAD actor 'driver:owner', driver_id 'owner'), a false provenance that no test rejects.",
+      "why_it_matters": "It confirms the row pins the field and its driver-caller value, not 'the principal who acted'. Low severity: the wake outcome for an owner ack is identical either way (non-own, so it wakes), and the driver-caller path - the one that caused the 4a318868 regression - is fully pinned.",
+      "restored_sha256": "ebe90db5cbb2d1a67d73b0bef98cc02b08635d3bf23aafcc51a055dfddec6d57"
+    },
+    {
+      "id": "M2",
+      "criterion": "own-echo-does-not-wake",
+      "description": "History hole 08a34c15, re-opened: an authorless event naming the driver counts as own (payload.actor != null ? actor===me : driver_id===driverId).",
+      "file": "integrations/dsh-driver/runtime.mjs:60",
+      "result": "reddened node unit AND the real-DSH e2e; pytest stayed green",
+      "output": "runtime.test.mjs: 29/30, AssertionError: an acked event naming me with no actor is input (expected false, got true) - it stops on the first failing row.\nDirect 17-row evaluation (no early exit): 6 rows fail - actorless ack, ack+actorless, authorless lease_expired, own+lease_expired, null actor, driver_id alone.\nruntime.wake-echo.test.mjs: FAIL in 31.8 s at 'the authorless lease_expired did not wake the director'; WAITS [10,11,12] shows the cursor advanced to 12 while no turn ran - the lease holder is the one driver not woken.\npytest tests/unit/test_private_director_ack_tables.py: 2 passed, 2 deselected.",
+      "restored_sha256": "af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945"
+    },
+    {
+      "id": "M3",
+      "criterion": "own-echo-does-not-wake",
+      "description": "Count everything as own: every(() => true) for a non-empty tick with no inbox.",
+      "file": "integrations/dsh-driver/runtime.mjs:60",
+      "result": "reddened node unit AND the e2e; pytest stayed green",
+      "output": "runtime.test.mjs: 29/30, same first failing assertion (an acked event naming me with no actor is input).\nDirect 17-row evaluation: 12 rows fail, incl. one foreign event makes it input, actor decides over driver_id, prefix is another driver, other driver's lease expiry.\nruntime.wake-echo.test.mjs: FAIL in 31.6 s at 'the authorless lease_expired did not wake the director' (the earliest wake assertion, so the ack and foreign assertions are never reached under M3 - the lease line covers it).\npytest: 2 passed, 2 deselected.",
+      "restored_sha256": "af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945"
+    },
+    {
+      "id": "M4",
+      "criterion": "one-question-per-wait",
+      "description": "Drop the answered-wait hold in Continuation.turnEnded.",
+      "file": "integrations/dsh-driver/runtime.mjs:153",
+      "patch": "- if (wait && wait === this.answeredWait) return false;",
+      "result": "reddened node unit AND the e2e",
+      "output": "runtime.test.mjs: 29/30, 'continuation while waiting: one NOTHING_LEFT holds for the wait, a changed wait is asked again' -> AssertionError: same wait, already answered: not asked.\nruntime.wake-echo.test.mjs: FAIL in 1.7 s at line 156 'still the same, already answered wait: not asked again' (2 !== 1).",
+      "restored_sha256": "af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945"
+    },
+    {
+      "id": "M5",
+      "criterion": "own-echo-does-not-wake (filter's own half)",
+      "description": "Plausible wrong filter: exempt director_message_acked from the echo rule so the director's own ack becomes input (every(({event_type,payload}) => event_type==='director_message_acked' ? false : payload.actor===me)).",
+      "file": "integrations/dsh-driver/runtime.mjs:60",
+      "result": "reddened the e2e ONLY",
+      "output": "runtime.test.mjs: 30/30 pass - its table builds every event with event_type 'e', so an event-type-keyed exemption is invisible there (the rows pin the payload shape, not the event-type wiring).\nruntime.wake-echo.test.mjs: FAIL in 2.7 s at line 166 'an own ack tick must not start a turn' (6 !== 5).",
+      "why_it_matters": "It shows the two checks are complementary rather than redundant: the new e2e ack case is the only thing that reddens for a filter that lets the ack through, and the unit table is the only fast check on the payload shapes.",
+      "restored_sha256": "af0105114adc43100db106994f80016f0ff155c5edfe9e9cc9e2b8eaa5dc9945"
+    }
+  ],
+  "payload_shapes": {
+    "method": "Probe run inside the disposable container against the real core/director_messaging.py at 021cae0c, driving the public send->acknowledge and send->acknowledge->resolve paths through StateService and reading state_events.",
+    "own_state_write": {
+      "example": "claim_acquired",
+      "stored": {
+        "actor": "driver:<me>",
+        "driver_id": "<me>"
+      },
+      "filter": "own (silent), cursor advances",
+      "source": "e2e seq 11 tick; core/state_claims.py shape"
+    },
+    "authorless_system_event": {
+      "example": "lease_expired",
+      "stored": {
+        "subject": "node:alpha/LEASE_NODE",
+        "lease_id": "lease-1",
+        "driver_id": "<holder>",
+        "phase": "expired",
+        "fence": 4
+      },
+      "filter": "input (wakes), whatever ids it names, delivered whole",
+      "source": "e2e seq 12 tick; core/state_claims.py:329-344 shape"
+    },
+    "driver_ack": {
+      "stored": {
+        "delivery_id": "f975cbf6-...",
+        "driver_id": "bob",
+        "actor": "driver:bob",
+        "acks": [
+          {
+            "acked_at": "2026-11-05T22:15:20.835532Z",
+            "driver_id": "bob"
+          }
+        ]
+      },
+      "filter_for_director_bob": "own (silent)",
+      "source": "probe DRIVER_ACK; pinned by the new Python row incl. exact key set"
+    },
+    "driver_resolve": {
+      "stored": {
+        "delivery_id": "31f5c09d-...",
+        "driver_id": "bob",
+        "actor": "driver:bob",
+        "acks": [
+          {
+            "acked_at": "2026-11-05T22:15:20.875929Z",
+            "driver_id": "bob"
+          }
+        ]
+      },
+      "filter_for_director_bob": "own (silent)",
+      "source": "probe DRIVER_RESOLVE; pinned by the new Python row"
+    },
+    "owner_browser_ack": {
+      "stored": {
+        "delivery_id": "a2031aee-...",
+        "driver_id": "owner",
+        "actor": "owner:human@example.test",
+        "acks": [
+          {
+            "acked_at": "2026-11-05T22:15:20.977384Z",
+            "driver_id": "owner"
+          }
+        ]
+      },
+      "filter_for_any_driver": "input (wakes) - correct, a human acted; not pinned by any test",
+      "source": "probe OWNER_ACK; _acker() returns bare 'owner' for owner: actors (core/director_messaging.py:254-265)"
+    },
+    "foreign_driver_write": {
+      "stored": {
+        "actor": "driver:grok"
+      },
+      "filter": "input (wakes), delivered",
+      "source": "e2e seq 14 tick"
+    },
+    "inbox": {
+      "driver_inbox": "[{seq}] non-empty makes the tick input even when every event is own",
+      "project_inbox": "{items:[...]} non-empty likewise",
+      "source": "unit rows 'driver inbox is input', 'project inbox is input'"
+    }
+  },
+  "review_scope": "Read, hunk by hunk, all 6 files of 08a34c15eb..021cae0c; read in full integrations/dsh-driver/runtime.mjs (ownEchoOnly, Continuation.turnEnded, StateRuntime.pump/onEvent, wakeSources/endsDormancy, watch_process notice, todo handbacks, IdleReview), both node suites, core/director_messaging.py aknowledge/resolve + _acker, and the new Python row. Wrote no code; mutated six times and restored each byte-for-byte; committed only this report.",
+  "method_log": [
+    {
+      "run": "baseline-node-unit",
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD -u AITELIER_DSH_SESSION -u DSH_SESSION_ID /home/linxuhao/.local/share/aitelier-dsh/bin/node --test integrations/dsh-driver/runtime.test.mjs",
+      "observed": "30 tests, 30 pass, 0 fail, 79.5 ms"
+    },
+    {
+      "run": "baseline-node-e2e",
+      "command": "same env strip, --test integrations/dsh-driver/runtime.wake-echo.test.mjs",
+      "observed": "1 pass, 0 fail, 4313 ms; repeated on the restored tree 4614 ms"
+    },
+    {
+      "run": "baseline-pytest-ack-tables",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v <worktree>:/w -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_private_director_ack_tables.py",
+      "observed": "2 passed, 2 deselected (docker-marked git rows), 1.87 s"
+    },
+    {
+      "run": "baseline-pytest-neighbourhood",
+      "command": "same container + -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro, four files, -m \"not network and not baked_toolchain\"",
+      "observed": "86 passed, 0 failed, 55.7 s"
+    },
+    {
+      "run": "row-matrix",
+      "command": "pinned node /tmp/ackrev/echo-matrix.mjs (imports ownEchoOnly and evaluates the shipped 17-row table with no early exit)",
+      "observed": "clean filter 0 failing; M2 6 failing; M3 12 failing"
+    },
+    {
+      "run": "payload-probe",
+      "command": "container, -s /t/probe_payload_shapes.py (real send -> acknowledge -> resolve, driver and owner-browser callers)",
+      "observed": "DRIVER_ACK / DRIVER_RESOLVE actor 'driver:bob'; OWNER_ACK actor 'owner:human@example.test', driver_id 'owner'"
+    },
+    {
+      "run": "mutants",
+      "command": "M1, M1b on core/director_messaging.py; M2, M3, M4, M5 on integrations/dsh-driver/runtime.mjs; after each: git checkout -- <file> and sha256sum",
+      "observed": "every restore matched the recorded head sha256; final git status clean"
+    }
+  ],
+  "unverified": [
+    "No shipped test spans the emitter->filter boundary: the Python row never runs the JS filter and the node suites never run the Python emitter. The join is the literal 'driver:<id>' duplicated in two languages, which is why M1 and M5 each redden in one language only. A single cross-language test would be strictly better; none exists in this range.",
+    "'A worker's own State write going silent cannot hide a result' is established by reading the single ownEchoOnly call site (runtime.mjs:740) and the untouched wake-source table, not by a runtime e2e in which a native child writes State under the director's identity and then settles. A test for that shape does not exist.",
+    "The 500 ms settle window in the new e2e ack case is a timing assumption. M5 shows it fires within 2.7 s of test time (the assertion trips), so the window is adequate on this fixture, but on a loaded host a wake slower than 500 ms would be caught only by the later delivered('delivery-1')===undefined assertion, which is checked after the foreign turn.",
+    "Cursor persistence after a silent tick: the e2e measures the in-memory cursor (next long poll uses after=11/12/13) and pump() writes cursor.json unconditionally after onEvent returns, but no test restarts the process after a silent tick to prove the file matches.",
+    "Principal strings other than driver:<id> and owner:<email> (e.g. system:, anonymous, dshr-* recovery actors) were not enumerated; only the two paths above were measured against the filter.",
+    "pytest scope was the changed row's file plus three neighbouring director-messaging modules (86 passed). The full repository suite was not run, and no AItelier pytest ran on the host or in the production container.",
+    "The driver.md fragment defect is reported, not fixed: this review commits only its report."
+  ]
+}

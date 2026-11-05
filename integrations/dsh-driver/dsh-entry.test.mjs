@@ -81,17 +81,72 @@ test('a binary nobody can attribute to the pin is refused, not trusted', async (
   await rm(root, { recursive: true });
 });
 
-test('a stale override does not displace the pinned checkout install, and the mismatch stays visible', async () => {
+test('an explicit wrong-version override is refused, not answered by the pinned checkout install', async () => {
   const root = await makePinRoot(PINNED);
-  const pinned = await makeInstall(root, PINNED);
+  await makeInstall(root, PINNED); // a pinned build the walk could have fallen through to
   const staleHome = await mkdtemp(join(tmpdir(), 'dsh-entry-stale-'));
   const stale = await makeInstall(staleHome, '0.1.0');
   const resolution = await resolveDshEntry({ env: { AITELIER_DSH_TEST_ENTRY: stale.entry }, home: staleHome, root, systemRoots: false });
-  assert.equal(resolution.status, 'measured');
-  assert.equal(resolution.source, 'this checkout');
-  assert.equal(resolution.entry, pinned.real);
-  assert.deepEqual(resolution.mismatches.map(m => m.path), [stale.entry]);
+  assert.equal(resolution.status, 'refused', 'the explicit override decides the answer; it must not be routed around');
+  assert.equal(resolution.entry, null);
+  assert.equal(resolution.version, null);
+  assert.equal(resolution.source, null);
+  assert.deepEqual(resolution.mismatches,
+    [{ path: stale.entry, source: 'AITELIER_DSH_TEST_ENTRY', version: '0.1.0' }]);
+  assert.match(resolution.reason, /AITELIER_DSH_TEST_ENTRY/, 'the refusal must name the override it came from');
+  assert.match(resolution.reason, /0\.1\.0/, 'the refusal must name the version the override carries');
+  assert.match(resolution.reason, new RegExp(PINNED.replaceAll('.', '\\.')), 'the refusal must name the version that was wanted');
+  assert.ok(!resolution.searched.includes(join(root, 'node_modules', '.bin', 'dsh')),
+    'resolution walked past the refused override into other candidates');
+
+  // At the call site every pinned-DSH test shares this shape, there is no green run.
+  const seen = [];
+  await assert.rejects(measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) },
+    { env: { AITELIER_DSH_TEST_ENTRY: stale.entry }, home: staleHome, root, systemRoots: false }),
+  /refusing to measure @deepseek-ai\/dsh/);
+  assert.deepEqual(seen, [], 'a refused override must neither skip nor print a measuring line');
   await rm(root, { recursive: true }); await rm(staleHome, { recursive: true });
+});
+
+test('a wrong-version implicit candidate is skipped, the pinned one is measured, and the skip is said out loud', async () => {
+  const root = await makePinRoot(PINNED);
+  const wrong = await makeInstall(root, '0.2.0'); // implicit: this checkout
+  const host = await mkdtemp(join(tmpdir(), 'dsh-entry-host-'));
+  const pinned = await makeInstall(host, PINNED); // implicit: host install
+  const options = { env: { AITELIER_DSH_HOME: host }, home: host, root };
+  const resolution = await resolveDshEntry(options);
+  assert.equal(resolution.status, 'measured', 'an implicit mismatch stays skippable');
+  assert.equal(resolution.source, 'host install');
+  assert.equal(resolution.entry, pinned.real);
+  assert.deepEqual(resolution.mismatches, [{ path: wrong.entry, source: 'this checkout', version: '0.2.0' }]);
+
+  const seen = [];
+  assert.equal(await measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) }, options),
+  pinned.real);
+  const diagnostics = seen.filter(([kind]) => kind === 'diagnostic').map(([, message]) => message);
+  const ignored = diagnostics.find(message => message.includes(wrong.entry));
+  assert.ok(ignored, `the ignored 0.2.0 must be named in the test output: ${JSON.stringify(diagnostics)}`);
+  assert.match(ignored, /this checkout/);
+  assert.match(ignored, /0\.2\.0/);
+  assert.match(ignored, new RegExp(PINNED.replaceAll('.', '\\.')), 'the diagnostic must say which version it insisted on');
+  assert.match(diagnostics.at(-1), /^measuring @deepseek-ai\/dsh/, 'the measured binary is still the last thing said');
+  await rm(root, { recursive: true }); await rm(host, { recursive: true });
+});
+
+test('implicit wrong-version candidates alone are refused with their details', async () => {
+  const root = await makePinRoot(PINNED);
+  const wrong = await makeInstall(root, '0.2.0');
+  const emptyHome = await mkdtemp(join(tmpdir(), 'dsh-entry-home-'));
+  const resolution = await resolveDshEntry({ env: { AITELIER_DSH_HOME: emptyHome }, home: emptyHome, root });
+  assert.equal(resolution.status, 'refused');
+  assert.equal(resolution.entry, null);
+  assert.match(resolution.reason, /0\.2\.0/);
+  assert.match(resolution.reason, /this checkout/);
+  assert.match(resolution.reason, new RegExp(PINNED.replaceAll('.', '\\.')));
+  assert.deepEqual(resolution.mismatches, [{ path: wrong.entry, source: 'this checkout', version: '0.2.0' }]);
+  await rm(root, { recursive: true }); await rm(emptyHome, { recursive: true });
 });
 
 test('with nothing installed the suite is unmeasured and says where it looked', async () => {

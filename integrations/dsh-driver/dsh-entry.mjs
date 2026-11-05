@@ -8,6 +8,15 @@
  * environment fact — it must not go red); a suite that finds only a different
  * version is `refused` (an actionable mistake — it must not go green either).
  *
+ * Explicit and implicit candidates are not the same question. A caller who
+ * exported AITELIER_DSH_TEST_ENTRY/AITELIER_DSH_BIN asked for THAT binary, so a
+ * wrong-version explicit candidate is refused on the spot: routing around it to
+ * an implicit pinned install would hand back a green run that measured
+ * something else. Implicit candidates (checkout, releases, host and container
+ * install) are places to look, not requests, so a wrong-version one is skipped
+ * and recorded in `mismatches` — and `measuredEntryForTest` prints those skips,
+ * because "green" must never hide which binaries it declined to measure.
+ *
  * Every test file in this directory that boots the real harness needs the same
  * answer, so `measuredEntryForTest` is the single call site shape they share:
  *
@@ -33,7 +42,13 @@ export const packageRoot = dirname(fileURLToPath(import.meta.url));
 /** Variables that select the runtime a driver boots into. The test owns them. */
 export const executionModeKeys = ['AITELIER_DSH_EXECUTION', 'DSH_PERMISSION_MODE'];
 
+/** Candidate sources that are a caller's request, not merely a place to look. */
+export const explicitSources = ['AITELIER_DSH_TEST_ENTRY', 'AITELIER_DSH_BIN'];
+
 const MAX_WALK = 8;
+
+/** How many skipped implicit candidates one diagnostic may name before it summarises. */
+const MAX_REPORTED_MISMATCHES = 5;
 
 /** The committed pin, read from the same manifest npm installs from. */
 export async function pinnedDshVersion(root = packageRoot) {
@@ -56,7 +71,8 @@ export function withoutCallerMode(env = process.env) {
 export function dshEntryCandidates({ env = process.env, home = homedir(), root = packageRoot, systemRoots = true } = {}) {
   const candidates = [];
   const add = (path, source) => {
-    if (typeof path === 'string' && path) candidates.push({ path: resolve(path), source });
+    if (typeof path === 'string' && path)
+      candidates.push({ path: resolve(path), source, explicit: explicitSources.includes(source) });
   };
   add(env.AITELIER_DSH_TEST_ENTRY, 'AITELIER_DSH_TEST_ENTRY');
   add(env.AITELIER_DSH_BIN, 'AITELIER_DSH_BIN');
@@ -78,7 +94,7 @@ export async function releaseEntries({ env = process.env, home = homedir() } = {
   try { names = await readdir(join(root, 'releases')); }
   catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
   return names.slice().sort().reverse().map(name =>
-    ({ path: join(root, 'releases', name, 'node_modules', '.bin', 'dsh'), source: `host release ${name}` }));
+    ({ path: join(root, 'releases', name, 'node_modules', '.bin', 'dsh'), source: `host release ${name}`, explicit: false }));
 }
 
 async function readJson(path) {
@@ -109,6 +125,11 @@ async function owningManifest(binary) {
   return null;
 }
 
+/** One mismatch in words: path, source, version (or the fact that it has none). */
+function describeMismatch({ path, source, version }) {
+  return `${path} (${source}) is ${version ?? 'of unknown version'}`;
+}
+
 /**
  * Decide which binary may be measured.
  * @returns {Promise<{status: 'measured'|'unmeasured'|'refused', pinned: string,
@@ -120,7 +141,7 @@ export async function resolveDshEntry({ env = process.env, home = homedir(), roo
   const searched = [], mismatches = [];
   const candidates = dshEntryCandidates({ env, home, root, systemRoots });
   if (systemRoots) candidates.splice(candidates.length - 1, 0, ...await releaseEntries({ env, home }));
-  for (const { path, source } of candidates) {
+  for (const { path, source, explicit } of candidates) {
     searched.push(path);
     let info;
     try { info = await stat(path); }
@@ -128,20 +149,37 @@ export async function resolveDshEntry({ env = process.env, home = homedir(), roo
     if (!info.isFile()) continue;
     const manifest = await owningManifest(path);
     if (manifest?.version !== pinned) {
-      mismatches.push({ path, source, version: manifest?.version ?? null });
+      const mismatch = { path, source, version: manifest?.version ?? null };
+      mismatches.push(mismatch);
+      // An explicit override names the binary the run must measure. Answering it
+      // with some other pinned build would make this run evidence about a binary
+      // the caller did not choose, so it is refused here instead of skipped.
+      if (explicit) {
+        return { status: 'refused', pinned, version: null, entry: null, source: null,
+          reason: `refusing to measure ${DSH_PACKAGE} ${pinned}: the explicit ${source} override ${describeMismatch(mismatch)}`,
+          searched, mismatches };
+      }
       continue;
     }
     return { status: 'measured', pinned, version: manifest.version, entry: await realpath(path), source,
       reason: null, searched, mismatches };
   }
   if (mismatches.length) {
-    const detail = mismatches.map(m => `${m.path} (${m.source}) is ${m.version ?? 'of unknown version'}`).join('; ');
+    const detail = mismatches.map(describeMismatch).join('; ');
     return { status: 'refused', pinned, version: null, entry: null, source: null,
       reason: `refusing to measure ${DSH_PACKAGE} ${pinned}: ${detail}`, searched, mismatches };
   }
   return { status: 'unmeasured', pinned, version: null, entry: null, source: null,
     reason: `no installed ${DSH_PACKAGE} ${pinned} to measure; looked in: ${searched.join(', ')}`,
     searched, mismatches };
+}
+
+/** A bounded, readable list of the candidates a green run declined to measure. */
+function describeSkipped(pinned, mismatches) {
+  const shown = mismatches.slice(0, MAX_REPORTED_MISMATCHES).map(describeMismatch);
+  const hidden = mismatches.length - shown.length;
+  const more = hidden > 0 ? `; and ${hidden} more` : '';
+  return `not measuring ${mismatches.length} candidate(s) that are not ${DSH_PACKAGE} ${pinned}: ${shown.join('; ')}${more}`;
 }
 
 /**
@@ -156,6 +194,9 @@ export async function measuredEntryForTest(t, options = {}) {
     t.skip(resolution.reason);
     return null;
   }
+  // Skips are part of the result: a reader of this output must be able to see
+  // that the measured entry was not the only DSH on the machine.
+  if (resolution.mismatches.length) t.diagnostic(describeSkipped(resolution.pinned, resolution.mismatches));
   t.diagnostic(`measuring ${DSH_PACKAGE} ${resolution.version} (${resolution.source}): ${resolution.entry}`);
   return resolution.entry;
 }

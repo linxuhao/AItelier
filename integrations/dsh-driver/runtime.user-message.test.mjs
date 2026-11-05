@@ -9,11 +9,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 
 const PROVIDER = `
 import { createRequire } from 'node:module';
@@ -45,9 +46,10 @@ export function apply(ctx) {
 }
 `;
 
-test('native send_user_message tool calls the durable driver -> user action', { timeout: 45000 }, async () => {
+test('native send_user_message tool calls the durable driver -> user action', { timeout: 45000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;                       // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-user-message-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const sent = [], turns = [], activity = [];
   let output = '', proc;
@@ -85,7 +87,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,

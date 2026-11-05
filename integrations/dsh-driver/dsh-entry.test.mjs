@@ -109,6 +109,74 @@ test('an explicit wrong-version override is refused, not answered by the pinned 
   await rm(root, { recursive: true }); await rm(staleHome, { recursive: true });
 });
 
+test('an explicit override whose path does not exist is refused, not answered by the pinned install', async () => {
+  const root = await makePinRoot(PINNED);
+  await makeInstall(root, PINNED); // a pinned build the walk could have fallen through to
+  const missing = join(root, 'nope', 'dsh');
+  for (const source of ['AITELIER_DSH_TEST_ENTRY', 'AITELIER_DSH_BIN']) {
+    const resolution = await resolveDshEntry({ env: { [source]: missing }, home: root, root, systemRoots: false });
+    assert.equal(resolution.status, 'refused', `${source}: a missing explicit override was answered by another install`);
+    assert.equal(resolution.entry, null);
+    assert.equal(resolution.version, null);
+    assert.equal(resolution.source, null);
+    assert.deepEqual(resolution.mismatches, [], 'a path that is not there is not a version mismatch');
+    assert.match(resolution.reason, new RegExp(source), 'the refusal must name the override it came from');
+    assert.ok(resolution.reason.includes(missing), 'the refusal must name the path that was asked for');
+    assert.match(resolution.reason, /is missing/, 'the refusal must say the path is not there');
+    assert.match(resolution.reason, new RegExp(PINNED.replaceAll('.', '\\.')), 'the refusal must name the version that was wanted');
+    assert.deepEqual(resolution.searched, [missing], 'resolution walked past the unhonourable override');
+  }
+
+  // The shared call site must not turn this into a skip or a green run.
+  const seen = [];
+  await assert.rejects(measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) },
+    { env: { AITELIER_DSH_TEST_ENTRY: missing }, home: root, root, systemRoots: false }),
+  /refusing to measure @deepseek-ai\/dsh/);
+  assert.deepEqual(seen, [], 'a refused override must neither skip nor print a measuring line');
+  await rm(root, { recursive: true });
+});
+
+test('an explicit override that names a directory is refused as not a file', async () => {
+  const root = await makePinRoot(PINNED);
+  await makeInstall(root, PINNED); // a pinned build the walk could have fallen through to
+  const directory = join(root, 'dsh-is-a-directory');
+  await mkdir(directory, { recursive: true });
+  const resolution = await resolveDshEntry({ env: { AITELIER_DSH_BIN: directory }, home: root, root, systemRoots: false });
+  assert.equal(resolution.status, 'refused', 'a directory named as the override was answered by another install');
+  assert.equal(resolution.entry, null);
+  assert.equal(resolution.version, null);
+  assert.equal(resolution.source, null);
+  assert.deepEqual(resolution.mismatches, [], 'a directory is not a version mismatch');
+  assert.match(resolution.reason, /AITELIER_DSH_BIN/, 'the refusal must name the override it came from');
+  assert.ok(resolution.reason.includes(directory), 'the refusal must name the path that was asked for');
+  assert.match(resolution.reason, /is not a file/, 'the refusal must say it is not a file');
+  assert.match(resolution.reason, /directory/, 'the refusal must say what it is instead');
+  assert.deepEqual(resolution.searched, [directory]);
+
+  const seen = [];
+  await assert.rejects(measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) },
+    { env: { AITELIER_DSH_BIN: directory }, home: root, root, systemRoots: false }),
+  /refusing to measure @deepseek-ai\/dsh/);
+  assert.deepEqual(seen, []);
+  await rm(root, { recursive: true });
+});
+
+test('the asymmetry is intended: a missing implicit candidate is skipped, the very same path named explicitly is refused', async () => {
+  const root = await makePinRoot(PINNED); // no install: the checkout candidate does not exist
+  const emptyHome = await mkdtemp(join(tmpdir(), 'dsh-entry-home-'));
+  const absent = join(root, 'node_modules', '.bin', 'dsh');
+  const implicit = await resolveDshEntry({ env: {}, home: emptyHome, root, systemRoots: false });
+  assert.equal(implicit.status, 'unmeasured', 'a missing implicit candidate must not refuse the run');
+  assert.ok(implicit.searched.includes(absent));
+  const explicit = await resolveDshEntry({ env: { AITELIER_DSH_TEST_ENTRY: absent }, home: emptyHome, root, systemRoots: false });
+  assert.equal(explicit.status, 'refused', 'the same absent path, named by the caller, is a request that must be refused');
+  assert.match(explicit.reason, /is missing/);
+  assert.match(explicit.reason, /AITELIER_DSH_TEST_ENTRY/);
+  await rm(root, { recursive: true }); await rm(emptyHome, { recursive: true });
+});
+
 test('a wrong-version implicit candidate is skipped, the pinned one is measured, and the skip is said out loud', async () => {
   const root = await makePinRoot(PINNED);
   const wrong = await makeInstall(root, '0.2.0'); // implicit: this checkout

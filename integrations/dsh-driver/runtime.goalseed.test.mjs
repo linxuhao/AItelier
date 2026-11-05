@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { execFileSync } from 'node:child_process';
 import { bindDriverGoal, goalMdCommit, ROUND_TOP_UP_BELOW, ROUND_TOP_UP_TO } from './goal.mjs';
 
@@ -147,8 +148,10 @@ test('an active goal near its round cap gets its cap raised in the same edit, th
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-async function sessionEvents(root, session) {
-  const require = createRequire(process.env.AITELIER_DSH_ENTRY ?? '/opt/aitelier-dsh/node_modules/.bin/dsh');
+async function sessionEvents(root, session, entry) {
+  // Read the persisted session through the DSH that produced it: the entry the
+  // harness measured, never the caller's shell and never a hard-coded install.
+  const require = createRequire(entry);
   const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
   const storage = await import(require.resolve('@deepseek-ai/dsh-session-persistence-jsonl'));
   const ctx = new Context();
@@ -164,9 +167,10 @@ async function sessionEvents(root, session) {
 // One fixture directory, two driver copies (old/new goal.md), a fake AItelier API, and run(variant, until)
 // = start the real pinned host on that copy, wait, SIGTERM it, return the persisted session events.
 // goalRows are extra profile rows, e.g. a smaller native default round cap.
-async function driverHarness(goalRows = []) {
+async function driverHarness(t, goalRows = []) {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(tmpdir(), 'dsh-goalseed-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   // Two copies of the driver that differ only in goal.md stand for "goal.md edited, host service restarted".
   const variants = {};
   for (const [name, mandate] of [['old', 'OLD mandate for {{project_id}}\n'], ['new', 'NEW mandate for {{project_id}}\n']]) {
@@ -204,7 +208,7 @@ async function driverHarness(goalRows = []) {
   const readSeeds = async () => { try { return (await readFile(seedFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
   const run = async (variant, until) => {
     activity.length = 0;
-    proc = spawn(process.execPath, [entry, '--profile', 'driver-' + variant], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver-' + variant], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'seed-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'seed-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
@@ -216,7 +220,7 @@ async function driverHarness(goalRows = []) {
     assert.ok(await until(), 'host never reached the expected state\n' + output);
     await new Promise(resolve => setTimeout(resolve, 300));
     proc.kill('SIGTERM'); await once(proc, 'exit');
-    return sessionEvents(join(directory, 'home/sessions'), 'seed-root');
+    return sessionEvents(join(directory, 'home/sessions'), 'seed-root', entry);
   };
   const idle = async () => activity.some(a => a.phase === 'waiting');
   const close = async () => {
@@ -228,8 +232,10 @@ async function driverHarness(goalRows = []) {
   return { run, idle, readSeeds, sha, close };
 }
 
-test('real pinned DSH: restart re-seeds an active director goal from goal.md exactly once', { timeout: 60000 }, async () => {
-  const { run, idle, readSeeds, sha, close } = await driverHarness();
+test('real pinned DSH: restart re-seeds an active director goal from goal.md exactly once', { timeout: 60000 }, async (t) => {
+  const harness = await driverHarness(t);
+  if (!harness) return;
+  const { run, idle, readSeeds, sha, close } = harness;
   try {
     // First start: the goal is created from the old goal.md; nothing to re-seed.
     const firstAll = await run('old', idle), first = firstAll.filter(e => e.type === 'goal/change');
@@ -281,9 +287,11 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
   } finally { await close(); }
 });
 
-test('real pinned DSH: a start near the round cap raises the cap in place, once', { timeout: 60000 }, async () => {
+test('real pinned DSH: a start near the round cap raises the cap in place, once', { timeout: 60000 }, async (t) => {
   // A native default cap of 40 leaves 39 rounds after the first start: below ROUND_TOP_UP_BELOW.
-  const { run, idle, readSeeds, sha, close } = await driverHarness([{ id: 'goal', config: { defaultMaxGoalRounds: 40 } }]);
+  const harness = await driverHarness(t, [{ id: 'goal', config: { defaultMaxGoalRounds: 40 } }]);
+  if (!harness) return;
+  const { run, idle, readSeeds, sha, close } = harness;
   try {
     const firstAll = await run('old', idle), first = firstAll.filter(e => e.type === 'goal/change');
     const created = first.filter(e => e.data.operation === 'create');

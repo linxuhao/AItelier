@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 
 // Root script: refused while a claim is live, then dormant with a padded context,
 // then a State event wakes it. Compaction requests answer with a checkpoint.
@@ -61,12 +62,13 @@ export function apply(ctx) {
 }
 `;
 
-async function scenario(floor) {
+async function scenario(t, floor) {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-dormancy-'));
   // Unique per run: background-job detection matches processes by session, and other
   // real-DSH test files run their own drivers in parallel.
   const session = 'dormancy-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const events = [], requests = [], claimQueries = [], parked = new Set();
   const held = new Set();
@@ -134,7 +136,7 @@ async function scenario(floor) {
       'path = ' + JSON.stringify(planFile),
       'plans = json.load(open(path)) if os.path.exists(path) else []',
       'print(json.dumps({"plans": plans}))'].join('\n') + '\n');
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: session,
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
@@ -180,14 +182,18 @@ async function scenario(floor) {
   }
 }
 
-test('real pinned DSH: dormancy is refused while work is live, parks reviews, compacts a large context once, and a State event wakes it', { timeout: 60000 }, async () => {
-  const { compactions, summaryRequests } = await scenario(1000);
+test('real pinned DSH: dormancy is refused while work is live, parks reviews, compacts a large context once, and a State event wakes it', { timeout: 60000 }, async (t) => {
+  const run = await scenario(t, 1000);
+  if (!run) return;
+  const { compactions, summaryRequests } = run;
   assert.equal(compactions.length, 1, 'expected exactly one compaction on entering dormancy');
   assert.equal(summaryRequests, 1);
 });
 
-test('real pinned DSH: below the token floor dormancy does not compact', { timeout: 60000 }, async () => {
-  const { compactions, summaryRequests } = await scenario(10_000_000);
+test('real pinned DSH: below the token floor dormancy does not compact', { timeout: 60000 }, async (t) => {
+  const run = await scenario(t, 10_000_000);
+  if (!run) return;
+  const { compactions, summaryRequests } = run;
   assert.equal(compactions.length, 0);
   assert.equal(summaryRequests, 0);
 });

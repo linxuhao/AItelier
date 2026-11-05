@@ -23,12 +23,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { TodoCli, dormancyRefusal, settledAttempts, attemptSettled, todoSummary, unfinishedWithoutChild } from './runtime.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -237,14 +238,15 @@ export function apply(ctx) {
 `;
 
 let scenarioRun;
-const terminalPlanScenario = () => (scenarioRun ??= bootTerminalPlanScenario());
+const terminalPlanScenario = async t => (scenarioRun ??= await bootTerminalPlanScenario(t));
 
-async function bootTerminalPlanScenario() {
+async function bootTerminalPlanScenario(t) {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-terminal-plan-boot-'));
   // Unique per run: idle_dormant's background-process scan matches by session, and
   // the other real-DSH test files run their own drivers in parallel.
   const session = 'terminal-plan-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const events = [], requests = [], attemptsRead = [], settled = new Set();
   let finished = false, output = '', proc;
   const server = createServer(async (req, res) => {
@@ -290,7 +292,7 @@ async function bootTerminalPlanScenario() {
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-terminal-plan-provider.mjs') }, { id: 'driver', name: join(HERE, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: session,
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
@@ -318,8 +320,9 @@ async function bootTerminalPlanScenario() {
   }
 }
 
-test('real pinned DSH: a settled attempt stops refusing idle_dormant, while a live or unanswerable attempt keeps blocking', { timeout: 120000 }, async () => {
-  const run = await terminalPlanScenario();
+test('real pinned DSH: a settled attempt stops refusing idle_dormant, while a live or unanswerable attempt keeps blocking', { timeout: 120000 }, async (t) => {
+  const run = await terminalPlanScenario(t);
+  if (!run) return;
   // The runtime asked State about every plan, by the attempt id its file is named after.
   assert.deepEqual([...new Set(run.attemptsRead)].sort(), Object.values(run.plans).sort());
 

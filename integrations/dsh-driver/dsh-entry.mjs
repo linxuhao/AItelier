@@ -17,6 +17,13 @@
  * and recorded in `mismatches` — and `measuredEntryForTest` prints those skips,
  * because "green" must never hide which binaries it declined to measure.
  *
+ * The same asymmetry decides an unusable path. An implicit candidate that does
+ * not exist (the usual checkout before `npm install`) is simply looked past. An
+ * explicit override that does not exist, or that names a directory, is a request
+ * the runner must honour or refuse: falling through to an implicit pinned install
+ * would print "measuring ... (host install)" and go green, without ever measuring
+ * the binary the caller named.
+ *
  * Every test file in this directory that boots the real harness needs the same
  * answer, so `measuredEntryForTest` is the single call site shape they share:
  *
@@ -130,6 +137,23 @@ function describeMismatch({ path, source, version }) {
   return `${path} (${source}) is ${version ?? 'of unknown version'}`;
 }
 
+/** One explicit override that cannot be honoured at all, in words. */
+function describeUnusable(path, source, problem) {
+  return `the explicit ${source} override ${path} ${problem}`;
+}
+
+/** Why a path that stat found is still not a binary this suite may spawn. */
+function describeNotAFile(info) {
+  return info.isDirectory() ? 'is not a file (it is a directory)' : 'is not a file';
+}
+
+/** A refusal shared by every explicit override that cannot be honoured. */
+function refusedUnusable({ pinned, path, source, problem, searched, mismatches }) {
+  return { status: 'refused', pinned, version: null, entry: null, source: null,
+    reason: `refusing to measure ${DSH_PACKAGE} ${pinned}: ${describeUnusable(path, source, problem)}`,
+    searched, mismatches };
+}
+
 /**
  * Decide which binary may be measured.
  * @returns {Promise<{status: 'measured'|'unmeasured'|'refused', pinned: string,
@@ -145,8 +169,18 @@ export async function resolveDshEntry({ env = process.env, home = homedir(), roo
     searched.push(path);
     let info;
     try { info = await stat(path); }
-    catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue; throw error; }
-    if (!info.isFile()) continue;
+    catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+      // Implicit: a place to look, and this one is not there — look further.
+      if (!explicit) continue;
+      // Explicit: the caller named this binary, so an absent path is refused by
+      // name rather than answered by some other install (see the header).
+      return refusedUnusable({ pinned, path, source, problem: 'is missing', searched, mismatches });
+    }
+    if (!info.isFile()) {
+      if (explicit) return refusedUnusable({ pinned, path, source, problem: describeNotAFile(info), searched, mismatches });
+      continue;
+    }
     const manifest = await owningManifest(path);
     if (manifest?.version !== pinned) {
       const mismatch = { path, source, version: manifest?.version ?? null };

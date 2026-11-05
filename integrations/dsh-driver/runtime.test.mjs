@@ -635,6 +635,25 @@ test('when the ceiling cannot be met by withholding bodies, the oldest items are
   assert.equal(digest.items[0].message_id, 'dm_0020');
 });
 
+test('an injected item carries everything acknowledging its delivery needs', () => {
+  // acknowledge_director_message(project_id, delivery_id, expected_version, request_key):
+  // a director must be able to settle a delivery from the payload it was handed.
+  // Acknowledging is what stops a delivery costing context on every later wake, so
+  // these two fields are part of the bound, not decoration - do not trim them.
+  const digest = projectInboxDigest(inboxPage([inboxItem({ seq: 7, body: 'x'.repeat(1000) })]));
+  const [entry] = digest.items;
+
+  assert.equal(digest.page.project_id, 'aitelier');
+  assert.equal(entry.delivery_id, 'dlv_0007');
+  assert.ok(Number.isInteger(entry.version), 'version is the expected_version the call takes');
+  assert.equal(entry.version, 1);
+  assert.equal(entry.message_id, 'dm_0007');
+  // A settled (already acknowledged) item keeps them too: it still has to be resolvable.
+  const settled = projectInboxDigest(inboxPage([inboxItem({ seq: 8, status: 'acknowledged', acked_by_me: true })]));
+  assert.equal(settled.items[0].delivery_id, 'dlv_0008');
+  assert.equal(settled.items[0].version, 1);
+});
+
 // The API pages by delivery_seq ascending and has no newest-first option, so the
 // page a `limit: 20` request returned was the OLDEST 20 of 91 - a message that
 // arrives today sits on page five and would never be injected. The collector walks

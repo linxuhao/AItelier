@@ -458,6 +458,45 @@ def resolve_agent_model(model_name: str) -> str:
     return os.getenv("AITELIER_FORCE_ALL_AGENT_MODELS") or model_name
 
 
+def _tool_arguments_json(arguments) -> str:
+    """A tool call's arguments as a JSON object string every provider accepts.
+
+    A model sometimes emits arguments that are not one JSON object (an extra
+    closing brace, a truncated string). The call failed when it ran, but it stays
+    in the history, and ollamacloud /v1 rejects the WHOLE request for it with
+    400 "invalid tool call arguments" - while deepseek and opencodego accept it.
+    A 400 is not failed over, so one such turn stalled a director on every later
+    completion (2026-11-05). Valid text passes through byte-for-byte (the cached
+    prefix is unchanged); anything else keeps the original text under
+    `unparsed_arguments`, so the model still sees exactly what it emitted.
+    """
+    if arguments is None:
+        return "{}"
+    if isinstance(arguments, dict):
+        return json.dumps(arguments, ensure_ascii=False)
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return "{}"
+        try:
+            if isinstance(json.loads(arguments), dict):
+                return arguments
+        except ValueError:
+            pass
+    return json.dumps({"unparsed_arguments": arguments if isinstance(arguments, str) else repr(arguments)},
+                      ensure_ascii=False)
+
+
+def _normalized_tool_call(tool_call):
+    """`tool_call` with its function.arguments made a JSON object string (a copy; never mutated)."""
+    if not isinstance(tool_call, dict) or not isinstance(tool_call.get("function"), dict):
+        return tool_call
+    function = tool_call["function"]
+    arguments = _tool_arguments_json(function.get("arguments"))
+    if arguments is function.get("arguments"):
+        return tool_call
+    return {**tool_call, "function": {**function, "arguments": arguments}}
+
+
 class AIGateway:
     """
     AItelier 统一模型路由网关
@@ -733,6 +772,10 @@ class AIGateway:
             if not has_tools and (content is None or
                                   (isinstance(content, str) and not content.strip())):
                 m = {**m, "content": " "}
+            if isinstance(m.get("tool_calls"), list):
+                calls = [_normalized_tool_call(tc) for tc in m["tool_calls"]]
+                if any(new is not old for new, old in zip(calls, m["tool_calls"])):
+                    m = {**m, "tool_calls": calls}
             cleaned.append(m)
         return cleaned
 

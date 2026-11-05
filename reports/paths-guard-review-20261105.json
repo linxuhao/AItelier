@@ -1,0 +1,123 @@
+{
+ "attempt_id": "attempt-252d179eb4e44df4a6766db3361b73ad",
+ "artifact_commit": "8394b9226337047d211691aa529c6ed35635b98e",
+ "verdict": "ACCEPT with findings: the guard does what the commit claims, in the right place; 2 mutants survive the shipped tests (test gaps, behaviour correct) and 3 edge cases of 'can never satisfy' are not covered (non-regular files, a file used as a parent directory, one inaccurate note sentence).",
+ "baseline": {
+  "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init (worktree mounted rw) python -m pytest -q -p no:cacheprovider tests/unit/test_todo_templates.py tests/unit/test_todo_plan_cli.py tests/unit/test_todo_runtime.py",
+  "result": "143 passed (matches the author: 81 base for plan_cli+runtime + 62 in templates = 45 base + 17 new)",
+  "test_diff_removed_lines": "only 2 import lines (load_template import and the Cli,... import tuple) - no assertion of any existing test was removed or edited; core/todo_plan.py and core/todo_runtime.py are untouched by the commit (diff 0 lines), so the item predicates are unchanged."
+ },
+ "criteria": {
+  "refuses-an-impossible-path": {
+   "verdict": "pass",
+   "evidence": [
+    "Live CLI probes (real `python -m core.todo_cli create --template code_change`, in a disposable container, own git repo): existing directory, './out', 'out/', 'out/.', 'deep/./sub', '.', symlink-to-directory -> exit 2 refused=impossible_path naming item=implement predicate=files_changed path=<normalised>; absolute and '..' (also 'deep/../out') -> exit 2 refused=invalid_plan (the plan's own _relative rule); duplicates 'app.py'+'app.py', 'app.py'+'./app.py', 'new.py'+'new.py/' -> exit 2 impossible_path path named.",
+    "No plan file: in every refused probe the --store directory did not exist AT ALL afterwards (not merely no *.json; no .lock sidecar either). Successful creates leave att.json + att.lock. Shipped tests assert only `not glob('*.json')`; I checked the stronger store-absent fact myself.",
+    "Own mutants for the directory case (not the author's `and False`): M6 lookup in cwd instead of workspace -> 5 shipped tests red; M7 `is_dir() and is_file()` (never fires) -> 3 red (directory-refused, free-plan-route, audit-is-one-function). Mutant M3 (no normalisation in duplicate key) -> 2 red; both restored.",
+    "Meaning-vs-shape probe: symlink to a directory IS refused as DIRECTORY (is_dir follows symlinks), and a directory that exists only after normalisation ('./out', 'out/.', 'deep/./sub') is refused under its normalised name. A path THROUGH a symlinked directory ('link_dir/f.txt') is accepted as existing, correctly, since it is a file."
+   ],
+   "caveat": "Two directory-case mutants SURVIVE the shipped tests (see mutants M1, M2): the shipped directory test uses an EMPTY directory reached directly, so (a) a symlink-skipping guard and (b) a guard that only fires for empty directories both pass 62/62. Real behaviour is correct (probed: non-empty dir 'out' with a file and a symlink to it are refused); the tests just would not notice a regression."
+  },
+  "absent-is-announced-not-banned": {
+   "verdict": "pass",
+   "evidence": [
+    "Not-yet-existing 'docs/new.md', a mix of existing+new, a create-only plan ['a_new.py','b_new.py'] and a modify-only plan ['app.py'] all freeze (exit 0). Result carries paths={workspace, workspace_is_a_directory, declared, existing, not_yet_existing, notes}; create-only lists both under not_yet_existing with one note naming them and 'will have to CREATE'; modify-only has existing=['app.py'], notes=[]. A scope glob list containing an existing directory (['docs/**','out']) is not judged (scope is not a delta path) and freezes.",
+    "Transport confirmed in source: integrations/dsh-driver/runtime.mjs `todo_plan` execute -> `todo.call(args.attempt_id, ['create', ...])`; call() -> run() = JSON.parse(CLI stdout) then returns `{refused:true,...result}` for exit 2 else `result` unchanged, adding only `brief` if absent. No key projection, so the `paths` key reaches the todo_plan tool result. I read this; I did NOT run the .mjs tests or a live DSH todo_plan call, and runtime.todo.test.mjs has no assertion on `paths`.",
+    "Announcement is not an excuse, positive/negative pair driven through the CLI: freeze ['docs/new.md'] (announced) -> begin -> done WITHOUT creating it: outcome=fail, files_changed 'docs/new.md does not exist after the step'; then create docs/new.md -> done: outcome=pass. (Shipped test test_a_path_that_does_not_exist_yet_still_has_to_be_created... does the same; mutant M4 which BANS not-yet-existing paths reddens 8 tests, M5 which drops the `paths` key reddens 5.)"
+   ],
+   "caveat": "A not-yet-existing path whose PARENT is an existing regular file ('app.py/x/y.txt') is classified not_yet_existing and its note says the step 'will have to CREATE' it - that can never be satisfied. Same blind spot for an existing non-regular file (FIFO) which is listed as 'existing' although _digest returns None for it, so files_changed would fail it forever. The commit only claims directories, so this is a boundary of the claim, not a regression."
+  },
+  "independent-review": {
+   "verdict": "pass",
+   "evidence": [
+    "Placement: check_declared_paths is the last statement of _plan_from_args; cmd_create calls it before `with store.lock(...)`/store.write. Mutant M8a (audit removed from _plan_from_args) -> 22 red; M8b (audit moved to after store.write, inside the lock) -> 6 red including every 'no plan file' assertion and the free-plan route. So the 'before the plan file exists' ordering is pinned by tests, not by inspection.",
+    "Not in from_stored/from_json: probe froze ['later'] (absent), then made 'later' a directory: `status` and `begin` still succeed (plan keeps running, not refused on rehydration); `done` fails honestly ('later does not exist after the step'). Only a RE-CREATE of the identical plan after the path became a directory is now refused with impossible_path (exit 2) instead of returning created:false - an idempotent-retry edge; the existing plan file stays intact (not stranded).",
+    "Legitimate plans freeze through the CLI: create-only, modify-only, mixed, symlink-to-file, dangling symlink, same path in two different items (shipped test) - all exit 0.",
+    "Workspace-absent: ghost workspace and workspace-is-a-file both exit 0 with workspace_is_a_directory=false, declared listed, existing=[]/not_yet_existing=[] and one note ('could not be looked up ... nothing was assumed'). Announced, not skipped.",
+    "Inaccuracy found: that note says 'no directory, duplicate-spelling or existence check was made', but the duplicate check is not workspace dependent and still fires: ghost workspace with ['out','out'] -> exit 2 impossible_path. Text only; behaviour is the stricter, correct one.",
+    "No other test changed meaning (see baseline): 143 passed, only import lines removed from the test file."
+   ]
+  }
+ },
+ "mutants": [
+  {
+   "id": "M1",
+   "file": "core/todo_templates.py",
+   "change": "`if target.is_dir():` -> `if target.is_dir() and not target.is_symlink():`",
+   "shipped_tests": "62 passed -> SURVIVED (symlink-to-directory not covered by any shipped test)"
+  },
+  {
+   "id": "M2",
+   "file": "core/todo_templates.py",
+   "change": "`if target.is_dir():` -> `if target.is_dir() and not any(target.iterdir()):`",
+   "shipped_tests": "62 passed -> SURVIVED (shipped test only uses an empty directory)"
+  },
+  {
+   "id": "M3",
+   "file": "core/todo_templates.py",
+   "change": "duplicate key `str(PurePosixPath(str(value)))` -> `str(value)`",
+   "shipped_tests": "2 failed (repeated_in_one_list[paths1], [paths3]) -> killed"
+  },
+  {
+   "id": "M4",
+   "file": "core/todo_templates.py",
+   "change": "a not-yet-existing path raises impossible_path (ban instead of announce)",
+   "shipped_tests": "8 failed -> killed"
+  },
+  {
+   "id": "M5",
+   "file": "core/todo_cli.py",
+   "change": "drop `\"paths\": paths.as_json()` from the create result",
+   "shipped_tests": "5 failed -> killed"
+  },
+  {
+   "id": "M6",
+   "file": "core/todo_templates.py",
+   "change": "`target = workspace / rel` -> `target = Path(rel)`",
+   "shipped_tests": "5 failed -> killed"
+  },
+  {
+   "id": "M7",
+   "file": "core/todo_templates.py",
+   "change": "`if target.is_dir():` -> `if target.is_dir() and target.is_file():` (never fires)",
+   "shipped_tests": "3 failed -> killed"
+  },
+  {
+   "id": "M8a",
+   "file": "core/todo_cli.py",
+   "change": "_plan_from_args returns None instead of check_declared_paths(plan)",
+   "shipped_tests": "22 failed -> killed"
+  },
+  {
+   "id": "M8b",
+   "file": "core/todo_cli.py",
+   "change": "audit removed from _plan_from_args and run after store.write inside the lock (stranded-plan-plus-refusal)",
+   "shipped_tests": "6 failed -> killed"
+  }
+ ],
+ "restore": {
+  "method": "git checkout -- <file> after every mutant; sha256 before == after each time; `git status` clean before writing this report",
+  "core/todo_templates.py": "28ad34b30c29da0daccc0c16dd462c2f8aef7e91908ab5763b0fb560871546fa",
+  "core/todo_cli.py": "3d81c0f5628e2022a4bad0b765acc74581d010f946a692ca52b58a639d5e6a40",
+  "each_mutant_restore_check": "IDENTICAL x9"
+ },
+ "shapes": {
+  "existing directory ('out')": "item implement: files_changed.paths declares 'out', an existing DIRECTORY under workspace <ws>: the item requires every declared path to differ from its state at the start of the step, and a directory has no state to differ from - files_changed compares a file's digest, so this item could never pass and the attempt would run until someone abandoned it; declare the files inside it   [refused=impossible_path, item=implement, predicate=files_changed, path=out; exit 2]",
+  "symlink to directory ('link_dir')": "same message, path=link_dir [impossible_path]",
+  "'./out', 'out/', 'out/.'": "same message, path=out (normalised) [impossible_path]",
+  "'.'": "same message, path='.' [impossible_path]",
+  "absolute '/etc/passwd'": "item implement: files_changed.paths must be a relative path inside the workspace, got '/etc/passwd'   [refused=invalid_plan; exit 2]",
+  "'../x'": "item implement: files_changed.paths must be a relative path inside the workspace, got '../x'   [invalid_plan]",
+  "'deep/../out'": "item implement: files_changed.paths must be a relative path inside the workspace, got 'deep/../out'   [invalid_plan]",
+  "duplicate ['app.py','./app.py']": "item implement: files_changed.paths declares 'app.py' twice ('app.py' and './app.py' are the same path once normalised): a list that repeats one file names fewer files than the director reads it as - the other file that was meant is not declared at all, and this item would judge a shorter list than intended   [impossible_path, path=app.py]",
+  "empty string ['']": "item implement: files_changed.paths has the wrong type or is empty: ['']   [invalid_plan, pre-existing rule]"
+ },
+ "unverified": [
+  "Did not run integrations/dsh-driver/runtime.todo.test.mjs (node) nor a live DSH `todo_plan` call: the claim that `paths` reaches the tool result rests on reading runtime.mjs (call()/run() return the CLI JSON unprojected) plus the CLI stdout, not on observing the tool output.",
+  "Tests assert `not glob('*.json')` for 'no plan file'; I verified the stronger 'store directory absent' only with my own live probes, not as a regression test. A mutant that audits inside the lock but before write (leaving an empty .lock) was not run and would likely pass the shipped tests.",
+  "Concurrency/race (path becomes a directory between audit and write; two creates racing) not examined: the audit runs outside the lock by design.",
+  "Case-insensitive filesystems, Windows separators, very long/unicode paths, permission-denied stat() (is_dir returns False on EACCES so such a directory would be announced as not_yet_existing) not probed.",
+  "Did not run the full repository suite; only the three todo test files (143 passed). The other 3 shipped templates (test_fix, docs_change) were exercised by the shipped tests, not by my probes (I used code_change and relied on the shipped investigate test).",
+  "Findings left unfixed by instruction (review only): non-regular existing files and a file-as-parent path are not refused; the workspace-absent note over-states what was skipped; M1/M2 need tests (a non-empty dir and a symlink-to-dir case)."
+ ]
+}

@@ -1,0 +1,220 @@
+{
+  "attempt_id": "attempt-32dab82c1f3646e38e8ac5da5d87e628",
+  "node": "driver.pinned-dsh-smoke-runs-or-says-unmeasured-20261105",
+  "artifact_commit": "cacd5f5308ab836ce6ef8ced8eca82aa752166a0",
+  "reviewed_commits": ["ee3dd7caae11c713c4d844413c86f29d665932a1", "cacd5f5308ab836ce6ef8ced8eca82aa752166a0"],
+  "review_kind": "independent, non-author; every number below was measured on this host in this worktree, nothing taken from either author report",
+  "verdict": "pass",
+  "criteria": {
+    "pinned-version-guard": {
+      "verdict": "pass",
+      "checks": [
+        {
+          "id": "pin-is-the-committed-manifest-value",
+          "result": "pass",
+          "evidence": "integrations/dsh-driver/package.json dependencies['@deepseek-ai/dsh'] == '0.2.1-rc.5'. pinnedDshVersion() reads the manifest it is pointed at (unit test 1 asserts 9.9.9-test is honoured from a fabricated root and a manifest without the dependency rejects with /does not pin @deepseek-ai\\/dsh/). No constant copy of the version exists in dsh-entry.mjs."
+        },
+        {
+          "id": "a-pinned-binary-is-accepted-and-attributed",
+          "result": "pass",
+          "evidence": "Explicit AITELIER_DSH_TEST_ENTRY=<host>/.local/share/aitelier-dsh/node_modules/.bin/dsh -> status measured, version 0.2.1-rc.5, source AITELIER_DSH_TEST_ENTRY, entry resolved through realpath to .../@deepseek-ai/dsh/lib/bin.js (the .bin symlink, not the shim). With AITELIER_DSH_BIN unset the same binary is accepted as source 'host install' by default (the implicit installRoot path exists on this host and holds 0.2.1-rc.5)."
+        },
+        {
+          "id": "explicit-wrong-version-refuses-and-names-both-versions",
+          "result": "pass",
+          "evidence": "AITELIER_DSH_TEST_ENTRY=/tmp/.../stale-0.1.0/node_modules/.bin/dsh (a fabricated npm-shaped install at 0.1.0) with the real pinned host install reachable -> status 'refused', entry null, source null, reason \"refusing to measure @deepseek-ai/dsh 0.2.1-rc.5: the explicit AITELIER_DSH_TEST_ENTRY override /tmp/dsh-review-stale-010/node_modules/.bin/dsh (AITELIER_DSH_TEST_ENTRY) is 0.1.0\" -- names 0.1.0 and 0.2.1-rc.5. Same shape via AITELIER_DSH_BIN (reason names AITELIER_DSH_BIN)."
+        },
+        {
+          "id": "explicit-unattributable-refuses-naming-unknown-version",
+          "result": "pass",
+          "evidence": "/tmp/.../loose/dsh (executable file, nearest package.json is name 'not-dsh', no @deepseek-ai/dsh ancestor) -> status 'refused', reason \"refusing to measure @deepseek-ai/dsh 0.2.1-rc.5: the explicit AITELIER_DSH_TEST_ENTRY override /tmp/dsh-review-loose/dsh (AITELIER_DSH_TEST_ENTRY) is of unknown version\", mismatches[0].version === null."
+        },
+        {
+          "id": "the-walk-stops-at-the-refused-override-in-both-cases",
+          "result": "pass",
+          "evidence": "In both refusal probes `searched` was exactly ['<the override>'] -- neither the checkout candidate nor the host-install candidate was ever stat()ed, so the walk could not fall through (this is the branch cacd5f53 fixed; iss-ab4b9702471c4d1d). Call site: measuredEntryForTest threw the refusal, and the recording test context received [] events -- no t.skip and no 'measuring ...' line."
+        },
+        {
+          "id": "refusal-is-a-red-run-end-to-end",
+          "result": "pass",
+          "evidence": "`node --test runtime.smoke.test.mjs` with the stale explicit override: exit 1, 2 tests failed, 0 skipped, both failures carry the refusal text naming 0.1.0 and 0.2.1-rc.5. Not a skip, not a green run."
+        },
+        {
+          "id": "implicit-wrong-version-next-to-a-pinned-one-is-measured-from-the-pinned-one",
+          "result": "pass",
+          "evidence": "Ran runtime.smoke.test.mjs from a byte-identical copy of the driver directory (/tmp/dsh-review-implicit-checkout, dsh-entry.mjs sha256 14a5104e..., runtime.smoke.test.mjs sha256 ade1b2e2...) whose node_modules/.bin/dsh is a fabricated 0.2.0 install, with the real pinned host install reachable: exit 0, 2 pass, 0 skipped, 2x \"measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install)\". An implicit mismatch alone (same copy, AITELIER_DSH_HOME empty) is 'refused' with the details, never a green skip."
+        },
+        {
+          "id": "the-implicit-skip-is-visible-in-the-test-output",
+          "result": "pass",
+          "evidence": "Both real smoke tests printed, before their measuring line: \"not measuring 1 candidate(s) that are not @deepseek-ai/dsh 0.2.1-rc.5: /tmp/dsh-review-implicit-checkout/node_modules/.bin/dsh (this checkout) is 0.2.0\". Cap boundary measured with a fabricated releases tree (6 newer wrong releases ahead of the pinned release): diagnostic showed 5 entries then '; and 1 more', and the resolution was still measured from 'host release 0.2.1-rc.5'."
+        },
+        {
+          "id": "own-mutant-reddens-the-unit-file",
+          "result": "pass",
+          "evidence": "M1 (version comparison made unconditional) -> dsh-entry.test.mjs exit 1, pass 5 fail 6. See mutants[] for the full set."
+        }
+      ]
+    },
+    "no-install-is-unmeasured": {
+      "verdict": "pass",
+      "checks": [
+        {
+          "id": "no-install-reachable-exit-0-two-real-tests-skipped",
+          "result": "pass",
+          "evidence": "AITELIER_DSH_TEST_ENTRY/AITELIER_DSH_BIN/AITELIER_DSH_HOME/AITELIER_DSH_ENTRY unset, home untouched, /opt/aitelier-dsh absent, no node_modules in the checkout: with AITELIER_DSH_HOME=<empty tmpdir> `node --test runtime.smoke.test.mjs` -> exit 0, tests 2, pass 0, fail 0, skipped 2, both lines are `- real pinned DSH ... # no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <checkout>/node_modules/.bin/dsh, <empty>/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh`."
+        },
+        {
+          "id": "same-with-HOME-pointing-at-an-empty-temp-dir",
+          "result": "pass",
+          "evidence": "HOME=<empty tmpdir>, AITELIER_DSH_HOME unset: exit 0, tests 2, pass 0, fail 0, skipped 2; the skip message names <empty>/.local/share/aitelier-dsh/node_modules/.bin/dsh (i.e. os.homedir() followed HOME), plus the checkout path and /opt/aitelier-dsh. Nothing was written into the empty HOME (it was still empty afterwards)."
+        },
+        {
+          "id": "real-host-root-runs-them-and-passes-against-the-pin",
+          "result": "pass",
+          "evidence": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD -u AITELIER_DSH_BIN -u AITELIER_DSH_HOME <pinned node> --test runtime.smoke.test.mjs -> exit 0, tests 2, pass 2, fail 0, skipped 0; both report \"measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install)\". Combined `--test dsh-entry.test.mjs runtime.smoke.test.mjs` -> 13 pass, 0 fail, 0 skipped, exit 0 (matches the cacd5f53 claim)."
+        },
+        {
+          "id": "the-skip-does-not-swallow-a-real-failure",
+          "result": "pass",
+          "evidence": "M5 (fixture-provider.mjs stops forwarding 'compaction/end', a break inside a live smoke scenario) -> runtime.smoke.test.mjs exit 1, pass 1 fail 1 skipped 0, failure `AssertionError: automatic compaction missing`. The two `if (!entry) return;` skips are reached only on the resolver's explicit 'unmeasured' status, so a measured run cannot hide a scenario failure."
+        },
+        {
+          "id": "caller-execution-mode-cannot-corrupt-the-measurement",
+          "result": "pass",
+          "evidence": "Baseline run re-run with AITELIER_DSH_EXECUTION=host DSH_PERMISSION_MODE=danger-full-access exported by the calling shell: exit 0, 2 pass, 0 skipped -- withoutCallerMode() strips both before both spawns. M4 (withoutCallerMode made a no-op) with the same host-mode caller reddens exactly the new guard assertion at runtime.smoke.test.mjs:137, message \"the driver booted in the caller's execution mode instead of this test's\", test 1 only (test 2 unaffected) -- so the added assertion has teeth and is not decorative."
+        }
+      ]
+    }
+  },
+  "mutants": [
+    {
+      "id": "M1",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "`if (manifest?.version !== pinned)` -> `if (false)`: version comparison made unconditional, every existing candidate accepted",
+      "sha256_mutated": "c6c579fa66c1f8271a5f88c1b67691740f7dfe78a1c250206059e879def626d8",
+      "run": "node --test dsh-entry.test.mjs",
+      "result": "exit 1, tests 11, pass 5, fail 6 (a differently-versioned binary is refused; a binary nobody can attribute is refused; an explicit wrong-version override is refused; the implicit-skip-and-say-so test; implicit wrong-version alone refused; measuredEntryForTest honest shape)",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    },
+    {
+      "id": "M2",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "`if (explicit)` -> `if (false && explicit)`: the cacd5f53 explicit-refusal branch removed, an explicit override treated as just another place to look (pre-fix behaviour, iss-ab4b9702471c4d1d)",
+      "sha256_mutated": "31667ef8c9e89bf2347add511c7461f61226a772a5c895aaefff99e9bda647d3",
+      "run": "node --test dsh-entry.test.mjs -> exit 1, 11 tests, pass 10, fail 1, exactly `an explicit wrong-version override is refused, not answered by the pinned checkout install` (the commit's 'fails exactly one test' claim holds)",
+      "extra_run": "node --test runtime.smoke.test.mjs with the stale explicit override still set -> exit 0, 2 pass, 0 skipped, 'measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install)': the runtime smoke file alone does NOT detect this regression class (it only shows the 'not measuring ... is 0.1.0' line). See limits[2].",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    },
+    {
+      "id": "M3",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "measuredEntryForTest: `if (refused) throw` -> `if (refused) { t.skip(...); return null; }` (a refusal disguised as an unmeasured skip)",
+      "sha256_mutated": "fc7c85a7f49fc7040a455e4c5dbbab3b74ad3a0d0e2f1f65faeb14cc3ace7852",
+      "run": "node --test dsh-entry.test.mjs",
+      "result": "exit 1, pass 9, fail 2 -- both 'a refused override must neither skip nor print a measuring line' and 'a refusal must fail loudly, never be reported as an unmeasured skip'",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    },
+    {
+      "id": "M4",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "withoutCallerMode() made a no-op (execution-mode keys no longer deleted)",
+      "sha256_mutated": "e34413155d62d0922973dd59083f885e031a682f2fa8c8be929827764d096b32",
+      "run": "AITELIER_DSH_EXECUTION=host DSH_PERMISSION_MODE=danger-full-access node --test runtime.smoke.test.mjs",
+      "result": "exit 1, pass 1, fail 1: the new assertion at runtime.smoke.test.mjs:137 fires with its own message (test 2 is unaffected). Confirms the mode guard is the thing that catches an inherited mode.",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    },
+    {
+      "id": "M5",
+      "file": "integrations/dsh-driver/fixture-provider.mjs",
+      "what": "'compaction/end' removed from the forwarded session-event list: a real break inside a smoke scenario",
+      "sha256_mutated": "5d2defb36bc6d13f710396683c641d53874482863b1c59db6f0b4a019692d125",
+      "run": "node --test runtime.smoke.test.mjs",
+      "result": "exit 1, tests 2, pass 1, fail 1, skipped 0, `AssertionError: automatic compaction missing`",
+      "restored_sha256": "291a864c3dce0a5457d4c9bcc006cc174bdb04830412ff43f8177b084c1aaf3c"
+    },
+    {
+      "id": "M7",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "the implicit-skip diagnostic deleted (skips made silent)",
+      "sha256_mutated": "a8ce9d3080e4d52fd1e89fa8232d505645a659551cbedf402d441304c0c66d71",
+      "run": "node --test dsh-entry.test.mjs",
+      "result": "exit 1, pass 10, fail 1, exactly `a wrong-version implicit candidate is skipped, the pinned one is measured, and the skip is said out loud` (cacd5f53's 'fails exactly one test' claim holds)",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    },
+    {
+      "id": "M8",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "what": "the resolver's measured return replaced by an unconditional `unmeasured` (a resolver that silently decides nothing is installed)",
+      "sha256_mutated": "6db1ada2d90de6e3430d00271bb29eb1f11bc05041a6a6b8efc1dccb9acae1e3",
+      "run": "node --test runtime.smoke.test.mjs -> exit 0, 0 pass, 2 skipped; node --test dsh-entry.test.mjs -> exit 1, pass 8, fail 3",
+      "result": "the smoke file alone cannot catch a resolver that wrongly says unmeasured (it stays green with 2 skips); the unit file does. See limits[2].",
+      "restored_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"
+    }
+  ],
+  "restoration": {
+    "method": "every mutant written with a single literal substitution in the worktree file, run, then restored with `git checkout -- <file>`; hashes compared against a baseline sha256 list taken before any mutation",
+    "files": [
+      {"path": "integrations/dsh-driver/dsh-entry.mjs", "baseline_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac", "final_sha256": "14a5104ea914099fd037edf511ec35031d0eb323a5dbc164f5a2014be61a06ac"},
+      {"path": "integrations/dsh-driver/dsh-entry.test.mjs", "baseline_sha256": "68f21680e1175844016266cc2bf6226ad4985e6e7e10c36c994bec358c7e1733", "final_sha256": "68f21680e1175844016266cc2bf6226ad4985e6e7e10c36c994bec358c7e1733", "note": "never mutated"},
+      {"path": "integrations/dsh-driver/runtime.smoke.test.mjs", "baseline_sha256": "ade1b2e2f9df7858b919e34881f7fe6d906fac441853a46385628a7922354163", "final_sha256": "ade1b2e2f9df7858b919e34881f7fe6d906fac441853a46385628a7922354163", "note": "never mutated"},
+      {"path": "integrations/dsh-driver/fixture-provider.mjs", "baseline_sha256": "291a864c3dce0a5457d4c9bcc006cc174bdb04830412ff43f8177b084c1aaf3c", "final_sha256": "291a864c3dce0a5457d4c9bcc006cc174bdb04830412ff43f8177b084c1aaf3c"},
+      {"path": "integrations/dsh-driver/package.json", "baseline_sha256": "55d40a73bf00ecd7fdcc6b74ee8cb18dc0c3a18dd987719f7f5a56305c508155", "final_sha256": "55d40a73bf00ecd7fdcc6b74ee8cb18dc0c3a18dd987719f7f5a56305c508155", "note": "never mutated"}
+    ],
+    "tree": "git status --porcelain empty before the report was written; the only new path afterwards is this report"
+  },
+  "limits": [
+    {
+      "id": "L1-missing-or-directory-override-falls-through",
+      "severity": "low, outside the letter of criterion 1",
+      "measured": "AITELIER_DSH_TEST_ENTRY pointing at a path that does not exist (a typo, or an uninstalled build) or at a directory does NOT refuse: status 'measured', source 'host install', measuredEntryForTest returned the host binary. The only trace is the diagnostic 'measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): ...', i.e. a source the caller did not ask for. So 'an explicit override names the binary the run must measure' is enforced for wrong-version and unattributable overrides (both measured as refusing, walk stopped) but not for an override that is not a regular file. A test run with a mistyped override therefore measures the implicit install and is green."
+    },
+    {
+      "id": "L2-attribution-is-by-nearest-owning-manifest-only",
+      "severity": "low, contrived",
+      "measured": "A file that is not dsh but sits inside the pinned package directory (…/@deepseek-ai/dsh/lib/rogue-review-probe.js) is attributed to 0.2.1-rc.5 and 'measured'. The resolver never checks the binary is the package's declared bin. Strictly the criterion is about the resolved package's version and that package is pinned, so this is a limit rather than a failure; the probe file was deleted immediately (verified absent)."
+    },
+    {
+      "id": "L3-the-skip-guard-lives-only-in-the-unit-file",
+      "severity": "medium, worth a gate decision",
+      "measured": "runtime.smoke.test.mjs alone cannot detect a resolver regression: with M2 (explicit override routed around, the historic bug) it is green (exit 0, 2 pass) while measuring the host install, and with M8 (always unmeasured) it is exit 0 with 2 skips. dsh-entry.test.mjs catches both (M2: exactly 1 fail; M8: 3 fails). Also, runtime.smoke.test.mjs itself contains no assertion that it was not skipped when an install exists. Keeping dsh-entry.test.mjs in the same gate as runtime.smoke.test.mjs is therefore load-bearing, not optional."
+    },
+    {
+      "id": "L4-scope-only-the-smoke-file-was-converted",
+      "severity": "medium, scope statement for the director",
+      "measured": "Seven other pinned test files still resolve `new URL('./node_modules/.bin/dsh', import.meta.url)` (runtime.user-message, runtime.dormancy, runtime.terminal-plan, runtime.continuation, runtime.goalseed, runtime.todo x2, tool-discovery via createRequire). Measured: env -u AITELIER_DSH_TEST_ENTRY <pinned node> --test runtime.user-message.test.mjs -> exit 1, `ENOENT ... realpath '.../integrations/dsh-driver/node_modules/.bin/dsh'`. So 'no test needs node_modules inside the checkout' currently holds only for runtime.smoke.test.mjs; the package.json `npm test` list in this node_modules-less checkout still reds. dsh-entry.mjs is shaped for adoption (measuredEntryForTest needs only t), but adoption was not part of these two commits."
+    },
+    {
+      "id": "L5-failed-runs-leave-test-scratch-behind",
+      "severity": "informational",
+      "measured": "A clean `node --test dsh-entry.test.mjs` run created 0 new /tmp/dsh-entry-* directories (fixtures are removed by each test's trailing rm). Failing mutant runs abort at their assertion before the rm, so they leave /tmp/dsh-entry-* fixtures behind; the 41 such directories present during this review (from mutant runs, mine and earlier ones) were removed afterwards, my own /tmp/dsh-review-* fixtures too."
+    }
+  ],
+  "environment": {
+    "worktree": "/home/linxuhao/.AItelier/worktrees/smoke-pin-review-20261105",
+    "branch": "dsh/smoke-pin-review-20261105",
+    "head": "cacd5f5308ab836ce6ef8ced8eca82aa752166a0",
+    "node_modules": "absent, deliberately; no symlink created at any point",
+    "node": "/home/linxuhao/.local/share/aitelier-dsh/bin/node v24.22.2 (all numbers above). /usr/bin/node is v22.23.4 and was not used.",
+    "pin": "@deepseek-ai/dsh 0.2.1-rc.5, from integrations/dsh-driver/package.json",
+    "host_install": "/home/linxuhao/.local/share/aitelier-dsh, node_modules/@deepseek-ai/dsh/package.json version 0.2.1-rc.5, node_modules/.bin/dsh -> ../@deepseek-ai/dsh/lib/bin.js; no releases/ directory; /opt/aitelier-dsh does not exist",
+    "invocation": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD [-u AITELIER_DSH_BIN] [-u AITELIER_DSH_ENTRY] [-u AITELIER_DSH_HOME] <pinned node> --test <files>, cwd = integrations/dsh-driver",
+    "note_on_brief": "the delegating shell actually exports AITELIER_DSH_BIN and AITELIER_DSH_ENTRY (not AITELIER_DSH_HOME). AITELIER_DSH_BIN is a resolver candidate and resolved to the pinned host binary, so it was unset whenever the implicit host-install path or the unmeasured path had to be proven; AITELIER_DSH_ENTRY is not a resolver candidate (the smoke test sets it itself from the resolved entry).",
+    "concurrency": "node test runs were serialized; one run at a time, no pytest, no docker, no writes outside this worktree and /tmp"
+  },
+  "unverified": [
+    "Nothing was measured under /usr/bin/node v22.23.4; every result is v24.22.2 only, so a v22 difference (the brief warns results differ) is untested by me.",
+    "The MAX_WALK=8 attribution depth and cross-filesystem/realpath-failure branches were not exercised.",
+    "The seven unconverted pinned test files were not run to completion -- only their node_modules-less failure mode was sampled once (runtime.user-message.test.mjs, ENOENT), which is enough for L4 but is not coverage of those files.",
+    "`npm test` / the full package.json file list was not run as a single command (it would red on the unconverted files by L4); the two delivered files were run together (13 pass) and separately.",
+    "The container install candidate (/opt/aitelier-dsh) is absent on this host, so it was only observed as a searched path in skip messages, never resolved.",
+    "No Python/pytest side of the project was inspected or executed, per the node-only rule."
+  ],
+  "author_claims_rechecked": [
+    {"claim": "ee3dd7ca/cacd5f53: pinned node, dsh-entry.test.mjs + runtime.smoke.test.mjs -> 13 pass, 0 fail, 0 skipped, both smoke tests measuring 0.2.1-rc.5", "measured": "confirmed exactly (exit 0, tests 13, pass 13, fail 0, skipped 0, two 'measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install)' lines)"},
+    {"claim": "cacd5f53: 'dropping the explicit refusal ... fails exactly one test'", "measured": "confirmed with M2: pass 10, fail 1, and the failing test is the explicit-override one"},
+    {"claim": "cacd5f53: 'dropping the skip diagnostic fails exactly one test'", "measured": "confirmed with M7: pass 10, fail 1"},
+    {"claim": "ee3dd7ca: 'With no install reachable the two smoke tests report skipped with the searched paths, not failed'", "measured": "confirmed for both variants (AITELIER_DSH_HOME empty and HOME empty): exit 0, 2 skipped, message lists the paths tried"},
+    {"claim": "ee3dd7ca: 'no test needs node_modules inside the checkout'", "measured": "true only for runtime.smoke.test.mjs -- see L4; this is a commit-message overstatement, not a defect in dsh-entry.mjs"}
+  ]
+}

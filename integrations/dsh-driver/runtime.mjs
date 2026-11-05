@@ -165,7 +165,10 @@ export function dormancyRefusal({ reason, liveChildren = 0, claims = [], plans =
   if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
   if (liveChildren) return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running` };
   if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
-  if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id) };
+  if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id),
+    // Which of them have nothing left to run: the director's next step there is
+    // todo_finish, not another dispatch.
+    ...(plans.some(p => p.ready_to_finish) ? { ready_to_finish: plans.filter(p => p.ready_to_finish).map(p => p.attempt_id) } : {}) };
   if (background.length) return { refused: 'background_processes', reason: 'jobs you started are still running; watch_process them or wait', pids: background };
   return null;
 }
@@ -281,14 +284,49 @@ export class TodoCli {
     const status = await this.run(['status', '--attempt=' + attempt], signal);
     return { ...value, brief: status.code === 0 ? status.result.brief : null };
   }
-  /** Every stored plan's summary (`list`). No store yet means no plan was ever
-   *  made, so the interpreter is not started for it. */
+  /** Where `todo_finish` puts an attempt's candidate: the bundle and the report. */
+  finishDir(attempt) { return join(this.store, 'finish', attempt); }
+  /** The candidate report `todo_finish` writes. The plan file itself is NEVER
+   *  rewritten by finishing, so this file's existence is the one record that
+   *  finishing already ran for that attempt. */
+  finishReport(attempt) { return join(this.finishDir(attempt), attempt + '-candidate.json'); }
+  /** Every stored plan's summary (`list`), plus whether its candidate report
+   *  exists. No store yet means no plan was ever made, so the interpreter is not
+   *  started for it. */
   async plans(signal) {
     try { await stat(this.store); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
     const { code, result } = await this.run(['list'], signal);
     if (code !== 0) throw new Error('todo_cli list refused: ' + JSON.stringify(result).slice(0, 1000));
-    return result.plans.filter(plan => !plan.error);
+    return Promise.all(result.plans.filter(plan => !plan.error).map(async plan =>
+      ({ ...plan, finish_reported: await fileExists(this.finishReport(plan.attempt_id)) })));
   }
+}
+
+/** Whether a path exists; an unreadable one counts as absent (fail towards
+ *  reminding the director, never towards silently dropping a plan). */
+async function fileExists(path) {
+  try { await stat(path); return true; } catch { return false; }
+}
+
+/** Whether a plan's every item has passed while no candidate was ever produced.
+ *
+ *  That is the state a host restart leaves behind when it kills a child right
+ *  after its last `todo_done`: the plan has no `remaining` items, the State
+ *  attempt is still live and has no candidate report, and `todo_finish` has not
+ *  been run - so the only work left is the DIRECTOR's. Both views below surface
+ *  such a plan, marked `ready_to_finish`, precisely because filtering on
+ *  `remaining.length` alone dropped it out of them and nothing ever reminded the
+ *  director that the attempt was ready to finish (iss-af4fdabe05954077).
+ *
+ *  `todo_finish` does not rewrite the plan file, so `remaining: []` alone cannot
+ *  tell "nobody finished this" from "the candidate is already written". The
+ *  report `todo_finish` writes is what says it ran (`finish_reported`, read in
+ *  `TodoCli.plans`); when that is unknown the plan stays surfaced.
+ *
+ *  Nothing here re-opens the items: `remaining` is empty, so no item is offered
+ *  as work again. */
+export function awaitingFinish(plan) {
+  return Array.isArray(plan.remaining) && plan.remaining.length === 0 && plan.finish_reported !== true;
 }
 
 /** Attempt statuses State can store, split by whether the attempt is still work.
@@ -322,15 +360,16 @@ export function attemptSettled(answer) {
 
 /** The plan attempt ids whose State record says the attempt has SETTLED.
  *
- *  One `get_attempt` per plan that still has items, through the same State read
- *  the rest of this runtime uses. FAILS CLOSED: a request that throws (State
- *  unreachable, an unknown attempt), an answer with no status, or a status that
- *  is not provably terminal leaves that attempt OUT of the set, so its plan keeps
- *  blocking exactly as it did before this existed. This set only ever shrinks the
- *  blocking list by what State actually said. */
+ *  One `get_attempt` for every plan a view could show - one that still has
+ *  items, and one whose items have all passed but which was never finished -
+ *  through the same State read the rest of this runtime uses. FAILS CLOSED: a
+ *  request that throws (State unreachable, an unknown attempt), an answer with
+ *  no status, or a status that is not provably terminal leaves that attempt OUT
+ *  of the set, so its plan keeps blocking exactly as it did before this existed.
+ *  This set only ever shrinks the blocking list by what State actually said. */
 export async function settledAttempts(plans, read, signal) {
   const settled = new Set();
-  await Promise.all(plans.filter(plan => plan.remaining?.length).map(async plan => {
+  await Promise.all(plans.filter(plan => plan.remaining?.length || awaitingFinish(plan)).map(async plan => {
     let answer;
     try { answer = await read('/api/state/query/get_attempt', { attempt_id: plan.attempt_id }, signal); }
     catch { return; /* fail closed: an unread plan is unfinished work, not settled */ }
@@ -339,21 +378,34 @@ export async function settledAttempts(plans, read, signal) {
   return settled;
 }
 
-/** The post-compaction snapshot's view of unfinished plans: enough to resume, not
- *  the items. `settled` is `settledAttempts`' answer (absent means "nothing is
- *  known to have settled"), so a settled plan is not listed as awaiting work. */
+/** The post-compaction snapshot's view of plans the director still owns: enough
+ *  to resume, not the items. `settled` is `settledAttempts`' answer (absent means
+ *  "nothing is known to have settled"), so a settled plan is not listed as
+ *  awaiting work.
+ *
+ *  `ready_to_finish` is the explicit marker: true when every item passed and the
+ *  candidate has not been produced, so the plan's `remaining_count` is 0 and the
+ *  director's next step is `todo_finish` (with no item left to run); false when
+ *  items remain. A plan with items left is never reported as ready to finish. */
 export function todoSummary(plans, liveSessions, settled = new Set()) {
-  return plans.filter(p => p.remaining?.length && !settled.has(p.attempt_id))
+  return plans.filter(p => !settled.has(p.attempt_id) && (p.remaining?.length || awaitingFinish(p)))
     .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next,
-      remaining_count: p.remaining?.length ?? 0, child_alive: liveSessions.has(p.child_session) }));
+      remaining_count: p.remaining?.length ?? 0, ready_to_finish: awaitingFinish(p),
+      child_alive: liveSessions.has(p.child_session) }));
 }
 
 /** Plans the idle review must hand back: unfinished, their attempt not settled,
  *  and no live child on them. A plan whose attempt settled is history, not a
- *  blocker; a plan whose attempt State could not answer for stays one. */
+ *  blocker; a plan whose attempt State could not answer for stays one.
+ *
+ *  `ready_to_finish` says which of them have nothing left to run: every item
+ *  passed, no candidate produced, `remaining` empty. That plan is handed back so
+ *  the director finishes it - it is never a list of items to dispatch again. */
 export function unfinishedWithoutChild(plans, liveSessions, settled = new Set()) {
-  return plans.filter(p => p.remaining?.length && !liveSessions.has(p.child_session) && !settled.has(p.attempt_id))
-    .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next, remaining: p.remaining }));
+  return plans.filter(p => !liveSessions.has(p.child_session) && !settled.has(p.attempt_id)
+      && (p.remaining?.length || awaitingFinish(p)))
+    .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next, remaining: p.remaining ?? [],
+      ready_to_finish: awaitingFinish(p) }));
 }
 
 /** Whether the director may take a plan over from a named session, or why not.
@@ -738,7 +790,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
       execute: async (args, exec) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.attempt_id)
         ? todo.call(args.attempt_id, ['finish', '--attempt=' + args.attempt_id,
-          '--out=' + join(todo.store, 'finish', args.attempt_id)], exec.signal,
+          '--out=' + todo.finishDir(args.attempt_id)], exec.signal,
           await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
         : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
     }));
@@ -894,6 +946,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         todo_error: String(error.message ?? error).slice(0, 1000) }));
     }
     for (const plan of plans) {
+      // Items open only: a plan whose items have all passed is not work to run
+      // again. It reaches the director as ready_to_finish through the plan and
+      // work views (awaitingFinish), which is where that reminder belongs.
       if (plan.child_session !== session || !plan.remaining?.length) continue;
       let payload;
       try {

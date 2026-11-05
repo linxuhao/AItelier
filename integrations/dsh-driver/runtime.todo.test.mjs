@@ -180,7 +180,10 @@ if args.command == 'finish':
     bundle = out / (args.attempt + '.bundle')
     git(plan, 'bundle', 'create', str(bundle), 'HEAD')
     digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    report = out / (args.attempt + '.report.json')
+    # The exact name the real CLI writes (todo_cli.cmd_finish names it after the
+    # attempt). The runtime looks for this file to tell "nobody finished this plan"
+    # apart from "its candidate already exists".
+    report = out / (args.attempt + '-candidate.json')
     report.write_text(json.dumps({'status': 'candidate', 'artifact': git(plan, 'rev-parse', 'HEAD'),
                                   'git_bundle': {'path': str(bundle), 'sha256': digest}}))
     emit({'git_bundle': {'path': str(bundle), 'sha256': digest}, 'report': str(report)})
@@ -495,11 +498,19 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     assert.match(toolText(resolve), /may only state_graph_write report_issue\)/);
     assert.deepEqual(mcpCalls.sort(), ['state_graph_write:record_evidence', 'state_graph_write:report_issue'], 'a refused State write reached the server');
 
-    // 3b. The real idle review (short interval) names the unfinished plan with no live child.
+    // 3b. The real idle review (short interval) names the plan with items left. The
+    // all-pass plan is named too, until its candidate exists - as ready_to_finish,
+    // with nothing left to run, never as items to dispatch again.
     assert.ok(reviewedB(), 'no idle review named the unfinished plan\n' + JSON.stringify(reviews()));
-    const review = reviews().filter(r => r.todo_unfinished?.length).at(-1);
-    assert.deepEqual(review.todo_unfinished, [
-      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'] }]);
+    const review = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.b.attempt_id)).at(-1);
+    assert.deepEqual(review.todo_unfinished.filter(p => p.attempt_id === plans.b.attempt_id), [
+      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'], ready_to_finish: false }]);
+    assert.ok(review.todo_unfinished.every(p => p.ready_to_finish === (p.remaining.length === 0)),
+      'a plan was marked the wrong way round: ' + JSON.stringify(review.todo_unfinished));
+    for (const plan of review.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id)) {
+      assert.deepEqual(plan, { attempt_id: plans.a.attempt_id, node_key: 'execution.todo-full', next: null,
+        remaining: [], ready_to_finish: true }, 'the all-pass plan was handed back as items to run');
+    }
 
     // 4. Compaction: after each successful child compaction the child got one
     // brief line (a host-scoped agent/pre-step reaches native children) and its
@@ -525,7 +536,8 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     const after = snapshots.filter(s => s.event.data.source.compaction_seq > 0).at(-1);
     assert.ok(after, 'no post-compaction snapshot');
     assert.deepEqual(state(after).todo, [
-      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining_count: 1, child_alive: false },
+      { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining_count: 1,
+        ready_to_finish: false, child_alive: false },
     ]);
     assert.match(toolJson(result('root-todo_status-after-compact').event).brief, /Next: deliver/);
 
@@ -902,11 +914,20 @@ test('idle review and snapshot views: unfinished plans without a live child, and
     }
     const plans = await todo.plans();
     assert.deepEqual(plans.map(p => p.attempt_id), ['attempt-done', 'attempt-open']);
+    // attempt-done walked every item but nobody ran todo_finish, so it is work
+    // waiting on the director - carried with the explicit marker, and with no item
+    // offered as remaining.
+    assert.deepEqual(plans.map(p => p.finish_reported), [false, false]);
     assert.deepEqual(unfinishedWithoutChild(plans, new Set()), [
-      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining: ['implement', 'test', 'deliver'] }]);
-    assert.deepEqual(unfinishedWithoutChild(plans, new Set(['child-open'])), [], 'a plan with a live child is not handed back');
+      { attempt_id: 'attempt-done', node_key: 'execution.done', next: null, remaining: [], ready_to_finish: true },
+      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining: ['implement', 'test', 'deliver'], ready_to_finish: false }]);
+    // A live child still keeps its own plan out of the handback - including the one
+    // whose items all passed: nothing is handed back for a living session.
+    assert.deepEqual(unfinishedWithoutChild(plans, new Set(['child-open'])), [
+      { attempt_id: 'attempt-done', node_key: 'execution.done', next: null, remaining: [], ready_to_finish: true }]);
     assert.deepEqual(todoSummary(plans, new Set(['child-open'])), [
-      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining_count: 3, child_alive: true }]);
+      { attempt_id: 'attempt-done', node_key: 'execution.done', next: null, remaining_count: 0, ready_to_finish: true, child_alive: false },
+      { attempt_id: 'attempt-open', node_key: 'execution.open', next: 'implement', remaining_count: 3, ready_to_finish: false, child_alive: true }]);
     let listed = [];
     const runtime = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
       request: async () => ({ nodes: [], project_note: {}, private_note: {} }), todoPlans: async () => listed });

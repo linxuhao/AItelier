@@ -64,12 +64,21 @@ session_id), naming that dead session. The plan records the handover
 (rebound_from). A live child keeps its own plan: todo_rebind refuses it and
 todo_done keeps answering bound_to_other_session. When the plan is complete, run
 todo_finish, then report_external_attempt with the report it wrote, then review
-the delivered change yourself and record_evidence. A plan stops counting as
+the delivered change yourself and record_evidence. A plan whose items have ALL
+passed but which nobody finished is reported to you as work waiting on you: the
+snapshot and the runtime's todo_unfinished view carry it with ready_to_finish
+true, no remaining items and no next item, and idle_dormant refuses it as
+unfinished_plans. That is how a child killed right after its last todo_done (a
+host restart) is not forgotten: your next step there is todo_finish, never a
+re-dispatch of its items. A plan with items left is reported with
+ready_to_finish false and its remaining items. A plan stops counting as
 unfinished work once the State attempt it is named after has settled (candidate,
-failed, superseded or abandoned): its open items are already accounted for by that
-terminal report, so idle_dormant no longer refuses it and the runtime snapshot no
-longer lists it. While the attempt is live the plan keeps blocking, and it also
-keeps blocking when State cannot answer for it. run_pipeline stays available
+failed, superseded or abandoned), and an all-passed plan also stops counting once
+its candidate report exists: its open items are already accounted for by that
+terminal report, or its candidate is already written, so idle_dormant no longer
+refuses it and the runtime snapshot no longer lists it. While the attempt is live
+the plan keeps blocking, and it also keeps blocking when State cannot answer for
+it. run_pipeline stays available
 for a task that genuinely needs an existing pipeline; it is not the default.
 Native Spawn/Fork subagents use the dedicated `worker` model route, with a
 provider selected once per child from its round-robin pool. The director keeps

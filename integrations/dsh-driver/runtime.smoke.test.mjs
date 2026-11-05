@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { readHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
 
@@ -30,13 +31,15 @@ function assertInjectionCadence(events) {
   assert.ok(injected.has(epoch), 'latest successful compaction was not followed by fresh State');
 }
 
-test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: 45000 }, async () => {
+test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: 45000 }, async (t) => {
+  // Measure the pinned harness or report this run unmeasured; never invent one.
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;
   // Use non-temporary roots: /tmp is writable independently of workspace policy.
   const directory = await mkdtemp(join(homedir(), 'dsh-native-smoke-'));
   const outsideDirectory = await mkdtemp(join(homedir(), 'dsh-outside-workspace-'));
   const childDirectory = join(directory, 'work', 'child');
   await mkdir(childDirectory, {recursive:true});
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], activity = [], events = [], workCalls = [], dispatches = [], parked = new Set(), childWaits = new Set();
   let changed = false, overflowChanged = false, contextReads = 0, output = '', proc;
@@ -103,14 +106,17 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    const environment = { ...process.env,
+    // The execution mode is this test's decision, never the invoking shell's:
+    // an inherited AITELIER_DSH_EXECUTION=host would boot the host branch here
+    // and silently stop exercising the workspace-write path.
+    const environment = withoutCallerMode({ ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_TEST_CHILD_CWD: childDirectory,
       AITELIER_TEST_OUTSIDE_CWD: outsideDirectory,
-    };
+    });
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
       child.stdout.on('data', chunk => output += chunk); child.stderr.on('data', chunk => output += chunk);
@@ -126,6 +132,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(proc.exitCode, null, output);
+    // The fixture reports the mode it really booted in, so an inherited
+    // execution mode fails here instead of corrupting a later filesystem claim.
+    assert.ok(requests.length > 0 && requests.every(r => r.host === false),
+      'the driver booted in the caller\'s execution mode instead of this test\'s\n' + output);
     assert.ok(activity.some(a => a.subagents.length > 0), 'native child activity missing\n' + output + JSON.stringify({contextReads,activity,requests:requests.map(r=>({summary:r.summary,child:r.child})),events:events.map(e=>e.type),directory}));
     assert.ok(events.some(e => e.type === 'compaction/end' && !e.data.error), 'automatic compaction missing\n' + output + JSON.stringify({requests:requests.map(r=>({summary:r.summary,child:r.child,size:JSON.stringify(r.options).length})),events:events.map(e=>({type:e.type,data:e.type==='compaction/end'?e.data:undefined}))}));
     assert.ok(contextReads >= 2, 'context was not refreshed\n' + output);
@@ -194,6 +204,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.equal(older.entries.length, 2);
     assert.ok(older.entries.at(-1).seq < archive.entries.at(-1).seq);
     // Migrate this exact persisted workspace-write session, not a fresh root.
+    // The host mode is chosen here, on top of the stripped caller environment.
     environment.AITELIER_DSH_EXECUTION = 'host';
     environment.DSH_PERMISSION_MODE = 'danger-full-access';
     proc = launch();
@@ -226,9 +237,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   }
 });
 
-test('real pinned DSH default host adapter calls the authenticated completion bridge', { timeout: 20000 }, async () => {
+test('real pinned DSH default host adapter calls the authenticated completion bridge', { timeout: 20000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;
   const directory = await mkdtemp(join(tmpdir(), 'dsh-host-model-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const completions = [], activity = [];
   let output = '', proc, inboxWait, replied = false, call = 0, heldCompletion, waitRequests = 0, failNext = false;
@@ -273,12 +285,12 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'driver', name: join(here, 'runtime.mjs') }] }]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: withoutCallerMode({ ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'host-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'host-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
-    } });
+    }) });
     proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));

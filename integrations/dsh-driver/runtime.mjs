@@ -94,7 +94,7 @@ export const NOTHING_LEFT = 'NOTHING_LEFT';
 /** Continuation questions in a row without real input before the director is left idle. */
 export const MAX_AUTO_CONTINUE = 5;
 export const continuationQuestion = 'AItelier continuation check: you ended a turn. Before parking, look for more work you can do now, in parallel with anything running: ready frontier nodes, open issues you can close or advance, next steps you promised yourself, results you can collect. If there is one, do it now. If not, answer with one line that starts with NOTHING_LEFT: naming why each candidate is blocked. For a long background job you started, call watch_process with its pid instead of polling it.';
-export const reviewInstruction = 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If nothing is actionable, reply with one line that starts with NOTHING_LEFT: naming why each candidate is blocked; if nothing is in flight either, call idle_dormant with that reason instead.';
+export const reviewInstruction = 'Recheck live State frontier (ready nodes), open issues, next steps you promised yourself, results you can collect, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If nothing is actionable, reply with one line that starts with NOTHING_LEFT: naming why each candidate is blocked; if nothing is in flight either, call idle_dormant with that reason instead.';
 
 /** Decides, at the end of each root turn, whether to ask the director once more.
  *  A turn that called a tool and did not answer NOTHING_LEFT may have stopped
@@ -146,6 +146,16 @@ export function backgroundProcesses(session, selfPid = process.pid, procRoot = '
   try { names = readdirSync(procRoot); } catch { return []; }
   return names.filter(name => /^\d+$/.test(name) && Number(name) !== selfPid)
     .map(Number).filter(pid => processSession(pid, procRoot) === session && processAlive(pid, procRoot)).sort((a, b) => a - b);
+}
+
+/** Why watch_process must refuse, or null. Only a running job of THIS driver may be
+ *  watched (its session in the environment), at most `max` at a time. */
+export function watchRefusal({ pid, note, alive, session, mySession, watched = false, count = 0, max = 16 }) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || !note) return { refused: 'invalid_arguments', reason: 'pid must be a process id and note must say what it is' };
+  if (!alive) return { refused: 'not_running', reason: `process ${pid} is not running` };
+  if (session !== mySession) return { refused: 'not_this_driver', reason: `process ${pid} was not started from this driver` };
+  if (!watched && count >= max) return { refused: 'too_many_watches', reason: `at most ${max} watched jobs` };
+  return null;
 }
 
 /** Why idle_dormant must refuse, or null. Dormancy must never strand work: a live
@@ -653,10 +663,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { pid: { type: 'integer', required: true }, note: { type: 'string', required: true } }, output: jsonOutput,
       execute(args) {
         const pid = Number(args.pid), note = typeof args.note === 'string' ? args.note.trim().slice(0, 500) : '';
-        if (!Number.isSafeInteger(pid) || pid <= 1 || !note) return { refused: 'invalid_arguments', reason: 'pid must be a process id and note must say what it is' };
-        if (!processAlive(pid)) return { refused: 'not_running', reason: `process ${pid} is not running` };
-        if (processSession(pid) !== env.AITELIER_DSH_SESSION) return { refused: 'not_this_driver', reason: `process ${pid} was not started from this driver` };
-        if (!watches.has(pid) && watches.size >= 16) return { refused: 'too_many_watches', reason: 'at most 16 watched jobs', watching: [...watches.keys()] };
+        const refusal = watchRefusal({ pid, note, alive: Number.isSafeInteger(pid) && pid > 1 && processAlive(pid),
+          session: processSession(pid), mySession: env.AITELIER_DSH_SESSION, watched: watches.has(pid), count: watches.size });
+        if (refusal) return refusal.refused === 'too_many_watches' ? { ...refusal, watching: [...watches.keys()] } : refusal;
         watches.set(pid, { note, since: watches.get(pid)?.since ?? Date.now() });
         if (!watchTimer) { watchTimer = setInterval(pollWatches, watchIntervalMs); watchTimer.unref?.(); }
         return { watching: true, pid, note, check_every_seconds: watchIntervalMs / 1000 };

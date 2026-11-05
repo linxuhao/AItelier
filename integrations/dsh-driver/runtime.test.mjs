@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -285,12 +285,27 @@ test('dormancy refuses unwatched background jobs last, after every other kind of
   assert.equal(dormancyRefusal({ reason: 'quiet', plans: [{ attempt_id: 'a' }], background: [41] }).refused, 'unfinished_plans');
   assert.equal(dormancyRefusal({ reason: 'quiet', background: [] }), null);
 });
+test('watch_process refuses what it cannot or must not watch: bad args, a dead pid, another driver\'s job, a 17th watch', () => {
+  const ok = { pid: 4242, note: 'pytest', alive: true, session: 'me', mySession: 'me', watched: false, count: 0 };
+  assert.equal(watchRefusal(ok), null);
+  for (const bad of [{ pid: 1 }, { pid: 0 }, { pid: 1.5 }, { pid: NaN }, { note: '' }])
+    assert.equal(watchRefusal({ ...ok, ...bad }).refused, 'invalid_arguments', JSON.stringify(bad));
+  assert.deepEqual(watchRefusal({ ...ok, alive: false }), { refused: 'not_running', reason: 'process 4242 is not running' });
+  assert.deepEqual(watchRefusal({ ...ok, session: 'someone-else' }), { refused: 'not_this_driver', reason: 'process 4242 was not started from this driver' });
+  assert.deepEqual(watchRefusal({ ...ok, session: undefined }).refused, 'not_this_driver', 'no session in the environment is not ours');
+  assert.equal(watchRefusal({ ...ok, count: 15 }), null, 'the 16th watch is allowed');
+  assert.deepEqual(watchRefusal({ ...ok, count: 16 }), { refused: 'too_many_watches', reason: 'at most 16 watched jobs' });
+  assert.equal(watchRefusal({ ...ok, count: 16, watched: true }), null, 're-watching a watched pid is not a new watch');
+  assert.equal(watchRefusal({ ...ok, alive: false, session: 'someone-else' }).refused, 'not_running', 'order: running first');
+});
 test('prompts ask for concrete candidates and a NOTHING_LEFT line, and name the tools', async () => {
   for (const text of [continuationQuestion, reviewInstruction]) {
     assert.match(text, /NOTHING_LEFT:/); assert.match(text, /blocked/); assert.match(text, /open issues/);
   }
   assert.match(continuationQuestion, /ready frontier nodes/); assert.match(continuationQuestion, /promised/); assert.match(continuationQuestion, /watch_process/);
   assert.match(reviewInstruction, /idle_dormant/);
+  for (const text of [continuationQuestion, reviewInstruction])
+    for (const candidate of [/ready/, /open issues/, /next steps you promised yourself/, /results you can collect/]) assert.match(text, candidate);
   const guide = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
   for (const word of ['continuation check', 'NOTHING_LEFT:', 'watch_process', 'idle_dormant']) assert.ok(guide.includes(word), word);
 });

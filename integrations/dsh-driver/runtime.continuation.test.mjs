@@ -39,6 +39,8 @@ export function apply(ctx) {
         ?? (text.includes('AItelier director review due') ? once('job', () => bash('root-job', 'setsid nohup sleep 3 >/dev/null 2>&1 < /dev/null & echo JOB_PID=$!')) : undefined)
         ?? (pid ? once('dormant-refused', () => tool('root-dormant-refused', 'idle_dormant', { reason: 'only the job is left' })) : undefined)
         ?? (pid ? once('watch', () => tool('root-watch', 'watch_process', { pid: Number(pid), note: 'fixture sleep' })) : undefined)
+        ?? (pid ? once('watch-missing', () => tool('root-watch-missing', 'watch_process', { pid: 2147483646, note: 'no such job' })) : undefined)
+        ?? (pid ? once('watch-foreign', () => tool('root-watch-foreign', 'watch_process', { pid: Number(process.env.AITELIER_TEST_FOREIGN_PID), note: 'another driver job' })) : undefined)
         ?? (pid ? once('dormant', () => tool('root-dormant', 'idle_dormant', { reason: 'only the watched job is left' })) : undefined)
         ?? (pid ? once('stop2', () => ({ type: 'text', text: 'STOP2 dormant, watching the job' })) : undefined)
         ?? (text.includes('AItelier background job finished') ? once('seen', () => ({ type: 'text', text: 'JOB_SEEN' })) : undefined)
@@ -66,6 +68,8 @@ test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job
   const session = 'continuation-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const events = [], requests = [], parked = new Set();
   let output = '', proc;
+  // A live job of ANOTHER driver: same user, different AITELIER_DSH_SESSION.
+  const foreign = spawn('sleep', ['60'], { env: { ...process.env, AITELIER_DSH_SESSION: session + '-other' }, stdio: 'ignore' });
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -113,7 +117,7 @@ test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access',
-      AITELIER_DSH_IDLE_REVIEW_MS: '1500', AITELIER_DSH_WATCH_INTERVAL_MS: '200' } });
+      AITELIER_DSH_IDLE_REVIEW_MS: '1500', AITELIER_DSH_WATCH_INTERVAL_MS: '200', AITELIER_TEST_FOREIGN_PID: String(foreign.pid) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
     await until('the NOTHING_LEFT answer never came', () => said('NOTHING_LEFT: everything else'));
@@ -129,6 +133,8 @@ test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job
     assert.equal(refused.refused, 'background_processes', JSON.stringify(refused));
     assert.ok(refused.pids.includes(pid), `the detached job ${pid} must be found by its session: ${JSON.stringify(refused)}`);
     assert.equal(json(result('root-watch')).watching, true);
+    assert.equal(json(result('root-watch-missing')).refused, 'not_running');
+    assert.equal(json(result('root-watch-foreign')).refused, 'not_this_driver', JSON.stringify(json(result('root-watch-foreign'))));
     assert.equal(json(result('root-dormant')).dormant, true, 'a watched job does not block dormancy: ' + JSON.stringify(json(result('root-dormant'))));
     // Dormant: the STOP2 turn is not asked.
     // The job's exit wakes the director with the pid and the note.
@@ -136,12 +142,14 @@ test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job
     const [notice] = finished();
     const payload = JSON.parse(userText(notice).split('\n').slice(1).join('\n'));
     assert.equal(payload.pid, pid); assert.equal(payload.note, 'fixture sleep'); assert.ok(payload.ran_seconds >= 0);
+    assert.equal(notice.data.source?.kind, 'aitelier-runtime-event', 'the exit notice is a runtime event, not owner input');
     assert.ok(notice.seq > said('STOP2').seq);
     assert.equal(questions().length, 1, 'neither NOTHING_LEFT, a dormant turn nor a tool-less turn is asked again');
     // Woken and tool-less: idle, and the normal review comes back.
     await until('the review did not come back', () => reviews().some(r => r.seq > said('JOB_SEEN').seq), 10000);
     assert.equal(questions().length, 1);
   } finally {
+    foreign.kill('SIGTERM');
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of parked) response.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

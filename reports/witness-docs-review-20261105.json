@@ -1,0 +1,228 @@
+{
+  "attempt_id": "attempt-66db3a9b41dc4819945889194adec2a1",
+  "artifact_commit": "647aec2b2255fd0d5d80b4a6e5ae5de606df5f96",
+  "node_key": "driver.finished-plan-claim-witness-and-docs-20261105",
+  "reviewer": "independent non-author subagent (worktree /home/linxuhao/.AItelier/worktrees/witness-docs-review-20261105, branch dsh/witness-docs-review-20261105)",
+  "scope_of_commit": {
+    "diff": "git diff 16e51f3705..647aec2b",
+    "files_changed": ["docs/dsh-driver.md", "integrations/dsh-driver/runtime.todo.test.mjs"],
+    "stat": "2 files changed, 53 insertions(+), 11 deletions(-)",
+    "runtime_mjs_changed": false,
+    "runtime_mjs_diff_lines": 0,
+    "note": "The commit under review changes prose and one test file only; every mutant below is therefore planted by me in runtime.mjs, which this commit does not touch."
+  },
+  "environment": {
+    "node": "/home/linxuhao/.local/share/aitelier-dsh/bin/node v24.22.2 (pinned; /usr/bin/node is v22.23.4 and was not used)",
+    "command_prefix": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE",
+    "node_modules": "integrations/dsh-driver/node_modules -> /home/linxuhao/.local/share/aitelier-dsh/node_modules (gitignored symlink; real pinned dsh 0.2.1-rc.5 boots)",
+    "pytest": "not run (node-only review, as instructed)",
+    "test_serialisation": "exactly one test run at a time"
+  },
+  "baseline": {
+    "claimed_by_author": "12 passed / 0 failed / ~26 s for runtime.todo.test.mjs + runtime.finished-plan.test.mjs",
+    "measured_before_mutants": { "tests": 12, "pass": 12, "fail": 0, "duration_ms": 26369.9, "wall": "26.4 s" },
+    "measured_after_all_restores": { "tests": 12, "pass": 12, "fail": 0, "wall": "~26 s" },
+    "hashes_at_both_green_runs": {
+      "integrations/dsh-driver/runtime.mjs": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "integrations/dsh-driver/runtime.todo.test.mjs": "e4fe10126ce9bf1fbc1bc33019072fdad0bba985103ea39c037a216042e997c1",
+      "integrations/dsh-driver/runtime.finished-plan.test.mjs": "4284de33b6951a2ae754a0492809c87cd2b3c02bc219adc3316de6d773c428e7",
+      "docs/dsh-driver.md": "417870aaa68355bf315960f0e6bc421cd55a41f95bbeeea4ad10cd2f37826fcf"
+    },
+    "verdict": "author's baseline reproduced exactly, twice, with identical source hashes"
+  },
+  "criteria": [
+    {
+      "id": "payload-witness",
+      "verdict": "pass",
+      "claim": "runtime.todo.test.mjs asserts that a live idle-review payload really names an all-passed, unfinished plan (remaining [], next null, ready_to_finish true) in a scenario where such a plan exists, and the old loop executed zero times.",
+      "assertion_under_test": {
+        "file": "integrations/dsh-driver/runtime.todo.test.mjs",
+        "lines": "522-528",
+        "selector": "const allPassed = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.a.attempt_id));",
+        "gate": "assert.ok(allPassed.length, 'no idle review named the all-passed plan before it was finished: ...')  (line 523)",
+        "per_payload": "assert.deepEqual(payload.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id), [{attempt_id: 'attempt-todo-a', node_key: 'execution.todo-full', next: null, remaining: [], ready_to_finish: true}])  (line 525)",
+        "fixture_order_gate": "PROVIDER root branch, lines 276-277 + 287: the finish turn is only produced when an 'AItelier director review due:' message is already in options.messages"
+      },
+      "measured": [
+        "Green on the unmodified tree (both baseline runs): the assert.ok(allPassed.length) at line 523 is what fails first in a regressed runtime (mutant 1 below), so its silence in the green run is evidence that at least one real idle-review payload named the all-passed plan a while it was unfinished.",
+        "A plan-a entry can only appear in todo_unfinished when awaitingFinish() was true for it (unfinishedWithoutChild, runtime.mjs:404-409), i.e. when its items had all passed AND no candidate report existed (finish_reported !== true, runtime.mjs:328-330). So each allPassed payload is a pre-finish witness by construction, and line 525 additionally pins next:null / remaining:[] / ready_to_finish:true.",
+        "Mutant 1 (mine, not the author's) reddens exactly this assertion with a real payload dump (see mutants[0]); restoring runtime.mjs byte-for-byte returns the file to green.",
+        "The old loop's vacuity was measured, not trusted: see vacuity_measurement. In the pre-fix scenario (test file from 16e51f3705, instrumented copy) zero idle reviews named plan a, so `for (const plan of review.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id))` iterated over an empty array every time."
+      ],
+      "caveats": [
+        "The witness is produced by the idle-review path (AITELIER_DSH_IDLE_REVIEW_MS=3000 in the fixture) after the root goes idle following the handback turn, so the scenario now depends on that timer. It is not flaky in what I measured (2 green runs) and it fails LOUD (line 523 / line 471 / the 75 s loop's rootDone assert) rather than hanging when the ordering breaks.",
+        "The loop is over all reviews that name plan a, so a post-finish review that still named plan a would pass line 525 (same shape). That case is caught elsewhere, not lost: the post-compaction snapshot deepEqual at lines 553-556 and runtime.finished-plan.test.mjs's 'the marker tracks the candidate report' both redden under mutant 3."
+      ]
+    },
+    {
+      "id": "docs-state-current-rule",
+      "verdict": "pass",
+      "claim": "docs/dsh-driver.md states the shipped rule (ready_to_finish, the two real drop-out conditions, the snapshot field list) and no longer says finished plans drop out; every sentence checked is true of the code.",
+      "method": "Exercised the code, not the prose: a standalone script (/tmp/review-docs-check.mjs, outside the worktree) imports awaitingFinish, todoSummary, unfinishedWithoutChild, attemptSettled, settledAttempts, dormancyRefusal and DriverRuntime from runtime.mjs and asserts each documented behaviour; 12/12 checks passed. The finish-report filename and the handback guard were checked against core/todo_cli.py + the runtime's own --out path, and the handback guard was also measured by mutant 2.",
+      "docs_checked": [
+        {
+          "sentence": "Only a plan with items left is handed back: an all-passed plan is never work to run again. (docs/dsh-driver.md:444-446)",
+          "code": "runtime.mjs:952  `if (plan.child_session !== session || !plan.remaining?.length) continue;`",
+          "result": "true",
+          "how": "Mutant 2 removes `|| !plan.remaining?.length`; the scenario then emits a third handback (the all-passed plan a), which the existing assertion runtime.todo.test.mjs:471 (handbacks.length === 2) catches. The guard is load-bearing and the sentence is true of the code."
+        },
+        {
+          "sentence": "No candidate report exists (the file todo_finish writes) ... (docs/dsh-driver.md:451-453)",
+          "code": "runtime.mjs:287-292 finishDir/finishReport = <stateDir>/todo/finish/<attempt>/<attempt>-candidate.json; runtime.mjs:792-794 passes --out=<finishDir>; core/todo_cli.py:363 writes out_dir / f\"{attempt_id}-candidate.json\"; core/todo_cli.py:326 takes out_dir from --out",
+          "result": "true",
+          "how": "path traced through both sides; the fixture CLI (runtime.todo.test.mjs:178-189) writes the same name, and the test's finish assertion at 560-564 requires that exact file to exist"
+        },
+        {
+          "sentence": "Both views keep such a plan and mark it ready_to_finish: true, with no remaining items and no `next` item (docs/dsh-driver.md:454-456)",
+          "code": "runtime.mjs:390-395 todoSummary, 404-409 unfinishedWithoutChild, 328-330 awaitingFinish; `next` comes from the CLI's report, which is null once every item is complete (core/todo_runtime.py:526-534,543-552)",
+          "result": "true",
+          "how": "measured: todoSummary([all-passed]) -> {attempt_id, node_key, next: null, remaining_count: 0, ready_to_finish: true, child_alive: false}; unfinishedWithoutChild([all-passed]) -> {attempt_id, node_key, next: null, remaining: [], ready_to_finish: true}"
+        },
+        {
+          "sentence": "`idle_dormant` refuses it as `unfinished_plans`; its reminder is this marker, not a handback. (docs/dsh-driver.md:457-458)",
+          "code": "runtime.mjs:855-858 idle_dormant feeds unfinishedWithoutChild into dormancyRefusal; runtime.mjs:164-173 builds `refused: 'unfinished_plans'` and lists ready_to_finish",
+          "result": "true",
+          "how": "measured: dormancyRefusal({reason, plans: [all-passed A, items-left B]}) -> {refused: 'unfinished_plans', attempts: ['A','B'], ready_to_finish: ['A']}; end-to-end dormancy is covered by runtime.todo.test.mjs's 'todo_rebind: dormancy refuses unfinished_plans ...' which I saw redden under mutant 3 ('dormancy still refuses the finished plan')"
+        },
+        {
+          "sentence": "A plan with items left is unfinished work for its child: it is reported with `ready_to_finish: false` and its remaining items. (docs/dsh-driver.md:459-460)",
+          "code": "runtime.mjs:390-395, 404-409",
+          "result": "true",
+          "how": "measured: review entry {next: 'deliver', remaining: ['deliver'], ready_to_finish: false}; snapshot entry {remaining_count: 1, ready_to_finish: false}. The review carries the item ids and the snapshot carries remaining_count, exactly as the two field lists below state; the sentence is true as read against those lists."
+        },
+        {
+          "sentence": "A plan stops counting once the State attempt it is named after has settled (candidate, failed, superseded, abandoned) (docs/dsh-driver.md:461-464)",
+          "code": "runtime.mjs:343-359 ACTIVE/SETTLED allowlists + attemptSettled; 372-378 settledAttempts",
+          "result": "true",
+          "how": "measured: attemptSettled true for candidate/failed/superseded/abandoned (both bare and inside a {result:{status}} envelope), and each of the four passed as a settled set removes the plan from todoSummary AND unfinishedWithoutChild"
+        },
+        {
+          "sentence": "An all-passed plan also stops counting once its candidate report exists, i.e. once todo_finish has run. (docs/dsh-driver.md:464-465)",
+          "code": "runtime.mjs:328-330 (finish_reported), 300-301 (plan.finish_reported = fileExists(finishReport))",
+          "result": "true",
+          "how": "measured: awaitingFinish({remaining: [], finish_reported: true}) === false and the plan disappears from both views; mutant 3 (ignoring finish_reported) reddens both runtime.finished-plan.test.mjs and the snapshot deepEqual at runtime.todo.test.mjs:553-556"
+        },
+        {
+          "sentence": "A read that cannot prove either - State unreachable, an unknown attempt, a status neither list names - fails closed: the plan keeps counting. (docs/dsh-driver.md:465-467)",
+          "code": "runtime.mjs:370-378 (catch -> not settled), 349-352 (no status -> undefined), 356-359 (unknown status -> not settled)",
+          "result": "true",
+          "how": "measured: settledAttempts with a read that throws -> empty set; with a read answering {oops:true} -> empty set; attemptSettled false for reserved/launching/running/paused/unknown/weird/Candidate/''/{}/null; a plan whose attempt State answers candidate is the only one that leaves the views"
+        },
+        {
+          "sentence": "The idle review payload adds `todo_unfinished` - one entry per plan of those two kinds that also has no live child: `{attempt_id, node_key, next, remaining, ready_to_finish}` (docs/dsh-driver.md:469-471)",
+          "code": "runtime.mjs:404-409, 898-910",
+          "result": "true",
+          "how": "measured: entry keys are exactly the documented five (sorted ['attempt_id','next','node_key','ready_to_finish','remaining']); a plan with a live child is excluded from this view while the snapshot keeps it with child_alive: true"
+        },
+        {
+          "sentence": "adds `todo: [{attempt_id, node_key, next, remaining_count, ready_to_finish, child_alive}]` ... with `remaining_count: 0` and `ready_to_finish: true` for the all-passed ones (docs/dsh-driver.md:473-476)",
+          "code": "runtime.mjs:390-395, 485, 490-495",
+          "result": "true",
+          "how": "measured: entry keys are exactly the documented six; DriverRuntime.refresh()+render() emits todo with remaining_count 0 / ready_to_finish true for the all-passed plan"
+        },
+        {
+          "sentence": "When there are none the key is absent: a settled attempt's plan and a plan whose candidate report exists drop out. A todo CLI failure never fails the snapshot: it renders `todo_error` instead. (docs/dsh-driver.md:476-479)",
+          "code": "runtime.mjs:493 (`...(this.todo?.length ? { todo: this.todo } : {})`), 494 (todo_error), 481-489 (refresh catch)",
+          "result": "true",
+          "how": "measured: todoPlans -> [] gives a render with no todo and no todo_error key; todoPlans throwing gives refresh() resolving normally with todo absent and todo_error /todo_cli list refused/; both drop-out conditions measured directly (settled set; finish_reported true). Also covered by the existing test at runtime.todo.test.mjs:950-961."
+        },
+        {
+          "sentence": "the document does not still say finished plans drop out",
+          "code": "docs/dsh-driver.md",
+          "result": "true",
+          "how": "grep for 'finished plans drop out' and for the old 'plans with remaining items and no live child' phrasing returns nothing in docs/dsh-driver.md; the replaced paragraph at 473-479 now names the two real drop-out conditions"
+        }
+      ]
+    },
+    {
+      "id": "diff-no-weakened-assertions",
+      "verdict": "pass",
+      "claim": "No existing assertion in the two changed files was weakened, made vacuous, or silently deleted.",
+      "measured": [
+        "`git diff --name-only 16e51f3705 647aec2b` = docs/dsh-driver.md + integrations/dsh-driver/runtime.todo.test.mjs only; runtime.mjs diff is 0 lines, so nothing the tests observe was quietly changed alongside them.",
+        "assert.* occurrences: runtime.todo.test.mjs 123 -> 124 (one net assertion ADDED); runtime.finished-plan.test.mjs 52 -> 52 (untouched by the diff).",
+        "The 11 deleted lines are: the old one-line comment about the all-pass plan, the old `for (const plan of review.todo_unfinished.filter(...))` loop and its deepEqual (7 lines), and 2 prose paragraphs in the doc. The loop's deepEqual is reproduced verbatim inside the new loop (lines 524-528) and is now guarded by assert.ok(allPassed.length) at 523 and applied to EVERY review naming plan a instead of only the last review naming plan b. Strictly stronger, not weaker: the old form could iterate zero times, and my vacuity_measurement shows it did.",
+        "The two assertions immediately above it are byte-identical: the plan-b deepEqual at 518-519 and the ready_to_finish symmetric check at 520-521.",
+        "The only other test-file change is a fixture precondition (PROVIDER lines 270-277, 287: finish now also requires a seen review message). It cannot mask a runtime defect: under mutant 1 the same scenario with the same gate reddens at line 523 with real payloads, and mutant 2/3 redden other assertions through the same gate. A gate can only delay the finish turn; the scenario has a 75 s wait whose failure path is assert.ok(rootDone) plus a 90 s test timeout, so a broken ordering fails loudly.",
+        "No assertion moved out from under a code path it used to cover: the big test still asserts the two handbacks (471), the plan-b review shape (518), everything in the snapshot (553-556) and the finish result (560-564), all of which I either saw redden under my mutants or saw green twice."
+      ]
+    }
+  ],
+  "mutants": [
+    {
+      "id": "mutant-1-plans-drop-all-passed",
+      "kind": "runtime regression planted by the reviewer (deliberately a different mutant from the author's `awaitingFinish -> return false`)",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "edit": "line 300: `result.plans.filter(plan => !plan.error)` -> `result.plans.filter(plan => !plan.error && plan.remaining?.length)` (TodoCli.plans hides every all-passed plan from both views - the exact shape of the iss-af4fdabe05954077 defect)",
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE <pinned node> --test runtime.todo.test.mjs",
+      "reddened": [
+        "integrations/dsh-driver/runtime.todo.test.mjs:523 - AssertionError: 'no idle review named the all-passed plan before it was finished' with the dumped payloads showing todo_unfinished = [{attempt_id: 'attempt-todo-b', node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'], ready_to_finish: false}] only. This is the payload-witness assertion itself.",
+        "integrations/dsh-driver/runtime.todo.test.mjs 'idle review and snapshot views' unit test (collateral, expected)"
+      ],
+      "run_result": "tests 9, pass 7, fail 2",
+      "sha256_before": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "sha256_while_mutated": "eadc92bed77cd0c3ddf443e67e3e028dbc171c6e3cc6b2d2d01523ec23af4860",
+      "sha256_after_restore": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; byte-for-byte equal to the pre-mutant hash; a full two-file run afterwards is 12/12 green"
+    },
+    {
+      "id": "mutant-2-handback-guard-removed",
+      "kind": "docs claim probe: 'Only a plan with items left is handed back'",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "edit": "line 952: `if (plan.child_session !== session || !plan.remaining?.length) continue;` -> `if (plan.child_session !== session) continue;`",
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE <pinned node> --test runtime.todo.test.mjs",
+      "reddened": [
+        "integrations/dsh-driver/runtime.todo.test.mjs:471 - AssertionError: 'expected the partial and the resume child to be handed back' (an extra handback for the all-passed plan a appeared; the scenario emits 3 instead of 2)"
+      ],
+      "run_result": "tests 9, pass 8, fail 1",
+      "sha256_before": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "sha256_while_mutated": "b1c9a58602429f509210a5cc2947df1e73cdd2534a702c6238ef9f45f5de10dd",
+      "sha256_after_restore": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; hash matches the pre-mutant value"
+    },
+    {
+      "id": "mutant-3-awaitingFinish-ignores-candidate-report",
+      "kind": "docs claim probe: 'An all-passed plan also stops counting once its candidate report exists'",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "edit": "line 329: `return Array.isArray(plan.remaining) && plan.remaining.length === 0 && plan.finish_reported !== true;` -> drop the `&& plan.finish_reported !== true` clause",
+      "command": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE <pinned node> --test runtime.todo.test.mjs runtime.finished-plan.test.mjs",
+      "reddened": [
+        "runtime.finished-plan.test.mjs 'real plan files: an all-passed plan nobody finished is surfaced ...' - AssertionError: 'awaitingFinish does not name the plans nobody finished'",
+        "runtime.finished-plan.test.mjs 'the neighbours: a settled attempt, a plan with items left and a live child keep their behaviour'",
+        "runtime.finished-plan.test.mjs 'the marker tracks the candidate report: a finished plan is not nagged, and one whose report is missing is'",
+        "runtime.todo.test.mjs:553-556 - the post-compaction snapshot deepEqual (a finished plan came back into todo) in the big DSH scenario",
+        "runtime.todo.test.mjs 'todo_rebind: dormancy refuses unfinished_plans before the takeover and stops refusing it after' - 'dormancy still refuses the finished plan'"
+      ],
+      "run_result": "tests 12, pass 7, fail 5",
+      "sha256_before": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "sha256_while_mutated": "9354112a7a9577ee408ef5f4d8988fffabe7b4430c3991cb5fe2d0d1dd535104",
+      "sha256_after_restore": "04a361923b64b1bf2f307816f8dbb723020fddd5850702fe5e22bd2f3a6667eb",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; hash matches the pre-mutant value"
+    }
+  ],
+  "vacuity_measurement": {
+    "question": "did the pre-fix loop body really execute zero times (author's claim), or would a reviewer have to trust it?",
+    "method": "git show 16e51f3705:integrations/dsh-driver/runtime.todo.test.mjs > integrations/dsh-driver/zz-review-vacuity.test.mjs (temporary), then inserted immediately before the old loop: const oldAllPassed = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.a.attempt_id)); assert.ok(oldAllPassed.length, 'VACUITY-MEASURE: ...' + JSON.stringify(reviews())); and ran it with the pinned node.",
+    "result": "FAILED with 'VACUITY-MEASURE: no idle review named the all-passed plan' and the dump of every emitted review: the only todo_unfinished entry in the pre-fix scenario is attempt-todo-b (remaining ['deliver']). No review ever named plan a, so the old `for (const plan of review.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id))` iterated over an empty array in every review - the author's account is correct and is now measured, not trusted.",
+    "cleanup": "temporary file deleted in the same command (trap + explicit rm); `git status --porcelain` empty immediately afterwards"
+  },
+  "docs_checked": {
+    "file": "docs/dsh-driver.md",
+    "regions": ["435-479 (handback paragraph, the new three-bullet rule, the idle-review field list, the compaction/snapshot paragraph)"],
+    "method": "every sentence in the changed region was matched to the code that produces it and then exercised through the exported functions (awaitingFinish, todoSummary, unfinishedWithoutChild, attemptSettled, settledAttempts, dormancyRefusal, DriverRuntime.refresh/render) - 12/12 checks in /tmp/review-docs-check.mjs; the finish-report path was traced into core/todo_cli.py; the handback sentence was measured by mutant 2",
+    "result": "all checked sentences are true of the current code; no leftover 'finished plans drop out' wording",
+    "not_in_this_diff_but_read": "the review-side `todo_error` sentence and the pre-existing handback payload prose were read against runtime.mjs:940-961 and left as-is"
+  },
+  "cleanliness": {
+    "worktree": "/home/linxuhao/.AItelier/worktrees/witness-docs-review-20261105",
+    "head_during_review": "647aec2b2255fd0d5d80b4a6e5ae5de606df5f96 (unchanged)",
+    "mutated_files_left_behind": "none (runtime.mjs restored three times to its 04a3619... hash; the temporary zz-review-vacuity.test.mjs deleted)",
+    "git_status_after_experiments": "only the report file added at commit time",
+    "production_checkout_or_state_touched": "no; no push, merge or restart"
+  },
+  "unverified": [
+    "The review-side `todo_error` branch (runtime.mjs:898-910 catch) was not exercised: no fixture makes the todo CLI fail during an idle review. That sentence is pre-existing prose, unchanged in shape by this commit, and the symmetric snapshot-side todo_error was exercised (render with a throwing todoPlans).",
+    "The docs phrase 'the State attempt it is named after is still live' is a statement about State status values. I exercised attemptSettled/settledAttempts with synthetic answers (including a throwing read and a statusless answer) but did not query a live State service; in the fixture, get_attempt 404s and the runtime fails closed (plans stayed visible), which I observed only indirectly.",
+    "Only the two named node test files were run (plus the instrumented old-file reconstruction); the rest of the node suite and pytest were not run, since the commit touches only these two files and the docs."
+  ]
+}

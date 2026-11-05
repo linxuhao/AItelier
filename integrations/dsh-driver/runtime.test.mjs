@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -489,4 +489,242 @@ test('a State event is not labelled as the user, and an empty tick does not wake
   assert.equal(eventCarriesSomething({ events: [{ seq: 1 }] }), true);
   assert.equal(eventCarriesSomething({ driver_inbox: [{ message_id: 'm' }] }), true);
   assert.equal(eventCarriesSomething({ project_inbox: { items: [{ message: {} }] } }), true);
+});
+
+// ── The director's project inbox injection is bounded and honest ──────────────
+// What a `director_message_received` wake injects, and what it must never inject.
+//
+// Measured on the real page 2026-11-05: 20 items, matched_total 91, has_more true,
+// 42,304 characters of project_inbox per wake - and only 24,894 of those were
+// bodies. The projection below is the guard: identity for every item, at most a
+// few hundred characters of body, the page's own numbers stated, and a ceiling on
+// the whole payload. The fixtures are synthetic; no real message text is in this
+// repository.
+
+const inboxPage = (items, extra = {}) => ({ schema: 'aitelier.director-messaging.v3',
+  result: { project_id: 'aitelier', items, matched_total: items.length, has_more: false, next_after: 0, ...extra } });
+
+const inboxItem = ({ seq, body = '', subject = `Synthetic subject ${seq}`, thread = `thr_${seq}`,
+  status = 'unread', acked_by_me = false }) => ({
+  message: { message_id: `dm_${String(seq).padStart(4, '0')}`, thread_id: thread, sender_project_id: 'other-project',
+    director_identity: 'other-project/dsh-other', actor: 'driver:dsh-other', subject, body,
+    created_at: '2026-11-0' + (1 + (seq % 5)) + 'T10:00:00+00:00', reply_to_delivery_id: null,
+    delivery_mode: 'transient', sender_driver_id: 'dsh-other', ack_mode: 'at_least_n', ack_quorum: 1 },
+  delivery: { delivery_id: `dlv_${String(seq).padStart(4, '0')}`, message_id: `dm_${String(seq).padStart(4, '0')}`,
+    target_project_id: 'aitelier', delivery_seq: seq, status, version: 1 },
+  ack_mode: 'at_least_n', ack_quorum: 1, acks: [], acked_count: 0, pending_drivers: ['dsh-me'],
+  acked_by_me, legacy_ack: false, quorum_met: status === 'acknowledged', ack_quorum_unreachable: false,
+});
+
+// 4 KB bodies with a unique tail past the excerpt cap, so "the tail is absent" is a
+// real assertion rather than a search for repeated filler.
+const fatBody = seq => {
+  const head = `Synthetic body ${seq}: `, tail = ` TAIL-${seq}`;
+  return head + 'x'.repeat(4096 - head.length - tail.length) + tail;
+};
+
+test('twenty four-kilobyte bodies cost one stated, enforced ceiling', () => {
+  const items = Array.from({ length: 20 }, (_, i) => inboxItem({ seq: 72 + i, body: fatBody(i + 1) }));
+  // What listProjectInbox hands over for a 91-match inbox: it scanned all 91 and
+  // kept the newest 20 (delivery_seq 72..91).
+  const digest = projectInboxDigest(inboxPage(items, {
+    matched_total: 91, has_more: true, next_after: 91, scanned: 91, scan_complete: true }));
+  const text = JSON.stringify(digest);
+
+  // The bound, measured: 20 items x 4 KB bodies with full excerpts would be tens of
+  // kilobytes (this fixture's raw page is 96,040 characters of project_inbox, JSON,
+  // as it is built here); the digest is 10,880. Assert the real number, not just
+  // "smaller".
+  assert.ok(text.length <= INBOX_CEILING_CHARS,
+    `project_inbox is ${text.length} chars, over its ${INBOX_CEILING_CHARS} ceiling`);
+
+  // The page states itself: a director can tell "I am seeing 20 of 91" from "there are 20".
+  assert.equal(digest.page.window, 'newest 20 of 91');
+  assert.equal(digest.page.items, 20);
+  assert.equal(digest.page.matched_total, 91);
+  assert.equal(digest.page.scanned, 91);
+  assert.equal(digest.page.scan_complete, true);
+  assert.equal(digest.page.has_more, true);
+  assert.equal(digest.page.next_after, 91);
+  assert.equal(digest.page.items_omitted, 0, 'nothing was dropped at this size, so nothing may be claimed as dropped');
+  assert.equal(digest.page.bodies_withheld, 0);
+  assert.equal(digest.page.excerpt_chars, INBOX_EXCERPT_CHARS);
+  assert.equal(digest.page.ceiling_chars, INBOX_CEILING_CHARS);
+
+  // Everything acknowledge_director_message(project_id, delivery_id,
+  // expected_version, request_key) needs is on the payload it was given: without
+  // these two the director cannot settle a delivery, and a delivery that is never
+  // settled keeps costing context on every later wake.
+  assert.equal(digest.page.project_id, 'aitelier');
+  for (const [i, entry] of digest.items.entries()) {
+    const seq = 91 - i;   // newest first
+    assert.equal(entry.message_id, `dm_${String(seq).padStart(4, '0')}`);
+    assert.equal(entry.delivery_id, `dlv_${String(seq).padStart(4, '0')}`);
+    assert.equal(entry.version, 1);
+    assert.equal(entry.subject, `Synthetic subject ${seq}`);
+    assert.equal(entry.sender_project_id, 'other-project');
+    assert.match(entry.created_at, /^2026-11-0/);
+    assert.equal(entry.status, 'unread');
+    assert.equal(entry.acked_by_me, false);
+    assert.equal(entry.body_chars, 4096);
+    assert.equal(entry.body_excerpt.length, INBOX_EXCERPT_CHARS, 'the excerpt is capped, not the body');
+    assert.equal(entry.body_excerpt, fatBody(seq - 71).slice(0, INBOX_EXCERPT_CHARS), 'the excerpt is the body\'s own opening');
+    assert.equal(entry.excerpt_truncated, true);
+  }
+  for (let seq = 1; seq <= 20; seq++) assert.ok(!text.includes(`TAIL-${seq}`), `body text past the cap leaked for ${seq}`);
+
+  // The event path still sees an injection: these two functions decide whether a
+  // tick is worth a turn, and the projection must not turn input into "nothing".
+  assert.equal(eventCarriesSomething({ project_inbox: digest }), true);
+  assert.equal(ownEchoOnly({ events: [{ payload: { actor: 'driver:dsh-me' } }], project_inbox: digest }, 'dsh-me'), false);
+});
+
+test('an acknowledged delivery carries identity only and a superseded one a short excerpt', () => {
+  const settled = inboxItem({ seq: 1, body: 'S'.repeat(2000), status: 'acknowledged', acked_by_me: true, thread: 'thr_a' });
+  // Quorum-acknowledged by another member: settled for the project, not by me.
+  const quorum = inboxItem({ seq: 2, body: 'Q'.repeat(2000), status: 'acknowledged', acked_by_me: false, thread: 'thr_b' });
+  // One thread, three messages: 4 and 5 are superseded by 6, which is on the page too.
+  const thread = [4, 5, 6].map(seq => inboxItem({ seq, body: `T${seq}: ` + 'y'.repeat(1000), thread: 'thr_t' }));
+  const digest = projectInboxDigest(inboxPage([settled, quorum, ...thread]));
+  const text = JSON.stringify(digest);
+
+  const byId = Object.fromEntries(digest.items.map(entry => [entry.message_id, entry]));
+  for (const id of ['dm_0001', 'dm_0002']) {
+    const entry = byId[id];
+    assert.equal(entry.body_excerpt, undefined, `acknowledged ${id} must not re-inject a body`);
+    assert.equal(entry.body_withheld, 'acknowledged');
+    assert.equal(entry.body_chars, 2000);
+    assert.equal(entry.status, 'acknowledged');
+  }
+  assert.equal(byId.dm_0001.acked_by_me, true);
+  assert.equal(byId.dm_0002.acked_by_me, false, 'the cheap ack truth still says who settled it');
+
+  for (const id of ['dm_0004', 'dm_0005']) {
+    const entry = byId[id];
+    assert.ok(entry.body_excerpt.length <= INBOX_SUPERSEDED_EXCERPT_CHARS,
+      `${id} is superseded by a later message on the page and must not arrive at the full excerpt`);
+    assert.equal(entry.superseded_by, 'dm_0006');
+    assert.equal(entry.thread_id, 'thr_t');
+  }
+  assert.equal(byId.dm_0006.body_excerpt.length, INBOX_EXCERPT_CHARS);
+  assert.equal(byId.dm_0006.superseded_by, undefined);
+  assert.ok(text.length <= INBOX_CEILING_CHARS);
+
+  // Everything thinned out is still counted, and nothing vanished.
+  assert.equal(digest.page.items, 5);
+  assert.equal(digest.page.matched_total, 5);
+  assert.equal(digest.page.items_omitted, 0);
+  assert.equal(digest.page.bodies_withheld, 2);
+});
+
+test('when the ceiling cannot be met by withholding bodies, the oldest items are omitted and counted', () => {
+  const items = Array.from({ length: 20 }, (_, i) => inboxItem({ seq: i + 1, body: fatBody(i + 1), subject: 's'.repeat(160) }));
+  const digest = projectInboxDigest(inboxPage(items, { matched_total: 91, has_more: true }), { ceiling: 4000 });
+  const text = JSON.stringify(digest);
+
+  assert.ok(text.length <= 4000, `project_inbox is ${text.length} chars against a 4000 ceiling`);
+  assert.ok(digest.page.items < 20, 'this ceiling cannot carry twenty identity lines');
+  assert.equal(digest.page.items + digest.page.items_omitted, 20, 'an omitted item is counted, never dropped');
+  assert.equal(digest.page.matched_total, 91, 'omission never rewrites what matched');
+  assert.equal(digest.page.excerpt_chars, 0);
+  assert.equal(digest.items.filter(entry => entry.body_excerpt).length, 0);
+  for (const entry of digest.items) {
+    assert.ok(entry.message_id && entry.subject && entry.sender_project_id && entry.created_at);
+    assert.equal(entry.body_withheld, 'ceiling');
+  }
+  // Newest survive: the omitted tail is the oldest end of the page.
+  assert.equal(digest.items[0].message_id, 'dm_0020');
+});
+
+test('an injected item carries everything acknowledging its delivery needs', () => {
+  // acknowledge_director_message(project_id, delivery_id, expected_version, request_key):
+  // a director must be able to settle a delivery from the payload it was handed.
+  // Acknowledging is what stops a delivery costing context on every later wake, so
+  // these two fields are part of the bound, not decoration - do not trim them.
+  const digest = projectInboxDigest(inboxPage([inboxItem({ seq: 7, body: 'x'.repeat(1000) })]));
+  const [entry] = digest.items;
+
+  assert.equal(digest.page.project_id, 'aitelier');
+  assert.equal(entry.delivery_id, 'dlv_0007');
+  assert.ok(Number.isInteger(entry.version), 'version is the expected_version the call takes');
+  assert.equal(entry.version, 1);
+  assert.equal(entry.message_id, 'dm_0007');
+  // A settled (already acknowledged) item keeps them too: it still has to be resolvable.
+  const settled = projectInboxDigest(inboxPage([inboxItem({ seq: 8, status: 'acknowledged', acked_by_me: true })]));
+  assert.equal(settled.items[0].delivery_id, 'dlv_0008');
+  assert.equal(settled.items[0].version, 1);
+});
+
+// The API pages by delivery_seq ascending and has no newest-first option, so the
+// page a `limit: 20` request returned was the OLDEST 20 of 91 - a message that
+// arrives today sits on page five and would never be injected. The collector walks
+// the cursor to the end of the matches and keeps the newest page.
+const inboxServer = store => {
+  const asked = [];
+  const request = async (_path, body) => {
+    const after = body.after ?? 0;
+    asked.push(after);
+    const matches = store.filter(entry => entry.delivery.delivery_seq > after);
+    const batch = matches.slice(0, body.limit);
+    // Exactly as the server computes it: matched_total counts deliveries with
+    // delivery_seq > after, so it is a REMAINDER of the query, not the size of the
+    // match set. A double that answers store.length hides every paging bug.
+    return { result: { project_id: 'alpha', items: batch, matched_total: matches.length,
+      has_more: matches.length > batch.length,
+      next_after: batch.at(-1)?.delivery.delivery_seq ?? after } };
+  };
+  return { request, asked };
+};
+
+test('the message that just arrived is on the injected page, wherever the cursor put it', async () => {
+  const store = Array.from({ length: 40 }, (_, i) => inboxItem({ seq: i + 1, body: fatBody(i + 1) }));
+  const { request, asked } = inboxServer(store);
+  const digest = projectInboxDigest(await listProjectInbox(request, 'alpha', { limit: 10 }));
+
+  assert.deepEqual(asked, [0, 10, 20, 30], 'the collector followed next_after to the end of the matches');
+  assert.equal(digest.page.window, 'newest 20 of 40');
+  assert.equal(digest.page.scanned, 40);
+  assert.equal(digest.page.scan_complete, true);
+  assert.equal(digest.items.length, 20);
+  assert.equal(digest.items[0].delivery_id, 'dlv_0040', 'the newest delivery is the first thing read');
+  assert.equal(digest.items[0].message_id, 'dm_0040');
+  assert.equal(digest.items[0].body_excerpt, fatBody(40).slice(0, INBOX_EXCERPT_CHARS));
+  assert.equal(digest.items[0].excerpt_truncated, true);
+  assert.ok(!digest.items.some(entry => entry.message_id === 'dm_0001'),
+    'returning the first page as the API served it is the bug: the oldest 20 are not the page');
+});
+
+test('a walk past one page still states the whole match set, not the last remainder', async () => {
+  // 101 matches and a 100-item request: the second page answers matched_total 1.
+  // Stating that as the total would say "newest 20 of 1" while 81 messages are
+  // invisible - the silent drop this whole change exists to make impossible.
+  const store = Array.from({ length: 101 }, (_, i) => inboxItem({ seq: i + 1, body: fatBody((i % 20) + 1) }));
+  const { request, asked } = inboxServer(store);
+  const digest = projectInboxDigest(await listProjectInbox(request, 'alpha'));
+
+  assert.deepEqual(asked, [0, 100], 'two pages: 100 then the remainder');
+  assert.equal(digest.page.matched_total, 101, 'the last page answers 1; it is a remainder, not the match set');
+  assert.equal(digest.page.window, 'newest 20 of 101');
+  assert.equal(digest.page.scanned, 101);
+  assert.equal(digest.page.scan_complete, true);
+  assert.equal(digest.page.has_more, true);
+  assert.equal(digest.page.items, 20);
+  assert.equal(digest.items[0].message_id, 'dm_0101', 'the 101st delivery is on the second page and is still carried');
+  assert.equal(digest.items[0].delivery_seq, 101);
+  assert.ok(digest.items[0].body_excerpt.length > 0);
+});
+
+test('a scan that cannot reach the end of the matches says so instead of guessing the window', async () => {
+  const store = Array.from({ length: 600 }, (_, i) => inboxItem({ seq: i + 1 }));
+  const { request, asked } = inboxServer(store);
+  const digest = projectInboxDigest(await listProjectInbox(request, 'alpha', { pages: 1 }));
+
+  assert.deepEqual(asked, [0], 'one page of the scan, exactly as configured');
+  assert.equal(digest.page.matched_total, 600);
+  assert.equal(digest.page.scanned, 100);
+  assert.equal(digest.page.scan_complete, false, 'a truncated scan is not the whole match set');
+  assert.equal(digest.page.window, 'newest 20 of the 100 scanned (600 matched, 500 unscanned)',
+    'a truncated scan carries the newest of the slice it saw, not of the match set');
+  assert.equal(digest.page.has_more, true);
+  assert.equal(digest.items[0].delivery_id, 'dlv_0100', 'newest of what the scan could see');
 });

@@ -60,6 +60,208 @@ export function ownEchoOnly(result, driverId) {
   return result.events.every(({ payload = {} }) => payload.actor === me);
 }
 
+/** The director's project inbox, bounded and self-describing.
+ *
+ *  The raw `list_director_messages` page is everything about every message: full
+ *  bodies plus each delivery's quorum bookkeeping (`acks`, `pending_drivers`,
+ *  `legacy_ack`, `quorum_met`, the same ids repeated three times). Measured
+ *  2026-11-05: 20 items, `matched_total` 91, 42,304 characters of `project_inbox`
+ *  (42,358 for the whole injected message), re-sent on EVERY
+ *  `director_message_received` wake - the largest consumer of the resident
+ *  director's context and one that grows with project history. Only 24,894 of those
+ *  characters are bodies; the rest is per-item duplication and quorum bookkeeping.
+ *
+ *  What a director needs from a wake is only: which messages, what they are about
+ *  (identity), enough body to decide whether to read the whole thing (an excerpt),
+ *  and how large a page this is (`items` vs `matched_total`, `has_more`). So the
+ *  projection keeps identity, clips the body, and states the page. Nothing is
+ *  dropped silently: an item that carries no body still carries its identity and is
+ *  still counted, `bodies_withheld` says why, and `items_omitted` counts anything
+ *  the ceiling kept out.
+ */
+export const INBOX_EXCERPT_CHARS = 240;
+export const INBOX_SUPERSEDED_EXCERPT_CHARS = 96;
+export const INBOX_SUBJECT_CHARS = 160;
+export const INBOX_CEILING_CHARS = 12000;
+export const INBOX_PAGE_ITEMS = 20;
+export const INBOX_SCAN_PAGES = 5;
+
+const inboxText = value => (typeof value === 'string' ? value : value == null ? '' : String(value));
+const clip = (value, max) => { const text = inboxText(value); return text.length > max ? text.slice(0, max) : text; };
+const sequence = item => { const seq = Number(item?.delivery?.delivery_seq); return Number.isFinite(seq) ? seq : -1; };
+
+/** Every matched delivery of the project inbox, the newest `keep` kept for injection.
+ *
+ *  `list_director_messages` pages by `delivery_seq` ASCENDING and offers no
+ *  newest-first or body-less option (core/director_messaging.py takes project_id,
+ *  after, limit, delivery_mode, statuses, needs_my_ack, ack_mode - nothing that
+ *  orders by recency). So `limit: 20` on a 91-match inbox returns the OLDEST 20, and
+ *  a message that arrives today sits on page five and would never be injected -
+ *  exactly the delivery a director most needs. The cursor is the only way to the
+ *  end of the matches, so walk it: `limit: 100` per request (the server's maximum),
+ *  at most `pages` requests, then keep the newest `keep`.
+ *
+ *  Transport grows (a 91-match inbox is one 100-item response per wake); context
+ *  does not - the projection still carries one page, and it states which page.
+ */
+export async function listProjectInbox(request, project, {
+  limit = 100, pages = INBOX_SCAN_PAGES, keep = INBOX_PAGE_ITEMS, statuses = ['unread', 'acknowledged'],
+} = {}) {
+  const items = [];
+  let after = 0, matched_total = 0, next_after = 0, more = false, started = false;
+  for (let page = 0; page < pages; page++) {
+    const response = await request('/api/state/query/list_director_messages', {
+      project_id: project, protocol_version: 'v3', statuses, after, limit });
+    const result = response?.result ?? response ?? {};
+    const batch = Array.isArray(result.items) ? result.items : [];
+    items.push(...batch);
+    // `matched_total` is a REMAINDER, not a total: the server counts deliveries
+    // with delivery_seq > after, so the last page of a 101-match walk answers 1.
+    // Only the first page can state the size of the match set (plus the seq the
+    // walk started past). Verified read-only against the live API 2026-11-05:
+    // after=0 -> 91, after=2 -> 89.
+    if (!started) {
+      matched_total = (Number.isInteger(result.matched_total) ? result.matched_total : items.length) + after;
+      started = true;
+    }
+    next_after = result.next_after ?? next_after;
+    more = result.has_more === true && batch.length > 0;
+    if (!more) break;
+    after = next_after;
+  }
+  const newest = [...items].sort((a, b) => sequence(b) - sequence(a)).slice(0, keep);
+  return { result: { project_id: project, items: newest, matched_total,
+    has_more: matched_total > newest.length, next_after,
+    scanned: items.length, scan_complete: !more } };
+}
+
+/** One bounded, self-describing view of a `list_director_messages` page.
+ *
+ *  Per item: `message_id`, `subject`, `sender_project_id`, `created_at`, delivery
+ *  `status`, `delivery_id`, `delivery_seq` and `version` (exactly what
+ *  acknowledge_director_message needs - so the director can settle a delivery from
+ *  the payload it was given - and the cursor to re-read that delivery's page),
+ *  cheap ack truth, `body_chars`, and a body excerpt of at most `excerpt`
+ *  characters (`excerpt` is 240: a few hundred is enough to recognise a message,
+ *  and it is under the 320 the server itself uses for standing guidance).
+ *  A delivery this project has already acknowledged (status acknowledged, or
+ *  `acked_by_me`) is settled - it arrives as identity only, never a body. When a
+ *  later message in the same thread is on the page, the earlier one is superseded
+ *  and carries a shorter excerpt (`superseded_excerpt`).
+ *
+ *  The whole payload is capped at `ceiling` characters (JSON). The ceiling is
+ *  enforced by shrinking every excerpt together (so a message that just arrived
+ *  still has text, rather than losing a lottery), then by withholding bodies, and
+ *  only then by omitting the oldest items and counting them; it never changes what
+ *  was counted as matched.
+ *
+ *  @param page - the `list_director_messages` response (`{result}` or the result).
+ *  @returns {{page: object, items: object[]}} never larger than `ceiling` chars.
+ */
+export function projectInboxDigest(page, {
+  excerpt = INBOX_EXCERPT_CHARS, superseded_excerpt = INBOX_SUPERSEDED_EXCERPT_CHARS,
+  subject_chars = INBOX_SUBJECT_CHARS, ceiling = INBOX_CEILING_CHARS,
+} = {}) {
+  const result = page?.result ?? page ?? {};
+  const items = Array.isArray(result.items) ? result.items : [];
+  const matched_total = Number.isInteger(result.matched_total) ? result.matched_total : items.length;
+  const latest = new Map();
+  for (const item of items) {
+    const thread = item?.message?.thread_id;
+    if (!thread) continue;
+    const prior = latest.get(thread);
+    if (!prior || sequence(item) > prior.seq) latest.set(thread, { seq: sequence(item), message_id: item.message?.message_id ?? null });
+  }
+  const perThread = new Map();
+  for (const item of items) {
+    const thread = item?.message?.thread_id;
+    if (thread) perThread.set(thread, (perThread.get(thread) ?? 0) + 1);
+  }
+  // Newest first: the page arrives oldest-first (ORDER BY delivery_seq), so the
+  // first thing a director reads today is seven-week-old news. Newest first also
+  // means a ceiling that has to omit something omits the oldest.
+  const records = items.map((item, index) => ({ item, index }))
+    .sort((a, b) => sequence(b.item) - sequence(a.item) || a.index - b.index)
+    .map(({ item }) => {
+      const message = item?.message ?? {}, delivery = item?.delivery ?? {};
+      const thread = message.thread_id ?? null, seq = sequence(item);
+      const newer = thread ? latest.get(thread) : undefined;
+      return { message, delivery, thread, seq, body: inboxText(message.body),
+        status: delivery.status ?? null, acked: item?.acked_by_me === true,
+        thread_size: thread ? perThread.get(thread) ?? 1 : 0,
+        superseded_by: newer && newer.seq > seq ? newer.message_id : null };
+    });
+  const settled = record => record.status === 'acknowledged' || record.acked;
+  const capOf = (record, excerptLen) => settled(record) ? 0
+    : record.superseded_by ? Math.min(excerptLen, superseded_excerpt) : excerptLen;
+  const project = (record, excerptLen) => {
+    const cap = capOf(record, excerptLen);
+    const identity = {
+      message_id: record.message.message_id ?? null,
+      subject: clip(record.message.subject, subject_chars),
+      sender_project_id: record.message.sender_project_id ?? null,
+      created_at: record.message.created_at ?? null,
+      status: record.status,
+      acked_by_me: record.acked,
+      delivery_id: record.delivery.delivery_id ?? null,
+      delivery_seq: record.seq >= 0 ? record.seq : null,
+      version: record.delivery.version ?? null,
+      body_chars: record.body.length,
+      ...(record.thread_size > 1 ? { thread_id: record.thread } : {}),
+      ...(record.superseded_by ? { superseded_by: record.superseded_by } : {}),
+    };
+    if (settled(record)) return { ...identity, ...(record.body.length ? { body_withheld: 'acknowledged' } : {}) };
+    if (cap <= 0) return { ...identity, ...(record.body.length ? { body_withheld: 'ceiling' } : {}) };
+    return { ...identity, ...(record.body.length
+      ? { body_excerpt: clip(record.body, cap), ...(record.body.length > cap ? { excerpt_truncated: true } : {}) }
+      : {}) };
+  };
+  // A page that only saw part of the matches must say so; `listProjectInbox` sets
+  // these, a caller handing in one raw page means "this page is what I scanned".
+  const scanned = Number.isInteger(result.scanned) ? result.scanned : items.length;
+  const scan_complete = typeof result.scan_complete === 'boolean' ? result.scan_complete : result.has_more !== true;
+  // A truncated scan cannot claim the newest of the match set - it only saw a slice
+  // of it - so its window names the slice it saw and what it never reached.
+  const assemble = (carried, excerptLen, omitted = 0) => {
+    const projected = carried.map(record => project(record, excerptLen));
+    return {
+      page: {
+        project_id: result.project_id ?? null,
+        order: 'newest_first',
+        window: scan_complete ? `newest ${projected.length} of ${matched_total}`
+          : `newest ${projected.length} of the ${scanned} scanned (${matched_total} matched, ${Math.max(0, matched_total - scanned)} unscanned)`,
+        items: projected.length,
+        matched_total,
+        scanned,
+        scan_complete,
+        has_more: matched_total > projected.length,
+        next_after: result.next_after ?? null,
+        items_omitted: omitted,
+        bodies_withheld: projected.filter(item => item.body_withheld).length,
+        excerpt_chars: excerptLen,
+        superseded_excerpt_chars: superseded_excerpt,
+        ceiling_chars: ceiling,
+      },
+      items: projected,
+    };
+  };
+  const chars = digest => JSON.stringify(digest).length;
+  let digest = assemble(records, excerpt);
+  if (chars(digest) > ceiling) {
+    // Over budget: shrink every excerpt together, down to the superseded length.
+    // Withholding bodies first would leave whichever items the budget reached with
+    // text and the rest with none - the newest message must not be the loser.
+    for (let len = Math.floor((excerpt - 1) / 8) * 8; chars(digest) > ceiling && len >= superseded_excerpt; len -= 8) {
+      digest = assemble(records, len);
+    }
+    if (chars(digest) > ceiling) digest = assemble(records, 0);
+    for (let keep = records.length - 1; chars(digest) > ceiling && keep >= 0; keep--) {
+      digest = assemble(records.slice(0, keep), 0, records.length - keep);
+    }
+  }
+  return digest;
+}
+
 /** One durable snapshot per session bootstrap / successful compaction epoch. */
 export class StateInjection {
   constructor(session, runtime, createMessage) {
@@ -717,9 +919,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
     await ctx.sessionPersistence.flush();
   };
-  const projectInbox = () => request('/api/state/query/list_director_messages', {
-    project_id: project, protocol_version: 'v3', statuses: ['unread', 'acknowledged'], limit: 20,
-  });
+  // Bounded and self-describing: the newest page of the matches, projected (see
+  // listProjectInbox / projectInboxDigest). An injection is re-sent on every
+  // director-message wake, so it must not grow with project history - and it must
+  // be the page a message that just arrived is on, not the oldest one.
+  const projectInbox = async () => projectInboxDigest(await listProjectInbox(request, project));
   runtime.onConnectionError = async error => {
     subscriptionError = connectionErrorMessage(error);
     ctx.logger.warn(subscriptionError);
@@ -1045,7 +1249,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const inbox = await projectInbox();
   // Native goal rounds start/continue the director; bootstrap is not a human
   // message and must not manufacture human authority for goal tools.
-  const pendingInbox = (inbox.result ?? inbox).items?.length;
+  const pendingInbox = inbox.items.length;
   let removeInboxHook = () => {};
   const deliverInbox = () => {
     removeInboxHook();

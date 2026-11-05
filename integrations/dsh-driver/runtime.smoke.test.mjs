@@ -62,7 +62,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     }
     if (req.url === '/api/drivers/me') return send({ driver_id: 'dsh-fixture' });
     if (req.url === '/api/state/schema') return send({ operations: {} });
-    if (req.url === '/api/state/query/list_director_messages') return send({ result: { items: [{subject:'BOOT_PROJECT_INBOX',status:'unread'}] } });
+    if (req.url === '/api/state/query/list_director_messages') return send({ result: { project_id: 'alpha', matched_total: 1, has_more: false, next_after: 1, items: [{ message: { message_id: 'dm_fixture', thread_id: 'thr_fixture', sender_project_id: 'beta', subject: 'BOOT_PROJECT_INBOX', body: 'fixture body, not a real message', created_at: '2026-11-05T00:00:00+00:00' }, delivery: { delivery_id: 'dlv_fixture', delivery_seq: 1, status: 'unread', version: 1 }, acked_by_me: false }] } });
     if (req.url.endsWith('/context')) { contextReads++; return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: ['project rule'] },
       private_note: { index: [overflowChanged ? 'overflow fresh private rule' : changed ? 'fresh private rule' : 'original private rule'] }, driver_skill: 'fixture driver skill', runtime_skill: 'Automatic notifications.' }); }

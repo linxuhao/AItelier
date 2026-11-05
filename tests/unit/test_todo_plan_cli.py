@@ -650,3 +650,152 @@ def test_finish_writes_a_bundle_git_can_verify_and_a_report_state_accepts(cli, r
     assert all(o["outcome"] == "pass" for o in report["observations"])
     validate_external_semantics(report_bytes, "candidate", head)
     _structured_terminal(report_bytes)
+
+
+# -- the predicate library a plan was frozen under ------------------------------------------
+
+_MISSING = object()
+
+
+def rewrite_version(cli: Cli, value) -> dict:
+    """Set (or, with _MISSING, delete) the stored library_version; returns the document written."""
+    path = cli.store / "att-1.json"
+    document = json.loads(path.read_text())
+    if value is _MISSING:
+        document.pop("library_version", None)
+    else:
+        document["library_version"] = value
+    path.write_text(json.dumps(document))
+    return document
+
+
+def test_a_plan_frozen_under_another_library_is_refused_naming_both_versions_and_the_plan(cli, repo, base):
+    """Every command that rehydrates the document hits the same guard, before it measures anything."""
+    cli.create(plan(repo, base))
+    document = rewrite_version(cli, "1")
+    out_dir = cli.tmp_path / "out"
+    for argv in (["status"], ["handback"], ["begin", "--item", "edit"], ["done", "--item", "edit"],
+                 ["report", "--item", "edit", "--note", "n"], ["finish", "--out", str(out_dir)]):
+        out = cli.refused(argv[0], "--attempt", "att-1", *argv[1:])
+        assert out["refused"] == "library_mismatch", (argv, out)
+        assert out["plan_library_version"] == "1" and out["running_library_version"] == "2", (argv, out)
+        assert out["attempt_id"] == "att-1" and out["node_key"] == "execution.demo", (argv, out)
+        assert "v1" in out["reason"] and "v2" in out["reason"] and "att-1" in out["reason"], (argv, out)
+    assert json.loads((cli.store / "att-1.json").read_text()) == document, "a refusal rewrites nothing"
+    assert sorted(p.name for p in cli.store.iterdir()) == ["att-1.json", "att-1.lock"], \
+        "no temp file, and the sidecar lock file only - never a plan left half-written"
+    assert not out_dir.exists() or not list(out_dir.iterdir())
+    listed = cli.ok("list")["plans"]
+    assert [p["attempt_id"] for p in listed] == ["att-1"], listed
+    assert "v1" in listed[0]["error"] and "v2" in listed[0]["error"], listed[0]
+
+
+def test_the_version_is_named_before_a_predicate_this_library_lacks(cli, repo, base):
+    """Loaded in the wrong order, a v1 plan would be reported as a broken binding, not a wrong library."""
+    cli.create(plan(repo, base))
+    path = cli.store / "att-1.json"
+    document = json.loads(path.read_text())
+    document["library_version"] = "1"
+    document["plan"]["items"][0]["predicates"] = [{"predicate": "file_rewritten", "args": {}}]
+    path.write_text(json.dumps(document))
+    out = cli.refused("status", "--attempt", "att-1")
+    assert out["refused"] == "library_mismatch", f"the library is named first, not the missing predicate: {out}"
+    assert "file_rewritten" not in out["reason"]
+
+
+def test_a_document_with_no_library_version_is_refused_as_unmeasured(cli, repo, base):
+    cli.create(plan(repo, base))
+    rewrite_version(cli, _MISSING)
+    out = cli.refused("status", "--attempt", "att-1")
+    assert out["refused"] == "library_unmeasured", out
+    assert out["plan_library_version"] is None and out["running_library_version"] == "2", out
+    assert "library_version" in out["reason"] and "att-1" in out["reason"] and "v2" in out["reason"], out
+    # A version of the wrong TYPE measured nothing either: it is unmeasured, not "equal-looking".
+    rewrite_version(cli, 2)
+    out = cli.refused("done", "--attempt", "att-1", "--item", "edit")
+    assert out["refused"] == "library_unmeasured" and out["plan_library_version"] == 2, out
+
+
+def test_the_library_refusal_is_a_json_error_and_not_a_traceback(cli, repo, base):
+    cli.create(plan(repo, base))
+    rewrite_version(cli, "1")
+    done = subprocess.run([sys.executable, "-m", "core.todo_cli", "status", "--attempt", "att-1",
+                           "--store", str(cli.store), "--now", str(T0)], cwd=REPO_ROOT,
+                          capture_output=True, text=True, env=os.environ.copy(), timeout=120)
+    assert done.returncode == 2 and "Traceback" not in done.stderr, done.stderr
+    assert json.loads(done.stdout)["refused"] == "library_mismatch", done.stdout
+
+
+def test_a_refusal_leaves_the_store_usable_and_the_running_version_working_end_to_end(cli, repo, base):
+    cli.create(plan(repo, base))
+    path = cli.store / "att-1.json"
+    good = path.read_text()
+    assert json.loads(good)["library_version"] == "2", "what the running library writes is what loads"
+    rewrite_version(cli, "9")
+    assert cli.refused("status", "--attempt", "att-1")["refused"] == "library_mismatch"
+    path.write_text(good)                                     # the document exactly as the running version wrote it
+    assert cli.ok("status", "--attempt", "att-1")["next"] == "edit", "the lock was released; the plan opens again"
+    cli.ok("begin", "--attempt", "att-1", "--item", "edit")
+    (repo / "app.py").write_text("x = 1\ny = 2\n")
+    assert cli.ok("done", "--attempt", "att-1", "--item", "edit")["outcome"] == "pass", \
+        "a plan at the running version keeps working end to end after a refusal"
+
+
+def test_a_mismatched_plan_refuses_before_the_gate_command_is_spawned(cli, repo, base, tmp_path):
+    counter = tmp_path / "ran.txt"
+    cli.create(counting_gate_plan(repo, base, counter))
+    cli.ok("begin", "--attempt", "att-1", "--item", "gate")    # a pre-state exists: `done` really would evaluate
+    assert executions(counter) == 0
+    rewrite_version(cli, "1")
+    out = cli.refused("done", "--attempt", "att-1", "--item", "gate", now=T0)
+    assert out["refused"] == "library_mismatch"
+    assert executions(counter) == 0, "the gate command was never spawned: nothing was measured"
+    rewrite_version(cli, "2")                                 # the positive control: at its own version it does run
+    assert cli.ok("done", "--attempt", "att-1", "--item", "gate", now=T0)["outcome"] == "absent"
+    assert executions(counter) == 1
+
+
+def test_the_refusal_precedes_any_predicate_evaluation(tmp_path):
+    """Both libraries define `probe`, so the WRONG library could have evaluated it: `ran` says it did not."""
+    from core.todo_plan import Refusal, TodoPlan, load_run, new_document
+    from core.todo_runtime import PredicateLibrary, PredicateResult
+
+    ran: list[str] = []
+
+    def library_at(version: str) -> PredicateLibrary:
+        library = PredicateLibrary(version=version)
+
+        @library.define("probe")
+        def probe(*, workspace, pre_state, label: str) -> PredicateResult:
+            ran.append(f"{label}@{version}")
+            return PredicateResult("probe", "pass", "evaluated")
+        return library
+
+    frozen, running = library_at("2"), library_at("3")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    plan_json = {"attempt_id": "att-lib", "node_key": "execution.lib", "context_hash": "c" * 64,
+                 "base_sha": "a" * 40, "workspace": str(workspace), "scope": ["app.py"], "goal": "probe it",
+                 "items": [{"id": "probe", "title": "probe", "predicates": [
+                     {"predicate": "probe", "args": {"label": "first"}}]}]}
+    plan = TodoPlan.from_json(plan_json, frozen)
+    document = new_document(plan, frozen, T0)
+    assert document["library_version"] == "2", "the document records the library that froze it"
+
+    with pytest.raises(Refusal) as refused:
+        load_run(document, plan, running, lambda: T0)
+    assert refused.value.code == "library_mismatch", refused.value
+    assert "v2" in refused.value.reason and "v3" in refused.value.reason and "att-lib" in refused.value.reason
+    assert ran == [], "the guard refused before the library was asked to evaluate the bound name"
+
+    # Positive control: judged by the library it recorded, the very same document DOES measure.
+    run = load_run(document, plan, frozen, lambda: T0)
+    run.begin("probe")
+    assert run.observe("probe").outcome == "pass" and ran == ["first@2"], \
+        "`ran == []` above was the guard's doing, not a predicate that could never run"
+
+    # An unmeasured document is refused by load_run itself, not only by the CLI in front of it.
+    del document["library_version"]
+    with pytest.raises(Refusal) as unmeasured:
+        load_run(document, plan, frozen, lambda: T0)
+    assert unmeasured.value.code == "library_unmeasured" and ran == ["first@2"]

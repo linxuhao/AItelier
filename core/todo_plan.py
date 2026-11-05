@@ -6,6 +6,9 @@ makes "once" mean something:
 * `TodoPlan.from_json` validates the plan against the predicate library and
   refuses the WHOLE plan on any defect - an unknown predicate is a broken
   binding, never an absent measurement.
+* `require_library_version` refuses a stored document that records no predicate
+  library version, or one this build does not run, and it does so before a
+  `TodoRun` exists to evaluate anything: the library was frozen with the plan.
 * `plan_hash` is the sha256 of the canonical JSON of the frozen part (the plan,
   including the `deliver` item the harness appends). Re-creating the same attempt
   with the same plan is idempotent; with a different one it is refused.
@@ -63,6 +66,49 @@ def _relative(value: Any, where: str) -> None:
     path = PurePosixPath(str(value))
     if path.is_absolute() or ".." in path.parts:
         raise Refusal("invalid_plan", f"{where} must be a relative path inside the workspace, got {value!r}")
+
+
+def _stored_parts(document: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """The two objects a load needs from a stored document, or a refusal - a file that is not a plan
+    at all is damaged, which is a different finding from a plan whose library was never recorded."""
+    plan, items = document.get("plan"), document.get("items")
+    if not isinstance(plan, Mapping) or not isinstance(items, Mapping):
+        raise Refusal("corrupt_plan", "the stored plan is damaged: 'plan' and 'items' must both be objects "
+                                      f"(got plan={type(plan).__name__}, items={type(items).__name__})")
+    return plan, items
+
+
+def require_library_version(document: Mapping[str, Any], library: PredicateLibrary) -> str:
+    """The predicate library a stored document was frozen under, or a refusal naming both.
+
+    A plan binds predicates by NAME, so the library is part of what the plan means:
+    the same document judged by another library is a different plan judged by other
+    predicates. `new_document` records `library_version` for exactly this, and every
+    load path asks here - BEFORE it builds a TodoRun, hence before any predicate can
+    evaluate - because a silently re-versioned verdict is worse than no verdict.
+
+    No `library_version` is NOT "probably the running one": nothing recorded which
+    library froze the document, so there is nothing to compare and no honest default.
+    """
+    plan, _items = _stored_parts(document)
+    attempt_id, node_key = plan.get("attempt_id"), plan.get("node_key")
+    where = f"plan {attempt_id!r} at node {node_key!r}"
+    recorded, running = document.get("library_version"), library.version
+    identity = {"attempt_id": attempt_id, "node_key": node_key,
+                "plan_library_version": recorded, "running_library_version": running}
+    if not isinstance(recorded, str) or not recorded.strip():
+        raise Refusal(
+            "library_unmeasured",
+            f"{where} records no library_version ({recorded!r}): which predicate library froze it was never "
+            f"recorded, and this build runs v{running} - refused as unmeasured, not judged by an assumed library",
+            **identity)
+    if recorded != running:
+        raise Refusal(
+            "library_mismatch",
+            f"{where} was frozen under predicate library v{recorded}; this build runs v{running}, whose "
+            f"predicates are not the ones the plan bound - refused rather than re-judged",
+            **identity)
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -253,6 +299,7 @@ def item_state(entry: Mapping[str, Any]) -> str:
 def load_run(document: Mapping[str, Any], plan: TodoPlan, library: PredicateLibrary,
              clock: Callable[[], float]) -> TodoRun:
     """Rehydrate a TodoRun, ledger episodes included, from the file's observations."""
+    require_library_version(document, library)   # the library boundary: no run, so no predicate, before this
     entries = document["items"]
     reports = {
         item_id: ItemReport(item_id, e["outcome"], tuple(PredicateResult(**r) for r in e["results"]), e["unmeasurable"])

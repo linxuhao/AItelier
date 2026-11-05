@@ -739,6 +739,14 @@ class Attempt(Request):
     attempt_id: str
 
 
+class Receipt(Project):
+    """One published acceptance receipt, read back by the id a caller holds.
+
+    `project_id` is not decoration: it SCOPES the read, so a receipt of another
+    project is refused exactly like one that does not exist."""
+    receipt_id: str
+
+
 class RequestAttemptBase(Attempt):
     base_sha: str
 
@@ -1054,6 +1062,9 @@ READ_REQUESTS = {
     "search_driver_note_entries": SearchDriverNoteEntries,
     "check_driver_note_index": NotebookScopeRequest, "get_driver_guide_section": DriverGuideSection,
     "list_attempts": ListAttempts, "evidence": Attempt,
+    # The receipt a published acceptance hands out; the id is the only handle a
+    # reader has after a later revision clears the node's verified_receipt.
+    "get_receipt": Receipt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,
     "project_attempts": ProjectAttempts, "references": References,
@@ -1091,6 +1102,11 @@ PUBLIC_READS = frozenset({
     # Attempts and evidence.
     "get_attempt", "list_attempts", "evidence", "project_attempts",
     "attempt_detail", "run_owners", "references",
+    # A receipt names one acceptance of the graph above, so it is exactly as
+    # public as the attempt/evidence reads it summarises — and no more: the
+    # project half below still refuses a project nobody opened, which is what
+    # keeps a private project's acceptance unreachable by receipt id.
+    "get_receipt",
     # Issues.
     "list_issues", "get_issue",
     # Design records.
@@ -1314,6 +1330,7 @@ def _handlers(service) -> dict:
         "check_driver_note_index": service.driver_notes.check_index,
         "get_driver_guide_section": _driver_guide_section,
         "get_attempt": service.get_attempt,
+        "get_receipt": service.get_receipt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "open_project": service.open_project, "close_project": service.close_project,

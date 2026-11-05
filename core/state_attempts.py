@@ -1147,3 +1147,53 @@ class StateAttempts:
         with self.store.transaction() as conn:
             self._attempt(conn, attempt_id)
             return [dict(r) for r in conn.execute("SELECT * FROM state_evidence WHERE attempt_id=? ORDER BY seq", (attempt_id,))]
+
+    # What one receipt's evidence row says. Identifiers and verdicts only: the
+    # report body itself (`detail`, retained bytes) is never part of this read.
+    RECEIPT_EVIDENCE = ("evidence_id", "criterion_id", "kind", "verdict", "artifact_ref",
+                        "report_sha256")
+
+    def receipt(self, project_id: str, receipt_id: str) -> dict:
+        """The acceptance a published receipt_id names, for the project holding it.
+
+        A receipt is the HANDLE a caller is given for one acceptance (a public
+        transport publishes that id, never the attempt it came from), so it must
+        also be a handle they can dereference. Reading it back through the NODE
+        cannot do that: accepting a later revision CLEARS
+        ``state_nodes.verified_receipt``, and the node then names no earlier
+        acceptance at all. The receipt row is append-only and immutable, so this
+        reads it by its own identity.
+
+        ``project_id`` SCOPES the answer. A receipt that exists in another
+        project and a receipt that does not exist get the SAME refusal, so this
+        is never an oracle for another project's receipts and never returns
+        another project's facts. The evidence returned is exactly what the
+        receipt attests (its own ``evidence_ids``, in contract order, pinned
+        when it was issued) — not whatever was recorded against the attempt
+        afterwards.
+        """
+        project_id = key(project_id, "project_id")
+        receipt_id = key(receipt_id, "receipt id")
+        missing = StateNotFound(
+            f"acceptance receipt {receipt_id!r} not found in project {project_id!r}")
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=? AND project_id=?",
+                               (receipt_id, project_id)).fetchone()
+            if row is None:
+                raise missing
+            recorded = conn.execute("SELECT * FROM state_evidence WHERE attempt_id=? ORDER BY seq",
+                                    (row["attempt_id"],)).fetchall()
+            by_id = {r["evidence_id"]: r for r in recorded}
+            evidence = []
+            for evidence_id in json.loads(row["evidence_ids"]):
+                found = by_id.get(evidence_id)
+                if found is None:
+                    raise StateNotFound(
+                        f"acceptance receipt {receipt_id!r} names evidence {evidence_id!r} that does not exist")
+                evidence.append({name: found[name] for name in self.RECEIPT_EVIDENCE})
+            receipt = {"receipt_id": row["receipt_id"], "project_id": row["project_id"],
+                       "node_key": row["node_key"], "node_revision": row["node_revision"],
+                       "attempt_id": row["attempt_id"], "artifact_ref": row["artifact_ref"],
+                       "contract_hash": row["contract_hash"], "reviewer": row["reviewer"],
+                       "created_at": row["created_at"], "evidence": evidence}
+        return receipt

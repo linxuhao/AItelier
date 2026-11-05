@@ -1254,6 +1254,27 @@ class StateService:
     # did and did not do is now the whole record.
     _TERMINAL = ("candidate", "failed", "superseded", "abandoned")
 
+    def get_receipt(self, project_id, receipt_id):
+        """The acceptance a published receipt_id names, inside the project that
+        issued it.
+
+        The receipt id is what a caller is HANDED (a public transport publishes
+        receipts, not attempts), so it has to be dereferenceable on its own:
+        accepting a later revision clears the node's ``verified_receipt``, and
+        the current node then cannot recover the real earlier acceptance. The
+        receipt itself is append-only, so this reads it by identity.
+
+        The project half of the read verdict is applied HERE too, not only at
+        ``core.state_commands.execute``: ``refuse_unopened_project`` is the same
+        predicate every other state read uses (``store.is_project_public``), so
+        a forged route that bypasses `execute` still cannot hand an anonymous
+        caller a project nobody opened — and the refusal is identical for a
+        project that does not exist."""
+        from core import state_privacy
+        if state_privacy.trust_of(self) is not True:
+            state_privacy.refuse_unopened_project(self.store, project_id)
+        return self.attempts.receipt(project_id, receipt_id)
+
     def get_attempt(self, attempt_id):
         """The read surface's view of one attempt; a failed SkillFlow attempt
         carries its relay_inventory so the director can inspect the retained

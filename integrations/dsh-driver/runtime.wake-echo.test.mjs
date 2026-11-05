@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest } from './dsh-entry.mjs';
 
 // Root script: start a detached job and watch it, stop -> asked once (a fresh wait)
 // -> NOTHING_LEFT. The test then releases a State tick of only the director's own
@@ -65,9 +66,9 @@ export function apply(ctx) {
 }
 `;
 
-test('real pinned DSH: own State writes do not wake the director; one NOTHING_LEFT holds while it waits; a changed wait is asked again', { timeout: 60000 }, async () => {
+test('real pinned DSH: own State writes do not wake the director; one NOTHING_LEFT holds while it waits; a changed wait is asked again', { timeout: 60000 }, async (t) => {
   const directory = await mkdtemp(join(homedir(), 'dsh-wake-echo-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
+  const entry = await measuredEntryForTest(t);
   const here = dirname(fileURLToPath(import.meta.url));
   const session = 'wake-echo-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const events = [], requests = [], waits = [], parked = [];

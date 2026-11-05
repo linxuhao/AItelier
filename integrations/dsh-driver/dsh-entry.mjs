@@ -34,10 +34,28 @@
  * runtime a driver boots into: `AITELIER_DSH_EXECUTION=host` in the invoking
  * environment silently changes the fixture's branch and makes these tests
  * measure the wrong thing.
+ *
+ * Imports are the same question, one directory up. A file that writes
+ *
+ *   const require = createRequire(process.env.AITELIER_DSH_TEST_ENTRY
+ *     ?? new URL('./package.json', import.meta.url));
+ *   const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
+ *
+ * hands the invoking shell the choice of which install its assertions are
+ * about, and a clean checkout has no `node_modules` at all — the failure then
+ * happens at load time, before any `t` exists to report it. `resolveDshLibraries`
+ * answers the import question from this module's single resolution instead:
+ * it never re-derives the pin, a `refused` binary resolution is returned
+ * unchanged (verbatim reason, so an explicit wrong-version override is not
+ * quietly answered by an implicit install), and the `node_modules` it hands
+ * back is the one that owns the measured binary — never the checkout's, never
+ * the caller's cwd. `unmeasured` keeps the searched paths, which is what a file
+ * that must import at load time needs in order to skip and say why.
  */
 import { readFile, realpath, stat, readdir } from 'node:fs/promises';
 import { dirname, join, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 
 /** The package whose version the tests are pinned to. */
@@ -132,6 +150,27 @@ async function owningManifest(binary) {
   return null;
 }
 
+/** The `node_modules` directory that owns an already-resolved binary, or null.
+ *
+ * The libraries a pinned test imports are the dependencies of the `dsh` package
+ * it measured, so they are found from that package's install root and nowhere
+ * else. `owningManifest` already established that the manifest at
+ * `<dir>/node_modules/@deepseek-ai/dsh` is the pin; this is the same attribution
+ * one directory up. A binary outside any `node_modules` (a bare `bin/dsh`) has
+ * no install root, so the caller gets null and refuses rather than guessing at
+ * the cwd.
+ */
+function owningNodeModules(entry) {
+  let directory = dirname(entry);
+  for (let depth = 0; depth < MAX_WALK; depth++) {
+    if (basename(directory) === 'node_modules') return directory;
+    const parent = dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
+  return null;
+}
+
 /** One mismatch in words: path, source, version (or the fact that it has none). */
 function describeMismatch({ path, source, version }) {
   return `${path} (${source}) is ${version ?? 'of unknown version'}`;
@@ -208,8 +247,44 @@ export async function resolveDshEntry({ env = process.env, home = homedir(), roo
     searched, mismatches };
 }
 
-/** A bounded, readable list of the candidates a green run declined to measure. */
-function describeSkipped(pinned, mismatches) {
+/** The refusal for a measured binary whose libraries cannot be located at all. */
+function refusedUnattributable({ pinned, entry, searched, mismatches }) {
+  return { status: 'refused', pinned, version: null, entry: null, source: null, nodeModules: null, require: null,
+    reason: `refusing to import the ${DSH_PACKAGE} ${pinned} libraries: the measured binary ${entry} `
+      + 'is not inside a node_modules directory, so there is no install root to import them from',
+    searched, mismatches };
+}
+
+/**
+ * Decide where a test may import the harness libraries from — the import-side
+ * twin of `resolveDshEntry`, with no second opinion about which install is the
+ * pin (see the header).
+ * @returns {Promise<{status: 'measured'|'unmeasured'|'refused', pinned: string,
+ *   version: string|null, entry: string|null, source: string|null, reason: string|null,
+ *   searched: string[], mismatches: {path: string, source: string, version: string|null}[],
+ *   nodeModules: string|null, require: NodeRequire|null}>}
+ */
+export async function resolveDshLibraries(options = {}) {
+  const resolution = await resolveDshEntry(options);
+  // 'refused' and 'unmeasured' come back verbatim: the decision and the words
+  // belong to the binary resolver, and an explicit override it refused must not
+  // reach an implicit install by way of the import path.
+  if (resolution.status !== 'measured') return { ...resolution, nodeModules: null, require: null };
+  const nodeModules = owningNodeModules(resolution.entry);
+  if (!nodeModules) return refusedUnattributable(resolution);
+  // createRequire needs an absolute path to anchor on; the file it names need
+  // not exist. Anchored here, '<id>' is looked up in this install's node_modules
+  // first, and the checkout's or the caller's cwd are never consulted.
+  return { ...resolution, nodeModules, require: createRequire(join(nodeModules, 'package.json')) };
+}
+
+/** A bounded, readable list of the candidates a green run declined to measure.
+ *
+ * Shared with the import path: a file that imports the libraries at load time
+ * has no `t` yet, so it prints this line from inside its first measured test
+ * rather than from a diagnostic the runner may never show.
+ */
+export function describeDeclinedToMeasure(pinned, mismatches) {
   const shown = mismatches.slice(0, MAX_REPORTED_MISMATCHES).map(describeMismatch);
   const hidden = mismatches.length - shown.length;
   const more = hidden > 0 ? `; and ${hidden} more` : '';
@@ -230,7 +305,7 @@ export async function measuredEntryForTest(t, options = {}) {
   }
   // Skips are part of the result: a reader of this output must be able to see
   // that the measured entry was not the only DSH on the machine.
-  if (resolution.mismatches.length) t.diagnostic(describeSkipped(resolution.pinned, resolution.mismatches));
+  if (resolution.mismatches.length) t.diagnostic(describeDeclinedToMeasure(resolution.pinned, resolution.mismatches));
   t.diagnostic(`measuring ${DSH_PACKAGE} ${resolution.version} (${resolution.source}): ${resolution.entry}`);
   return resolution.entry;
 }

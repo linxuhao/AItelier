@@ -14,12 +14,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
@@ -338,9 +339,10 @@ async function fakeCli(directory) {
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: process.env.AITELIER_TODO_TEST_CWD ?? directory };
 }
 
-test('real pinned DSH: plans walked by native children, runtime handback, State-writer refusal, briefs across compaction', { timeout: 90000 }, async () => {
+test('real pinned DSH: plans walked by native children, runtime handback, State-writer refusal, briefs across compaction', { timeout: 90000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;                       // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-todo-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], events = [], mcpCalls = [], activity = [], parked = new Set();
   let changed = false, rootDone = false, output = '', proc;
@@ -405,7 +407,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
@@ -701,14 +703,15 @@ export function apply(ctx) {
 
 let rebindRun;
 /** One boot for the three rebind tests below; a failing boot fails all three. */
-const rebindScenario = () => (rebindRun ??= bootRebindScenario());
+const rebindScenario = async t => (rebindRun ??= await bootRebindScenario(t));
 
-async function bootRebindScenario() {
+async function bootRebindScenario(t) {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-todo-rebind-'));
   // Unique per run: idle_dormant's background-process scan matches processes by
   // session, and the other real-DSH test files run their own drivers in parallel.
   const session = 'rebind-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], events = [], planStates = {}, held = new Set();
   let finished = false, output = '', proc;
@@ -752,7 +755,7 @@ async function bootRebindScenario() {
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-rebind-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: session,
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
@@ -791,8 +794,9 @@ async function bootRebindScenario() {
   }
 }
 
-test('todo_rebind: a director takes over an item begun by a session that died, then done and finish succeed', { timeout: 180000 }, async () => {
-  const run = await rebindScenario();
+test('todo_rebind: a director takes over an item begun by a session that died, then done and finish succeed', { timeout: 180000 }, async (t) => {
+  const run = await rebindScenario(t);
+  if (!run) return;
   const died = run.sessions.died;
   // The plan really was stuck behind the dead child: bound to it, item already begun.
   const before = run.json('root-todo_status-died');
@@ -817,8 +821,9 @@ test('todo_rebind: a director takes over an item begun by a session that died, t
   assert.deepEqual([...run.planStates.died.done].sort(), ['deliver', 'implement', 'test']);
 });
 
-test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', { timeout: 180000 }, async () => {
-  const run = await rebindScenario();
+test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', { timeout: 180000 }, async (t) => {
+  const run = await rebindScenario(t);
+  if (!run) return;
   const live = run.sessions.live;
   const refused = run.json('root-todo_rebind-live');
   assert.equal(refused.refused, 'live_session', 'a live child was taken over: ' + JSON.stringify(refused));
@@ -832,8 +837,9 @@ test('todo_rebind: a live child keeps its plan - the takeover refuses and done s
   for (const role of ['stuck', 'died', 'live']) assert.ok(!run.toolsOf(role).includes('todo_rebind'), role + ' child sees todo_rebind');
 });
 
-test('todo_rebind: dormancy refuses unfinished_plans before the takeover and stops refusing it after', { timeout: 180000 }, async () => {
-  const run = await rebindScenario();
+test('todo_rebind: dormancy refuses unfinished_plans before the takeover and stops refusing it after', { timeout: 180000 }, async (t) => {
+  const run = await rebindScenario(t);
+  if (!run) return;
   const id = run.plans.stuck.attempt_id;
   const blocked = run.json('root-idle-blocked');
   assert.equal(blocked.refused, 'unfinished_plans', 'dormancy was not refused by the stuck plan: ' + JSON.stringify(blocked));

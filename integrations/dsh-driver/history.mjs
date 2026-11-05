@@ -1,6 +1,7 @@
 /** Read the pinned DSH persistence seam without starting an agent or taking a write lease. */
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { resolveDshEntry } from './dsh-entry.mjs';
 
 export function historyPage(events, { before_seq = Number.MAX_SAFE_INTEGER, limit = 50 } = {}) {
   const visible = new Set(['user/message', 'assistant/message', 'tool/call', 'tool/result', 'compaction/end', 'agent/error']);
@@ -12,8 +13,25 @@ export function historyPage(events, { before_seq = Number.MAX_SAFE_INTEGER, limi
   }), has_more: selected.length > page.length, next_before_seq: page[0]?.seq ?? null };
 }
 
-export async function readHistory(root, session, options = {}) {
-  const require = createRequire(process.env.AITELIER_DSH_ENTRY ?? '/opt/aitelier-dsh/node_modules/.bin/dsh');
+/**
+ * Which DSH owns the persistence package this reader imports.
+ *
+ * The backend that serves history spawns this file with AITELIER_DSH_ENTRY set to
+ * the driver binary it launched, so that stays the first answer. Everything else
+ * — a test, a checkout, a host install — asks the same resolver the test suite
+ * asks, instead of trusting a hard-coded /opt path that only exists in one image.
+ */
+async function entryForReader(explicit) {
+  if (explicit) return explicit;
+  if (process.env.AITELIER_DSH_ENTRY) return process.env.AITELIER_DSH_ENTRY;
+  const resolution = await resolveDshEntry();
+  if (resolution.status !== 'measured')
+    throw new Error(`cannot read DSH history: ${resolution.reason}`);
+  return resolution.entry;
+}
+
+export async function readHistory(root, session, { entry, ...options } = {}) {
+  const require = createRequire(await entryForReader(entry));
   const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
   const storage = await import(require.resolve('@deepseek-ai/dsh-session-persistence-jsonl'));
   const ctx = new Context();

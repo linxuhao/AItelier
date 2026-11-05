@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DSH_PACKAGE, pinnedDshVersion, resolveDshEntry, measuredEntryForTest, withoutCallerMode,
+import { DSH_PACKAGE, pinnedDshVersion, resolveDshEntry, resolveDshLibraries, measuredEntryForTest, withoutCallerMode,
   dshEntryCandidates, installRoot, packageRoot, executionModeKeys } from './dsh-entry.mjs';
 
 const PINNED = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).dependencies[DSH_PACKAGE];
@@ -24,6 +24,16 @@ async function makeInstall(directory, version) {
   await writeFile(join(pkg, 'lib', 'bin.js'), '#!/usr/bin/env node\n');
   await symlink(`../${DSH_PACKAGE}/lib/bin.js`, join(directory, 'node_modules', '.bin', 'dsh'));
   return { entry: join(directory, 'node_modules', '.bin', 'dsh'), real: await realpath(join(pkg, 'lib', 'bin.js')) };
+}
+
+/** A library package inside an install's node_modules, enough to be resolved and imported. */
+async function makeLibrary(nodeModules, id, version = '1.0.0') {
+  const directory = join(nodeModules, ...id.split('/'));
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'package.json'), JSON.stringify({ name: id, version, type: 'module', main: 'index.js' }));
+  const index = join(directory, 'index.js');
+  await writeFile(index, `export const id = ${JSON.stringify(id)};\nexport default ${JSON.stringify(version)};\n`);
+  return index;
 }
 
 test('the pin comes from the committed manifest, not from a constant', async () => {
@@ -107,6 +117,74 @@ test('an explicit wrong-version override is refused, not answered by the pinned 
   /refusing to measure @deepseek-ai\/dsh/);
   assert.deepEqual(seen, [], 'a refused override must neither skip nor print a measuring line');
   await rm(root, { recursive: true }); await rm(staleHome, { recursive: true });
+});
+
+test('an explicit override whose path does not exist is refused, not answered by the pinned install', async () => {
+  const root = await makePinRoot(PINNED);
+  await makeInstall(root, PINNED); // a pinned build the walk could have fallen through to
+  const missing = join(root, 'nope', 'dsh');
+  for (const source of ['AITELIER_DSH_TEST_ENTRY', 'AITELIER_DSH_BIN']) {
+    const resolution = await resolveDshEntry({ env: { [source]: missing }, home: root, root, systemRoots: false });
+    assert.equal(resolution.status, 'refused', `${source}: a missing explicit override was answered by another install`);
+    assert.equal(resolution.entry, null);
+    assert.equal(resolution.version, null);
+    assert.equal(resolution.source, null);
+    assert.deepEqual(resolution.mismatches, [], 'a path that is not there is not a version mismatch');
+    assert.match(resolution.reason, new RegExp(source), 'the refusal must name the override it came from');
+    assert.ok(resolution.reason.includes(missing), 'the refusal must name the path that was asked for');
+    assert.match(resolution.reason, /is missing/, 'the refusal must say the path is not there');
+    assert.match(resolution.reason, new RegExp(PINNED.replaceAll('.', '\\.')), 'the refusal must name the version that was wanted');
+    assert.deepEqual(resolution.searched, [missing], 'resolution walked past the unhonourable override');
+  }
+
+  // The shared call site must not turn this into a skip or a green run.
+  const seen = [];
+  await assert.rejects(measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) },
+    { env: { AITELIER_DSH_TEST_ENTRY: missing }, home: root, root, systemRoots: false }),
+  /refusing to measure @deepseek-ai\/dsh/);
+  assert.deepEqual(seen, [], 'a refused override must neither skip nor print a measuring line');
+  await rm(root, { recursive: true });
+});
+
+test('an explicit override that names a directory is refused as not a file', async () => {
+  const root = await makePinRoot(PINNED);
+  await makeInstall(root, PINNED); // a pinned build the walk could have fallen through to
+  const directory = join(root, 'dsh-is-a-directory');
+  await mkdir(directory, { recursive: true });
+  const resolution = await resolveDshEntry({ env: { AITELIER_DSH_BIN: directory }, home: root, root, systemRoots: false });
+  assert.equal(resolution.status, 'refused', 'a directory named as the override was answered by another install');
+  assert.equal(resolution.entry, null);
+  assert.equal(resolution.version, null);
+  assert.equal(resolution.source, null);
+  assert.deepEqual(resolution.mismatches, [], 'a directory is not a version mismatch');
+  assert.match(resolution.reason, /AITELIER_DSH_BIN/, 'the refusal must name the override it came from');
+  assert.ok(resolution.reason.includes(directory), 'the refusal must name the path that was asked for');
+  assert.match(resolution.reason, /is not a file/, 'the refusal must say it is not a file');
+  assert.match(resolution.reason, /directory/, 'the refusal must say what it is instead');
+  assert.deepEqual(resolution.searched, [directory]);
+
+  const seen = [];
+  await assert.rejects(measuredEntryForTest(
+    { skip: reason => seen.push(['skip', reason]), diagnostic: message => seen.push(['diagnostic', message]) },
+    { env: { AITELIER_DSH_BIN: directory }, home: root, root, systemRoots: false }),
+  /refusing to measure @deepseek-ai\/dsh/);
+  assert.deepEqual(seen, []);
+  await rm(root, { recursive: true });
+});
+
+test('the asymmetry is intended: a missing implicit candidate is skipped, the very same path named explicitly is refused', async () => {
+  const root = await makePinRoot(PINNED); // no install: the checkout candidate does not exist
+  const emptyHome = await mkdtemp(join(tmpdir(), 'dsh-entry-home-'));
+  const absent = join(root, 'node_modules', '.bin', 'dsh');
+  const implicit = await resolveDshEntry({ env: {}, home: emptyHome, root, systemRoots: false });
+  assert.equal(implicit.status, 'unmeasured', 'a missing implicit candidate must not refuse the run');
+  assert.ok(implicit.searched.includes(absent));
+  const explicit = await resolveDshEntry({ env: { AITELIER_DSH_TEST_ENTRY: absent }, home: emptyHome, root, systemRoots: false });
+  assert.equal(explicit.status, 'refused', 'the same absent path, named by the caller, is a request that must be refused');
+  assert.match(explicit.reason, /is missing/);
+  assert.match(explicit.reason, /AITELIER_DSH_TEST_ENTRY/);
+  await rm(root, { recursive: true }); await rm(emptyHome, { recursive: true });
 });
 
 test('a wrong-version implicit candidate is skipped, the pinned one is measured, and the skip is said out loud', async () => {
@@ -207,4 +285,117 @@ test('measuredEntryForTest gives every pinned-DSH site one honest shape', async 
   assert.deepEqual(refusals, [], 'a refusal must fail loudly, never be reported as an unmeasured skip');
   await rm(root, { recursive: true }); await rm(install, { recursive: true });
   await rm(empty, { recursive: true }); await rm(staleHome, { recursive: true });
+});
+
+test('library imports come from the install that was measured, never from the checkout or the cwd', async () => {
+  const root = await makePinRoot(PINNED);
+  const install = await mkdtemp(join(tmpdir(), 'dsh-entry-install-'));
+  const fixture = await makeInstall(install, PINNED);
+  // Two copies of the same library: whichever one resolves says which node_modules won.
+  const checkoutCopy = await makeLibrary(join(root, 'node_modules'), '@deepseek-ai/cordis', 'checkout-copy');
+  const measuredCopy = await makeLibrary(join(install, 'node_modules'), '@deepseek-ai/cordis', 'measured-copy');
+  const libraries = await resolveDshLibraries({ env: { AITELIER_DSH_TEST_ENTRY: fixture.entry }, home: root, root, systemRoots: false });
+  assert.equal(libraries.status, 'measured');
+  assert.equal(libraries.version, PINNED, 'the import path must inherit the binary resolution, not re-derive the pin');
+  assert.equal(libraries.source, 'AITELIER_DSH_TEST_ENTRY');
+  assert.equal(libraries.nodeModules, join(install, 'node_modules'));
+  assert.equal(typeof libraries.require.resolve, 'function');
+  assert.equal(libraries.require.resolve.paths('@deepseek-ai/cordis')[0], join(install, 'node_modules'),
+    'the first place a lookup looks must be the measured install root');
+  assert.equal(await realpath(libraries.require.resolve('@deepseek-ai/cordis')), await realpath(measuredCopy));
+  assert.notEqual(await realpath(libraries.require.resolve('@deepseek-ai/cordis')), await realpath(checkoutCopy),
+    'the checkout copy would mean imports still follow the invoking checkout instead of the measured install');
+  const loaded = await import(libraries.require.resolve('@deepseek-ai/cordis'));
+  assert.equal(loaded.default, 'measured-copy', 'the anchored require must load from the measured install');
+  assert.equal(loaded.id, '@deepseek-ai/cordis');
+  await rm(root, { recursive: true }); await rm(install, { recursive: true });
+});
+
+test('a stale checkout install is skipped for imports too, and the pinned host install answers', async () => {
+  const root = await makePinRoot(PINNED);
+  const wrong = await makeInstall(root, '0.2.0'); // implicit: this checkout, stale
+  const staleCopy = await makeLibrary(join(root, 'node_modules'), '@deepseek-ai/cordis', 'stale-copy');
+  const host = await mkdtemp(join(tmpdir(), 'dsh-entry-host-'));
+  await makeInstall(host, PINNED); // implicit: the pinned host install
+  const pinnedCopy = await makeLibrary(join(host, 'node_modules'), '@deepseek-ai/cordis', 'pinned-copy');
+  const libraries = await resolveDshLibraries({ env: { AITELIER_DSH_HOME: host }, home: host, root });
+  assert.equal(libraries.status, 'measured', 'an implicit mismatch is skippable on the import path, not a refusal');
+  assert.equal(libraries.source, 'host install');
+  assert.equal(libraries.nodeModules, join(host, 'node_modules'));
+  assert.equal(await realpath(libraries.require.resolve('@deepseek-ai/cordis')), await realpath(pinnedCopy));
+  assert.notEqual(await realpath(libraries.require.resolve('@deepseek-ai/cordis')), await realpath(staleCopy),
+    'imports followed the stale checkout install instead of the one that was measured');
+  assert.deepEqual(libraries.mismatches, [{ path: wrong.entry, source: 'this checkout', version: '0.2.0' }],
+    'the skipped install is still recorded for whoever reports the run');
+  await rm(root, { recursive: true }); await rm(host, { recursive: true });
+});
+
+test('the import path refuses exactly what the binary path refuses, in the binary path\'s own words', async () => {
+  const root = await makePinRoot(PINNED);
+  await makeInstall(root, PINNED); // a pinned install the walk must not fall through to
+  const staleHome = await mkdtemp(join(tmpdir(), 'dsh-entry-stale-'));
+  const stale = await makeInstall(staleHome, '0.1.0');
+  await makeLibrary(join(staleHome, 'node_modules'), '@deepseek-ai/cordis');
+  const missing = join(root, 'nope', 'dsh');
+  const directory = join(root, 'dsh-is-a-directory');
+  await mkdir(directory, { recursive: true });
+  const cases = [
+    { env: { AITELIER_DSH_TEST_ENTRY: stale.entry }, says: /0\.1\.0/ },
+    { env: { AITELIER_DSH_BIN: missing }, says: /is missing/ },
+    { env: { AITELIER_DSH_BIN: directory }, says: /is not a file/ },
+  ];
+  for (const { env, says } of cases) {
+    const options = { env, home: root, root, systemRoots: false };
+    const binary = await resolveDshEntry(options);
+    const libraries = await resolveDshLibraries(options);
+    assert.equal(libraries.status, 'refused', `${Object.keys(env)[0]}: the import path was not refused`);
+    assert.equal(libraries.reason, binary.reason, 'the import path must not invent its own refusal text');
+    assert.match(libraries.reason, says);
+    assert.match(libraries.reason, new RegExp(PINNED.replaceAll('.', '\\.')), 'the refusal must name the version that was wanted');
+    assert.equal(libraries.nodeModules, null);
+    assert.equal(libraries.require, null);
+    assert.equal(libraries.version, null);
+    assert.equal(libraries.entry, null);
+    assert.ok(!libraries.searched.includes(join(root, 'node_modules', '.bin', 'dsh')),
+      'the import path walked past the refused override into the pinned install');
+    assert.deepEqual(libraries.searched, binary.searched);
+  }
+  await rm(root, { recursive: true }); await rm(staleHome, { recursive: true });
+});
+
+test('with nothing installed the import path is unmeasured, says where it looked, and hands out no require', async () => {
+  const root = await makePinRoot(PINNED);
+  const empty = await mkdtemp(join(tmpdir(), 'dsh-entry-home-'));
+  const options = { env: {}, home: empty, root, systemRoots: false };
+  const binary = await resolveDshEntry(options);
+  const libraries = await resolveDshLibraries(options);
+  assert.equal(libraries.status, 'unmeasured');
+  assert.equal(libraries.nodeModules, null);
+  assert.equal(libraries.require, null);
+  assert.equal(libraries.version, null);
+  assert.equal(libraries.reason, binary.reason, 'the unmeasured reason is the binary resolver\'s, not a second wording');
+  assert.ok(libraries.reason.includes(join(root, 'node_modules', '.bin', 'dsh')), libraries.reason);
+  assert.ok(libraries.searched.includes(join(root, 'node_modules', '.bin', 'dsh')));
+  assert.deepEqual(libraries.searched, binary.searched);
+  await rm(root, { recursive: true }); await rm(empty, { recursive: true });
+});
+
+test('a measured binary that lives in no node_modules is refused, not imported from the cwd', async () => {
+  const root = await makePinRoot(PINNED);
+  // A bare install: the manifest that owns the binary is beside bin/, not in a node_modules.
+  const bare = await mkdtemp(join(tmpdir(), 'dsh-entry-bare-'));
+  await writeFile(join(bare, 'package.json'), JSON.stringify({ name: DSH_PACKAGE, version: PINNED }));
+  await mkdir(join(bare, 'bin'), { recursive: true });
+  await writeFile(join(bare, 'bin', 'dsh'), '#!/usr/bin/env node\n');
+  const binary = join(bare, 'bin', 'dsh');
+  const options = { env: { AITELIER_DSH_TEST_ENTRY: binary }, home: bare, root, systemRoots: false };
+  assert.equal((await resolveDshEntry(options)).status, 'measured', 'the binary itself is attributable to the pin');
+  const libraries = await resolveDshLibraries(options);
+  assert.equal(libraries.status, 'refused', 'with no install root to import from, guessing the cwd is not an answer');
+  assert.equal(libraries.nodeModules, null);
+  assert.equal(libraries.require, null);
+  assert.ok(libraries.reason.includes(await realpath(binary)), libraries.reason);
+  assert.match(libraries.reason, /is not inside a node_modules directory/);
+  assert.match(libraries.reason, new RegExp(PINNED.replaceAll('.', '\\.')));
+  await rm(root, { recursive: true }); await rm(bare, { recursive: true });
 });

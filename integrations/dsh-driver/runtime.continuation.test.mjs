@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 
 // Root script: one step of work and stop -> continuation question -> a check and
 // NOTHING_LEFT -> idle (no second question) -> the review: start a detached job,
@@ -61,9 +62,10 @@ export function apply(ctx) {
 }
 `;
 
-test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job refused then watched, its exit wakes, review resumes', { timeout: 60000 }, async () => {
+test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job refused then watched, its exit wakes, review resumes', { timeout: 60000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;                       // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-continuation-'));
-  const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const session = 'continuation-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const events = [], requests = [], parked = new Set();
@@ -111,7 +113,7 @@ test('real pinned DSH: continuation question, NOTHING_LEFT parks, background job
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-continuation-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: session,
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,

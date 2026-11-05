@@ -668,3 +668,23 @@ test('prompts: dispatch picks a template and binds params, adds templates by rev
   assert.doesNotMatch(goal, /已有适用的 pipeline|没有适用 pipeline/);
   assert.doesNotMatch(driver, /Delegate bounded work to DSH subagent or an AItelier pipeline/);
 });
+
+// iss-92653d46882441de: the tool shell drops any environment name containing KEY, so git's indexed
+// config arrives as COUNT=1 with no KEY_0 and every bare git command dies before it runs.
+test('the indexed git config environment is removed before anything can inherit it', async () => {
+  const { dropIndexedGitConfig } = await import('./runtime.mjs');
+  const env = {
+    PATH: '/usr/bin',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '/some/helper.sh',
+    GIT_CONFIG_KEY_1: 'user.name',
+    GIT_CONFIG_VALUE_1: 'someone',
+    GIT_CONFIG_GLOBAL: '/tmp/keep-me',
+    GIT_TOKENLIKE_UNRELATED: 'keep',
+  };
+  dropIndexedGitConfig(env);
+  assert.deepEqual(Object.keys(env).sort(), ['GIT_CONFIG_GLOBAL', 'GIT_TOKENLIKE_UNRELATED', 'PATH']);
+  // A clean environment is the whole point: with COUNT gone git reads ~/.gitconfig and parses.
+  assert.equal(env.GIT_CONFIG_COUNT, undefined);
+});

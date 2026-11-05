@@ -286,6 +286,8 @@ export class DriverRuntime {
 }
 
 export async function boot(ctx, { env = process.env, request: suppliedRequest } = {}) {
+  // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
+  dropIndexedGitConfig(process.env);
   await ctx.get('loader')?.await();
   const require = createRequire(env.AITELIER_DSH_ENTRY);
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
@@ -694,4 +696,27 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
 export function apply(ctx) {
   // Awaiting loader settlement inside apply would deadlock its own startup.
   void boot(ctx).catch(error => { console.error('AItelier DSH startup:', String(error)); ctx.get('appExit')?.(1); });
+}
+
+/**
+ * Drop git's indexed config environment before anything is spawned.
+ *
+ * The host unit exports GIT_CONFIG_COUNT=1 plus GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0 so git picks up
+ * the credential helper. The tool shell applies a secret-name filter to the environment, and that
+ * filter matches by NAME: it correctly removes AITELIER_DRIVER_TOKEN and friends, and it also removes
+ * GIT_CONFIG_KEY_0 because the name contains KEY. What survives is COUNT=1 with no KEY_0, which is
+ * not a partial configuration git can ignore - git refuses to parse the environment at all
+ * ("error: missing config key GIT_CONFIG_KEY_0", exit 128) and every bare git command fails, which
+ * looks like a Git problem rather than a harness one (iss-92653d46882441de).
+ *
+ * An indexed pair cannot survive a name filter by construction, so the fix is to hand git no partial
+ * config: with all three gone, git reads ~/.gitconfig as usual and works. The credential helper is
+ * not needed for this driver's own use - every successful push from this driver ran with the whole
+ * GIT_CONFIG_* set unset.
+ */
+export function dropIndexedGitConfig(env) {
+  for (const name of Object.keys(env)) {
+    if (/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(name)) delete env[name];
+  }
+  return env;
 }

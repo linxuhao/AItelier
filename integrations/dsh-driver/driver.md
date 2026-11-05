@@ -70,7 +70,13 @@ message bus. External providers may only support one-shot work. Each writer
 needs its own checkout; each run has one controller.
 
 When no immediate action remains, finish the current round. There is no wait
-tool. The runtime stays subscribed to project State changes (including new
+tool. After a turn in which you called a tool, the runtime asks you once
+(continuation check) whether there is more you can do now; do it, or answer with
+one line that starts with NOTHING_LEFT: naming why each candidate is blocked.
+A turn without a tool call or with NOTHING_LEFT parks you. For a long background
+job you started, call watch_process with its pid and note instead of polling its
+log: its exit wakes you. When nothing is actionable and nothing is in flight,
+call idle_dormant with the reason: the timed review stops until real input. The runtime stays subscribed to project State changes (including new
 issues), project/driver inbox messages, and native worker messages/completion.
 It wakes an idle agent automatically and queues busy-time input for the next
 step. Ordinary transport timeouts spend no model turns. An active director gets

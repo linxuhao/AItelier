@@ -63,6 +63,9 @@ export function apply(ctx) {
 
 async function scenario(floor) {
   const directory = await mkdtemp(join(homedir(), 'dsh-dormancy-'));
+  // Unique per run: background-job detection matches processes by session, and other
+  // real-DSH test files run their own drivers in parallel.
+  const session = 'dormancy-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const events = [], requests = [], claimQueries = [], parked = new Set();
@@ -109,7 +112,7 @@ async function scenario(floor) {
     const deadline = Date.now() + ms;
     while (Date.now() < deadline && proc.exitCode === null && !predicate()) await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(proc.exitCode, null, output);
-    assert.ok(predicate(), `${what}\nREQ ${JSON.stringify(requests.map(r => [r.session === 'fixture-root' ? 'root' : r.session.slice(0, 8), r.purpose]))}\n${output}\n${JSON.stringify(events.map(e => [e.seq, e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? '']))}`);
+    assert.ok(predicate(), `${what}\nREQ ${JSON.stringify(requests.map(r => [r.session === session ? 'root' : r.session.slice(0, 8), r.purpose]))}\n${output}\n${JSON.stringify(events.map(e => [e.seq, e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? '']))}`);
   };
   try {
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
@@ -133,7 +136,7 @@ async function scenario(floor) {
       'print(json.dumps({"plans": plans}))'].join('\n') + '\n');
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
-      AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
+      AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: session,
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_IDLE_REVIEW_MS: '400', AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS: String(floor),

@@ -6,6 +6,7 @@ import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit }
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -86,14 +87,76 @@ export const wakeSources = new Set(['user', runtimeEventSource, 'agent-message',
  *  (runtime context, compaction checkpoints, this runtime's State snapshot): not input. */
 export const endsDormancy = event => event.type === 'user/message' && wakeSources.has(event.data?.source?.kind ?? 'user');
 
+/** Source of the runtime's continuation question: not input, not a goal round, not a wake source. */
+export const continueSource = 'aitelier-continue';
+/** The marker a director answers with when nothing is actionable. */
+export const NOTHING_LEFT = 'NOTHING_LEFT';
+/** Continuation questions in a row without real input before the director is left idle. */
+export const MAX_AUTO_CONTINUE = 5;
+export const continuationQuestion = 'AItelier continuation check: you ended a turn. Before parking, look for more work you can do now, in parallel with anything running: ready frontier nodes, open issues you can close or advance, next steps you promised yourself, results you can collect. If there is one, do it now. If not, answer with one line that starts with NOTHING_LEFT: naming why each candidate is blocked. For a long background job you started, call watch_process with its pid instead of polling it.';
+export const reviewInstruction = 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If nothing is actionable, reply with one line that starts with NOTHING_LEFT: naming why each candidate is blocked; if nothing is in flight either, call idle_dormant with that reason instead.';
+
+/** Decides, at the end of each root turn, whether to ask the director once more.
+ *  A turn that called a tool and did not answer NOTHING_LEFT may have stopped
+ *  with work left (a cheap model tends to end a round after one step), so it is
+ *  asked; a turn without a tool call, or one that answered NOTHING_LEFT, is the
+ *  second consecutive stop and goes idle. Real input (wake sources) restores the
+ *  budget of MAX_AUTO_CONTINUE questions, which bounds a director that only polls. */
+export class Continuation {
+  constructor({ maxAuto = MAX_AUTO_CONTINUE } = {}) {
+    this.maxAuto = maxAuto;
+    this.auto = 0;
+    this.tools = 0;
+    this.text = '';
+  }
+  observe(event) {
+    if (event.type === 'tool/call') this.tools++;
+    else if (event.type === 'assistant/message') this.text = (event.data?.message?.content ?? [])
+      .filter(block => block.type === 'text').map(block => block.text ?? '').join('\n');
+    else if (endsDormancy(event)) this.auto = 0;
+  }
+  /** At idle: true to ask once more, false to go idle. Always starts a new turn record. */
+  turnEnded() {
+    const worked = this.tools > 0 && !this.text.includes(NOTHING_LEFT);
+    this.tools = 0;
+    this.text = '';
+    if (!worked || this.auto >= this.maxAuto) return false;
+    this.auto++;
+    return true;
+  }
+}
+
+/** The AItelier driver session a process belongs to (its environment), or undefined. */
+export function processSession(pid, procRoot = '/proc') {
+  try {
+    const entry = readFileSync(join(procRoot, String(pid), 'environ'), 'latin1').split('\0').find(e => e.startsWith('AITELIER_DSH_SESSION='));
+    return entry?.slice('AITELIER_DSH_SESSION='.length);
+  } catch { return undefined; }
+}
+/** Whether a process exists and is not a zombie. */
+export function processAlive(pid, procRoot = '/proc') {
+  try { return readFileSync(join(procRoot, String(pid), 'stat'), 'latin1').replace(/^.*\) /s, '')[0] !== 'Z'; }
+  catch { return false; }
+}
+/** Live processes other than the driver itself that carry this driver's session:
+ *  jobs its shell started, detached or not (the environment survives reparenting). */
+export function backgroundProcesses(session, selfPid = process.pid, procRoot = '/proc') {
+  if (!session) return [];
+  let names;
+  try { names = readdirSync(procRoot); } catch { return []; }
+  return names.filter(name => /^\d+$/.test(name) && Number(name) !== selfPid)
+    .map(Number).filter(pid => processSession(pid, procRoot) === session && processAlive(pid, procRoot)).sort((a, b) => a - b);
+}
+
 /** Why idle_dormant must refuse, or null. Dormancy must never strand work: a live
  *  native child, a live State claim of this driver, or an unfinished todo plan
  *  without a live child each refuse. claims/plans are omitted for the early check. */
-export function dormancyRefusal({ reason, liveChildren = 0, claims = [], plans = [] }) {
+export function dormancyRefusal({ reason, liveChildren = 0, claims = [], plans = [], background = [] }) {
   if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
   if (liveChildren) return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running` };
   if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
   if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id) };
+  if (background.length) return { refused: 'background_processes', reason: 'jobs you started are still running; watch_process them or wait', pids: background };
   return null;
 }
 
@@ -108,8 +171,8 @@ export const DORMANT_COMPACT_MIN_TOKENS = 32000;
  *  `compact` runs once - the provider cache will be cold by the next wake anyway,
  *  so a large context is cheapest to shrink while it is still warm. */
 export class IdleReview {
-  constructor({ agent, goals, notify, onError, compact, intervalMs = 15 * 60 * 1000 }) {
-    Object.assign(this, { agent, goals, notify, onError, compact, intervalMs });
+  constructor({ agent, goals, notify, onError, compact, continuation, ask, canContinue = () => true, intervalMs = 15 * 60 * 1000 }) {
+    Object.assign(this, { agent, goals, notify, onError, compact, continuation, ask, canContinue, intervalMs });
     this.closed = false;
   }
   enterDormancy(reason) {
@@ -129,6 +192,7 @@ export class IdleReview {
     // Keep the durable mandate active, while parking immediate native rounds.
     // Incoming steering and native child messages still wake an idle agent.
     this.goals.disarm(this.agent);
+    const again = this.continuation?.turnEnded() ?? false;
     if (this.dormant) {
       if (this.dormant.compactPending && this.compact) {
         this.dormant.compactPending = false;
@@ -137,6 +201,10 @@ export class IdleReview {
       return;
     }
     if (this.goals.get(this.agent)?.phase !== 'active') return;
+    if (again && this.ask && this.canContinue()) {
+      Promise.resolve().then(this.ask).catch(this.onError);
+      return;
+    }
     this.timer = setTimeout(() => {
       if (this.closed || this.agent.status !== 'idle' || this.goals.get(this.agent)?.phase !== 'active') return;
       Promise.resolve().then(this.notify).catch(this.onError);
@@ -431,11 +499,25 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   await runtime.init();
   const schema = await request('/api/state/schema');
   const subagents = new Set();
+  const watchIntervalMs = Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) > 0 ? Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) : 15000;
   const floorEnv = Number(env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS);
   const compactFloor = env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS !== undefined && Number.isFinite(floorEnv) && floorEnv >= 0
     ? floorEnv : DORMANT_COMPACT_MIN_TOKENS;
   // idleReview is created after the agent; tools reach it only when called.
   let agent, agentCtx, idleReview, waiting = false, disposed = false;
+  const continuation = new Continuation();
+  // watch_process: pid -> { note, since }. One poller while any watch exists.
+  const watches = new Map();
+  let watchTimer;
+  const pollWatches = () => {
+    for (const [pid, watch] of watches) {
+      if (processAlive(pid) && processSession(pid) === env.AITELIER_DSH_SESSION) continue;
+      watches.delete(pid);
+      void notify('AItelier background job finished:\n' + JSON.stringify({ pid, note: watch.note,
+        ran_seconds: Math.round((Date.now() - watch.since) / 1000) })).catch(error => ctx.logger.warn(String(error)));
+    }
+    if (!watches.size) { clearInterval(watchTimer); watchTimer = undefined; }
+  };
   let subscriptionError = '', completionError = '';
   let activity = Promise.resolve();
   const currentPhase = () => waiting ? completionError ? 'failed' : 'waiting' : 'running';
@@ -566,6 +648,20 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
           await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
         : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
     }));
+    scope.tools.register(defineTool({ name: 'watch_process',
+      description: 'Director only. Watch a long background job you started (its pid): when it exits you get a runtime event with the pid, your note and how long it ran, even while dormant. Use it instead of polling a log; a watched job does not block idle_dormant. Refused for a pid that is not running or not started from this driver.',
+      parameters: { pid: { type: 'integer', required: true }, note: { type: 'string', required: true } }, output: jsonOutput,
+      execute(args) {
+        const pid = Number(args.pid), note = typeof args.note === 'string' ? args.note.trim().slice(0, 500) : '';
+        if (!Number.isSafeInteger(pid) || pid <= 1 || !note) return { refused: 'invalid_arguments', reason: 'pid must be a process id and note must say what it is' };
+        if (!processAlive(pid)) return { refused: 'not_running', reason: `process ${pid} is not running` };
+        if (processSession(pid) !== env.AITELIER_DSH_SESSION) return { refused: 'not_this_driver', reason: `process ${pid} was not started from this driver` };
+        if (!watches.has(pid) && watches.size >= 16) return { refused: 'too_many_watches', reason: 'at most 16 watched jobs', watching: [...watches.keys()] };
+        watches.set(pid, { note, since: watches.get(pid)?.since ?? Date.now() });
+        if (!watchTimer) { watchTimer = setInterval(pollWatches, watchIntervalMs); watchTimer.unref?.(); }
+        return { watching: true, pid, note, check_every_seconds: watchIntervalMs / 1000 };
+      },
+    }));
     scope.tools.register(defineTool({ name: 'idle_dormant',
       description: 'Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. You stay subscribed: any State event, inbox message, owner message or child message wakes you and the review resumes. Refused while you have a live child, a live State claim or an unfinished todo plan.',
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
@@ -582,7 +678,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         } catch (error) {
           return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
         }
-        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, claims, plans });
+        const background = backgroundProcesses(env.AITELIER_DSH_SESSION).filter(pid => !watches.has(pid));
+        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, claims, plans, background });
         if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
         const dormant = idleReview.enterDormancy(reason);
@@ -608,7 +705,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: env.AITELIER_DSH_SESSION })
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
-  idleReview = new IdleReview({ agent, goals: ctx.goals,
+  idleReview = new IdleReview({ agent, goals: ctx.goals, continuation,
+    canContinue: () => !completionError,
+    ask: async () => {
+      if (disposed) return;
+      ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: continuationQuestion }], source: { kind: continueSource } })));
+      await ctx.sessionPersistence.flush();
+    },
     ...(Number(env.AITELIER_DSH_IDLE_REVIEW_MS) > 0 ? { intervalMs: Number(env.AITELIER_DSH_IDLE_REVIEW_MS) } : {}),
     compact: async () => {
       const tokens = ctx.tokenMeter.measure(agent.session).totalTokens;
@@ -623,7 +726,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier director review due:\n' + JSON.stringify({
         project_id: project, reason: 'idle_review_due',
-        instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available and nothing is in flight, call idle_dormant with the reason; otherwise finish this round and remain subscribed.',
+        instruction: reviewInstruction,
         ...todoView,
       }));
     },
@@ -645,6 +748,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // Only real input ends dormancy (a compaction while dormant must not). A kind
     // missing from wakeSources only keeps the timed review parked; the message
     // itself still runs a turn.
+    continuation.observe(event);
     if (endsDormancy(event) && idleReview.wake())
       ctx.logger.info(`dormancy ended by ${event.data.source?.kind ?? 'user'} message at seq ${event.seq}`);
     if (event.type === 'assistant/message') completionError = '';
@@ -712,6 +816,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     if (disposed) return;
     disposed = true;
     idleReview.close();
+    clearInterval(watchTimer);
     // A host shutdown ends process-local continuation, not the standing goal.
     // Disarm before cancellation so DSH does not persist a user-style pause.
     ctx.goals.disarm(agent);

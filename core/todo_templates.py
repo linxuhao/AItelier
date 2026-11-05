@@ -15,17 +15,25 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   appended `deliver` item.
 * `sha256` is the digest of the template file's bytes; the plan file records it, so
   a plan can always be traced to the exact template it came from.
+* A template binds paths into predicates that require them to CHANGE from their
+  state at the start of the step. `check_declared_paths` judges those paths against
+  the real workspace while the plan is still being frozen: a path that can never
+  differ (an existing directory, one outside the workspace, a repeat) is refused
+  there, and the ones that do not exist yet - legal, since creating a file is a
+  change - are announced in the result the director reads.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Mapping
 
-from core.todo_plan import Refusal, TodoPlan
+# `_relative` is reused, not restated: a declared path that escapes the workspace must be
+# refused by the SAME rule whether the plan or this audit looks at it.
+from core.todo_plan import Refusal, TodoPlan, _relative
 from core.todo_runtime import PredicateLibrary
 
 TYPES = ("str", "int", "list[str]")
@@ -241,3 +249,106 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
         items.append(item)
     return {"attempt_id": attempt_id, "node_key": node_key, "context_hash": context_hash, "base_sha": base_sha,
             "workspace": workspace, "scope": list(resolved["scope"]), "goal": goal, "items": items}
+
+
+# -- the paths a frozen plan requires to change ----------------------------------------------
+
+#: The predicates whose verdict is "this path differs from its state at the start of the step",
+#: with the argument that carries those paths. `core/todo_runtime.capture_pre_state` captures a
+#: pre-state for exactly these two, so a path bound here is one the item REQUIRES to change: if
+#: it can never change, the item can never pass, however good the work is.
+DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
+
+
+@dataclass(frozen=True)
+class PathAudit:
+    """What a plan's declared paths are, judged against the real workspace at freeze time."""
+
+    workspace: str
+    measured: bool          # False: the workspace is not a directory, so nothing was looked up
+    declared: tuple[str, ...]
+    existing: tuple[str, ...]
+    not_yet_existing: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    def as_json(self) -> dict:
+        return {"workspace": self.workspace, "workspace_is_a_directory": self.measured,
+                "declared": list(self.declared), "existing": list(self.existing),
+                "not_yet_existing": list(self.not_yet_existing), "notes": list(self.notes)}
+
+
+def check_declared_paths(plan: TodoPlan) -> PathAudit:
+    """Judge the plan's declared paths against the real workspace, before the plan file exists.
+
+    The item's own predicate is "every listed path differs from its state at the start of the
+    step". A path for which that is impossible is refused HERE, while the plan is being frozen,
+    because a frozen plan whose item can never pass keeps its attempt running until someone
+    abandons it and the director only finds out at delivery:
+
+    * an existing DIRECTORY - `_digest` digests files only, so a directory has no state to
+      differ from: `files_changed` would fail it forever with "does not exist after the step";
+    * a path outside the workspace (absolute, or holding a `..` component) - refused by the
+      plan's own rule, `todo_plan._relative`, called here so there are never two rules;
+    * the same path twice in one list, compared in normalised form so `./a` and `a` collide -
+      a list that repeats one file names fewer files than it looks like it does.
+
+    A path that does not exist yet stays LEGAL: creating a file is a normal change and
+    `code_change` relies on it. It is ANNOUNCED instead ("the step will have to create it"), in
+    the result that carries the frozen plan, so a director who will never create one sees it now.
+
+    A workspace that is not a directory is said out loud rather than skipped, and nothing is
+    assumed about it: the paths cannot be looked up, so they are not judged by a guess.
+    """
+    workspace = Path(plan.workspace)
+    measured = workspace.is_dir()
+    declared: list[str] = []
+    existing: list[str] = []
+    created: list[str] = []
+    for item in plan.items:
+        for binding in item.predicates:
+            arg = DELTA_PATHS.get(binding.predicate)
+            if arg is None or arg not in binding.args:
+                continue
+            where = f"item {item.id}: {binding.predicate}.{arg}"
+            raw = binding.args[arg]
+            seen: dict[str, str] = {}
+            for value in (raw if isinstance(raw, list) else [raw]):
+                _relative(value, where)
+                rel = str(PurePosixPath(str(value)))
+                if rel in seen:
+                    raise Refusal(
+                        "impossible_path",
+                        f"{where} declares {rel!r} twice ({seen[rel]!r} and {value!r} are the same path once "
+                        f"normalised): a list that repeats one file names fewer files than the director reads it "
+                        f"as - the other file that was meant is not declared at all, and this item would judge a "
+                        f"shorter list than intended",
+                        item=item.id, predicate=binding.predicate, path=rel)
+                seen[rel] = str(value)
+                if rel in declared:
+                    continue
+                declared.append(rel)
+                if not measured:
+                    continue
+                target = workspace / rel
+                if target.is_dir():
+                    raise Refusal(
+                        "impossible_path",
+                        f"{where} declares {rel!r}, an existing DIRECTORY under workspace {plan.workspace}: the "
+                        f"item requires every declared path to differ from its state at the start of the step, and a "
+                        f"directory has no state to differ from - {binding.predicate} compares a file's digest, so "
+                        f"this item could never pass and the attempt would run until someone abandoned it; declare "
+                        f"the files inside it",
+                        item=item.id, predicate=binding.predicate, path=rel)
+                (existing if target.exists() else created).append(rel)
+    notes: list[str] = []
+    if not measured:
+        notes.append(
+            f"workspace {plan.workspace} is not a directory, so the {len(declared)} declared path(s) {list(declared)} "
+            f"could not be looked up: no directory, duplicate-spelling or existence check was made, and nothing was "
+            f"assumed about them")
+    elif created:
+        notes.append(
+            f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "
+            f"EVERY declared path to differ from its state at the start of the step, so this step will have to "
+            f"CREATE them - a director who will never create one has frozen an item that cannot pass")
+    return PathAudit(plan.workspace, measured, tuple(declared), tuple(existing), tuple(created), tuple(notes))

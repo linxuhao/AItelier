@@ -142,8 +142,13 @@ def cmd_templates(args, store: None, now: float) -> dict:
     return {"directory": str(directory), "templates": listed}
 
 
-def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None]:
-    """The frozen plan, and (for a template) where it came from. Both routes validate identically."""
+def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None, "templates.PathAudit"]:
+    """The frozen plan, (for a template) where it came from, and the declared-path audit.
+
+    Both routes validate identically, the audit included: whichever way a plan is written, a
+    declared path that can never change makes one of its items impossible to pass - so it is
+    refused here, while planning, before `cmd_create` writes any plan file.
+    """
     if bool(args.plan_json) == bool(args.template):
         raise Refusal("usage", "give exactly one of --template NAME (with --params) or --plan-json FILE")
     if args.plan_json:
@@ -151,25 +156,27 @@ def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None]:
             raw = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise Refusal("invalid_plan", f"cannot read plan JSON {args.plan_json}: {exc}") from exc
-        return TodoPlan.from_json(raw, library), None, None
-    missing = [f"--{f.replace('_', '-')}" for f in _TEMPLATE_FLAGS if not getattr(args, f)]
-    if missing:
-        raise Refusal("usage", f"--template needs {', '.join(missing)}")
-    try:
-        supplied = json.loads(args.params or "{}")
-    except ValueError as exc:
-        raise Refusal("bad_param", f"--params is not JSON: {exc}") from exc
-    template = templates.load_template(args.template, library)
-    resolved = templates.resolve_params(template, supplied)
-    plan = TodoPlan.from_json(templates.plan_data(
-        template, resolved, attempt_id=args.attempt, node_key=args.node_key, context_hash=args.context_hash,
-        base_sha=args.base_sha, workspace=args.workspace, goal=args.goal), library)
-    return plan, {"name": template.name, "version": template.version, "sha256": template.sha256}, resolved
+        plan, template, params = TodoPlan.from_json(raw, library), None, None
+    else:
+        missing = [f"--{f.replace('_', '-')}" for f in _TEMPLATE_FLAGS if not getattr(args, f)]
+        if missing:
+            raise Refusal("usage", f"--template needs {', '.join(missing)}")
+        try:
+            supplied = json.loads(args.params or "{}")
+        except ValueError as exc:
+            raise Refusal("bad_param", f"--params is not JSON: {exc}") from exc
+        source = templates.load_template(args.template, library)
+        params = templates.resolve_params(source, supplied)
+        plan = TodoPlan.from_json(templates.plan_data(
+            source, params, attempt_id=args.attempt, node_key=args.node_key, context_hash=args.context_hash,
+            base_sha=args.base_sha, workspace=args.workspace, goal=args.goal), library)
+        template = {"name": source.name, "version": source.version, "sha256": source.sha256}
+    return plan, template, params, templates.check_declared_paths(plan)
 
 
 def cmd_create(args, store: PlanStore, now: float) -> dict:
     library = builtin_library()
-    plan, template, params = _plan_from_args(args, library)
+    plan, template, params, paths = _plan_from_args(args, library)
     with store.lock(plan.attempt_id):
         existing = store.read(plan.attempt_id)
         if existing is not None:
@@ -183,7 +190,7 @@ def cmd_create(args, store: PlanStore, now: float) -> dict:
     with _plan(store, plan.attempt_id, now, locked=False) as open_plan:
         return {"created": created, "attempt_id": plan.attempt_id, "plan_hash": plan.plan_hash,
                 "template": template, "params": params, "library_version": library.version, "items": [i.id for i in plan.items],
-                "brief": open_plan.run.brief(max_chars=_BRIEF_CHARS)}
+                "paths": paths.as_json(), "brief": open_plan.run.brief(max_chars=_BRIEF_CHARS)}
 
 
 def cmd_status(args, store: PlanStore, now: float) -> dict:

@@ -12,10 +12,10 @@ import sys
 import pytest
 
 from core.todo_runtime import builtin_library
-from core.todo_templates import load_template
+from core.todo_templates import check_declared_paths, load_template
 # The CLI harness and fixtures are shared with the free-plan tests.
 from tests.unit.test_todo_plan_cli import (  # noqa: F401
-    Cli, T0, begin_done, base, cli, commit_all, deliver_results, git, repo)
+    Cli, T0, begin_done, base, cli, commit_all, deliver_results, git, item, plan, repo)
 
 TEMPLATES = Path(__file__).resolve().parents[2] / "todo_templates"
 SHIPPED = {"code_change", "test_fix", "docs_change", "investigate"}
@@ -323,3 +323,154 @@ def test_a_template_plan_runs_end_to_end_to_a_candidate(cli, repo, base, tmp_pat
     assert deliver_results(cli)["_outcome"] == "pass"
     done = cli.ok("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))
     assert done["candidate"] is True and done["artifact"] == git(repo, "rev-parse", "HEAD")
+
+
+# -- the paths a plan requires to change ------------------------------------------------------
+#
+# An item whose predicates say "every listed path must differ from its state at the start of the
+# step" cannot pass if one of those paths can never differ. That is caught here, at freeze time:
+# a frozen plan that cannot pass keeps its attempt running until someone abandons it, and the
+# director only hears about it at delivery.
+
+def test_a_declared_directory_is_refused_by_name_before_any_plan_file_exists(cli, repo, base):
+    (repo / "out").mkdir()
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "out"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'out'" in out["reason"] and "DIRECTORY" in out["reason"], out["reason"]
+    assert "could never pass" in out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "out")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../outside.py", "sub/../../escape.py"])
+def test_a_declared_path_outside_the_workspace_is_refused_before_any_plan_file_exists(cli, repo, base, bad):
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", bad]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert "relative path inside the workspace" in out["reason"] and bad in out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+@pytest.mark.parametrize("paths", [["app.py", "app.py"], ["app.py", "./app.py"],
+                                   ["docs/x.md", "docs/x.md"], ["app.py", "app.py/"]])
+def test_a_declared_path_repeated_in_one_list_is_refused(cli, repo, base, paths):
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": paths})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "twice" in out["reason"] and "not declared at all" in out["reason"], out["reason"]
+    assert out["path"] == paths[0].rstrip("/") and out["item"] == "implement"
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_plan_whose_paths_all_exist_refuses_nothing_and_announces_nothing(cli, repo, base):
+    code, out = create_from(cli, repo, base)
+    assert code == 0, out
+    assert out["paths"] == {"workspace": str(repo), "workspace_is_a_directory": True,
+                            "declared": ["app.py", "other.py"], "existing": ["app.py", "other.py"],
+                            "not_yet_existing": [], "notes": []}
+
+
+def test_a_path_that_does_not_exist_yet_is_legal_and_announced_in_the_plan_result(cli, repo, base):
+    params = {**CODE, "paths": ["app.py", "docs/new.md"], "scope": ["app.py", "docs/"]}
+    code, out = create_from(cli, repo, base, params=params)
+    assert code == 0, out
+    audit = out["paths"]
+    assert audit["workspace_is_a_directory"] is True
+    assert audit["declared"] == ["app.py", "docs/new.md"]
+    assert (audit["existing"], audit["not_yet_existing"]) == (["app.py"], ["docs/new.md"])
+    note = audit["notes"][0]
+    assert "docs/new.md" in note and "will have to CREATE" in note and "cannot pass" in note, note
+    assert document(cli)["plan"]["items"][0]["predicates"][0]["args"]["paths"] == ["app.py", "docs/new.md"]
+
+
+def test_a_path_that_does_not_exist_yet_still_has_to_be_created_for_the_item_to_pass(cli, repo, base):
+    params = {**CODE, "paths": ["app.py", "docs/new.md"], "scope": ["app.py", "docs/"]}
+    assert create_from(cli, repo, base, params=params)[0] == 0
+    cli.ok("begin", "--attempt", "att-1", "--item", "implement")
+    (repo / "app.py").write_text("x = 1  # changed\n")
+    files = next(r for r in cli.ok("done", "--attempt", "att-1", "--item", "implement")["results"]
+                 if r["predicate"] == "files_changed")
+    assert files["outcome"] == "fail" and "docs/new.md" in files["detail"], "announced, not excused"
+    (repo / "docs").mkdir()
+    (repo / "docs" / "new.md").write_text("# changed\n")
+    assert cli.ok("done", "--attempt", "att-1", "--item", "implement")["outcome"] == "pass"
+
+
+def test_investigate_announces_the_report_it_has_to_create(cli, repo, base):
+    code, out = create_from(cli, repo, base, "investigate", INVESTIGATE)
+    assert code == 0, out
+    assert out["paths"]["declared"] == ["out/report.json"] and out["paths"]["not_yet_existing"] == ["out/report.json"]
+    assert "out/report.json" in out["paths"]["notes"][0]
+
+
+def test_a_workspace_that_is_not_a_directory_is_said_out_loud_not_silently_skipped(cli, repo, base, tmp_path):
+    ghost = tmp_path / "not-a-workspace"
+    code, out = cli.run("create", "--template", "code_change", "--params", json.dumps(CODE),
+                        "--attempt", "att-1", "--node-key", "execution.demo", "--context-hash", "c" * 64,
+                        "--base-sha", base, "--workspace", str(ghost), "--goal", "make the change")
+    assert code == 0, out
+    audit = out["paths"]
+    assert audit["workspace_is_a_directory"] is False
+    assert (audit["declared"], audit["existing"], audit["not_yet_existing"]) == (["app.py", "other.py"], [], []), \
+        "nothing was invented about paths the audit could not look up"
+    note = audit["notes"][0]
+    assert str(ghost) in note and "could not be looked up" in note and "nothing was assumed" in note, note
+
+
+def test_the_free_plan_route_refuses_the_same_paths(cli, repo, base):
+    (repo / "out").mkdir()
+    directory = plan(repo, base, [item("edit", [{"predicate": "files_changed", "args": {"paths": ["out"]}}])])
+    code, out = cli.create(directory)
+    assert code == 2 and out["refused"] == "impossible_path" and out["path"] == "out", out
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+TWO_ITEMS = """\
+name: t
+version: 1
+description: two items that each require the same file to change
+params:
+  scope:
+    type: list[str]
+    required: true
+  paths:
+    type: list[str]
+    required: true
+items:
+  - id: first
+    title: "first ${paths}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths}
+  - id: second
+    title: "second ${paths}"
+    needs: [first]
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths}
+"""
+
+
+def test_the_same_path_in_two_items_is_not_a_duplicate(cli, repo, base, custom):
+    write_template(custom, "t", TWO_ITEMS)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"], "paths": ["app.py"]})
+    assert code == 0, out
+    assert out["paths"]["declared"] == ["app.py"], "one entry per path, once"
+
+
+def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
+    from core.todo_plan import Refusal, TodoPlan
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("x = 1\n")
+    (workspace / "dir").mkdir()
+    data = {"attempt_id": "att-1", "node_key": "execution.demo", "context_hash": "c" * 64, "base_sha": "0" * 40,
+            "workspace": str(workspace), "scope": ["a.py"], "goal": "g",
+            "items": [item("edit", [{"predicate": "files_changed", "args": {"paths": ["a.py", "later.py"]}}])]}
+    audit = check_declared_paths(TodoPlan.from_json(data, builtin_library()))
+    assert (audit.declared, audit.existing, audit.not_yet_existing) == (("a.py", "later.py"), ("a.py",), ("later.py",))
+    assert audit.measured is True and audit.workspace == str(workspace)
+
+    data["items"] = [item("edit", [{"predicate": "files_changed", "args": {"paths": ["dir"]}}])]
+    with pytest.raises(Refusal) as caught:
+        check_declared_paths(TodoPlan.from_json(data, builtin_library()))
+    assert caught.value.code == "impossible_path" and caught.value.extra["path"] == "dir"

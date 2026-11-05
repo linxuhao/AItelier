@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -163,6 +163,69 @@ test('runtime parks native continuation, reviews idle active goals, and cancels 
   t.mock.timers.tick(100);await Promise.resolve();assert.equal(reviews,1);
   agent.status='idle';review.statusChanged('idle');review.close();
   t.mock.timers.tick(500);await Promise.resolve();assert.equal(reviews,1);
+});
+test('dormancy parks the timed review, compacts once on the first idle, and wake restores the review', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const agent={status:'idle'},goal={id:'kept',phase:'active',activation:'armed',roundsStarted:4};
+  let reviews=0,compactions=0;
+  const review=new IdleReview({agent,goals:{get:()=>goal,disarm:()=>{goal.activation='disarmed';}},intervalMs:100,
+    notify:()=>{reviews++;},compact:()=>{compactions++;},onError:error=>{throw error;}});
+  // Entered during the tool's turn (running), so the review timer is not armed yet.
+  agent.status='running';review.statusChanged('running');
+  const entered=review.enterDormancy('nothing authorized');
+  assert.equal(entered.reason,'nothing authorized');assert.ok(Date.parse(entered.since));
+  agent.status='idle';review.statusChanged('idle');
+  await Promise.resolve();await Promise.resolve();
+  assert.equal(compactions,1,'first idle after entering compacts once');
+  assert.equal(goal.activation,'disarmed','dormancy still parks native continuation');
+  t.mock.timers.tick(10000);await Promise.resolve();
+  assert.equal(reviews,0,'no timed review while dormant');
+  // Further idles while still dormant neither review nor compact again.
+  review.statusChanged('running');review.statusChanged('idle');await Promise.resolve();
+  t.mock.timers.tick(10000);await Promise.resolve();
+  assert.equal(compactions,1);assert.equal(reviews,0);
+  // A real message wakes it: the turn runs, the next idle arms the normal review.
+  assert.equal(review.wake().reason,'nothing authorized');
+  assert.equal(review.wake(),undefined,'waking twice is a no-op');
+  agent.status='running';review.statusChanged('running');
+  agent.status='idle';review.statusChanged('idle');
+  t.mock.timers.tick(100);await Promise.resolve();
+  assert.equal(reviews,1);assert.equal(compactions,1,'waking does not compact');
+  review.close();
+});
+test('only real input ends dormancy: owner, runtime events and child messages, not DSH bookkeeping', () => {
+  const message = kind => ({ type: 'user/message', data: { content: [], ...(kind === undefined ? {} : { source: { kind } }) } });
+  for (const kind of [undefined, 'user', 'aitelier-runtime-event', 'agent-message', 'subagent-settled', 'child'])
+    assert.equal(endsDormancy(message(kind)), true, String(kind));
+  for (const kind of ['runtime-context', 'compact-checkpoint', stateInjectionSource, 'goal', 'something-new'])
+    assert.equal(endsDormancy(message(kind)), false, kind);
+  for (const type of ['assistant/message', 'tool/result', 'compaction/end'])
+    assert.equal(endsDormancy({ type, data: {} }), false, type);
+});
+test('dormancy is refused for each kind of live work, in a fixed order, and allowed only with none', () => {
+  const claim = { node_key: 'n', status: 'live', driver_id: 'me' }, plan = { attempt_id: 'attempt-x', remaining: ['test'] };
+  assert.equal(dormancyRefusal({ reason: '' }).refused, 'reason_required');
+  const children = dormancyRefusal({ reason: 'quiet', liveChildren: 2 });
+  assert.equal(children.refused, 'live_children'); assert.match(children.reason, /^2 native/);
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', claims: [claim] }), { refused: 'live_claims', reason: 'you hold live State claims', node_keys: ['n'] });
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', plans: [plan] }),
+    { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: ['attempt-x'] });
+  // A child outranks claims and plans; a claim outranks plans.
+  assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 1, claims: [claim], plans: [plan] }).refused, 'live_children');
+  assert.equal(dormancyRefusal({ reason: 'quiet', claims: [claim], plans: [plan] }).refused, 'live_claims');
+  assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 0, claims: [], plans: [] }), null);
+});
+test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const errors=[],agent={status:'idle'},goal={id:'g',phase:'active',activation:'disarmed'};
+  const review=new IdleReview({agent,goals:{get:()=>goal,disarm:()=>{}},intervalMs:100,notify:()=>assert.fail('reviewed'),
+    compact:async()=>{throw new Error('busy');},onError:error=>errors.push(String(error))});
+  review.enterDormancy('quiet');review.statusChanged('idle');
+  for(let i=0;i<5;i++) await Promise.resolve();
+  assert.deepEqual(errors,['Error: busy']);
+  t.mock.timers.tick(1000);await Promise.resolve();
+  assert.ok(review.dormant,'a compaction failure does not end dormancy');
+  review.close();
 });
 test('idle review respects explicit stopped and cleared goal states', async t => {
   t.mock.timers.enable({apis:['setTimeout']});

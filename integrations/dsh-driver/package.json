@@ -2,6 +2,6 @@
   "name": "aitelier-dsh-driver",
   "private": true,
   "type": "module",
-  "scripts": {"test": "node --test runtime.test.mjs model.test.mjs tool-discovery.test.mjs runtime.user-message.test.mjs runtime.smoke.test.mjs runtime.todo.test.mjs runtime.goalseed.test.mjs"},
+  "scripts": {"test": "node --test runtime.test.mjs model.test.mjs tool-discovery.test.mjs runtime.user-message.test.mjs runtime.smoke.test.mjs runtime.todo.test.mjs runtime.goalseed.test.mjs runtime.dormancy.test.mjs"},
   "dependencies": {"@deepseek-ai/dsh": "0.2.1-rc.5"}
 }

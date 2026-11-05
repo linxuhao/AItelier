@@ -1,0 +1,241 @@
+{
+  "attempt_id": "attempt-6be67e05988d4b23ae02310c1e7702b8",
+  "node": "driver.project-inbox-injection-is-bounded-20261105",
+  "artifact_commit": "b120b6fc130c33497d96eaef22395ea7fad14e46",
+  "artifact_commit_date": "2026-11-05T22:44:26+00:00",
+  "artifact_subject": "DSH driver: the ack fields have their own guard",
+  "branch": "dsh/inbox-bound-review-20261105",
+  "worktree": "/home/linxuhao/.AItelier/worktrees/inbox-bound-review-20261105",
+  "secrecy": "Numbers only. This file contains no real or synthetic message subject or body text - only field names, lengths, counts and ids-free aggregates. The captured real page was read only through scripts that print numbers; both captures stayed in /tmp (inbox-page-all.json: the full 91-match set; inbox-page-raw.json: the oldest 20, i.e. the old injection).",
+  "reviewer": {
+    "identity": "Native DSH subagent; independent, non-author. Wrote none of the change. Added only this report to the tree. integrations/dsh-driver/runtime.mjs was mutated three times to plant mutants and restored byte-for-byte each time (sha256 in `mutants`). Pushed nothing, merged nothing, restarted nothing, wrote to no production checkout or State. Two read-only State queries were made with my own driver token (see payload_measurements.live_server_reads).",
+    "diff_under_review": "git diff a248ba48d9..b120b6fc13: 4 files, 417 insertions, 6 deletions. integrations/dsh-driver/runtime.mjs (3 hunks: +189 lines for listProjectInbox + projectInboxDigest, the projectInbox call site, the pendingInbox expression), runtime.test.mjs (+215), runtime.smoke.test.mjs (2 fixture lines), driver.md (+7).",
+    "suite": "npm test in integrations/dsh-driver on the pinned node: 102 tests, 102 pass, 0 fail at b120b6fc - measured before the mutants and again after the last restore. No pytest: the change is JavaScript only.",
+    "verdict": "PARTIAL. bounded-and-stated holds only while the match set fits in one request; the counted total becomes a remainder above 100 matches (the inbox is at 91). stale-items-stop-repeating passes. independent-review passes on the event path, the State cursor and the ack fields, but its 'counted' clause shares the same defect. Recommend the one-line matched_total fix (take it from the first page) before this lands; see recommendation."
+  },
+  "criteria": [
+    {
+      "id": "bounded-and-stated",
+      "verdict": "partial",
+      "ran_independently": [
+        "Replayed the real captured 91-match page through the committed code (listProjectInbox with the real request parameters + projectInboxDigest), not through the author's script: the author's /tmp/measure-inbox.mjs used a double whose matched_total is the store size on every page, which is not what the server returns.",
+        "Measured the payload on the real page and on a synthetic 20 x 4,096-byte fixture, then planted a mutant that removes the excerpt cap and measured which assertions redden.",
+        "Confirmed the server's pagination semantics twice: from core/director_messaging.py:442-466,483 (matched_total is computed over delivery_seq > after) and from tests/contracts/director_messaging/test_v2_statement.py:117,124 (after 1 of 2 matches, matched_total is 1), then live with two read-only queries against the deployed server."
+      ],
+      "bounded": {
+        "measured": true,
+        "real_page_digest_chars": 11921,
+        "ceiling_chars_named_by_the_code": 12000,
+        "under_ceiling": true,
+        "whole_event_envelope_chars": 11975,
+        "synthetic_20x4096_fixture_digest_chars": 10520,
+        "synthetic_20x4096_fixture_raw_page_chars": 96040,
+        "note": "The ceiling bounds the project_inbox digest, not the whole injected message: prefix plus envelope adds chars outside it (11,975 with an empty events array, and a real wake also carries the events array). The author's figures 11,921 / 12,000 / 10,520 reproduce exactly; the test comment's raw-page figure of 87,720 does not (measured 96,040) - comment only, no assertion depends on it."
+      },
+      "states_itself": {
+        "measured": true,
+        "real_page_window": "newest 20 of 91",
+        "page_fields_measured": {
+          "items": 20,
+          "matched_total": 91,
+          "scanned": 91,
+          "scan_complete": true,
+          "has_more": true,
+          "next_after": 210,
+          "items_omitted": 0,
+          "bodies_withheld": 0,
+          "excerpt_chars": 176,
+          "order": "newest_first",
+          "project_id": "aitelier"
+        },
+        "identity_per_item": "20/20 items carry message_id, subject (max 160 chars, clipped from a source maximum of 184), sender_project_id, created_at, status, acked_by_me, delivery_id, an integer version and body_chars; 20/20 carry a body_excerpt that is a strict prefix of that message's body; 0 carry a `body` key; all 20 have identical key sets.",
+        "shrinks_before_withholding": "On the real page the shrink path actually fires: 240-char excerpts would not fit, the loop lands on 176 chars, and 0 bodies are withheld, 0 items omitted. On the synthetic 20 x 4,096 fixture the full 240-char excerpt fits and nothing is thinned. So the claim 'shrink every excerpt together, then withhold, then omit' is measured, not asserted only."
+      },
+      "omission_does_not_rewrite_the_count": {
+        "measured": true,
+        "evidence": "Mutant M1 (no excerpt cap) drove the ceiling path: digest carried 2 items, items_omitted 18, and matched_total stayed 91 - omission is counted and the total is not rewritten inside the projection. The projection's own omission path is therefore honest."
+      },
+      "failure_measured_above_one_request": {
+        "claim_tested": "the page states items carried, matched_total and whether more exist",
+        "result": "FAILS when the collector has to page",
+        "root_cause": "listProjectInbox assigns matched_total from every response in the loop, so the final value is the LAST page's matched_total. The server computes matched_total over `delivery_seq > after`, i.e. it is a remaining count, not a total.",
+        "table_with_real_cursor_semantics": [
+          {"matches_actually": 91, "http_requests": 1, "stated_window": "newest 20 of 91", "stated_matched_total": 91, "stated_has_more": true, "correct": true},
+          {"matches_actually": 100, "http_requests": 1, "stated_window": "newest 20 of 100", "stated_matched_total": 100, "stated_has_more": true, "correct": true},
+          {"matches_actually": 101, "http_requests": 2, "stated_window": "newest 20 of 1", "stated_matched_total": 1, "stated_has_more": false, "correct": false},
+          {"matches_actually": 120, "http_requests": 2, "stated_window": "newest 20 of 20", "stated_matched_total": 20, "stated_has_more": false, "correct": false},
+          {"matches_actually": 250, "http_requests": 3, "stated_window": "newest 20 of 50", "stated_matched_total": 50, "stated_has_more": true, "correct": false},
+          {"matches_actually": 500, "http_requests": 5, "stated_window": "newest 20 of 100", "stated_matched_total": 100, "stated_has_more": true, "correct": false},
+          {"matches_actually": 600, "http_requests": 5, "stated_window": "newest 20 of 200 (scanned 500)", "stated_matched_total": 200, "stated_has_more": true, "newest_carried_seq": 500, "newest_actual_seq": 600, "correct": false}
+        ],
+        "worst_case_reading": "At 101 matches the director is told there is exactly ONE match and has_more false, while 81 unseen messages exist; at 250 it is told 50; at 600 the 100 newest messages are never injected and the window reads as 'newest 20' although they are the newest of the scanned 500.",
+        "why_the_author_s_test_misses_it": "The collector's test double (runtime.test.mjs inboxServer) returns `matched_total: store.length` for every page, so the 600-match truncated-scan test asserts 600 where the real server would yield 200. The test's semantics, not the code's, are what pass.",
+        "live_confirmation": "Two read-only list_director_messages calls on the deployed server (limit 2): after=0 -> matched_total 91, has_more true, next_after 2; after=2 -> matched_total 89, has_more true, next_after 14. Cursor-relative, as the code and the contract test say.",
+        "severity": "latent today (91 matches, one request, correct numbers), wrong at 101. The real inbox crossed 91 within the capture window, so this is 10 messages away, not hypothetical."
+      }
+    },
+    {
+      "id": "stale-items-stop-repeating",
+      "verdict": "pass",
+      "ran_independently": [
+        "Compared the old injection and the new one on the same captured inbox: the old path's page and the new digest, measured, not quoted.",
+        "Simulated the director acknowledging the newest page it was shown, and separately acknowledging all 91 deliveries, then re-ran the real projection to measure what a later wake costs.",
+        "Put a synthetic fresh message on top of the real store to check that the newest delivery still arrives with text, and checked whether thread supersession fires on any real data."
+      ],
+      "old_vs_new_on_the_same_inbox": {
+        "old_injection": {"items": 20, "which": "oldest (delivery_seq 1..43)", "statuses": ["acknowledged"], "body_chars": 24894, "payload_chars_with_schema": 42357, "payload_chars_result_only": 42304},
+        "new_injection": {"items": 20, "which": "newest (delivery_seq 167..210)", "statuses": ["unread"], "body_chars_represented": 26279, "excerpt_chars_each": 176, "excerpt_chars_total": 3520, "payload_chars": 11921},
+        "reduction": "71.8% of the injected envelope (42,411 -> 11,975 chars), and the page stops being 20 already-settled deliveries re-sent in full."
+      },
+      "acknowledged_contributes_identity_only": {
+        "measured": true,
+        "evidence": "After the newest page is acknowledged: 16/16 acknowledged items carry no body_excerpt and body_withheld 'acknowledged', while the 4 still-unread items on the page carry 240-char excerpts. Total 9,216 chars. The dedicated test asserts exactly this (entry.body_excerpt undefined, body_withheld 'acknowledged', body_chars preserved); mutant M2 reddens it with 'acknowledged dm_0001 must not re-inject a body'."
+      },
+      "steady_state_when_everything_is_acknowledged": {
+        "measured": true,
+        "digest_chars": 8226,
+        "items": 20,
+        "identity_only": 20,
+        "identity_chars_per_item": 411,
+        "note": "Bodies stop repeating; identity does not. While acknowledged deliveries stay inside the newest-20 window they still cost about 8.2 KB per wake. That is inherent to keeping them resolvable (delivery_id + version per item), not a defect, but it is the residual floor of this design and should be known."
+      },
+      "superseded_arrives_short": {
+        "measured": true,
+        "evidence": "Unit test: a message superseded by a later message of the same thread carries at most INBOX_SUPERSEDED_EXCERPT_CHARS (96) and names superseded_by; mutant M1 reddens it. On real data the clause never fires: the 91-message match set has 91 distinct threads and 0 threads with more than one message, so 0 items on the real page are superseded. Real-data-unverified, synthetic-only."
+      },
+      "newest_still_has_enough_to_decide": {
+        "measured": true,
+        "fresh_message_on_top_of_the_real_store": {"window": "newest 20 of 92", "position": "first", "excerpt_chars": 184, "body_chars_stated": 3000, "digest_chars": 11977, "under_ceiling": true},
+        "evidence": "The newest delivery is the first item read, its excerpt is that body's own opening (prefix-checked on the real page for all 20), body_chars states how much is not shown, and excerpt_truncated is set on 20/20 real items. Judgement: 176 chars of opening plus body_chars and a message_id is enough to decide whether to fetch the body, but it is thin against a median body of roughly 1 KB - the documentation correctly sends the director to the full body when it is not enough (which is itself partly unavailable; see criterion 3)."
+      }
+    },
+    {
+      "id": "independent-review",
+      "verdict": "partial",
+      "ran_independently": [
+        "Compared the two revisions by diff, not by reading the new file alone: `git diff -U0 a248ba48d9..b120b6fc -- integrations/dsh-driver/runtime.mjs` has exactly 3 hunks.",
+        "Read the server contract the ack call must satisfy (core/director_messaging.py:527-532 acknowledge_director_message(project_id, delivery_id, expected_version, request_key), ListDirectorMessages in core/state_commands.py:524-538) and checked the project's fields against it, then planted a mutant that drops those fields to prove the guard bites.",
+        "Checked the real items and the two live reads for delivery_id and an integer version, rather than trusting the fixture."
+      ],
+      "event_path_untouched": {
+        "measured": true,
+        "evidence": "The three hunks in runtime.mjs are: the new exported functions, the projectInbox closure, and `pendingInbox`. The DriverRuntime class, its pump, and the State cursor are not in the diff: the lines `project_id: this.project, after: this.after, include_driver_inbox: true`, `inbox_after: this.inboxAfter, timeout_seconds: 240` and `this.inboxAfter = result.next_inbox_after ?? this.inboxAfter` are byte-identical in both revisions (line numbers 534/536/550 -> 723/725/739 only).",
+        "wake_path": "onEvent still fetches the project inbox only when the tick carries a director_message_received event and steers 'AItelier runtime event:\\n' + JSON.stringify({...result, project_inbox}); eventCarriesSomething and ownEchoOnly are unchanged and still read `project_inbox.items.length`, which the digest satisfies (asserted with digest input: eventCarriesSomething true, ownEchoOnly false). The old `(inbox.result ?? inbox).items` fallback was replaced by `inbox.items`, consistent with the new shape."
+      },
+      "ack_fields_present_and_really_asserted": {
+        "measured": true,
+        "present": "20/20 real items carry delivery_id and an integer version; the page carries project_id. The two live reads show the same on the deployed server (versions integer, delivery_id present).",
+        "asserted": "The dedicated test asserts page.project_id, entry.delivery_id, Number.isInteger(entry.version) and that a settled item keeps both; the 20-item test asserts them for every item. Mutant M3 (remove delivery_id + version from the identity) reddens 4 projection tests, including 'an injected item carries everything acknowledging its delivery needs' and 'the newest delivery is the first thing read' - so the guard is load-bearing, not decorative.",
+        "against_the_server": "acknowledge_director_message(project_id, delivery_id, expected_version, request_key) - the digest supplies the first three; request_key is the caller's stable key. Correct."
+      },
+      "no_message_dropped_without_being_counted": {
+        "verdict": "fails above 100 matches, holds below",
+        "evidence": "Inside the projection, omission is counted (M1: 2 carried + 18 omitted = 20, matched_total preserved). Across the collector, the counted total is a remainder once paging starts (criterion 1 table): at 101 matches 81 unseen messages are covered by a stated total of 1 and has_more false; at 600 the 100 newest are never injected and the window reads 'newest 20 of 200 (scanned 500)', which reads as the newest overall though it is the newest of the scanned slice. scan_complete=false is set but cannot carry the correction while matched_total is wrong."
+      },
+      "documented_recovery_path_does_not_exist": {
+        "measured": true,
+        "claim": "driver.md (injected into the director's system prompt) says: 'Read a whole body by message_id with list_director_messages when the excerpt is not enough.'",
+        "evidence": "No read action accepts message_id: ListDirectorMessages fields are project_id, protocol_version, needs_my_ack, after, limit, delivery_mode, statuses (+ ack_mode); there is no get_director_message action. The digest also drops delivery_seq, so a director has delivery_id and message_id but no cursor to seek the body with. Today it works by accident of size (91 <= limit 100, so one call returns every body); the documented instruction is not executable as written and gets worse as the match set grows.",
+        "severity": "documentation defect, one sentence; the intended escape hatch exists but is cursor paging from after=0, not a lookup by id."
+      }
+    }
+  ],
+  "mutants": [
+    {
+      "id": "M1",
+      "criterion": "bounded-and-stated",
+      "intent": "remove the excerpt cap (the author's cap is the thing that bounds each body)",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "patch": "capOf: `settled(record) ? 0 : record.superseded_by ? Math.min(excerptLen, superseded_excerpt) : excerptLen` -> `settled(record) ? 0 : record.body.length` (one line replacing two; nothing else touched)",
+      "sha256_before": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "sha256_mutated": "3e2d900513f3b15c8b87125fb48916a3d71ad42efa8d69ac7facae1d6812f2ba",
+      "run": "env -u AITELIER_DSH_EXECUTION -u DSH_PERMISSION_MODE -u AITELIER_TODO_CWD -u AITELIER_DSH_HOME -u AITELIER_DSH_BIN PATH=<pinned node>:$PATH npm test  (cwd integrations/dsh-driver)",
+      "result": {"tests": 102, "pass": 98, "fail": 4, "red": [
+        "twenty four-kilobyte bodies cost one stated, enforced ceiling - window 'newest 2 of 91' vs expected 'newest 20 of 91'",
+        "an acknowledged delivery carries identity only and a superseded one a short excerpt - superseded excerpt no longer short",
+        "when the ceiling cannot be met by withholding bodies, the oldest items are omitted and counted",
+        "the message that just arrived is on the injected page, wherever the cursor put it - window 'newest 2 of 40'"
+      ]},
+      "what_this_teaches": "The ceiling assertion ALONE does not catch a removed excerpt cap: the payload still stayed under 12,000 because the omission loop threw away 18 of 20 messages. It is the 'items carried / newest first / nothing withheld' assertions that redden. A future refactor that keeps only the size assertion would stop guarding the property the change exists for.",
+      "sha256_after_restore": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; sha256 equals sha256_before; npm test 102/102 green afterwards"
+    },
+    {
+      "id": "M2",
+      "criterion": "stale-items-stop-repeating",
+      "intent": "revert the selection to 'every unacknowledged message, full body' (no settle short-circuit, no excerpt cap)",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "patch": "`const settled = record => record.status === 'acknowledged' || record.acked;` -> `record => false`, and capOf -> `record.body.length` (two edits, six lines replaced)",
+      "sha256_before": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "sha256_mutated": "8a8335b2f0da634101aa6a8f3e6824e45b72cf94a4d2646ad806ab077a21404c",
+      "run": "same npm test command",
+      "result": {"tests": 102, "pass": 98, "fail": 4, "red": [
+        "an acknowledged delivery carries identity only and a superseded one a short excerpt - 'acknowledged dm_0001 must not re-inject a body' (a 2,000-char body reappeared)",
+        "twenty four-kilobyte bodies cost one stated, enforced ceiling - window 'newest 2 of 91'",
+        "when the ceiling cannot be met by withholding bodies, the oldest items are omitted and counted",
+        "the message that just arrived is on the injected page, wherever the cursor put it - window 'newest 2 of 40'"
+      ]},
+      "sha256_after_restore": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; sha256 equals sha256_before"
+    },
+    {
+      "id": "M3",
+      "criterion": "independent-review",
+      "intent": "re-create the defect that had to be sent back: the ack fields dropped from the identity",
+      "file": "integrations/dsh-driver/runtime.mjs",
+      "patch": "delete `delivery_id: record.delivery.delivery_id ?? null,` and `version: record.delivery.version ?? null,` from the projected identity",
+      "sha256_before": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "sha256_mutated": "12c37ad4c635a58d69a9670e5c84a21e6561ffaf08143fdfadc3b4f8feb089a9",
+      "run": "node --test runtime.test.mjs (the projection's own file; targeted run, still one at a time)",
+      "result": {"tests": 36, "pass": 32, "fail": 4, "red": [
+        "an injected item carries everything acknowledging its delivery needs",
+        "twenty four-kilobyte bodies cost one stated, enforced ceiling",
+        "the message that just arrived is on the injected page, wherever the cursor put it - 'the newest delivery is the first thing read'",
+        "a scan that cannot reach the end of the matches says so instead of guessing the window - 'newest of what the scan could see'"
+      ]},
+      "sha256_after_restore": "e9896e10b8336fb3492feee2183f86163b5079b5b961a2e4fe0eb753f3132580",
+      "restore": "git checkout -- integrations/dsh-driver/runtime.mjs; sha256 equals sha256_before; full npm test 102/102 green afterwards"
+    }
+  ],
+  "payload_measurements": {
+    "environment": {
+      "node": "/home/linxuhao/.local/share/aitelier-dsh/bin/node",
+      "env_stripped": "AITELIER_DSH_EXECUTION, DSH_PERMISSION_MODE, AITELIER_TODO_CWD, AITELIER_DSH_HOME, AITELIER_DSH_BIN on every run",
+      "runner": "npm test in integrations/dsh-driver runs all 14 *.test.mjs; suite-composition.test.mjs asserts the list equals the directory (verified green)"
+    },
+    "real_captured_page_2026_11_05": {
+      "match_set": {"items": 91, "matched_total": 91, "has_more": false, "next_after": 210, "distinct_threads": 91, "threads_with_more_than_one_message": 0},
+      "transport_per_wake": {"http_requests": 1, "requested_limit": 100, "items_returned": 91, "response_json_chars": 193206, "response_json_chars_result_only": 193153, "note": "the collector now pulls the whole match set with full bodies and quorum bookkeeping on every director_message_received wake and discards it after projecting 20 items: 4.6x the bytes of the old 42,357-char page. Not context (that is what the change fixes), but real per-wake latency/memory; worst case is 5 requests of 100 items."},
+      "old_injection": {"items": 20, "body_chars": 24894, "payload_chars_with_schema": 42357, "payload_chars_result_only": 42304, "envelope_chars": 42411},
+      "new_injection": {"digest_chars": 11921, "envelope_chars": 11975, "items": 20, "excerpt_chars_each": 176, "excerpt_chars_total": 3520, "bodies_withheld": 0, "items_omitted": 0},
+      "reduction_envelope_pct": 71.8
+    },
+    "synthetic_fixture_20x4096_bodies": {"digest_chars": 10520, "ceiling": 12000, "headroom": 1480, "raw_page_chars": 96040, "excerpt_chars": 240, "items": 20, "omitted": 0},
+    "acknowledged_state": {
+      "newest_page_acknowledged": {"digest_chars": 9216, "identity_only": 16, "withheld_acknowledged": 16, "unread_with_240_excerpts": 4},
+      "all_91_acknowledged": {"digest_chars": 8226, "identity_only": 20, "identity_chars_per_item": 411}
+    },
+    "fresh_arrival_on_top_of_the_real_store": {"window": "newest 20 of 92", "digest_chars": 11977, "newest_excerpt_chars": 184, "newest_body_chars": 3000, "under_ceiling": true},
+    "honesty_table_under_real_cursor_semantics": "see criteria[bounded-and-stated].failure_measured_above_one_request.table_with_real_cursor_semantics",
+    "live_server_reads": {
+      "endpoint": "POST /api/state/query/list_director_messages (read-only), my own driver token, protocol_version v3, statuses unread+acknowledged, limit 2",
+      "call_1": {"after": 0, "matched_total": 91, "has_more": true, "next_after": 2, "items": 2, "delivery_seqs": [1, 2], "versions_integer": true, "delivery_id_present": true},
+      "call_2": {"after": 2, "matched_total": 89, "has_more": true, "next_after": 14, "items": 2, "delivery_seqs": [3, 14], "versions_integer": true, "delivery_id_present": true},
+      "conclusion": "matched_total is cursor-relative on the deployed server (91 -> 89 after two deliveries), and the real items carry the fields acknowledge needs. The collector's last-page matched_total is therefore a remainder."
+    }
+  },
+  "unverified": [
+    "No live director_message_received wake was observed, and none can be from a review worktree without driving a resident driver. I do not consider the author's coverage claim exact: the real-harness smoke test covers the BOOTSTRAP injection (it asserts the fixture inbox subject appears in the first model request through the pinned DSH binary) but not the wake path - no test emits a director_message_received event through boot() and asserts the steered digest. What IS covered for the wake is the pure projection plus eventCarriesSomething/ownEchoOnly on digest-shaped input. Risk is low (one call site, same function as bootstrap) but the claim 'the wiring is covered by the real-harness smoke test' is imprecise. What would close it: a boot() test against a stub State server that emits a director_message_received event, capturing the steered text and asserting digest-size/window; that needs no production wake.",
+    "The real page is ONE capture (91 matches, taken 2026-11-05). The superseded/short-excerpt rule never fires on it (0 threads with more than one message) and the omission path (items_omitted > 0) is synthetic only; both are asserted only by fixtures. A second capture after a threaded reply, and one after the inbox crosses 100 matches, would convert the two remaining synthetic claims into measurements.",
+    "The matched_total defect is proved from the server source, the existing contract test and two live reads of the same server, but was not measured end-to-end on a live inbox with more than 100 matches: the live match set is 91, which fits one request and yields correct numbers. The 101/120/250/500/600 rows come from a harness that reproduces the server's cursor semantics, not from production.",
+    "No live acknowledge was performed (I mutate no State): the ack fields are verified against acknowledge_director_message's signature, against real item shape from the live reads, and by mutant M3 reddening. Whether a director in practice acknowledges from the payload is a behavioural question this review did not observe.",
+    "Deployed server version vs this checkout was not compared beyond the two reads; if the deployment differs elsewhere in list_director_messages the honesty table would need re-running.",
+    "No pytest was run (the change is JavaScript only; the Python side is unchanged and was read, not executed). No repository test was run on the host or in the production container - only the JS suite with the pinned node in this worktree."
+  ],
+  "recommendation": {
+    "land": "as an improvement, after one fix",
+    "must_fix": "listProjectInbox must take matched_total from the FIRST page (after=0) instead of overwriting it on every page; has_more then follows from that total (already computed as matched_total > carried). Measured effect at 101 matches: stated total 1/has_more false -> 101/true. One line, no test rewrite, but the collector's test double should also stop returning store.length for every page - it currently makes the 600-match test assert 600 while production states 200.",
+    "should_fix": "(a) for a truncated scan, say that the carried items are the newest of the scanned slice, not the newest overall - 'newest 20 of 600 (scanned 500)' currently reads as the newest 20; (b) driver.md's 'read a whole body by message_id' should describe cursor paging (or the projection should keep delivery_seq), since no read action takes message_id; (c) the test comment's 87,720 raw-page figure measures 96,040.",
+    "answer_to_the_review_question": "The payload is genuinely bounded (11,921 chars against a 12,000 ceiling on the real page; 10,520 on the synthetic worst case) and the director does get the newest message first with a 176-char opening, body_chars and truncated=true, plus delivery_id and integer version so it can acknowledge from the payload it was handed, and the honest count holds while the match set fits one request (the current 91). It stops being honest at 101 matches, where the stated total becomes the last page's remainder and can say has_more false while 81 messages are invisible - a bounded payload that silently understates what it is not showing is the failure the change was meant to end, so fix it before the inbox gets there."
+  }
+}

@@ -1,0 +1,552 @@
+{
+  "attempt_id": "attempt-93d03555975f4500bf1f3bdbe0e2358d",
+  "artifact_commit": "455cd4cae2f347622fe23778fd61dfb25536da4c",
+  "node_key": "driver.every-pinned-dsh-test-uses-the-resolver-20261105",
+  "node_revision": 2,
+  "review_branch": "dsh/resolver-adoption-review2-20261105",
+  "reviewer": "independent non-author DSH subagent (parent aitelier-dsh-c61eed4a13ba4aaaae96)",
+  "verdict": "PASS (4/4), with two notes a director should read: the commit message's per-file test counts are wrong, and the guard for \"a refusal must not become a skip\" lives in a file npm test does not run.",
+  "history_checked": "The first review at ae10b24b failed criterion 1 because tool-discovery.test.mjs still hand-rolled its own install lookup (1 createRequire + 5 require.resolve at module scope) and was RED on a clean checkout. I re-read that version from git (git show ae10b24b:integrations/dsh-driver/tool-discovery.test.mjs) rather than trusting the report, and confirmed it is the file this commit replaces.",
+  "runtime": {
+    "node": "/home/linxuhao/.local/share/aitelier-dsh/bin/node v24.22.2 (pinned; /usr/bin/node v22 not used)",
+    "worktree": "/home/linxuhao/.AItelier/worktrees/resolver-adoption-review2-20261105",
+    "checkout_has_node_modules": false,
+    "checkout_node_modules_found": 0,
+    "env_stripped_on_every_run": [
+      "AITELIER_DSH_EXECUTION",
+      "DSH_PERMISSION_MODE",
+      "AITELIER_TODO_CWD",
+      "AITELIER_DSH_HOME",
+      "AITELIER_DSH_BIN"
+    ],
+    "cwd_default": "integrations/dsh-driver (except the explicit cwd-independence run, from /tmp)",
+    "host_install": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh 0.2.1-rc.5",
+    "container_install": "/opt/aitelier-dsh does not exist on this host"
+  },
+  "criteria": [
+    {
+      "id": "one-resolver-everywhere",
+      "verdict": "PASS",
+      "summary": "No test file resolves the harness install itself any more. The only module-scope install lookup left is inside dsh-entry.mjs. Every remaining textual hit of the two former patterns is either the resolver, a comment that documents the removed code, or an explicit env: handed TO the resolver by its own unit test.",
+      "evidence": {
+        "counted_command": "grep -rn \"node_modules/.bin/dsh\\|AITELIER_DSH_TEST_ENTRY\" integrations/dsh-driver/*.mjs",
+        "matching_lines_total": 30,
+        "per_file": {
+          "dsh-entry.mjs": {
+            "lines": 5,
+            "why_legitimate": "the resolver itself: header prose (l.12), the quoted old shape in the header (l.40), explicitSources (l.71), the add() call that reads the override (l.102), and a comment about .bin/dsh (l.140)"
+          },
+          "dsh-entry.test.mjs": {
+            "lines": 23,
+            "why_legitimate": "no resolution is performed here: 14 are env: {...} passed TO resolveDshEntry/resolveDshLibraries, 5 assert the source label in a result, 3 assert candidate paths built by dshEntryCandidates, 1 is the loop over the two source names"
+          },
+          "tool-discovery.test.mjs": {
+            "lines": 2,
+            "why_legitimate": "both are header comment lines (l.7, l.10) quoting the hand-rolled lookup this commit removed; the code itself names neither"
+          }
+        },
+        "module_scope_library_sites": {
+          "ae10b24b (first attempt)": {
+            "file": "integrations/dsh-driver/tool-discovery.test.mjs",
+            "createRequire": 1,
+            "require_resolve": 5,
+            "quote": "const require = createRequire(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./package.json', import.meta.url));"
+          },
+          "455cd4ca": {
+            "files_outside_dsh_entry_resolving_the_install": 0,
+            "dsh_entry_mjs": {
+              "createRequire": 1,
+              "where": "resolveDshLibraries() anchors createRequire(join(nodeModules, 'package.json'))"
+            },
+            "tool_discovery_test_mjs": "6 require.resolve calls, all through libraries.require (5 imports + 1 in the every-library row), none at module scope deciding anything"
+          }
+        },
+        "other_createRequire_calls_explained": "runtime.{user-message,todo,terminal-plan,dormancy,continuation}.test.mjs each contain createRequire(process.env.AITELIER_DSH_ENTRY) but every one is inside a String.raw fixture-provider script that the spawned dsh process runs (verified by reading each site and its template header); the driver sets that variable for the child. They are not the test file resolving its own libraries.",
+        "files_changed_ae10b24b_to_455cd4ca": [
+          "integrations/dsh-driver/dsh-entry.mjs",
+          "integrations/dsh-driver/dsh-entry.test.mjs",
+          "integrations/dsh-driver/tool-discovery.test.mjs"
+        ],
+        "unchanged_on_purpose": {
+          "runtime.smoke.test.mjs": "already converted by the previous commit; it calls measuredEntryForTest twice (l.36, l.241) and prints the \"measuring ...\" line (seen in this review's runs)",
+          "runtime.mjs": "production module, out of scope by the brief; it reads AITELIER_DSH_ENTRY from the driver process it runs in, not a test's choice",
+          "history.mjs / fixture-provider.mjs": "run inside the spawned dsh process and receive the entry (createRequire(await entryForReader(entry)) / AITELIER_DSH_ENTRY)",
+          "package.json": "not touched by either attempt (git diff --name-only b3ac61d437..455cd4ca does not list it), so the npm test file list is the same list the first review saw"
+        }
+      },
+      "notes": [
+        "The 6 test files whose createRequire lives inside fixture templates are the reason a raw grep for \"createRequire\" cannot be the count; I classified each site rather than counting keyword hits."
+      ]
+    },
+    {
+      "id": "converted-files-run-without-node_modules",
+      "verdict": "PASS_WITH_NOTE",
+      "summary": "Measured per file, not once for the set: with no node_modules anywhere in the checkout and no override, all nine files in npm test run green and every file that measures a DSH prints which install it measured. With nothing reachable (empty AITELIER_DSH_HOME) all nine exit 0 and each reports itself unmeasured, naming the paths it walked. The one deviation from the wording of the criterion is deliberate and cosmetic: tool-discovery.test.mjs prints \"importing @deepseek-ai/dsh 0.2.1-rc.5 (host install) libraries from <node_modules>\" instead of measuredEntryForTest's \"measuring ...\" line, because it has no t at load time; version and source are both named, and the line is visible in the default reporter.",
+      "evidence": {
+        "per_file": "see per_file below: 9 files, measured state exit 0, 65 tests, 65 pass; unmeasured state exit 0, 59 tests, 46 pass, 13 skipped, 0 fail",
+        "full_suite_measured": {
+          "command": "npm test (cwd integrations/dsh-driver, no node_modules, env stripped)",
+          "exit": 0,
+          "tests": 65,
+          "pass": 65,
+          "fail": 0,
+          "skipped": 0,
+          "duration_ms": 26729,
+          "resolver_lines_seen": [
+            "measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js",
+            "importing @deepseek-ai/dsh 0.2.1-rc.5 (host install) libraries from /home/linxuhao/.local/share/aitelier-dsh/node_modules"
+          ]
+        },
+        "full_suite_unmeasured": {
+          "command": "npm test with AITELIER_DSH_HOME=<empty dir>",
+          "exit": 0,
+          "tests": 59,
+          "pass": 46,
+          "fail": 0,
+          "skipped": 13,
+          "note": "13 skip lines, every one naming \"no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <checkout>/node_modules/.bin/dsh, <empty home>/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh\"; no \"measuring\" line at all"
+        },
+        "cwd_independence": "Running tool-discovery.test.mjs by absolute path from /tmp in the measured state still prints \"importing ... (host install) libraries from /home/linxuhao/.local/share/aitelier-dsh/node_modules\" and is 8/8 green, so the run does not depend on cwd.",
+        "node22_not_used": "All runs used the pinned v24.22.2 node, as the brief requires."
+      },
+      "notes": [
+        "For the files that use measuredEntryForTest the criterion's exact string is reproduced verbatim; only tool-discovery.test.mjs words it differently, on purpose, and still names version + source."
+      ]
+    },
+    {
+      "id": "unmeasurable-explicit-override-refuses",
+      "verdict": "PASS",
+      "summary": "A missing path, a directory and a wrong version are refused by name for both the binary path and the new library path, with the binary resolver's own sentence, `searched` stopping at the override. resolveDshLibraries never skips, and a measured binary that no node_modules owns is refused rather than imported from the cwd. My own mutant on the new library branch reddens the unit cases and nothing else.",
+      "evidence": {
+        "matrix": "Same options through resolveDshEntry and resolveDshLibraries, 6 refusal cases + 1 measured case + 1 unattributable case (probe /tmp/review2-probe.mjs against the worktree module, fixtures in /tmp only):",
+        "matrix_result": {
+          "AITELIER_DSH_TEST_ENTRY missing": {
+            "binary": "refused",
+            "libraries": "refused",
+            "same_reason_text": true,
+            "same_searched": true,
+            "nodeModules": null,
+            "require": null,
+            "walked_past_override": false,
+            "reason": "refusing to measure @deepseek-ai/dsh 0.2.1-rc.5: the explicit AITELIER_DSH_TEST_ENTRY override <path> is missing"
+          },
+          "AITELIER_DSH_TEST_ENTRY directory": {
+            "binary": "refused",
+            "libraries": "refused",
+            "same_reason_text": true,
+            "same_searched": true,
+            "walked_past_override": false,
+            "reason": "... the explicit AITELIER_DSH_TEST_ENTRY override <path> is not a file (it is a directory)"
+          },
+          "AITELIER_DSH_TEST_ENTRY wrong version": {
+            "binary": "refused",
+            "libraries": "refused",
+            "same_reason_text": true,
+            "same_searched": true,
+            "walked_past_override": false,
+            "reason": "... the explicit AITELIER_DSH_TEST_ENTRY override <path> (AITELIER_DSH_TEST_ENTRY) is 0.1.0 (and the pin 0.2.1-rc.5 is named)"
+          },
+          "AITELIER_DSH_BIN missing / directory / wrong version": "identical three outcomes from the second override name",
+          "measured binary outside any node_modules (bare bin/dsh with a pinned manifest beside it)": {
+            "binary": "measured",
+            "libraries": "refused",
+            "require": null,
+            "reason": "refusing to import the @deepseek-ai/dsh 0.2.1-rc.5 libraries: the measured binary <realpath> is not inside a node_modules directory, so there is no install root to import them from"
+          },
+          "measured (control)": {
+            "status": "measured",
+            "version": "0.2.1-rc.5",
+            "nodeModules": "<fixture>/node_modules",
+            "require_paths_first": "<fixture>/node_modules"
+          }
+        },
+        "searched_stops_at_the_override": "In every refusal case libraries.searched deep-equals binary.searched and is exactly [<the override path>]; the pinned install that exists later in the walk is never reached (the unit test asserts the same thing).",
+        "throws_not_skips": "The only consumer, tool-discovery.test.mjs, throws at load time for a refusal: exits 1, \"fail 1 / skipped 0\", and prints the resolver's sentence for all four bad overrides I tried (missing BIN, directory BIN, wrong-version TEST_ENTRY, wrong-version BIN).",
+        "wrong_version_only_implicit_home": "A machine whose only install is a wrong version (AITELIER_DSH_HOME=<home with 0.1.0>) is refused too: exit 1, \"refusing to measure @deepseek-ai/dsh 0.2.1-rc.5: <path> (host install) is 0.1.0\". That matches resolveDshEntry's semantics (mismatches alone = refused), so the import path invents nothing.",
+        "mutants": "M1 and M2 below; both restored byte-for-byte (sha256 in mutants[].restored_sha256)."
+      }
+    },
+    {
+      "id": "independent-review",
+      "verdict": "PASS_WITH_NOTE",
+      "summary": "tool-discovery.test.mjs behaves correctly in all three states: measured 8/8 exit 0 with the install named; nothing reachable exactly one skip, exit 0, the three paths it looked in named; explicit bad override exit 1, fail 1, skipped 0 in the resolver's own words. A real failure inside the loaded libraries reddens it: a library missing from the measured install and a library that throws at import both give exit 1 with skipped 0. There is no try/catch in the file, so the trap the author was warned about is not present. No other test changed meaning, and npm test's file list resolves.",
+      "evidence": {
+        "state_measured": {
+          "command": "node --test tool-discovery.test.mjs (env stripped, no node_modules, host install reachable)",
+          "exit": 0,
+          "tests": 8,
+          "pass": 8,
+          "fail": 0,
+          "skipped": 0,
+          "output": [
+            "importing @deepseek-ai/dsh 0.2.1-rc.5 (host install) libraries from /home/linxuhao/.local/share/aitelier-dsh/node_modules",
+            "every library these tests import comes from the install that was measured"
+          ]
+        },
+        "state_unmeasured": {
+          "command": "AITELIER_DSH_HOME=<empty> node --test tool-discovery.test.mjs",
+          "exit": 0,
+          "tests": 2,
+          "pass": 1,
+          "fail": 0,
+          "skipped": 1,
+          "skip_line": "tool discovery against the pinned harness libraries (needs a pinned @deepseek-ai/dsh install to import from) # no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <checkout>/node_modules/.bin/dsh, <empty home>/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh",
+          "exactly_one_skip": true,
+          "names_the_paths": true,
+          "note": "the install-free search ranking test still runs and passes in this state (1 pass + 1 skip), so the skip does not cost the file its install-free coverage"
+        },
+        "state_refused": {
+          "exit": 1,
+          "tests": 1,
+          "fail": 1,
+          "skipped": 0,
+          "cases": [
+            "AITELIER_DSH_BIN=/nope/dsh",
+            "AITELIER_DSH_BIN=<a directory>",
+            "AITELIER_DSH_TEST_ENTRY=<0.1.0 install>",
+            "AITELIER_DSH_BIN=<0.1.0 install>"
+          ],
+          "failure_shape": "uncaught at load: \"Error: refusing to measure @deepseek-ai/dsh 0.2.1-rc.5: the explicit <VAR> override <path> ...\", reported by the runner as a failed file"
+        },
+        "real_failure_inside_the_libraries": {
+          "missing_library": {
+            "how": "a /tmp install carrying the pinned dsh manifest but no @deepseek-ai/cordis (the other four symlinked to the real install)",
+            "exit": 1,
+            "fail": 1,
+            "skipped": 0,
+            "message": "Error: Cannot find module '@deepseek-ai/cordis' (runner reports it as an uncaughtException from the file: \"A resource generated asynchronous activity after the test ended ... caught by the test runner\")"
+          },
+          "throwing_library": {
+            "how": "a /tmp install whose @deepseek-ai/cordis throws at import (\"REAL LIBRARY FAILURE: cordis exploded at import\")",
+            "exit": 1,
+            "fail": 1,
+            "skipped": 0,
+            "message": "the thrown error is reported and the file fails; it is NOT turned into a skip"
+          },
+          "own_assertion": {
+            "how": "M3, one expected value weakened inside the file",
+            "exit": 1,
+            "tests": 8,
+            "pass": 7,
+            "fail": 1,
+            "skipped": 0
+          }
+        },
+        "no_try_catch": "grep of tool-discovery.test.mjs: the only try/finally is inside the fixture helper (dispose scopes), and it re-throws nothing away; no catch anywhere, so a skip cannot absorb a library error.",
+        "no_other_test_changed_meaning": {
+          "scope": "git diff --name-only ae10b24b..455cd4ca = the three files above; no other test file is touched.",
+          "tool_discovery_test_mjs": "Multiset line diff (trimmed, comments dropped) old vs new: the only code lines removed are the two hand-rolled resolution lines. Not one assertion line is removed; the additions are the guard, the skip test, the install-attribution row and the braces that wrap the six existing tests. The six harness test bodies are identical assertions, re-indented.",
+          "dsh_entry_mjs": "measuredEntryForTest is behaviourally unchanged: describeSkipped was renamed to describeDeclinedToMeasure (exported for the import-side file) with an identical body and identical message text, and the call site was updated. No other function in the module changed except the new owningNodeModules / resolveDshLibraries / refusedUnattributable and the header prose.",
+          "dsh_entry_test_mjs": "19 tests, all pre-existing 14 untouched; 5 new library rows appended. Baseline at HEAD: 19/19 pass."
+        },
+        "npm_test_file_list_resolves": {
+          "files": [
+            "runtime.test.mjs",
+            "model.test.mjs",
+            "tool-discovery.test.mjs",
+            "runtime.user-message.test.mjs",
+            "runtime.smoke.test.mjs",
+            "runtime.todo.test.mjs",
+            "runtime.goalseed.test.mjs",
+            "runtime.dormancy.test.mjs",
+            "runtime.continuation.test.mjs"
+          ],
+          "all_present": true,
+          "suite_result_at_HEAD_without_node_modules": "65 tests, 65 pass, exit 0"
+        }
+      },
+      "notes": [
+        "The load-time real-failure path is loud but indirectly worded: node 24 reports it as \"A resource generated asynchronous activity after the test ended ... caught by the test runner\" rather than as a plain import error. Exit code and counts are unambiguous (exit 1, fail 1, skipped 0), and the underlying error text is printed; I note it only because a reader skimming the log sees the wrapper sentence first.",
+        "The guards for \"a refusal must never become a skip\" live in dsh-entry.test.mjs, which npm test does not include (package.json unchanged by this change). Under my M2 mutant npm test's tool-discovery would go green with one skip on a bad override; I verified that exact behaviour. So the durability of this node rests on a file the documented check does not run. Not one of the four criteria, hence a note and not a FAIL."
+      ]
+    }
+  ],
+  "sites": {
+    "command": "grep -rn \"node_modules/.bin/dsh\\|AITELIER_DSH_TEST_ENTRY\" integrations/dsh-driver/*.mjs",
+    "total_matching_lines": 30,
+    "resolver_owned": {
+      "integrations/dsh-driver/dsh-entry.mjs": 5
+    },
+    "unit_test_passes_env_to_resolver": {
+      "integrations/dsh-driver/dsh-entry.test.mjs": 23,
+      "breakdown": {
+        "env: {...} to resolveDshEntry/resolveDshLibraries": 14,
+        "asserts the source label": 5,
+        "asserts a candidate path": 3,
+        "loops over both source names": 1
+      }
+    },
+    "documentation_of_removed_code": {
+      "integrations/dsh-driver/tool-discovery.test.mjs": 2,
+      "lines": [
+        7,
+        10
+      ]
+    },
+    "module_scope_install_lookups_outside_the_resolver": 0,
+    "former_site_removed_by_this_commit": "tool-discovery.test.mjs lines 6-11 at ae10b24b: 1 createRequire(process.env.AITELIER_DSH_TEST_ENTRY ?? ...) + 5 require.resolve(<@deepseek-ai/*>)"
+  },
+  "mutants": [
+    {
+      "id": "M1",
+      "description": "New library branch guesses the caller's cwd instead of the measured install root: `const nodeModules = owningNodeModules(resolution.entry); if (!nodeModules) return refusedUnattributable(...)` replaced by `const nodeModules = join(process.cwd(), 'node_modules')`.",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "result": "FAIL (red)",
+      "reddened_tests": [
+        "library imports come from the install that was measured, never from the checkout or the cwd",
+        "a stale checkout install is skipped for imports too, and the pinned host install answers",
+        "a measured binary that lives in no node_modules is refused, not imported from the cwd"
+      ],
+      "run": "node --test dsh-entry.test.mjs: exit 1, tests 19, pass 16, fail 3, skipped 0 — every binary-side row stayed green, so the mutant is specific to the new branch",
+      "restored_sha256": "6de316f1b9b0697a43c6eb923da6ca46b389a337db71bce86518d31e0ad6896e",
+      "restored_verified": "cmp against a /tmp copy: identical"
+    },
+    {
+      "id": "M2",
+      "description": "The trap itself: a refused explicit override is downgraded to the skippable state (status \"refused\" -> \"unmeasured\") inside resolveDshLibraries.",
+      "file": "integrations/dsh-driver/dsh-entry.mjs",
+      "result": "FAIL (red)",
+      "reddened_tests": [
+        "the import path refuses exactly what the binary path refuses, in the binary path's own words"
+      ],
+      "run": "node --test dsh-entry.test.mjs: exit 1, tests 19, pass 18, fail 1, skipped 0",
+      "consumer_under_the_mutant": "AITELIER_DSH_BIN=/nope/dsh node --test tool-discovery.test.mjs under M2: exit 0, tests 2, pass 1, skipped 1, skip message \"... refusing to measure ... is missing\" — i.e. the cheerful skip this node exists to prevent, which is exactly why the committed unit row matters.",
+      "restored_sha256": "6de316f1b9b0697a43c6eb923da6ca46b389a337db71bce86518d31e0ad6896e",
+      "restored_verified": "cmp against a /tmp copy: identical"
+    },
+    {
+      "id": "M3",
+      "description": "One of tool-discovery.test.mjs's own assertions weakened: expected tool name 'run_pipeline' -> 'run_pipeline_MUTANT'.",
+      "file": "integrations/dsh-driver/tool-discovery.test.mjs",
+      "result": "FAIL (red)",
+      "reddened_tests": [
+        "search ranks exact names and Unicode descriptions, bounds results, and refuses empty queries"
+      ],
+      "run": "measured state: exit 1, tests 8, pass 7, fail 1, skipped 0 (actual 'run_pipeline' vs expected 'run_pipeline_MUTANT')",
+      "restored_sha256": "09a3bfe2ceba3be927130ff2e94ec25a6c780d76c2566902be97cd06c41b586b",
+      "restored_verified": "cmp against a /tmp copy: identical"
+    }
+  ],
+  "per_file": [
+    {
+      "file": "runtime.test.mjs",
+      "measured": {
+        "tests": 28,
+        "pass": 28,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": null
+      },
+      "unmeasured": {
+        "tests": 28,
+        "pass": 28,
+        "fail": 0,
+        "skipped": 0,
+        "reason_naming_searched_paths": false,
+        "reason_text_sample": null
+      }
+    },
+    {
+      "file": "model.test.mjs",
+      "measured": {
+        "tests": 6,
+        "pass": 6,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": null
+      },
+      "unmeasured": {
+        "tests": 6,
+        "pass": 6,
+        "fail": 0,
+        "skipped": 0,
+        "reason_naming_searched_paths": false,
+        "reason_text_sample": null
+      }
+    },
+    {
+      "file": "tool-discovery.test.mjs",
+      "measured": {
+        "tests": 8,
+        "pass": 8,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ importing @deepseek-ai/dsh 0.2.1-rc.5 (host install) libraries from /home/linxuhao/.local/share/aitelier-dsh/node_modules"
+      },
+      "unmeasured": {
+        "tests": 2,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 1,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.user-message.test.mjs",
+      "measured": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 1,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.smoke.test.mjs",
+      "measured": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 2,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 2,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.todo.test.mjs",
+      "measured": {
+        "tests": 9,
+        "pass": 9,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 9,
+        "pass": 5,
+        "fail": 0,
+        "skipped": 4,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.goalseed.test.mjs",
+      "measured": {
+        "tests": 8,
+        "pass": 8,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 8,
+        "pass": 6,
+        "fail": 0,
+        "skipped": 2,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.dormancy.test.mjs",
+      "measured": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 2,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 2,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    },
+    {
+      "file": "runtime.continuation.test.mjs",
+      "measured": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "resolver_line": "ℹ measuring @deepseek-ai/dsh 0.2.1-rc.5 (host install): /home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+      },
+      "unmeasured": {
+        "tests": 1,
+        "pass": 0,
+        "fail": 0,
+        "skipped": 1,
+        "reason_naming_searched_paths": true,
+        "reason_text_sample": "no installed @deepseek-ai/dsh 0.2.1-rc.5 to measure; looked in: <the three candidates it walked>, /tmp/review2-perfile-empty-CtBtmg/node_modules/.bin/dsh, /opt/aitelier-dsh/node_modules/.bin/dsh"
+      }
+    }
+  ],
+  "library_load_paths": {
+    "question": "Where do the five @deepseek-ai libraries of the imported harness come from, and could the checkout or the cwd win?",
+    "anchor": "createRequire(join(nodeModules, 'package.json')) where nodeModules = owningNodeModules(realpath of the measured binary); never the checkout, never cwd.",
+    "measured_resolution": {
+      "status": "measured",
+      "version": "0.2.1-rc.5",
+      "source": "host install",
+      "nodeModules": "/home/linxuhao/.local/share/aitelier-dsh/node_modules",
+      "searched": [
+        "/home/linxuhao/.AItelier/worktrees/resolver-adoption-review2-20261105/integrations/dsh-driver/node_modules/.bin/dsh",
+        "/home/linxuhao/.local/share/aitelier-dsh/node_modules/.bin/dsh"
+      ],
+      "mismatches": [],
+      "resolved": {
+        "@deepseek-ai/cordis": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/cordis/lib/index.js",
+        "@deepseek-ai/dsh-system-prompt": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh-system-prompt/lib/index.js",
+        "@deepseek-ai/dsh-tools": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh-tools/lib/index.js",
+        "@deepseek-ai/dsh-scope": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh-scope/lib/index.js",
+        "@deepseek-ai/dsh-llm": "/home/linxuhao/.local/share/aitelier-dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js"
+      }
+    },
+    "require_fallback_order_after_the_measured_install": [
+      "<install>/node_modules",
+      "<ancestors of the install>/node_modules ...",
+      "/node_modules",
+      "~/.node_modules",
+      "~/.node_libraries",
+      "<node prefix>/lib/node"
+    ],
+    "fallback_note": "The fallback is the measured install's ancestors and node's global folders — not the checkout, not the cwd. If a library were absent from the measured install, node would keep looking, so the file's own first measured row (\"every library these tests import comes from the install that was measured\") is the guard that such a fallback cannot pass unnoticed. That row is not vacuous: the commit's unit test puts a decoy copy in a checkout node_modules and a second copy in the measured install and shows the measured one wins.",
+    "overrides_that_select_the_install": [
+      "AITELIER_DSH_TEST_ENTRY",
+      "AITELIER_DSH_BIN"
+    ],
+    "wrong_version_override_is_not_answered": "A refused binary resolution is returned verbatim by resolveDshLibraries (same reason string, same searched list, nodeModules/require null), so an explicit wrong-version override cannot reach an implicit install through the import path."
+  },
+  "unverified": [
+    "The commit message's per-file evidence does not match the tree: it says \"29 tests pass (dsh-entry 17, tool-discovery 4, smoke 8)\". At 455cd4ca the same three files give dsh-entry 19, tool-discovery 8, smoke 2 — total 29, so the total reproduces while the breakdown does not. The files are right and the total is right; the sentence is wrong and should not be quoted as evidence.",
+    "The guard that keeps a refusal from becoming a skip (the resolveDshLibraries rows in dsh-entry.test.mjs) is outside `npm test`: npm test lists nine files and dsh-entry.test.mjs, runtime.terminal-plan.test.mjs and runtime.finished-plan.test.mjs are not among them. That is pre-existing (package.json untouched by either attempt), and tool-discovery.test.mjs still catches the coarser mutant M1 loudly, but under M2 `npm test` with a bad override would be green with one skip. I did not find another in-`npm test` file that would redden for M2.",
+    "If a library were missing from the measured install but present in one of the fallback directories (install ancestors, /node_modules, node's global folder), node would load that one; only the file's own attribution row would redden. I did not build that case because it would require writing node_modules above the shared host install, which is out of my scope. Reasoning is static plus the commit's own decoy-copy unit test.",
+    "Non-symlink .bin installs (Windows), MAX_WALK depth beyond 8 directories, and installs nested inside another package's node_modules were not exercised.",
+    "Only the pinned node v24.22.2 was used. The brief says /usr/bin/node v22 gives different results, so nothing here speaks for v22.",
+    "The six runtime e2e files were exercised against their own local fixture servers (I checked each child env sets AITELIER_URL to a local server) and not against a live AItelier service; no production service was touched.",
+    "No pytest was run (node-only review, per the brief)."
+  ],
+  "tree_state_after_review": {
+    "files_mutated_and_restored": [
+      "integrations/dsh-driver/dsh-entry.mjs",
+      "integrations/dsh-driver/dsh-entry.test.mjs",
+      "integrations/dsh-driver/tool-discovery.test.mjs"
+    ],
+    "sha256_at_head_and_after_restore": {
+      "dsh-entry.mjs": "6de316f1b9b0697a43c6eb923da6ca46b389a337db71bce86518d31e0ad6896e",
+      "dsh-entry.test.mjs": "e7202760ed01a5ddda4776e02b9449e29e9e1547038a5e2166230ecd83fdbfd7",
+      "tool-discovery.test.mjs": "09a3bfe2ceba3be927130ff2e94ec25a6c780d76c2566902be97cd06c41b586b"
+    },
+    "sha256sum_check_after_all_runs": "all three OK; git status --porcelain empty; no node_modules created (find . -name node_modules: 0)"
+  }
+}

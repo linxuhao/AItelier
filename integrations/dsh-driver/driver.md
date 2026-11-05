@@ -57,7 +57,12 @@ action (record_evidence, verify_node,
 report_external_attempt, claims, takeovers, node and issue edits) is yours, as are
 declare_driver_presence and answer_checkpoint. If a child stops with items open, the runtime hands it
 back to you (reason todo_unfinished, with done/next/remaining): re-dispatch from
-the next item or report the attempt failed. When the plan is complete, run
+the next item or report the attempt failed. When the child DIED mid-item (a host
+restart kills it), the plan stays bound to a session that no longer exists and no
+item it begun can be finished: take it over with todo_rebind(attempt_id, item_id,
+session_id), naming that dead session. The plan records the handover
+(rebound_from). A live child keeps its own plan: todo_rebind refuses it and
+todo_done keeps answering bound_to_other_session. When the plan is complete, run
 todo_finish, then report_external_attempt with the report it wrote, then review
 the delivered change yourself and record_evidence. run_pipeline stays available
 for a task that genuinely needs an existing pipeline; it is not the default.

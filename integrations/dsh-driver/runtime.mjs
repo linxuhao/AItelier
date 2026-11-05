@@ -303,6 +303,26 @@ export function unfinishedWithoutChild(plans, liveSessions) {
     .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next, remaining: p.remaining }));
 }
 
+/** Whether the director may take a plan over from a named session, or why not.
+ *
+ *  A host restart can kill a native child mid-plan: the plan stays bound to a
+ *  session that no longer exists, so `todo_done` answers `bound_to_other_session`
+ *  forever and `todo_finish` refuses (`never begun`), which in turn keeps
+ *  `idle_dormant` refusing `unfinished_plans`. The exit is one deliberate
+ *  takeover, and its whole safety is the liveness check: only the session the
+ *  plan is actually bound to may be replaced, and only while it is provably not
+ *  running. A live child keeps its plan and keeps answering `bound_to_other_session`.
+ */
+export function rebindRefusal({ attempt_id, item_id, session_id, bound_session, live = [], root_session }) {
+  if (!attempt_id || !item_id) return { refused: 'invalid_arguments', reason: 'attempt_id and the item_id to take over are required' };
+  if (!session_id) return { refused: 'invalid_arguments', reason: 'session_id must name the session being replaced' };
+  if (session_id === root_session || live.includes(session_id))
+    return { refused: 'live_session', reason: `session ${session_id} is still alive, so it still owns its plan` };
+  if (bound_session !== session_id)
+    return { refused: 'not_bound_session', reason: `plan ${attempt_id} is bound to ${bound_session ?? 'no session'}, not ${session_id}` };
+  return null;
+}
+
 /** Grep the immutable raw log, including events shadowed by compaction. */
 export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
   if (!pattern) throw new Error('pattern must not be empty');
@@ -658,6 +678,32 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
           '--out=' + join(todo.store, 'finish', args.attempt_id)], exec.signal,
           await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
         : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
+    }));
+    // The escape hatch for a plan whose child died mid-item (a host restart
+    // kills it): the director names the dead session and takes the item over.
+    // Without this an item already begun by a dead session has no exit at all -
+    // todo_done answers bound_to_other_session, todo_finish refuses, and
+    // idle_dormant refuses unfinished_plans forever.
+    scope.tools.register(defineTool({ name: 'todo_rebind',
+      description: 'Director only. Take a plan item over from a session that died (for example a native child killed by a host restart) so its work can be finished. Names the attempt_id, the item_id to begin and the session_id being replaced; refused unless that session is the one the plan is bound to and is verifiably dead. The plan records the takeover (rebound_from), so a later reader sees it changed hands. A live child keeps its own plan.',
+      parameters: { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true },
+        session_id: { type: 'string', required: true } },
+      output: jsonOutput,
+      async execute(args, exec) {
+        const root = exec.agent.session.id;
+        let status;
+        try { status = await todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal); }
+        catch (error) { return { refused: 'unverifiable', reason: 'could not read the plan: ' + String(error.message ?? error).slice(0, 500), brief: null }; }
+        if (status.refused) return status;
+        const refusal = rebindRefusal({ attempt_id: args.attempt_id, item_id: args.item_id, session_id: args.session_id,
+          bound_session: status.child_session, live: [...liveChildren], root_session: root });
+        if (refusal) return { ...refusal, brief: status.brief ?? null };
+        // The CLI holds the plan lock and writes the file; --rebind is the one path
+        // that may move child_session, and it records the session it replaced.
+        const result = await todo.call(args.attempt_id, ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+          '--session=' + root, '--rebind'], exec.signal);
+        return { ...result, replaced_session: args.session_id, taken_over_by: root };
+      },
     }));
     scope.tools.register(defineTool({ name: 'watch_process',
       description: 'Director only. Watch a long background job you started (its pid): when it exits you get a runtime event with the pid, your note and how long it ran, even while dormant. Use it instead of polling a log; a watched job does not block idle_dormant. Refused for a pid that is not running or not started from this driver.',

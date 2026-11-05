@@ -40,6 +40,30 @@ def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
     assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
+def stored_director_event(service,project_id,event_type,delivery_id):
+    """The one stored state_events row of this type for this delivery, payload decoded."""
+    matches=[e for e in service.store.events(project_id,limit=500)
+             if e['event_type']==event_type and e['payload'].get('delivery_id')==delivery_id]
+    assert len(matches)==1,[(e['event_type'],e['payload']) for e in matches]
+    return matches[0]['payload']
+
+def test_own_ack_and_resolve_events_carry_the_acting_driver_actor(peers):
+    # The echo filter in integrations/dsh-driver/runtime.mjs (ownEchoOnly) decides
+    # "own" only from the event's own `actor`, so the emitter must stamp it. Drive the
+    # real ack and resolve paths (not hand-built payloads) and read what State stored.
+    _,s=peers
+    d=send(s['ada'],ack_quorum=2)['result']['deliveries'][0]
+    s['bob'].director_messages.acknowledge_director_message('beta',d['delivery_id'],1,'bob-ack',protocol_version='v3')
+    acked=stored_director_event(s['bob'],'beta','director_message_acked',d['delivery_id'])
+    assert acked['actor']=='driver:bob' and acked['driver_id']=='bob'
+    assert set(acked)=={'delivery_id','driver_id','actor','acks'}
+    resolved_delivery=send(s['ada'],request_key='to-resolve',ack_quorum=2)['result']['deliveries'][0]
+    s['bob'].director_messages.acknowledge_director_message('beta',resolved_delivery['delivery_id'],1,'bob-ack-2',protocol_version='v3')
+    s['bob'].director_messages.resolve_director_message('beta',resolved_delivery['delivery_id'],2,'bob-resolve',protocol_version='v3')
+    resolved=stored_director_event(s['bob'],'beta','director_message_resolved',resolved_delivery['delivery_id'])
+    assert resolved['actor']=='driver:bob' and resolved['driver_id']=='bob'
+    assert set(resolved)=={'delivery_id','driver_id','actor','acks'}
+
 def ack_ledger(db):
     with db.get_connection() as c:
         return {t:[tuple(r) for r in c.execute('SELECT * FROM '+t+' ORDER BY rowid')]

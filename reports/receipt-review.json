@@ -1,0 +1,185 @@
+{
+  "node_key": "state.receipt-id-reads-the-acceptance-it-names-20261105",
+  "base_sha": "6069022aa058b36d9aed860425b1043dad962eb6",
+  "criteria": {
+    "receipt-id-reads-acceptance-and-evidence": {
+      "verdict": "PASS",
+      "evidence": [
+        "core/state_attempts.py:1156-1199 - StateAttempts.receipt reads the append-only row by identity: SELECT ... WHERE receipt_id=? AND project_id=? (:1180-1181), pins evidence from the receipt's own evidence_ids (:1188-1193), returns node_key/node_revision/artifact_ref/reviewer/created_at (:1194-1198); RECEIPT_EVIDENCE (:1153-1154) carries evidence_id/criterion_id/kind/verdict/artifact_ref/report_sha256 and no detail",
+        "core/state_commands.py:742-746 - Receipt(Project) request model (project_id + receipt_id); :1067 READ_REQUESTS; :1333 handler mapping service.get_receipt; :1109 PUBLIC_READS",
+        "api/state_http.py:407-421 - POST /api/state/query/{action} dispatches any READ_REQUESTS action and maps StateNotFound -> 404, so no api/** edit was needed for the route (confirmed by git show --stat HEAD: 4 files, none under api/)",
+        "tests/unit/test_state_receipt_read.py:130-159 - real HTTP read after revise_node cleared verified_receipt (:137-139); asserts node_key, node_revision, artifact_ref, reviewer, created_at and the evidence rows' criterion_id/verdict/artifact_ref/report_sha256; :179-187 asserts a nonexistent id is 404 naming the id and not {}",
+        "reviewer probe (deleted after use): anonymous open-project read returned all six facts and exactly the two pinned evidence rows, in contract order; a receipt in a project that was never opened never resolved"
+      ],
+      "falsifier": "M1 (receipt lookup deleted, row=None at core/state_attempts.py:1180) -> 2 shipped tests red (the open-project read and the writer pole of the privacy test). M4 (raise missing replaced by return {}) -> both by-name-refusal tests red. My independent probe also failed under M5 when the reader stopped returning the pinned evidence."
+    },
+    "privacy-follows-the-existing-project-rule": {
+      "verdict": "PASS",
+      "evidence": [
+        "core/state_commands.py:1441-1445 - execute applies the action verdict and then _refuse_if_project_not_public for an anonymous service, before argument validation and before any lookup",
+        "core/state_commands.py:1252-1261 - the project_id branch calls core.state_privacy.refuse_unopened_project, whose predicate (core/state_privacy.py:127-140) is store.is_project_public, False for both unopened and nonexistent",
+        "core/state_service.py:1274-1276 - get_receipt re-applies trust_of(self) + refuse_unopened_project before self.attempts.receipt, so a caller bypassing execute is still refused",
+        "api/state_graph_routers.py:39-48 - project_read_trusted comes from api.authz.may_read_private(request), derived per request from the raw credential, not from any route declaration",
+        "core/state_commands.py:1109 - get_receipt is in PUBLIC_READS, so api/state_http.py's router guard gives it public clearance and no identity dependency runs; the 403 therefore can only be the project predicate",
+        "tests/unit/test_state_receipt_read.py:162-177 - anonymous read of a closed project is 403 'not available' with no receipt_id/artifact/node_key/reviewer in the body, while the SAME call with the writer token is 200; the positive pole is test 1 (:141, no headers) answering an anonymous caller for an OPEN project"
+      ],
+      "falsifier": "M2 (both privacy call sites deleted) -> the shipped privacy test goes red with 'assert 200 == 403' and the body is the full private receipt (receipt_id, node_key, artifact_ref, reviewer, evidence rows): the privacy incident in the flesh. Extra probe measurements: project closed after being open -> 403; project that never existed -> the same 403 body as the opened-then-closed refusal (no existence oracle); a receipt of a still-CLOSED project read under an OPEN project_id -> an indistinguishable 404 with no foreign facts."
+    },
+    "independent-review": {
+      "verdict": "PASS",
+      "evidence": [
+        "this report's mutants table (7 mutants, each applied to the worktree at 350c8777c7951b2dc45dbffe44388a31e6a59c7a, run in a disposable container, then restored with git checkout -- and git diff --stat verified empty)",
+        "tests/unit/test_state_receipt_read.py:130-213 - the shipped tests go through api.main.app's HTTP surface (gate armed, State DB overridden) rather than calling the reader directly, which is what the criteria require"
+      ],
+      "falsifier": "Deleting the receipt lookup (M1) turned 2 shipped tests red; deleting the privacy gate (M2) turned 1 red with a real leak. M3/M4 add the scoping and by-name-refusal properties. Single-layer deletions (M2a/M2b) stayed green, which is the expected result for a deliberately redundant gate and is recorded under limits."
+    }
+  },
+  "mutants": [
+    {
+      "criterion": "receipt-id-reads-acceptance-and-evidence",
+      "mutation": "core/state_attempts.py:1180-1181 - delete the receipt lookup: replace the SELECT on state_acceptances with 'row = None', so a receipt can never be found",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "RED",
+      "failing_tests": [
+        "test_an_opened_project_receipt_is_readable_with_the_evidence_it_rests_on (404 instead of 200)",
+        "test_the_same_call_is_refused_for_an_anonymous_reader_of_a_project_nobody_opened (writer pole: 404 instead of 200)"
+      ],
+      "result_line": "2 failed, 2 passed, 1 warning in 3.81s"
+    },
+    {
+      "criterion": "privacy-follows-the-existing-project-rule",
+      "mutation": "core/state_commands.py:1259 - return early from _refuse_if_project_not_public for action 'get_receipt' AND core/state_service.py:1274-1276 - drop the reader's own trust_of/refuse_unopened_project gate (both privacy call sites deleted, which is the property the criterion names)",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "RED",
+      "failing_tests": [
+        "test_the_same_call_is_refused_for_an_anonymous_reader_of_a_project_nobody_opened (assert 200 == 403; the 200 body carried the private project's receipt_id, node_key, artifact_ref, reviewer and both evidence rows - the same string a later row-level check cannot catch because state_acceptances and state_evidence are PUBLIC_STATE_TABLES)"
+      ],
+      "result_line": "1 failed, 3 passed, 1 warning in 4.74s"
+    },
+    {
+      "criterion": "privacy-follows-the-existing-project-rule",
+      "mutation": "M2a, execute layer only: core/state_commands.py:1259 adds 'if action == \"get_receipt\": return' (the service gate at core/state_service.py:1274-1276 stays)",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "GREEN",
+      "failing_tests": [],
+      "result_line": "4 passed, 1 warning in 4.81s",
+      "note": "expected: the two call sites are redundant, so removing one layer alone is still safe and no shipped test distinguishes the layers. Not a hole; recorded as a limits item."
+    },
+    {
+      "criterion": "privacy-follows-the-existing-project-rule",
+      "mutation": "M2b, reader layer only: core/state_service.py:1274-1276 replaced by 'pass' (the execute gate stays)",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "GREEN",
+      "failing_tests": [],
+      "result_line": "4 passed, 1 warning in 4.69s",
+      "note": "expected for the same reason. The reader gate's reality was proven separately by the reviewer probe (an untrusted StateService calling get_receipt directly, bypassing execute, raised ProjectPrivate for an unopened AND for a nonexistent project, so it is neither dead code nor an oracle)."
+    },
+    {
+      "criterion": "privacy-follows-the-existing-project-rule",
+      "mutation": "extra: core/state_attempts.py:1180 drops the 'AND project_id=?' scope, so a receipt from any project resolves under any caller-supplied project_id",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "RED",
+      "failing_tests": [
+        "test_a_receipt_id_from_another_project_is_refused_by_name (200 with the foreign receipt instead of an indistinguishable 404)"
+      ],
+      "result_line": "1 failed, 3 passed, 1 warning in 4.76s"
+    },
+    {
+      "criterion": "receipt-id-reads-acceptance-and-evidence",
+      "mutation": "extra: core/state_attempts.py:1182-1183 - replace 'raise missing' with 'return {}' so a nonexistent receipt is answered with an empty object",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "outcome": "RED",
+      "failing_tests": [
+        "test_a_nonexistent_receipt_id_is_refused_by_name (200 {} instead of 404 naming the id)",
+        "test_a_receipt_id_from_another_project_is_refused_by_name (200 {} instead of 404)"
+      ],
+      "result_line": "2 failed, 2 passed, 1 warning in 5.40s"
+    },
+    {
+      "criterion": "receipt-id-reads-acceptance-and-evidence",
+      "mutation": "extra: core/state_attempts.py:1187-1193 - return every evidence row recorded against the attempt instead of the receipt's pinned evidence_ids",
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py tests/unit/test_zzz_receipt_review_probe.py 2>&1 | tail -20",
+      "outcome": "SHIPPED SUITE GREEN / reviewer probe RED",
+      "failing_tests": [
+        "tests/unit/test_zzz_receipt_review_probe.py::test_probe_the_receipt_lists_only_the_evidence_it_pinned (the shipped 4 stayed green; 9 passed = 4 shipped + 5 probes)"
+      ],
+      "result_line": "1 failed, 9 passed, 1 warning in 13.50s",
+      "note": "the docstring's stronger claim ('not whatever was recorded against the attempt afterwards') is not pinned by the shipped suite; the criterion's own wording (evidence rows readable) is still satisfied, so this is a limits item, not a criterion failure."
+    }
+  ],
+  "commands_run": [
+    {
+      "command": "git rev-parse HEAD",
+      "result": "350c8777c7951b2dc45dbffe44388a31e6a59c7a"
+    },
+    {
+      "command": "git show --stat HEAD",
+      "result": "core/state_attempts.py +50, core/state_commands.py +17, core/state_service.py +21, tests/unit/test_state_receipt_read.py +213; 4 files changed, 301 insertions(+); no api/** path touched"
+    },
+    {
+      "command": "sqlite read-only: SELECT goal, contract_json, status FROM state_nodes WHERE project_id='aitelier' AND node_key='state.receipt-id-reads-the-acceptance-it-names-20261105'",
+      "result": "status OPEN; contract ids receipt-id-reads-acceptance-and-evidence, privacy-follows-the-existing-project-rule, independent-review - the criteria judged here are the node's own"
+    },
+    {
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "4 passed, 1 warning in 5.71s"
+    },
+    {
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_read_visibility.py tests/unit/test_state_project_privacy.py 2>&1 | tail -20",
+      "result": "75 passed, 1 warning in 37.69s"
+    },
+    {
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py tests/unit/test_state_read_visibility.py tests/unit/test_state_project_privacy.py 2>&1 | tail -20",
+      "result": "79 passed, 1 warning in 41.25s (no cross-file interference)"
+    },
+    {
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_attempts.py tests/unit/test_state_declaration_binding.py tests/unit/test_state_graph.py tests/unit/test_state_external.py tests/unit/test_state_changes.py tests/unit/test_state_driver_notes.py tests/unit/test_state_p4_review_independence.py 2>&1 | tail -20",
+      "result": "219 passed, 1 warning in 151.02s"
+    },
+    {
+      "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_zzz_receipt_review_probe.py 2>&1 | tail -20",
+      "result": "6 passed, 1 warning in 8.63s (reviewer's own probe; file deleted afterwards - git status clean)"
+    },
+    {
+      "command": "apply M1; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "2 failed, 2 passed, 1 warning in 3.81s"
+    },
+    {
+      "command": "apply M2a; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "4 passed, 1 warning in 4.81s"
+    },
+    {
+      "command": "apply M2b; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "4 passed, 1 warning in 4.69s"
+    },
+    {
+      "command": "apply M2; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "1 failed, 3 passed, 1 warning in 4.74s"
+    },
+    {
+      "command": "apply M3; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "1 failed, 3 passed, 1 warning in 4.76s"
+    },
+    {
+      "command": "apply M4; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py 2>&1 | tail -20",
+      "result": "2 failed, 2 passed, 1 warning in 5.40s"
+    },
+    {
+      "command": "apply M5; docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/worktrees/receipt-review:/w -w /w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_state_receipt_read.py tests/unit/test_zzz_receipt_review_probe.py 2>&1 | tail -20",
+      "result": "1 failed, 9 passed, 1 warning in 13.50s"
+    },
+    {
+      "command": "git checkout -- core/state_attempts.py core/state_commands.py core/state_service.py && git diff --stat",
+      "result": "empty before every mutant (checked 6 times); final git status --porcelain empty, HEAD still 350c8777c7951b2dc45dbffe44388a31e6a59c7a"
+    }
+  ],
+  "overall": "PASS",
+  "limits": [
+    "The HTTP entry is api.main.app driven by Starlette TestClient with the State DB and workspace dependency-overridden and api.authz.gate_enabled monkeypatched True; the real middlewares (write_gate, security headers, read cache) run, but no live uvicorn socket and no Cloudflare Access JWT path was exercised - cf_access.email_from_request_headers is stubbed to None, so 'anonymous' means no credential at all (the strongest pole) and the signed-in non-writer pole was not measured.",
+    "The read requires project_id as well as receipt_id, so a holder of the receipt id alone (without the project id) cannot dereference it. That is deliberate project scoping and was disclosed in the request shape, but it is a strictly narrower reading of 'a caller holding only receipt_id' than 'the receipt id suffices'.",
+    "The two privacy call sites are redundant: removing either alone keeps the shipped suite green (M2a/M2b). The composite removal leaks (M2), so the property is guarded, but no shipped test pins either layer individually. For this action the row-level authorizer is not a backstop either - state_acceptances and state_evidence are PUBLIC_STATE_TABLES (core/state_privacy.py:92-100), so an armed untrusted connection may read their rows for unopened projects; those two predicate calls are the whole barrier.",
+    "Oracle claims were measured by status code and body only (identical 403 for unopened vs nonexistent project; identical 404 for foreign vs nonexistent receipt). No timing side channel was measured: the scoped lookup and the missing-row lookup are both primary-key SELECTs, but I did not benchmark them.",
+    "M5 shows the docstring's 'not whatever was recorded against the attempt afterwards' is unguarded by the shipped suite (green); only my throwaway probe caught it. The criterion as written does not require that stronger property.",
+    "Not exercised: the MCP transport (state_graph_read requires writer auth for the whole tool, so get_receipt is not anonymously reachable there; also the tool's description enumerates actions and does not name get_receipt - a discovery gap, not a leak), legacy/foreign data shapes (a receipt with NULL or non-JSON evidence_ids would raise outside the 404 path; no such row was constructed), the full tests/ tree and the web/ Vitest suite, and the running deployment on 127.0.0.1:4444 (that container serves different code, so measuring there is not evidence about 350c8777c7951b2dc45dbffe44388a31e6a59c7a)."
+  ]
+}

@@ -98,7 +98,9 @@ log: its exit wakes you. When nothing is actionable and nothing is in flight,
 call idle_dormant with the reason: the timed review stops until real input.
 While you wait on a live worker or a watched job, one NOTHING_LEFT answer holds
 until that set changes. The runtime stays subscribed to project State changes
-(including new issues; your own writes do not wake you), project/driver inbox messages, and native worker messages/completion.
+(including new issues; your own writes carry your actor and do not wake you,
+while an authorless system event such as a lease expiry still reaches you),
+project/driver inbox messages, and native worker messages/completion.
 It wakes an idle agent automatically and queues busy-time input for the next
 step. Ordinary transport timeouts spend no model turns. An active director gets
 an idle review after 15 minutes to recheck ready work, issues and blockers. Do

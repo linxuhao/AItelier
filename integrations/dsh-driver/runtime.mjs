@@ -46,8 +46,10 @@ export function eventCarriesSomething(result) {
  *  published as a State event and arrives on its own subscription. Woken by it,
  *  the director reads what it just did and ends the turn - and that turn then
  *  draws a continuation question (measured 2026-11-05: about half of all wakes).
- *  An event counts as own when its `actor` is this driver, or, with no actor,
- *  its `driver_id` is. An event naming no author is not own; any inbox item
+ *  Own means exactly "the event says I wrote it": `actor` is `driver:<me>`.
+ *  An event with no `actor` is a system event, whatever else its payload names -
+ *  `lease_expired` carries the claim holder's `driver_id` and no actor, and it
+ *  must reach the holder too, so a `driver_id` alone is never own. Any inbox item
  *  makes the tick input.
  *  @param result - one `/wait` payload (with `project_inbox` when fetched).
  *  @param driverId - this driver's id.
@@ -55,7 +57,7 @@ export function eventCarriesSomething(result) {
 export function ownEchoOnly(result, driverId) {
   if (!driverId || !result?.events?.length || result.driver_inbox?.length || result.project_inbox?.items?.length) return false;
   const me = 'driver:' + driverId;
-  return result.events.every(({ payload = {} }) => payload.actor != null ? payload.actor === me : payload.driver_id === driverId);
+  return result.events.every(({ payload = {} }) => payload.actor === me);
 }
 
 /** One durable snapshot per session bootstrap / successful compaction epoch. */

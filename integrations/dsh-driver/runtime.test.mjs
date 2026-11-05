@@ -263,10 +263,16 @@ test('continuation while waiting: one NOTHING_LEFT holds for the wait, a changed
 test('own echo: a tick of only this driver\'s writes is not input; any other author, no author or inbox is', () => {
   const me = 'dsh-x', ev = payload => ({ event_type: 'e', payload });
   const own = ev({ actor: 'driver:dsh-x' }), claim = ev({ actor: 'driver:dsh-x', driver_id: 'dsh-x' });
-  const acked = ev({ driver_id: 'dsh-x' }), foreign = ev({ actor: 'driver:grok' }), authorless = ev({});
+  const foreign = ev({ actor: 'driver:grok' }), authorless = ev({});
+  // The shape core/state_claims.py emits for an expired lease: no actor at all,
+  // the holder in driver_id. The holder must be woken by it, so it is not own.
+  const leaseExpired = ev({ subject: 'node:alpha/B', lease_id: 'lease-1', driver_id: 'dsh-x', phase: 'expired', fence: 4 });
   const table = [
-    [{ events: [own, claim, acked] }, true, 'all own'],
-    [{ events: [ev({ actor: null, driver_id: 'dsh-x' })] }, true, 'null actor falls back to driver_id'],
+    [{ events: [own, claim] }, true, 'all own'],
+    [{ events: [leaseExpired] }, false, 'an authorless lease_expired naming me is not my own write'],
+    [{ events: [own, leaseExpired] }, false, 'one authorless event in the tick makes it input'],
+    [{ events: [ev({ actor: null, driver_id: 'dsh-x' })] }, false, 'an authorless event is not my own write'],
+    [{ events: [ev({ driver_id: 'dsh-x' })] }, false, 'driver_id alone never makes an event own'],
     [{ events: [own, foreign] }, false, 'one foreign event makes it input'],
     [{ events: [own, authorless] }, false, 'an event naming no author is not own'],
     [{ events: [{ event_type: 'e' }] }, false, 'no payload at all is not own'],
@@ -277,6 +283,7 @@ test('own echo: a tick of only this driver\'s writes is not input; any other aut
     [{ events: [] }, false, 'nothing is not an echo (eventCarriesSomething handles it)'],
   ];
   for (const [result, expected, why] of table) assert.equal(ownEchoOnly(result, me), expected, why);
+  assert.equal(ownEchoOnly({ events: [leaseExpired] }, 'dsh-y'), false, 'someone else\'s lease expiry is input too');
   assert.equal(ownEchoOnly({ events: [own] }, undefined), false, 'no identity: never filter');
   assert.equal(ownEchoOnly({ events: [own] }, ''), false);
 });

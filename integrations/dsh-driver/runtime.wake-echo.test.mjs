@@ -10,10 +10,12 @@ import { once } from 'node:events';
 
 // Root script: start a detached job and watch it, stop -> asked once (a fresh wait)
 // -> NOTHING_LEFT. The test then releases a State tick of only the director's own
-// writes (must not wake it) and a tick by another driver (must): that turn checks
-// and stops - same wait, already answered, so not asked. The test ends the job: its
-// notice wakes the director, which collects it, starts and watches the next job and
-// stops - a different wait, so asked again.
+// writes (must not wake it), a tick carrying an authorless lease_expired that names
+// this director in driver_id (must wake it: it is a system event, not an own write)
+// and a tick by another driver (must): those turns check and stop - same wait,
+// already answered, so not asked. The test ends the job: its notice wakes the
+// director, which collects it, starts and watches the next job and stops - a
+// different wait, so asked again.
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
 const require = createRequire(process.env.AITELIER_DSH_ENTRY);
@@ -38,6 +40,8 @@ export function apply(ctx) {
         ?? (pid ? once('watch', () => tool('root-watch', 'watch_process', { pid: Number(pid), note: 'fixture job' })) : undefined)
         ?? once('stop1', () => ({ type: 'text', text: 'STOP1 waiting on the job' }))
         ?? (questions >= 1 ? once('nothing1', () => ({ type: 'text', text: 'NOTHING_LEFT: the watched job owns the next step' })) : undefined)
+        ?? (text.includes('LEASE_NODE') ? once('lease-check', () => bash('root-lease', 'echo SAW_LEASE')) : undefined)
+        ?? (text.includes('LEASE_NODE') ? once('stop1b', () => ({ type: 'text', text: 'STOP1b the lease expiry reached me' })) : undefined)
         ?? (text.includes('FOREIGN_NODE') ? once('foreign-check', () => bash('root-foreign', 'echo SAW_FOREIGN')) : undefined)
         ?? (text.includes('FOREIGN_NODE') ? once('stop2', () => ({ type: 'text', text: 'STOP2 still waiting on the job' })) : undefined)
         ?? (text.includes('AItelier background job finished') ? once('collect', () => bash('root-collect', 'setsid nohup sleep 120 >/dev/null 2>&1 < /dev/null & echo JOB2_PID=$!')) : undefined)
@@ -138,9 +142,21 @@ test('real pinned DSH: own State writes do not wake the director; one NOTHING_LE
     await release({ timed_out: false, next_after: 11, next_inbox_after: 0, driver_inbox: [], events: [
       { seq: 11, project_id: 'alpha', node_key: 'OWN_ECHO_NODE', event_type: 'claim_acquired', payload: { actor: 'driver:dsh-fixture', driver_id: 'dsh-fixture' } }] });
     assert.equal(waits.at(-1), 11, 'the own tick still advances the cursor');
-    // Another driver's write: input.
+    // An authorless system event that names this driver: a lease expiry is emitted
+    // with the claim holder's driver_id and no actor. Everyone else is woken by it,
+    // so the holder must be too - it is not this driver's own write.
     await release({ timed_out: false, next_after: 12, next_inbox_after: 0, driver_inbox: [], events: [
-      { seq: 12, project_id: 'alpha', node_key: 'FOREIGN_NODE', event_type: 'driver_note_updated', payload: { actor: 'driver:grok' } }] });
+      { seq: 12, project_id: 'alpha', node_key: 'LEASE_NODE', event_type: 'lease_expired',
+        payload: { subject: 'node:alpha/LEASE_NODE', lease_id: 'lease-1', driver_id: 'dsh-fixture', phase: 'expired', fence: 4 } }] });
+    await until('the authorless lease_expired did not wake the director', () => said('STOP1b'));
+    assert.equal(waits.at(-1), 12, 'the authorless tick advances the cursor too');
+    assert.ok(delivered('LEASE_NODE'), 'an authorless event naming me reaches the session');
+    assert.ok(delivered('lease-1') && delivered('expired'), 'it reaches the session whole, payload included');
+    assert.ok(result('root-lease'), 'the woken turn called a tool');
+    assert.equal(questions().length, 1, 'still the same, already answered wait: not asked again');
+    // Another driver's write: input.
+    await release({ timed_out: false, next_after: 13, next_inbox_after: 0, driver_inbox: [], events: [
+      { seq: 13, project_id: 'alpha', node_key: 'FOREIGN_NODE', event_type: 'driver_note_updated', payload: { actor: 'driver:grok' } }] });
     await until('the foreign tick did not wake the director', () => said('STOP2'));
     assert.equal(delivered('OWN_ECHO_NODE'), undefined, 'an own-writes tick must never reach the session');
     assert.ok(delivered('FOREIGN_NODE'), 'a foreign tick is delivered');

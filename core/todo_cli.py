@@ -33,7 +33,7 @@ import time
 from typing import Any, Iterator
 
 from core.todo_plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
-                            new_document, save_observations)
+                            new_document, require_library_version, save_observations)
 from core import todo_templates as templates
 from core.todo_runtime import builtin_library
 
@@ -52,6 +52,9 @@ class _Open:
     def __init__(self, store: PlanStore, document: dict, now: float):
         self.store, self.document, self.now = store, document, now
         self.library = builtin_library()
+        # Before the plan is even parsed: a document frozen under another library must
+        # be named as such, not reported as a plan whose predicates this library lacks.
+        require_library_version(document, self.library)
         try:
             self.plan = TodoPlan.from_stored(document["plan"], self.library)
             if self.plan.plan_hash != document["plan_hash"]:

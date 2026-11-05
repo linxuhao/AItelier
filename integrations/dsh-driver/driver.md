@@ -64,7 +64,12 @@ session_id), naming that dead session. The plan records the handover
 (rebound_from). A live child keeps its own plan: todo_rebind refuses it and
 todo_done keeps answering bound_to_other_session. When the plan is complete, run
 todo_finish, then report_external_attempt with the report it wrote, then review
-the delivered change yourself and record_evidence. run_pipeline stays available
+the delivered change yourself and record_evidence. A plan stops counting as
+unfinished work once the State attempt it is named after has settled (candidate,
+failed, superseded or abandoned): its open items are already accounted for by that
+terminal report, so idle_dormant no longer refuses it and the runtime snapshot no
+longer lists it. While the attempt is live the plan keeps blocking, and it also
+keeps blocking when State cannot answer for it. run_pipeline stays available
 for a task that genuinely needs an existing pipeline; it is not the default.
 Native Spawn/Fork subagents use the dedicated `worker` model route, with a
 provider selected once per child from its round-robin pool. The director keeps

@@ -291,15 +291,68 @@ export class TodoCli {
   }
 }
 
-/** The post-compaction snapshot's view of unfinished plans: enough to resume, not the items. */
-export function todoSummary(plans, liveSessions) {
-  return plans.filter(p => p.remaining?.length).map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next,
-    remaining_count: p.remaining?.length ?? 0, child_alive: liveSessions.has(p.child_session) }));
+/** Attempt statuses State can store, split by whether the attempt is still work.
+ *
+ *  A plan file is named after its State attempt, so a plan's unfinished items are
+ *  work only while that attempt is live. `candidate`, `failed`, `superseded` and
+ *  `abandoned` are settled: whatever is still open in the plan has already been
+ *  accounted for by the attempt's terminal report, and nothing may run it again.
+ *
+ *  Both lists are ALLOWLISTS on purpose. The settled one decides what may stop
+ *  blocking, so a status this runtime does not know - including one State adds
+ *  later - is settled by neither list and keeps its plan blocking until this file
+ *  is changed on review. "I could not classify it" is not "it settled". */
+export const ACTIVE_ATTEMPT_STATUSES = new Set(['reserved', 'launching', 'running', 'paused', 'unknown']);
+export const SETTLED_ATTEMPT_STATUSES = new Set(['candidate', 'failed', 'superseded', 'abandoned']);
+
+/** The status a State `get_attempt` answer carries, or undefined when it carries
+ *  none this runtime can read. The read returns the attempt envelope itself;
+ *  `result` is tolerated the same way `idle_dormant`'s list_claims tolerates it. */
+export function attemptStatus(answer) {
+  const status = answer && typeof answer === 'object' ? (answer.status ?? answer.result?.status) : undefined;
+  return typeof status === 'string' ? status : undefined;
 }
 
-/** Plans the idle review must hand back: unfinished, and no live child on them. */
-export function unfinishedWithoutChild(plans, liveSessions) {
-  return plans.filter(p => p.remaining?.length && !liveSessions.has(p.child_session))
+/** Whether a State `get_attempt` answer proves the attempt has settled. A status in
+ *  both lists (a later mistake) is live: blocking is the safe side of that typo. */
+export function attemptSettled(answer) {
+  const status = attemptStatus(answer);
+  return status !== undefined && SETTLED_ATTEMPT_STATUSES.has(status) && !ACTIVE_ATTEMPT_STATUSES.has(status);
+}
+
+/** The plan attempt ids whose State record says the attempt has SETTLED.
+ *
+ *  One `get_attempt` per plan that still has items, through the same State read
+ *  the rest of this runtime uses. FAILS CLOSED: a request that throws (State
+ *  unreachable, an unknown attempt), an answer with no status, or a status that
+ *  is not provably terminal leaves that attempt OUT of the set, so its plan keeps
+ *  blocking exactly as it did before this existed. This set only ever shrinks the
+ *  blocking list by what State actually said. */
+export async function settledAttempts(plans, read, signal) {
+  const settled = new Set();
+  await Promise.all(plans.filter(plan => plan.remaining?.length).map(async plan => {
+    let answer;
+    try { answer = await read('/api/state/query/get_attempt', { attempt_id: plan.attempt_id }, signal); }
+    catch { return; /* fail closed: an unread plan is unfinished work, not settled */ }
+    if (attemptSettled(answer)) settled.add(plan.attempt_id);
+  }));
+  return settled;
+}
+
+/** The post-compaction snapshot's view of unfinished plans: enough to resume, not
+ *  the items. `settled` is `settledAttempts`' answer (absent means "nothing is
+ *  known to have settled"), so a settled plan is not listed as awaiting work. */
+export function todoSummary(plans, liveSessions, settled = new Set()) {
+  return plans.filter(p => p.remaining?.length && !settled.has(p.attempt_id))
+    .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next,
+      remaining_count: p.remaining?.length ?? 0, child_alive: liveSessions.has(p.child_session) }));
+}
+
+/** Plans the idle review must hand back: unfinished, their attempt not settled,
+ *  and no live child on them. A plan whose attempt settled is history, not a
+ *  blocker; a plan whose attempt State could not answer for stays one. */
+export function unfinishedWithoutChild(plans, liveSessions, settled = new Set()) {
+  return plans.filter(p => p.remaining?.length && !liveSessions.has(p.child_session) && !settled.has(p.attempt_id))
     .map(p => ({ attempt_id: p.attempt_id, node_key: p.node_key, next: p.next, remaining: p.remaining }));
 }
 
@@ -308,10 +361,11 @@ export function unfinishedWithoutChild(plans, liveSessions) {
  *  A host restart can kill a native child mid-plan: the plan stays bound to a
  *  session that no longer exists, so `todo_done` answers `bound_to_other_session`
  *  forever and `todo_finish` refuses (`never begun`), which in turn keeps
- *  `idle_dormant` refusing `unfinished_plans`. The exit is one deliberate
- *  takeover, and its whole safety is the liveness check: only the session the
- *  plan is actually bound to may be replaced, and only while it is provably not
- *  running. A live child keeps its plan and keeps answering `bound_to_other_session`.
+ *  `idle_dormant` refusing `unfinished_plans` for as long as the attempt itself is
+ *  live. The exit is one deliberate takeover, and its whole safety is the liveness
+ *  check: only the session the plan is actually bound to may be replaced, and only
+ *  while it is provably not running. A live child keeps its plan and keeps
+ *  answering `bound_to_other_session`.
  */
 export function rebindRefusal({ attempt_id, item_id, session_id, bound_session, live = [], root_session }) {
   if (!attempt_id || !item_id) return { refused: 'invalid_arguments', reason: 'attempt_id and the item_id to take over are required' };
@@ -525,8 +579,17 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     execute: (args, exec) => todo.call(args.attempt_id, ['report', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
       '--session=' + exec.agent.session.id, '--note=' + args.note], exec.signal),
   }));
+  // The plans, and what State says about the attempt each one is named after. The
+  // two are read together because every view of "unfinished work" needs both: a
+  // plan whose attempt has settled is not work, and one whose attempt State could
+  // not answer for still is (settledAttempts fails closed).
+  const planWork = async signal => {
+    const plans = await todo.plans(signal);
+    return { plans, settled: await settledAttempts(plans, request, signal) };
+  };
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
-    directory: env.AITELIER_DSH_STATE_DIR, request, todoPlans: async () => todoSummary(await todo.plans(), liveChildren) });
+    directory: env.AITELIER_DSH_STATE_DIR, request,
+    todoPlans: async () => { const { plans, settled } = await planWork(); return todoSummary(plans, liveChildren, settled); } });
   await runtime.init();
   const schema = await request('/api/state/schema');
   const subagents = new Set();
@@ -683,7 +746,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // kills it): the director names the dead session and takes the item over.
     // Without this an item already begun by a dead session has no exit at all -
     // todo_done answers bound_to_other_session, todo_finish refuses, and
-    // idle_dormant refuses unfinished_plans forever.
+    // idle_dormant refuses unfinished_plans for as long as the attempt is live.
+    // (A plan whose attempt has already settled does not block at all; the takeover
+    // is for the stranded plan of an attempt that is still open.)
     scope.tools.register(defineTool({ name: 'todo_rebind',
       description: 'Director only. Take a plan item over from a session that died (for example a native child killed by a host restart) so its work can be finished. Names the attempt_id, the item_id to begin and the session_id being replaced; refused unless that session is the one the plan is bound to and is verifiably dead. The plan records the takeover (rebound_from), so a later reader sees it changed hands. A live child keeps its own plan.',
       parameters: { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true },
@@ -719,21 +784,23 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       },
     }));
     scope.tools.register(defineTool({ name: 'idle_dormant',
-      description: 'Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. You stay subscribed: any State event, inbox message, owner message or child message wakes you and the review resumes. Refused while you have a live child, a live State claim or an unfinished todo plan.',
+      description: 'Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. You stay subscribed: any State event, inbox message, owner message or child message wakes you and the review resumes. Refused while you have a live child, a live State claim or an unfinished todo plan whose State attempt has not settled.',
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
         const early = dormancyRefusal({ reason, liveChildren: liveChildren.size });
         if (early) return early;
-        let claims, plans;
+        let claims, work;
         try {
+          const bounded = AbortSignal.any([exec.signal, AbortSignal.timeout(30000)]);
           const listed = await request('/api/state/query/list_claims', { project_id: project, driver_id: env.AITELIER_DRIVER_ID, limit: 100 },
-            AbortSignal.any([exec.signal, AbortSignal.timeout(30000)]));
+            bounded);
           claims = ((listed.result ?? listed).claims ?? []).filter(c => c.status === 'live' && c.driver_id === env.AITELIER_DRIVER_ID);
-          plans = unfinishedWithoutChild(await todo.plans(exec.signal), liveChildren);
+          work = await planWork(bounded);
         } catch (error) {
           return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
         }
+        const plans = unfinishedWithoutChild(work.plans, liveChildren, work.settled);
         const background = backgroundProcesses(env.AITELIER_DSH_SESSION).filter(pid => !watches.has(pid));
         const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, claims, plans, background });
         if (refusal) return refusal;
@@ -778,7 +845,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     },
     notify: async () => {
       let todoView;
-      try { todoView = { todo_unfinished: unfinishedWithoutChild(await todo.plans(), liveChildren) }; }
+      try {
+        const { plans, settled } = await planWork();
+        todoView = { todo_unfinished: unfinishedWithoutChild(plans, liveChildren, settled) };
+      }
       catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier director review due:\n' + JSON.stringify({
         project_id: project, reason: 'idle_review_due',

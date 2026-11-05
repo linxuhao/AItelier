@@ -673,8 +673,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       const sha = text => createHash('sha256').update(text).digest('hex');
       const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
         old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
+        rounds_started: after.roundsStarted, old_max_goal_rounds: before.maxGoalRounds, new_max_goal_rounds: after.maxGoalRounds,
         goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
-      ctx.logger.info(`director goal ${after.id} re-seeded from goal.md: ${JSON.stringify(record)}`);
+      ctx.logger.info(`director goal ${after.id} re-seeded: ${JSON.stringify(record)}`);
       const written = await appendGoalSeedRecord(env.AITELIER_DSH_STATE_DIR, record);
       if (!written.written) ctx.logger.error(`director goal ${after.id} was re-seeded but its trace was NOT written (${written.error})`);
     } catch (error) {

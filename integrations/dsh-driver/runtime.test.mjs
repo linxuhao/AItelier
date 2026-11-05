@@ -32,13 +32,16 @@ test('enabled resident re-arms the exact active native goal without resetting it
   assert.equal(resumed.activation,'armed');
 });
 
-test('native continuation budget exhaustion is retained as a blocker across restart', () => {
+// Each start spends one counted round, so a resident goal's cap is raised at start instead of
+// blocking a healthy director after its 256th restart (runtime.goalseed.test.mjs).
+test('an exhausted active native budget is raised at restart, not turned into a blocker', () => {
   const current={id:'capped',revision:3,objective:'template',phase:'active',activation:'disarmed',roundsStarted:256,maxGoalRounds:256};
-  const goals={get:()=>current,block:(_agent,ref,reason)=>{
-    assert.deepEqual(ref,{id:'capped',revision:3});assert.equal(reason.code,'round-limit');
-    return {...current,phase:'blocked',blockedReason:reason};
-  }};
-  assert.equal(bindDriverGoal(goals,{},'template').phase,'blocked');
+  let edited;
+  const goals={get:()=>edited??current,block:()=>assert.fail('blocked'),
+    edit:(_agent,ref,request)=>{assert.deepEqual(ref,{id:'capped',revision:3});assert.deepEqual(request,{maxGoalRounds:512});return edited={...current,revision:4,maxGoalRounds:512};},
+    resume:(_agent,ref)=>{assert.deepEqual(ref,{id:'capped',revision:4});return {...edited,revision:5,activation:'armed'};}};
+  const view=bindDriverGoal(goals,{},'template');
+  assert.equal(view.phase,'active');assert.equal(view.activation,'armed');assert.equal(view.roundsStarted,256);assert.equal(view.maxGoalRounds,512);
 });
 
 test('State injection survives resume and ignores ordinary events, steps and failed compaction', async () => {

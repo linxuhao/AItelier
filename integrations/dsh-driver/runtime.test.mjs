@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -214,6 +214,100 @@ test('dormancy is refused for each kind of live work, in a fixed order, and allo
   assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 1, claims: [claim], plans: [plan] }).refused, 'live_children');
   assert.equal(dormancyRefusal({ reason: 'quiet', claims: [claim], plans: [plan] }).refused, 'live_claims');
   assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 0, claims: [], plans: [] }), null);
+});
+const toolCall = () => ({ type: 'tool/call', data: {} });
+const said = text => ({ type: 'assistant/message', data: { message: { content: [{ type: 'reasoning', text: 'NOTHING_LEFT in reasoning does not count' }, { type: 'text', text }] } } });
+const input = kind => ({ type: 'user/message', data: { content: [], source: { kind } } });
+test('continuation: a turn that called a tool is asked once more; no tool or NOTHING_LEFT is the second stop', () => {
+  const c = new Continuation();
+  c.observe(input('aitelier-runtime-event')); c.observe(toolCall()); c.observe(said('done one step'));
+  assert.equal(c.turnEnded(), true, 'stopped after work: ask');
+  c.observe(input(continueSource)); c.observe(said('nothing more'));
+  assert.equal(c.turnEnded(), false, 'answered without a tool call: idle');
+  c.observe(input('aitelier-runtime-event')); c.observe(toolCall()); c.observe(said(NOTHING_LEFT + ': all blocked on the owner'));
+  assert.equal(c.turnEnded(), false, 'NOTHING_LEFT after checking: idle');
+  // Only the visible text counts, not reasoning.
+  c.observe(toolCall()); c.observe(said('checked'));
+  assert.equal(c.turnEnded(), true);
+  // A fresh turn record each time: the counters do not leak into the next turn.
+  assert.equal(c.turnEnded(), false);
+});
+test('continuation is bounded: at most MAX_AUTO_CONTINUE questions until real input, and its own question is not input', () => {
+  assert.equal(MAX_AUTO_CONTINUE, 5);
+  const c = new Continuation();
+  const asked = [];
+  for (let i = 0; i < 8; i++) { c.observe(input(continueSource)); c.observe(toolCall()); c.observe(said('polled')); asked.push(c.turnEnded()); }
+  assert.deepEqual(asked, [true, true, true, true, true, false, false, false]);
+  c.observe(input('user')); c.observe(toolCall()); c.observe(said('owner asked'));
+  assert.equal(c.turnEnded(), true, 'real input restores the budget');
+});
+test('idle review: continuation asks instead of arming the review; dormancy, inactive goals and failures do not ask', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const agent = { status: 'idle' }, goal = { id: 'g', phase: 'active', activation: 'disarmed' };
+  let asks = 0, reviews = 0, ok = true;
+  const continuation = new Continuation();
+  const review = new IdleReview({ agent, goals: { get: () => goal, disarm: () => {} }, intervalMs: 100, continuation,
+    canContinue: () => ok, ask: () => { asks++; }, notify: () => { reviews++; }, onError: error => { throw error; } });
+  continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
+  t.mock.timers.tick(1000); await Promise.resolve();
+  assert.equal(asks, 1); assert.equal(reviews, 0, 'asked, so no review timer');
+  review.statusChanged('running'); review.statusChanged('idle'); t.mock.timers.tick(100); await Promise.resolve();
+  assert.equal(asks, 1); assert.equal(reviews, 1, 'empty answer: the normal review');
+  ok = false; continuation.observe(toolCall()); review.statusChanged('idle'); t.mock.timers.tick(100); await Promise.resolve();
+  assert.equal(asks, 1, 'a failed completion is not asked again'); assert.equal(reviews, 2);
+  ok = true; review.enterDormancy('quiet'); continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
+  t.mock.timers.tick(1000); await Promise.resolve();
+  assert.equal(asks, 1, 'dormant: never asked'); assert.equal(reviews, 2);
+  review.wake(); goal.phase = 'paused'; continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
+  assert.equal(asks, 1, 'stopped goal: never asked');
+  review.close();
+});
+test('background jobs are found by this driver session in the environment; zombies and the driver itself are not jobs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fake-proc-'));
+  const proc = async (pid, session, state = 'S') => {
+    await mkdir(join(root, String(pid)));
+    await writeFile(join(root, String(pid), 'environ'), ['PATH=/bin', ...(session ? ['AITELIER_DSH_SESSION=' + session] : []), 'X=1'].join('\0') + '\0');
+    await writeFile(join(root, String(pid), 'stat'), `${pid} (sh (weird) name) ${state} 1 2 3`);
+  };
+  try {
+    await proc(10, 'root-a'); await proc(11, 'root-a'); await proc(12, 'root-b'); await proc(13, undefined);
+    await proc(14, 'root-a', 'Z'); await proc(15, 'root-a'); await mkdir(join(root, 'self'));
+    assert.equal(processSession(10, root), 'root-a'); assert.equal(processSession(13, root), undefined); assert.equal(processSession(99, root), undefined);
+    assert.equal(processAlive(10, root), true); assert.equal(processAlive(14, root), false, 'zombie'); assert.equal(processAlive(99, root), false);
+    assert.deepEqual(backgroundProcesses('root-a', 15, root), [10, 11], 'not the driver itself, not a zombie, not another session');
+    assert.deepEqual(backgroundProcesses(undefined, 15, root), []);
+    assert.deepEqual(backgroundProcesses('root-a', 15, join(root, 'missing')), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('dormancy refuses unwatched background jobs last, after every other kind of live work', () => {
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', background: [41, 42] }),
+    { refused: 'background_processes', reason: 'jobs you started are still running; watch_process them or wait', pids: [41, 42] });
+  assert.equal(dormancyRefusal({ reason: 'quiet', plans: [{ attempt_id: 'a' }], background: [41] }).refused, 'unfinished_plans');
+  assert.equal(dormancyRefusal({ reason: 'quiet', background: [] }), null);
+});
+test('watch_process refuses what it cannot or must not watch: bad args, a dead pid, another driver\'s job, a 17th watch', () => {
+  const ok = { pid: 4242, note: 'pytest', alive: true, session: 'me', mySession: 'me', watched: false, count: 0 };
+  assert.equal(watchRefusal(ok), null);
+  for (const bad of [{ pid: 1 }, { pid: 0 }, { pid: 1.5 }, { pid: NaN }, { note: '' }])
+    assert.equal(watchRefusal({ ...ok, ...bad }).refused, 'invalid_arguments', JSON.stringify(bad));
+  assert.deepEqual(watchRefusal({ ...ok, alive: false }), { refused: 'not_running', reason: 'process 4242 is not running' });
+  assert.deepEqual(watchRefusal({ ...ok, session: 'someone-else' }), { refused: 'not_this_driver', reason: 'process 4242 was not started from this driver' });
+  assert.deepEqual(watchRefusal({ ...ok, session: undefined }).refused, 'not_this_driver', 'no session in the environment is not ours');
+  assert.equal(watchRefusal({ ...ok, count: 15 }), null, 'the 16th watch is allowed');
+  assert.deepEqual(watchRefusal({ ...ok, count: 16 }), { refused: 'too_many_watches', reason: 'at most 16 watched jobs' });
+  assert.equal(watchRefusal({ ...ok, count: 16, watched: true }), null, 're-watching a watched pid is not a new watch');
+  assert.equal(watchRefusal({ ...ok, alive: false, session: 'someone-else' }).refused, 'not_running', 'order: running first');
+});
+test('prompts ask for concrete candidates and a NOTHING_LEFT line, and name the tools', async () => {
+  for (const text of [continuationQuestion, reviewInstruction]) {
+    assert.match(text, /NOTHING_LEFT:/); assert.match(text, /blocked/); assert.match(text, /open issues/);
+  }
+  assert.match(continuationQuestion, /ready frontier nodes/); assert.match(continuationQuestion, /promised/); assert.match(continuationQuestion, /watch_process/);
+  assert.match(reviewInstruction, /idle_dormant/);
+  for (const text of [continuationQuestion, reviewInstruction])
+    for (const candidate of [/ready/, /open issues/, /next steps you promised yourself/, /results you can collect/]) assert.match(text, candidate);
+  const guide = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+  for (const word of ['continuation check', 'NOTHING_LEFT:', 'watch_process', 'idle_dormant']) assert.ok(guide.includes(word), word);
 });
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
   t.mock.timers.enable({apis:['setTimeout']});

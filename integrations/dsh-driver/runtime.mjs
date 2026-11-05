@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'aitelier-state-driver';
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm', 'goals'];
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction', 'credentials', 'llm', 'goals', 'tokenMeter'];
 
 const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
 const goalTemplate = await readFile(goalFile, 'utf8');
@@ -79,11 +79,38 @@ export function connectionErrorMessage(error, source = 'AItelier event subscript
   return `${source}: ${error.message}${cause ? ` (${[cause.code, cause.message].filter(Boolean).join(': ')})` : ''}`.slice(0, 2000);
 }
 
-/** The resident runtime owns idle time; the model never holds a wait tool open. */
+/** user/message sources that are input to the director: the owner, this runtime's
+ *  State/inbox/handback events, and native child messages. */
+export const wakeSources = new Set(['user', runtimeEventSource, 'agent-message', 'subagent-settled', 'child']);
+/** Whether a root session event ends dormancy. DSH also appends its own user/messages
+ *  (runtime context, compaction checkpoints, this runtime's State snapshot): not input. */
+export const endsDormancy = event => event.type === 'user/message' && wakeSources.has(event.data?.source?.kind ?? 'user');
+
+/** Below this measured context (tokens) entering dormancy does not compact: a cold re-read is cheap. */
+export const DORMANT_COMPACT_MIN_TOKENS = 32000;
+
+/** The resident runtime owns idle time; the model never holds a wait tool open.
+ *
+ *  Dormancy (idle_dormant) parks only the timed review: nothing is stopped, the
+ *  State/inbox subscription and child messages still steer the agent, and the
+ *  first such message ends dormancy (wake). On the first idle after entering it,
+ *  `compact` runs once - the provider cache will be cold by the next wake anyway,
+ *  so a large context is cheapest to shrink while it is still warm. */
 export class IdleReview {
-  constructor({ agent, goals, notify, onError, intervalMs = 15 * 60 * 1000 }) {
-    Object.assign(this, { agent, goals, notify, onError, intervalMs });
+  constructor({ agent, goals, notify, onError, compact, intervalMs = 15 * 60 * 1000 }) {
+    Object.assign(this, { agent, goals, notify, onError, compact, intervalMs });
     this.closed = false;
+  }
+  enterDormancy(reason) {
+    clearTimeout(this.timer);
+    this.dormant = { reason, since: new Date().toISOString(), compactPending: true };
+    return this.dormant;
+  }
+  /** Ends dormancy; returns what it was (undefined when not dormant). */
+  wake() {
+    const was = this.dormant;
+    this.dormant = undefined;
+    return was;
   }
   statusChanged(status) {
     clearTimeout(this.timer);
@@ -91,6 +118,13 @@ export class IdleReview {
     // Keep the durable mandate active, while parking immediate native rounds.
     // Incoming steering and native child messages still wake an idle agent.
     this.goals.disarm(this.agent);
+    if (this.dormant) {
+      if (this.dormant.compactPending && this.compact) {
+        this.dormant.compactPending = false;
+        Promise.resolve().then(this.compact).catch(this.onError);
+      }
+      return;
+    }
     if (this.goals.get(this.agent)?.phase !== 'active') return;
     this.timer = setTimeout(() => {
       if (this.closed || this.agent.status !== 'idle' || this.goals.get(this.agent)?.phase !== 'active') return;
@@ -386,7 +420,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   await runtime.init();
   const schema = await request('/api/state/schema');
   const subagents = new Set();
-  let agent, agentCtx, waiting = false, disposed = false;
+  const floorEnv = Number(env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS);
+  const compactFloor = env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS !== undefined && Number.isFinite(floorEnv) && floorEnv >= 0
+    ? floorEnv : DORMANT_COMPACT_MIN_TOKENS;
+  // idleReview is created after the agent; tools reach it only when called.
+  let agent, agentCtx, idleReview, waiting = false, disposed = false;
   let subscriptionError = '', completionError = '';
   let activity = Promise.resolve();
   const currentPhase = () => waiting ? completionError ? 'failed' : 'waiting' : 'running';
@@ -517,6 +555,31 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
           await todo.bound(args.attempt_id, status => status.finish_budget_seconds, exec.signal))
         : { refused: 'invalid_attempt_id', reason: 'attempt_id must be a plain file name', brief: null },
     }));
+    scope.tools.register(defineTool({ name: 'idle_dormant',
+      description: 'Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. You stay subscribed: any State event, inbox message, owner message or child message wakes you and the review resumes. Refused while you have a live child, a live State claim or an unfinished todo plan.',
+      parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
+      async execute(args, exec) {
+        const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+        if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
+        if (liveChildren.size) return { refused: 'live_children', reason: `${liveChildren.size} native child(ren) still running` };
+        let claims, plans;
+        try {
+          const listed = await request('/api/state/query/list_claims', { project_id: project, driver_id: env.AITELIER_DRIVER_ID, limit: 100 },
+            AbortSignal.any([exec.signal, AbortSignal.timeout(30000)]));
+          claims = ((listed.result ?? listed).claims ?? []).filter(c => c.status === 'live' && c.driver_id === env.AITELIER_DRIVER_ID);
+          plans = unfinishedWithoutChild(await todo.plans(exec.signal), liveChildren);
+        } catch (error) {
+          return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
+        }
+        if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
+        if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id) };
+        if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
+        const dormant = idleReview.enterDormancy(reason);
+        return { dormant: true, since: dormant.since, reason,
+          compaction: `once on the next idle if the context is at least ${compactFloor} tokens`,
+          wakes_on: ['State event', 'inbox message', 'owner message', 'child message'] };
+      },
+    }));
     scope.tools.register(defineTool({ name: 'grep_chat_history',
       description: 'Search this driver’s complete chat log, including before compaction. Literal search by default; optional JavaScript regex. Results cite event seq and line. Page with after_seq.',
       parameters: { pattern: { type: 'string', required: true }, regex: { type: 'boolean' },
@@ -534,15 +597,22 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: env.AITELIER_DSH_SESSION })
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
-  const idleReview = new IdleReview({ agent, goals: ctx.goals,
+  idleReview = new IdleReview({ agent, goals: ctx.goals,
     ...(Number(env.AITELIER_DSH_IDLE_REVIEW_MS) > 0 ? { intervalMs: Number(env.AITELIER_DSH_IDLE_REVIEW_MS) } : {}),
+    compact: async () => {
+      const tokens = ctx.tokenMeter.measure(agent.session).totalTokens;
+      if (!(tokens >= compactFloor)) return ctx.logger.info(`dormant at ${tokens} tokens: below ${compactFloor}, not compacting`);
+      // Native idle compaction; refused (busy) when work arrived meanwhile - then the wake handles it.
+      const result = await ctx.compaction.compactNow(agent, AbortSignal.timeout(10 * 60 * 1000));
+      ctx.logger.info(`dormant at ${tokens} tokens: ${result ? 'compacted' : 'nothing safe to compact'}`);
+    },
     notify: async () => {
       let todoView;
       try { todoView = { todo_unfinished: unfinishedWithoutChild(await todo.plans(), liveChildren) }; }
       catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier director review due:\n' + JSON.stringify({
         project_id: project, reason: 'idle_review_due',
-        instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available, finish this round and remain subscribed.',
+        instruction: 'Recheck live State frontier, open issues, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If no action is available and nothing is in flight, call idle_dormant with the reason; otherwise finish this round and remain subscribed.',
         ...todoView,
       }));
     },
@@ -561,6 +631,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   }
   ctx.on('session/event', (session, event) => {
     if (session !== agent.session) return;
+    // Only real input ends dormancy (a compaction while dormant must not). A kind
+    // missing from wakeSources only keeps the timed review parked; the message
+    // itself still runs a turn.
+    if (endsDormancy(event) && idleReview.wake())
+      ctx.logger.info(`dormancy ended by ${event.data.source?.kind ?? 'user'} message at seq ${event.seq}`);
     if (event.type === 'assistant/message') completionError = '';
     const entry = historyPage([event], { limit: 1 }).entries[0];
     if (entry) void report(currentPhase(), undefined, entry);

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { bindDriverGoal, goalMdCommit } from './goal.mjs';
+import { bindDriverGoal, goalMdCommit, ROUND_TOP_UP_BELOW, ROUND_TOP_UP_TO } from './goal.mjs';
 
 // A stateful stand-in for the native goals service: edit() bumps the revision
 // and keeps everything else, as the pinned dsh-goal does.
@@ -20,7 +20,9 @@ function fakeGoals(initial) {
   state.edit = (_agent, ref, request) => {
     assert.deepEqual(ref, { id: state.goal.id, revision: state.goal.revision });
     state.edits.push(request);
-    return state.goal = { ...state.goal, revision: state.goal.revision + 1, objective: request.objective.trim() };
+    return state.goal = { ...state.goal, revision: state.goal.revision + 1,
+      ...(request.objective === undefined ? {} : { objective: request.objective.trim() }),
+      ...(request.maxGoalRounds === undefined ? {} : { maxGoalRounds: request.maxGoalRounds }) };
   };
   state.resume = (_agent, ref) => {
     state.resumes++;
@@ -103,14 +105,42 @@ test('paused, blocked and completed goals keep their objective; cleared goals ar
   assert.deepEqual(cleared.edits, []);
 });
 
-test('a re-seeded goal at its round cap is still blocked rather than resumed', () => {
-  const goals = fakeGoals(active({ roundsStarted: 256 }));
-  goals.block = (_a, ref, reason) => ({ ...goals.goal, phase: 'blocked', blockedReason: reason, seenRevision: ref.revision });
-  const view = bindDriverGoal(goals, {}, 'NEW mandate');
-  assert.equal(goals.goal.objective, 'NEW mandate');
-  assert.equal(view.phase, 'blocked');
-  assert.equal(view.seenRevision, 8, 'block must be addressed to the edited revision');
-  assert.equal(goals.resumes, 0);
+test('an active goal near its round cap gets its cap raised in the same edit, then resumes', () => {
+  assert.equal(ROUND_TOP_UP_BELOW, 64);
+  assert.equal(ROUND_TOP_UP_TO, 256);
+  // [roundsStarted, rendered objective, expected edit request]
+  for (const [rounds, rendered, expected] of [
+    [256, 'NEW mandate', { objective: 'NEW mandate', maxGoalRounds: 512 }], // exhausted + goal.md changed: one edit carries both
+    [256, 'OLD mandate', { maxGoalRounds: 512 }],                         // exhausted, objective unchanged: cap only
+    [193, 'OLD mandate', { maxGoalRounds: 449 }],                         // 63 left: below the threshold
+    [300, 'OLD mandate', { maxGoalRounds: 556 }],                         // already past the cap
+  ]) {
+    const goals = fakeGoals(active({ roundsStarted: rounds })), seeded = [];
+    goals.block = () => assert.fail('a healthy resident goal must not be blocked by its round count');
+    const view = bindDriverGoal(goals, {}, rendered, { onSeed: (after, before) => seeded.push({ after, before }) });
+    assert.deepEqual(goals.edits, [expected], `rounds ${rounds}`);
+    assert.equal(seeded.length, 1);
+    assert.equal(seeded[0].before.maxGoalRounds, 256);
+    assert.equal(seeded[0].after.maxGoalRounds, rounds + 256);
+    assert.equal(seeded[0].after.revision, 8, 'one edit, one revision');
+    // id, phase and the counter are untouched: the budget is raised, never reset.
+    assert.equal(view.id, 'g1');
+    assert.equal(view.roundsStarted, rounds);
+    assert.equal(view.phase, 'active');
+    assert.equal(goals.resumes, 1);
+    assert.equal(view.activation, 'armed');
+    assert.equal(view.revision, 9, 'resume is addressed to the edited revision');
+  }
+  // Exactly at the threshold (64 left) nothing is edited.
+  const goals = fakeGoals(active({ roundsStarted: 192 }));
+  bindDriverGoal(goals, {}, 'OLD mandate', { onSeed: () => assert.fail('no edit expected') });
+  assert.deepEqual(goals.edits, []);
+  assert.equal(goals.resumes, 1);
+  // A goal that is already blocked (round-limit or otherwise) is an explicit state: left alone.
+  const blocked = fakeGoals(active({ phase: 'blocked', roundsStarted: 256, blockedReason: { code: 'round-limit', message: 'x' } }));
+  assert.equal(bindDriverGoal(blocked, {}, 'OLD mandate'), blocked.goal);
+  assert.deepEqual(blocked.edits, []);
+  assert.equal(blocked.resumes, 0);
 });
 
 // ---- real pinned DSH: the host service's restart path --------------------------------
@@ -131,7 +161,10 @@ async function sessionEvents(root, session) {
   } finally { await handle?.close(); await fork.dispose(); }
 }
 
-test('real pinned DSH: restart re-seeds an active director goal from goal.md exactly once', { timeout: 60000 }, async () => {
+// One fixture directory, two driver copies (old/new goal.md), a fake AItelier API, and run(variant, until)
+// = start the real pinned host on that copy, wait, SIGTERM it, return the persisted session events.
+// goalRows are extra profile rows, e.g. a smaller native default round cap.
+async function driverHarness(goalRows = []) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-goalseed-'));
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   // Two copies of the driver that differ only in goal.md stand for "goal.md edited, host service restarted".
@@ -160,7 +193,7 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
-  const profile = variant => ['driver-' + variant, JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'driver', name: join(variants[variant], 'runtime.mjs') }] }])];
+  const profile = variant => ['driver-' + variant, JSON.stringify([{ id: 'hmr', disabled: true }, ...goalRows, { insert: [{ id: 'driver', name: join(variants[variant], 'runtime.mjs') }] }])];
   for (const variant of ['old', 'new']) {
     const dir = join(directory, 'home/profiles/driver-' + variant); await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
@@ -186,6 +219,17 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     return sessionEvents(join(directory, 'home/sessions'), 'seed-root');
   };
   const idle = async () => activity.some(a => a.phase === 'waiting');
+  const close = async () => {
+    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
+    for (const response of parked) response.destroy();
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true, force: true });
+  };
+  return { run, idle, readSeeds, sha, close };
+}
+
+test('real pinned DSH: restart re-seeds an active director goal from goal.md exactly once', { timeout: 60000 }, async () => {
+  const { run, idle, readSeeds, sha, close } = await driverHarness();
   try {
     // First start: the goal is created from the old goal.md; nothing to re-seed.
     const firstAll = await run('old', idle), first = firstAll.filter(e => e.type === 'goal/change');
@@ -213,7 +257,11 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     const seeds = await readSeeds();
     assert.equal(seeds.length, 1);
     const [seed] = seeds;
-    assert.deepEqual(Object.keys(seed).sort(), ['at', 'goal_id', 'goal_md_commit', 'goal_md_sha256', 'new_objective_sha256', 'new_revision', 'old_objective_sha256', 'old_revision']);
+    assert.deepEqual(Object.keys(seed).sort(), ['at', 'goal_id', 'goal_md_commit', 'goal_md_sha256', 'new_max_goal_rounds', 'new_objective_sha256', 'new_revision', 'old_max_goal_rounds', 'old_objective_sha256', 'old_revision', 'rounds_started']);
+    // Far from the cap: the objective edit leaves the cap alone, and the record says so.
+    assert.equal(seed.old_max_goal_rounds, created[0].data.goal.maxGoalRounds);
+    assert.equal(seed.new_max_goal_rounds, seed.old_max_goal_rounds);
+    assert.equal(seed.rounds_started, roundsBefore);
     assert.equal(seed.goal_id, goalId);
     assert.equal(seed.old_objective_sha256, sha(created[0].data.goal.objective), 'old digest is the start-1 objective');
     assert.equal(seed.old_objective_sha256, sha('OLD mandate for alpha'));
@@ -230,12 +278,45 @@ test('real pinned DSH: restart re-seeds an active director goal from goal.md exa
     const third = (await run('new', idle)).filter(e => e.type === 'goal/change');
     assert.equal(third.filter(e => e.data.operation === 'edit').length, 1, 'same text was edited again');
     assert.deepEqual(await readSeeds(), seeds, 'a start with unchanged goal.md must append nothing');
-  } finally {
-    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
-    for (const response of parked) response.destroy();
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-    if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true, force: true });
-  }
+  } finally { await close(); }
+});
+
+test('real pinned DSH: a start near the round cap raises the cap in place, once', { timeout: 60000 }, async () => {
+  // A native default cap of 40 leaves 39 rounds after the first start: below ROUND_TOP_UP_BELOW.
+  const { run, idle, readSeeds, sha, close } = await driverHarness([{ id: 'goal', config: { defaultMaxGoalRounds: 40 } }]);
+  try {
+    const firstAll = await run('old', idle), first = firstAll.filter(e => e.type === 'goal/change');
+    const created = first.filter(e => e.data.operation === 'create');
+    assert.equal(created.length, 1);
+    assert.equal(created[0].data.goal.maxGoalRounds, 40, 'fixture: the profile row did not reach the goal service');
+    const roundsBefore = firstAll.filter(e => e.type === 'user/message' && e.data.source?.kind === 'goal').length;
+    assert.ok(roundsBefore >= 1 && 40 - roundsBefore < ROUND_TOP_UP_BELOW);
+
+    // Same goal.md, restart: the only reason to edit is the cap.
+    const secondAll = await run('old', async () => (await readSeeds()).length > 0), second = secondAll.filter(e => e.type === 'goal/change');
+    const edits = second.filter(e => e.data.operation === 'edit');
+    assert.equal(edits.length, 1, JSON.stringify(second.map(e => e.data.operation)));
+    assert.equal(edits[0].data.goal.id, created[0].data.goal.id);
+    assert.equal(edits[0].data.goal.phase, 'active');
+    assert.equal(edits[0].data.goal.objective, 'OLD mandate for alpha', 'objective must not change');
+    assert.equal(edits[0].data.goal.maxGoalRounds, roundsBefore + ROUND_TOP_UP_TO);
+    assert.equal(edits[0].data.roundsStarted, roundsBefore, 'the counter is kept, not reset');
+    assert.ok(second.some(e => e.data.operation === 'resume' && e.seq > edits[0].seq), 'disarmed -> resume did not follow the edit');
+    assert.ok(!second.some(e => e.data.goal?.phase === 'blocked'), 'goal was blocked');
+    const seeds = await readSeeds();
+    assert.equal(seeds.length, 1);
+    assert.equal(seeds[0].old_max_goal_rounds, 40);
+    assert.equal(seeds[0].new_max_goal_rounds, roundsBefore + ROUND_TOP_UP_TO);
+    assert.equal(seeds[0].rounds_started, roundsBefore);
+    assert.equal(seeds[0].old_objective_sha256, seeds[0].new_objective_sha256);
+    assert.equal(seeds[0].new_objective_sha256, sha('OLD mandate for alpha'));
+    assert.equal(seeds[0].new_revision, edits[0].data.goal.revision);
+
+    // A further start has plenty left: no edit, no record.
+    const third = (await run('old', idle)).filter(e => e.type === 'goal/change');
+    assert.equal(third.filter(e => e.data.operation === 'edit').length, 1, 'cap was raised again');
+    assert.deepEqual(await readSeeds(), seeds);
+  } finally { await close(); }
 });
 
 test('an unwritable trace target does not throw - the record is lost, the host is not', async () => {

@@ -264,22 +264,39 @@ def test_continuity_check_resolves_against_the_process_cwd(tmp_path,
         "to GUARDED above")
 
 
-def test_run_tests_refuses_a_relative_out_dir(tmp_path):
+def test_run_tests_refuses_a_relative_out_dir(tmp_path, monkeypatch):
     """The root guard covered `project_root` and an EMPTY `out_dir`, not a
     relative one — and `out_dir` is agent-visible (`tool.yaml`, required: false)
     while `run_tests` is granted to a repo-less step by `tool_creation`. So
     `out_dir="reports"` on a run with no repo made `Path("reports").mkdir()`
     resolve against the process CWD, which in the container is /app, the
     bind-mounted AItelier checkout.
+
+    The witness IS the process CWD, so it must be a directory this test owns.
+    It used to be the shared checkout (`Path.cwd()`), which made the assertion
+    depend on what that checkout happens to contain rather than on what the
+    guard did: once main tracked `reports/receipt-review.json`, this test was red
+    on every clean checkout while the guard was perfectly intact. A directory
+    that the repository's own contents can create cannot witness a write that
+    the guard is supposed to prevent — the failing write must be the only way
+    the path can appear. So the probe runs with the CWD moved into `tmp_path`,
+    and the assertion reads the same directory: lose the absolute-`out_dir`
+    guard and `Path("reports")` lands in `tmp_path/reports`, which nothing else
+    creates.
     """
     import importlib.util
     p = str(Path(__file__).resolve().parents[2] / "aitelier/tools/run_tests/impl.py")
     s = importlib.util.spec_from_file_location("run_tests_probe", p)
     m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 
+    monkeypatch.chdir(tmp_path)
     out = m.run_tests(project_root=str(tmp_path), out_dir="reports")
 
+    # The CWD witness comes first and stands on its own: the thing that must
+    # never happen is the WRITE, so losing the guard has to fail on the write
+    # rather than on a missing `error` key three assertions later.
+    assert not (tmp_path / "reports").exists(), \
+        "run_tests created a directory under the process CWD"
+    # …and the refusal explains itself, rather than passing silently.
     assert out["passed"] is False
     assert "absolute" in out["error"] and "reports" in out["error"]
-    assert not (Path.cwd() / "reports").exists(), \
-        "run_tests created a directory under the process CWD"

@@ -264,11 +264,21 @@ test('own echo: a tick of only this driver\'s writes is not input; any other aut
   const me = 'dsh-x', ev = payload => ({ event_type: 'e', payload });
   const own = ev({ actor: 'driver:dsh-x' }), claim = ev({ actor: 'driver:dsh-x', driver_id: 'dsh-x' });
   const foreign = ev({ actor: 'driver:grok' }), authorless = ev({});
+  // The acker's own ack/resolve: core/director_messaging.py stamps the actor it
+  // acts as next to the acker's driver_id, so it is own like any other own write.
+  const acked = ev({ delivery_id: 'd-1', driver_id: 'dsh-x', actor: 'driver:dsh-x', acks: [] });
   // The shape core/state_claims.py emits for an expired lease: no actor at all,
   // the holder in driver_id. The holder must be woken by it, so it is not own.
   const leaseExpired = ev({ subject: 'node:alpha/B', lease_id: 'lease-1', driver_id: 'dsh-x', phase: 'expired', fence: 4 });
+  // An acked event that names me in driver_id but carries no actor (a foreign or
+  // older payload): the identity is not stated, so it is input, not an echo.
+  const ackedNoActor = ev({ delivery_id: 'd-1', driver_id: 'dsh-x', acks: [] });
   const table = [
     [{ events: [own, claim] }, true, 'all own'],
+    [{ events: [acked] }, true, 'my own ack/resolve (actor stamped at the emitter) is an echo'],
+    [{ events: [acked, own] }, true, 'own acks mixed with own writes is an echo'],
+    [{ events: [ackedNoActor] }, false, 'an acked event naming me with no actor is input'],
+    [{ events: [acked, ackedNoActor] }, false, 'one actorless ack in the tick makes it input'],
     [{ events: [leaseExpired] }, false, 'an authorless lease_expired naming me is not my own write'],
     [{ events: [own, leaseExpired] }, false, 'one authorless event in the tick makes it input'],
     [{ events: [ev({ actor: null, driver_id: 'dsh-x' })] }, false, 'an authorless event is not my own write'],

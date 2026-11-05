@@ -154,11 +154,22 @@ test('real pinned DSH: own State writes do not wake the director; one NOTHING_LE
     assert.ok(delivered('lease-1') && delivered('expired'), 'it reaches the session whole, payload included');
     assert.ok(result('root-lease'), 'the woken turn called a tool');
     assert.equal(questions().length, 1, 'still the same, already answered wait: not asked again');
-    // Another driver's write: input.
+    // The director's own acknowledge of a message: the emitter stamps its actor, so
+    // it is an echo like any other own write and must not wake the director. The
+    // ack tick is released before the foreign one, so a woken turn would show first.
+    const turns = events.filter(e => e.type === 'user/message').length;
     await release({ timed_out: false, next_after: 13, next_inbox_after: 0, driver_inbox: [], events: [
-      { seq: 13, project_id: 'alpha', node_key: 'FOREIGN_NODE', event_type: 'driver_note_updated', payload: { actor: 'driver:grok' } }] });
+      { seq: 13, project_id: 'alpha', node_key: null, event_type: 'director_message_acked',
+        payload: { delivery_id: 'delivery-1', driver_id: 'dsh-fixture', actor: 'driver:dsh-fixture', acks: [] } }] });
+    assert.equal(waits.at(-1), 13, 'the own ack tick advances the cursor');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.equal(events.filter(e => e.type === 'user/message').length, turns, 'an own ack tick must not start a turn');
+    // Another driver's write: input.
+    await release({ timed_out: false, next_after: 14, next_inbox_after: 0, driver_inbox: [], events: [
+      { seq: 14, project_id: 'alpha', node_key: 'FOREIGN_NODE', event_type: 'driver_note_updated', payload: { actor: 'driver:grok' } }] });
     await until('the foreign tick did not wake the director', () => said('STOP2'));
     assert.equal(delivered('OWN_ECHO_NODE'), undefined, 'an own-writes tick must never reach the session');
+    assert.equal(delivered('delivery-1'), undefined, 'an own ack tick must never reach the session');
     assert.ok(delivered('FOREIGN_NODE'), 'a foreign tick is delivered');
     assert.ok(result('root-foreign'), 'the woken turn called a tool');
     // Same wait, already answered: the tool turn is not asked again.

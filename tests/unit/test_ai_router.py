@@ -722,3 +722,72 @@ class TestFailoverNeverRevisitsADeadEndpoint:
     def test_a_route_with_no_duplicates_is_unchanged(self):
         gw = self._gw(["a/1", "b/2", "c/3"])
         assert self._walk(gw) == ["a/1", "b/2", "c/3"]
+
+
+# ── malformed tool-call arguments in history (2026-11-05 incident) ──────────
+# The real arguments of wuxia-myth root history seq 14564, shortened: one JSON
+# object followed by an extra closing brace. ollamacloud /v1 answered the whole
+# request with 400 "invalid tool call arguments".
+_EXTRA_DATA = '{"arguments": {"action": "send_director_message", "arguments": {"body": "kill it"}}}}'
+
+
+def _assistant_call(arguments):
+    return {"role": "assistant", "content": None,
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "call_tool", "arguments": arguments}}]}
+
+
+@pytest.mark.parametrize("arguments, expected", [
+    ('{"a": 1}', '{"a": 1}'),
+    ('{ "a" : [1, 2] }', '{ "a" : [1, 2] }'),
+    ({"a": "é"}, '{"a": "é"}'),
+    ("", "{}"),
+    ("   ", "{}"),
+    (None, "{}"),
+    (_EXTRA_DATA, None),
+    ('{"a": "trunc', None),
+    ('[1, 2]', None),
+    ('7', None),
+    ('null', None),
+])
+def test_sanitize_makes_every_tool_call_argument_a_json_object(arguments, expected):
+    import json
+    [out] = AIGateway._sanitize_messages([_assistant_call(arguments)])
+    got = out["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(json.loads(got), dict), got
+    if expected is not None:
+        assert got == expected
+    else:
+        # Not one object: the original text is kept whole, not "repaired" into a
+        # call the model never made.
+        assert json.loads(got) == {"unparsed_arguments": arguments}
+
+
+def test_sanitize_passes_valid_arguments_through_unchanged_and_never_mutates():
+    import copy
+    valid = _assistant_call('{"cmd": "ls"}')
+    bad = _assistant_call(_EXTRA_DATA)
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "not json {"}
+    user = {"role": "user", "content": "hi"}
+    before = copy.deepcopy([valid, bad, tool, user])
+    out = AIGateway._sanitize_messages([valid, bad, tool, user])
+    assert [valid, bad, tool, user] == before, "the caller's history must not be mutated"
+    assert out[0] is valid, "an already-valid call is the same object: byte-identical prefix"
+    assert out[2] is tool and out[3] is user
+    assert out[1]["tool_calls"][0]["id"] == "c1"
+    assert out[1]["tool_calls"][0]["function"]["name"] == "call_tool"
+
+
+def test_generate_native_sends_normalized_tool_call_arguments():
+    import json
+    gw = AIGateway("deepseek/deepseek-v4-flash")
+    resp = _native_response(finish_reason="stop", content="ok")
+    history = [{"role": "user", "content": "go"}, _assistant_call(_EXTRA_DATA),
+               {"role": "tool", "tool_call_id": "c1", "content": "invalid JSON"},
+               {"role": "user", "content": "again"}]
+    with patch('litellm.completion', return_value=resp) as completion:
+        gw.generate_native(history, tools=[{"x": 1}])
+    sent = completion.call_args.kwargs["messages"]
+    args = sent[1]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(args) == {"unparsed_arguments": _EXTRA_DATA}
+    assert history[1]["tool_calls"][0]["function"]["arguments"] == _EXTRA_DATA

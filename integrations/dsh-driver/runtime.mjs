@@ -86,6 +86,17 @@ export const wakeSources = new Set(['user', runtimeEventSource, 'agent-message',
  *  (runtime context, compaction checkpoints, this runtime's State snapshot): not input. */
 export const endsDormancy = event => event.type === 'user/message' && wakeSources.has(event.data?.source?.kind ?? 'user');
 
+/** Why idle_dormant must refuse, or null. Dormancy must never strand work: a live
+ *  native child, a live State claim of this driver, or an unfinished todo plan
+ *  without a live child each refuse. claims/plans are omitted for the early check. */
+export function dormancyRefusal({ reason, liveChildren = 0, claims = [], plans = [] }) {
+  if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
+  if (liveChildren) return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running` };
+  if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
+  if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id) };
+  return null;
+}
+
 /** Below this measured context (tokens) entering dormancy does not compact: a cold re-read is cheap. */
 export const DORMANT_COMPACT_MIN_TOKENS = 32000;
 
@@ -560,8 +571,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-        if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
-        if (liveChildren.size) return { refused: 'live_children', reason: `${liveChildren.size} native child(ren) still running` };
+        const early = dormancyRefusal({ reason, liveChildren: liveChildren.size });
+        if (early) return early;
         let claims, plans;
         try {
           const listed = await request('/api/state/query/list_claims', { project_id: project, driver_id: env.AITELIER_DRIVER_ID, limit: 100 },
@@ -571,8 +582,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         } catch (error) {
           return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
         }
-        if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
-        if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id) };
+        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, claims, plans });
+        if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
         const dormant = idleReview.enterDormancy(reason);
         return { dormant: true, since: dormant.since, reason,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -201,6 +201,19 @@ test('only real input ends dormancy: owner, runtime events and child messages, n
     assert.equal(endsDormancy(message(kind)), false, kind);
   for (const type of ['assistant/message', 'tool/result', 'compaction/end'])
     assert.equal(endsDormancy({ type, data: {} }), false, type);
+});
+test('dormancy is refused for each kind of live work, in a fixed order, and allowed only with none', () => {
+  const claim = { node_key: 'n', status: 'live', driver_id: 'me' }, plan = { attempt_id: 'attempt-x', remaining: ['test'] };
+  assert.equal(dormancyRefusal({ reason: '' }).refused, 'reason_required');
+  const children = dormancyRefusal({ reason: 'quiet', liveChildren: 2 });
+  assert.equal(children.refused, 'live_children'); assert.match(children.reason, /^2 native/);
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', claims: [claim] }), { refused: 'live_claims', reason: 'you hold live State claims', node_keys: ['n'] });
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', plans: [plan] }),
+    { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: ['attempt-x'] });
+  // A child outranks claims and plans; a claim outranks plans.
+  assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 1, claims: [claim], plans: [plan] }).refused, 'live_children');
+  assert.equal(dormancyRefusal({ reason: 'quiet', claims: [claim], plans: [plan] }).refused, 'live_claims');
+  assert.equal(dormancyRefusal({ reason: 'quiet', liveChildren: 0, claims: [], plans: [] }), null);
 });
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
   t.mock.timers.enable({apis:['setTimeout']});

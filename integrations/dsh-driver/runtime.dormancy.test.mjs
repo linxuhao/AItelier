@@ -12,6 +12,7 @@ import { once } from 'node:events';
 // then a State event wakes it. Compaction requests answer with a checkpoint.
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
+import { unlinkSync } from 'node:fs';
 const require = createRequire(process.env.AITELIER_DSH_ENTRY);
 const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
 export const name = 'fixture-dormancy-provider';
@@ -20,7 +21,8 @@ const post = (path, body) => fetch(process.env.AITELIER_URL + path, { method: 'P
 const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
 export function apply(ctx) {
   const root = process.env.AITELIER_DSH_SESSION, done = new Set();
-  const once = (key, block) => done.has(key) ? undefined : (done.add(key), block);
+  // Lazy: a step with a side effect runs it only when that step is taken.
+  const once = (key, block) => done.has(key) ? undefined : (done.add(key), typeof block === 'function' ? block() : block);
   class FixtureAdapter extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
@@ -28,10 +30,19 @@ export function apply(ctx) {
       await post('/test/request', { session: options.sessionId, purpose: options.purpose ?? null });
       let block;
       if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: dormant director, nothing in flight.' };
+      else if (options.sessionId !== root && text.includes('DORMANCY_CHILD')) {
+        // The child stays alive until the test releases it.
+        await post('/test/hold', {});
+        block = { type: 'text', text: 'CHILD_DONE' };
+      }
       else if (!options.tools?.length || options.sessionId !== root) block = { type: 'text', text: 'Fixture session' };
       else block = once('refused', tool('root-dormant-refused', 'idle_dormant', { reason: 'quiet' }))
         ?? once('empty', tool('root-dormant-empty', 'idle_dormant', { reason: '  ' }))
-        ?? once('pad', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(1500) })
+        ?? once('plans', tool('root-dormant-plans', 'idle_dormant', { reason: 'quiet' }))
+        ?? once('spawn', () => (unlinkSync(process.env.AITELIER_TEST_PLAN_FILE), tool('root-spawn', 'subagent', { description: 'dormancy child', prompt: 'DORMANCY_CHILD stay alive' })))
+        ?? once('children', tool('root-dormant-children', 'idle_dormant', { reason: 'quiet' }))
+        ?? once('release', () => (void post('/test/release', {}), { type: 'text', text: 'WAITING_FOR_CHILD' }))
+        ?? (text.includes('CHILD_DONE') ? once('pad', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(1500) }) : undefined)
         ?? (done.has('woken') ? undefined : text.includes('ROOT_PADDING') && !done.has('dormant') ? (done.add('dormant'), tool('root-dormant', 'idle_dormant', { reason: 'nothing authorized is available' })) : undefined)
         ?? (text.includes('AItelier runtime event') && !done.has('woken') ? (done.add('woken'), { type: 'text', text: 'WOKEN' }) : undefined)
         ?? { type: 'text', text: 'Director idle.' };
@@ -55,7 +66,8 @@ async function scenario(floor) {
   const entry = await realpath(process.env.AITELIER_DSH_TEST_ENTRY ?? new URL('./node_modules/.bin/dsh', import.meta.url));
   const here = dirname(fileURLToPath(import.meta.url));
   const events = [], requests = [], claimQueries = [], parked = new Set();
-  let changed = false, output = '', proc;
+  const held = new Set();
+  let changed = false, released = false, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -77,6 +89,8 @@ async function scenario(floor) {
       if (changed && body.after < 11) return send({ timed_out: false, next_after: 11, next_inbox_after: 0, events: [{ type: 'node_changed' }] });
       parked.add(res); res.on('close', () => parked.delete(res)); return;
     }
+    if (req.url === '/test/hold') { if (released) return send({ ok: true }); held.add(res); return; }
+    if (req.url === '/test/release') { released = true; for (const target of held) { target.setHeader('content-type', 'application/json'); target.end('{}'); } held.clear(); return send({ ok: true }); }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
     if (req.url === '/test/event') { events.push(body.event); return send({ ok: true }); }
     res.statusCode = 404; send({ error: req.url });
@@ -95,7 +109,7 @@ async function scenario(floor) {
     const deadline = Date.now() + ms;
     while (Date.now() < deadline && proc.exitCode === null && !predicate()) await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(proc.exitCode, null, output);
-    assert.ok(predicate(), `${what}\n${output}\n${JSON.stringify(events.map(e => [e.seq, e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? '']))}`);
+    assert.ok(predicate(), `${what}\nREQ ${JSON.stringify(requests.map(r => [r.session === 'fixture-root' ? 'root' : r.session.slice(0, 8), r.purpose]))}\n${output}\n${JSON.stringify(events.map(e => [e.seq, e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? '']))}`);
   };
   try {
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
@@ -103,15 +117,27 @@ async function scenario(floor) {
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
+      { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-dormancy-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
+    // A fake todo CLI listing one unfinished, childless plan until the provider deletes it.
+    const cli = join(directory, 'cli'); await mkdir(join(cli, 'core'), { recursive: true }); await mkdir(join(directory, 'todo'));
+    const planFile = join(directory, 'one-plan.json');
+    await writeFile(planFile, JSON.stringify([{ attempt_id: 'attempt-open', node_key: 'n', next: 'test', remaining: ['test'], child_session: 'gone' }]));
+    await writeFile(join(cli, 'core', '__init__.py'), '');
+    await writeFile(join(cli, 'core', 'todo_cli.py'), [
+      'import json, os, sys',
+      'path = ' + JSON.stringify(planFile),
+      'plans = json.load(open(path)) if os.path.exists(path) else []',
+      'print(json.dumps({"plans": plans}))'].join('\n') + '\n');
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_IDLE_REVIEW_MS: '400', AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS: String(floor) } });
+      AITELIER_DSH_IDLE_REVIEW_MS: '400', AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS: String(floor),
+      AITELIER_TODO_PYTHON: 'python3', AITELIER_TODO_CWD: cli, AITELIER_TEST_PLAN_FILE: planFile } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
     await until('dormancy never entered', () => result('root-dormant'));
@@ -119,6 +145,11 @@ async function scenario(floor) {
     assert.equal(refused.refused, 'live_claims');
     assert.deepEqual(refused.node_keys, ['n'], 'only this driver\'s live claims count');
     assert.equal(json(result('root-dormant-empty')).refused, 'reason_required');
+    const plans = json(result('root-dormant-plans'));
+    assert.equal(plans.refused, 'unfinished_plans', JSON.stringify(plans));
+    assert.deepEqual(plans.attempts, ['attempt-open']);
+    const children = json(result('root-dormant-children'));
+    assert.equal(children.refused, 'live_children', JSON.stringify(children));
     assert.equal(claimQueries[0].driver_id, 'dsh-fixture');
     const entered = json(result('root-dormant'));
     assert.equal(entered.dormant, true);

@@ -1,0 +1,356 @@
+{
+  "attempt_id": "attempt-b987d7375dfc4c44b87f02a82d444ac6",
+  "artifact_commit": "724836696dd1ee854b67759890ec99c84ced0d2b",
+  "base_commit": "16e51f370578ad361b3752ca1d7362d4bad41f22",
+  "node_key": "execution.todo-plan-rehydrate-checks-its-predicate-library-20261105",
+  "reviewer": "independent non-author native DSH subagent (worktree /home/linxuhao/.AItelier/worktrees/library-version-review-20261105, branch dsh/library-version-review-20261105); the author's report and numbers were not used as evidence",
+  "scope_of_commit": {
+    "diff": "git show 72483669",
+    "stat": "3 files changed, 200 insertions(+), 1 deletion(-)  (core/todo_cli.py +4/-1, core/todo_plan.py +47/-0, tests/unit/test_todo_plan_cli.py +149/-0)",
+    "production_code_changed": [
+      "core/todo_plan.py",
+      "core/todo_cli.py"
+    ],
+    "tests_changed": "the test file only gains lines: 149 insertions, 0 deletions, so no existing test was edited"
+  },
+  "environment": {
+    "pytest": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v <worktree>:/w -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest python -m pytest -q -p no:cacheprovider <paths>",
+    "image": "aitelier:latest e0f264d4cf2e (python 3.12.15, pytest 9.2.0); docker on the host, one container at a time",
+    "host_pytest": "never run; every measurement below comes from a container",
+    "base_tree": "git archive 16e51f3705 -> /tmp/review-base-72483669, mounted as /w (the worktree is at 72483669, so the base had to be exported separately)",
+    "probes": "read-only mounted under /probes; the worktree never held an untracked file (git status clean at every step)",
+    "stores": "/home/linxuhao/.AItelier/dsh-drivers mounted READ-ONLY as /drivers for the stored-document check"
+  },
+  "baseline": {
+    "claimed_by_author": "74 passed before, 81 after",
+    "measured_at_base_16e51f37": {
+      "tests": 74,
+      "result": "74 passed, 1 warning in 19.58s",
+      "paths": "tests/unit/test_todo_plan_cli.py tests/unit/test_todo_runtime.py"
+    },
+    "measured_at_artifact_72483669": {
+      "tests": 81,
+      "result": "81 passed, 1 warning in 21.53s",
+      "paths": "tests/unit/test_todo_plan_cli.py tests/unit/test_todo_runtime.py"
+    },
+    "delta": "+7 tests, +149/-0 lines in the test file",
+    "adjacent_file_not_in_the_named_baseline": {
+      "path": "tests/unit/test_todo_finish_on_real_state.py",
+      "result": "1 passed in 1.64s",
+      "why": "it drives create/begin/done/finish through the real CLI, so it is the next load path a version guard could break"
+    },
+    "restored_tree_green_again": "81 passed, 1 warning in 21.43s after every mutant below was restored",
+    "source_hashes_at_the_green_runs": {
+      "core/todo_plan.py": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "core/todo_cli.py": "c7dbcb85b0d66e8c91021aa624223dd7f8cf051f7485ab0f7f8c8211ccd3030e"
+    }
+  },
+  "criteria": [
+    {
+      "id": "refuses-mismatch",
+      "verdict": "pass",
+      "claim": "A stored document whose library_version differs from the running library's version is refused by the real rehydration path, with the document's version, the running version and the plan/attempt identity in the message, BEFORE any predicate evaluates.",
+      "measured": [
+        "In-process, both libraries define the SAME predicate name (probe), so the wrong library was genuinely able to bind and evaluate this plan's predicate. Every evaluation appends a line to one marker file (probe_libraries.py):",
+        "  document records library_version '2' (what new_document wrote); plan_hash 0aa1915982bab423e77cd824dd7e135ace4c3b6bfb40fd60ea757d3d79a1b719",
+        "  control A/v2 (the library that froze it): load_run + begin + observe -> outcome pass, marker gains ['L@A/v2']",
+        "  control B/v1 (a foreign library): its own document (records '1') evaluates the same binding -> marker gains ['L@B/v1']; B also rebuilds the SAME plan from the stored plan (from_stored -> identical plan_hash), so nothing about this document is unparseable for B",
+        "  the guard: load_run(document@'2', plan, B) -> Refusal library_mismatch, marker delta [] - B was never asked",
+        "  the refusal JSON: {\"refused\": \"library_mismatch\", \"attempt_id\": \"att-lib\", \"node_key\": \"execution.lib\", \"plan_library_version\": \"2\", \"running_library_version\": \"1\", \"reason\": \"plan 'att-lib' at node 'execution.lib' was frozen under predicate library v2; this build runs v1, whose predicates are not the ones the plan bound - refused rather than re-judged\"}",
+        "Cross-process through the real CLI (probe_cli.py): a v2 document relabelled to '1' is refused by status, handback, begin, done, report, finish and create with exit 2, {\"refused\": \"library_mismatch\"}, the same four identity fields and no traceback (see entry_points); list reports it as an error string naming v1 and v2.",
+        "Cross-process side effect: a plan whose gate predicate spawns a command that appends to a counter file. `begin` first (so a pre-state exists and `done` really would evaluate), then relabel to '1': done refuses and the counter stays at 0 spawns; relabel back to '2': the same command IS spawned once and the item reports outcome absent. The guard, not an unbound predicate, is what kept the counter empty.",
+        "The check runs before the plan is parsed, not after: a document that is BOTH foreign-versioned AND has a plan that would not parse (stray key) is refused as library_mismatch, while the same damaged plan at the running version is refused as invalid_plan (probe_order.py). A synthetic-library-only test cannot fake this, because the parse would have failed first.",
+        "Mutant M1b (mine) makes the guard trust a document nobody has judged yet; the wrong library then evaluates the predicate: marker gains 'L@B/v1' and outcome pass, and 6 of the shipped tests redden."
+      ],
+      "caveats": [
+        "The in-process test the author added (test_the_refusal_precedes_any_predicate_evaluation) has two halves: `pytest.raises(Refusal)` and `ran == []`. The second half is sound and would catch an implementation that evaluates before refusing. The first half alone is not proof of a version COMPARISON, because TodoPlan.from_json appends the `deliver` item's bindings (git_delivered, changes_within) without calling library.check, so no synthetic library binds them. Measured: mutant M1a (accept a foreign library that binds every name) still refused for that incidental reason and the in-process test passed while 4 CLI tests failed.",
+        "A library version bump is now a hard stop for every in-flight plan: a v3 build refuses all v2 documents, with no migration path. That is what this node asked for, but it is an operational consequence worth stating in the docs the driver reads."
+      ]
+    },
+    {
+      "id": "current-version-unchanged",
+      "verdict": "pass",
+      "claim": "A plan at the running version still works end to end through the real CLI, documents already in the driver stores keep loading, and a document that recorded no version is refused as unmeasured rather than assumed current.",
+      "measured": [
+        "74 passed at 16e51f3705 and 81 passed at 72483669 on tests/unit/test_todo_plan_cli.py + tests/unit/test_todo_runtime.py (measured, not read off the author's report).",
+        "Driver stores, mounted READ-ONLY: 2 stores (dsh-c61eed4a13ba4aaaae96/todo, dsh-ef5b20d0a802467e8cbf/todo), 37 stored documents, every one recording \"2\" (the author's report says 33; I did not try to reconcile the difference - all 37 that exist now load). library_version values: {'2': 37}. require_library_version passes for all 37; the real CLI `status` returns exit 0 for all 37 (37 loaded, 0 refused, 0 non-zero). Fingerprint of the (path, sha256) list: 73b911b21a3b2f96c0270025c671d0aa264e3ac62bc230efc7f99bdb0b6bdacd. No write was attempted against the read-only mount.",
+        "End to end at the running version, in a temp store, AFTER the refusals above: create (records library_version '2') -> status next=edit -> begin edit -> write app.py -> done edit outcome pass -> commit -> begin deliver -> done deliver outcome pass -> finish writes att-1-candidate.json plus att-1.bundle. So a refusal leaves the store usable and the current-version path intact.",
+        "Unmeasured rather than assumed: a document with the key missing, '' , the integer 2, or '  ' is refused as library_unmeasured with plan_library_version echoed and running_library_version '2', and the marker file gains nothing (probe_libraries.py); through the CLI, status/done/handback refuse the same way (probe_cli.py).",
+        "Witness that accepting a missing version would redden something: mutant M3 (document.get('library_version', library.version), i.e. 'nothing recorded means current') -> 2 failed: test_a_document_with_no_library_version_is_refused_as_unmeasured and test_the_refusal_precedes_any_predicate_evaluation.",
+        "A damaged file keeps its own finding: when 'plan' or 'items' is not an object, the refusal is corrupt_plan even if the version is also foreign or missing (probe_order.py, both cases measured), so the new check did not swallow the pre-existing corrupt_plan path."
+      ],
+      "caveats": [
+        "The stored-document check reads two driver stores; a store this driver does not own could in principle hold a document with a different version, and I did not look outside ~/.AItelier/dsh-drivers."
+      ]
+    },
+    {
+      "id": "independent-review",
+      "verdict": "pass",
+      "claim": "The CLI reports the refusal as a structured refusal (JSON, exit 2, no traceback), a refusal rewrites nothing, creates no out dir and leaves no lock held, the same store works again afterwards, and every rehydrating entry point refuses identically.",
+      "measured": [
+        "All eight commands driven as separate processes against one store whose document recorded '1' (probe_cli.py, 29 checks, 0 failures): status, handback, begin, done, report, finish, create -> exit 2 + {\"refused\": \"library_mismatch\"} + plan_library_version '1' + running_library_version '2' + attempt_id 'att-1' + node_key 'execution.demo' + v1/v2/att-1 in the reason; stderr contains no 'Traceback'; list -> exit 0 with one entry whose error string holds the same reason (the plan is not hidden).",
+        "Refusal rewrites nothing: sha256 of the document is identical after all eight commands, and the store holds exactly ['att-1.json', 'att-1.lock'] - no temp file, no partial write.",
+        "No out dir: `finish` refused while out_dir did not exist and it still did not exist (and held no files) afterwards.",
+        "No lock held: after the refusals the probe process - a different process from every CLI invocation - takes flock(LOCK_EX|LOCK_NB) on att-1.lock immediately, so the lock file left behind is a file, not a held lock.",
+        "The store works again: restoring the document bytes the running version wrote makes status open again (next=edit), and begin/done/finish then succeed (see current-version-unchanged).",
+        "Unmeasured refusals (status/done/handback) also rewrite nothing and echo plan_library_version null.",
+        "No existing todo test changed meaning: the test diff is 149 insertions / 0 deletions. One pre-existing test executes a different raise site - test_a_damaged_plan_file_is_a_refusal_not_a_traceback writes '{}' and {'items': None}, which now reach corrupt_plan through _stored_parts instead of a KeyError caught in _Open - but it asserts only the code, still passes, and the code is the same corrupt_plan."
+      ],
+      "caveats": [
+        "`list` is the one entry point that does not refuse identically: it reports the plan at exit 0 as {\"attempt_id\", \"error\": \"library_mismatch: <reason>\"} and drops the structured identity/version fields. That is the pre-existing shape cmd_list uses for every refusing plan (it catches Refusal per plan), so it is consistent, but a caller that wants plan_library_version from a list sweep has to parse prose.",
+        "`require_library_version` is called outside _Open's try/except, so any non-Refusal exception there would surface as {\"refused\": \"internal\"} rather than corrupt_plan. I could not construct one: store.read guarantees a dict, _stored_parts type-checks plan/items, and every remaining operation is a get/f-string/identity dict. Measured wrong shapes (no plan, plan not an object, items None, version of five different types) all land on a Refusal.",
+        "Cosmetic asymmetry, both refusing: '  ' (whitespace) is library_unmeasured while '2 ' (trailing space) is library_mismatch, because strip() is used only for the emptiness test and then the raw string is compared. No silent acceptance either way."
+      ]
+    }
+  ],
+  "entry_points": {
+    "method": "one store, document relabelled to '1', each command a fresh `python -m core.todo_cli` process (no monkeypatching)",
+    "status": {
+      "argv": [
+        "status",
+        "--attempt",
+        "att-1"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true
+    },
+    "handback": {
+      "argv": [
+        "handback",
+        "--attempt",
+        "att-1"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true
+    },
+    "begin": {
+      "argv": [
+        "begin",
+        "--attempt",
+        "att-1",
+        "--item",
+        "edit"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true
+    },
+    "done": {
+      "argv": [
+        "done",
+        "--attempt",
+        "att-1",
+        "--item",
+        "edit"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true
+    },
+    "report": {
+      "argv": [
+        "report",
+        "--attempt",
+        "att-1",
+        "--item",
+        "edit",
+        "--note",
+        "n"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true
+    },
+    "finish": {
+      "argv": [
+        "finish",
+        "--attempt",
+        "att-1",
+        "--out",
+        "<out>"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true,
+      "out_dir_created": false
+    },
+    "list": {
+      "argv": [
+        "list"
+      ],
+      "rc": 0,
+      "refused": null,
+      "reported_as": {
+        "attempt_id": "att-1",
+        "error": "library_mismatch: plan 'att-1' at node 'execution.demo' was frozen under predicate library v1; this build runs v2, whose predicates are not the ones the plan bound - refused rather than re-judged"
+      },
+      "structured_identity": false,
+      "note": "cmd_list catches Refusal per plan and returns it as an error string; this is its pre-existing shape for every refusing plan"
+    },
+    "create": {
+      "argv": [
+        "create",
+        "--plan-json",
+        "<same plan>"
+      ],
+      "rc": 2,
+      "refused": "library_mismatch",
+      "structured_identity": true,
+      "note": "the plan hash matches the stored one, so the existing-document branch re-opens the document rather than writing anything"
+    },
+    "traceback_in_stderr": false,
+    "document_sha256_after_all_eight": "unchanged",
+    "store_listing_after_all_eight": [
+      "att-1.json",
+      "att-1.lock"
+    ],
+    "lock_held_after": false
+  },
+  "mutants": [
+    {
+      "id": "M1a",
+      "file": "core/todo_plan.py",
+      "planted_by": "me (reviewer), not the author",
+      "intent": "a plausible softening: accept a foreign library when it happens to bind every predicate name the plan uses",
+      "patch": "    # core/todo_plan.py, require_library_version: replace\n    if recorded != running:\n    # with\n    plan_items = plan.get(\"items\") if isinstance(plan.get(\"items\"), list) else []\n    binds_here = all(binding.get(\"predicate\") in library.names()\n                     for item in plan_items if isinstance(item, dict)\n                     for binding in (item.get(\"predicates\") or []) if isinstance(binding, dict))\n    if recorded != running and not binds_here:",
+      "mutated_file_sha256": "c5bede8985b577dbe90cedd45ba0844e86a94bfd0f25fce4a0e29452197c942e",
+      "shipped_pytest": "4 failed, 44 passed (tests/unit/test_todo_plan_cli.py)",
+      "failed": [
+        "test_a_plan_frozen_under_another_library_is_refused_naming_both_versions_and_the_plan",
+        "test_the_library_refusal_is_a_json_error_and_not_a_traceback",
+        "test_a_refusal_leaves_the_store_usable_and_the_running_version_working_end_to_end",
+        "test_a_mismatched_plan_refuses_before_the_gate_command_is_spawned"
+      ],
+      "finding": "the in-process test still PASSED under this mutant, because the appended `deliver` bindings are never bound by a synthetic library, so the refusal it asserted came from a missing predicate name rather than from a version comparison. Useful: it shows which test carries which proof, and it is recorded because it is a real limit of a synthetic-library test, not a defect of the commit.",
+      "restored_sha256": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "restore_verified": true
+    },
+    {
+      "id": "M1b",
+      "file": "core/todo_plan.py",
+      "planted_by": "me (reviewer), not the author",
+      "intent": "a different plausible softening: a plan nobody has judged yet may be re-judged by another library",
+      "patch": "    # core/todo_plan.py, require_library_version: replace\n    if recorded != running:\n    # with\n    if recorded != running and any(entry.get(\"outcome\") is not None for entry in _items.values()):",
+      "mutated_file_sha256": "264b2555f7741ccab310d82178f826892aa018db7eedefc855be3d6e6b7c902f",
+      "shipped_pytest": "6 failed, 42 passed (tests/unit/test_todo_plan_cli.py)",
+      "failed": [
+        "test_a_plan_frozen_under_another_library_is_refused_naming_both_versions_and_the_plan",
+        "test_the_version_is_named_before_a_predicate_this_library_lacks",
+        "test_the_library_refusal_is_a_json_error_and_not_a_traceback",
+        "test_a_refusal_leaves_the_store_usable_and_the_running_version_working_end_to_end",
+        "test_a_mismatched_plan_refuses_before_the_gate_command_is_spawned",
+        "test_the_refusal_precedes_any_predicate_evaluation"
+      ],
+      "probe_under_the_mutant": {
+        "marker_file": [
+          "L@A/v2",
+          "L@B/v1",
+          "L@B/v1"
+        ],
+        "observed": "load_run returned a run instead of refusing, the v1 library evaluated the v2 document's probe (outcome pass, 'evaluated by B/v1') and the marker gained L@B/v1",
+        "conclusion": "the guard is what stops the wrong library; without it the wrong library really does judge the document"
+      },
+      "restored_sha256": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "restore_verified": true
+    },
+    {
+      "id": "M2",
+      "file": "core/todo_cli.py",
+      "planted_by": "me (reviewer)",
+      "intent": "drop the pre-parse call in _Open, keeping load_run's guard: is the 'named before the plan is parsed' half actually pinned?",
+      "patch": "    # core/todo_cli.py, _Open.__init__: delete the three lines\n        # Before the plan is even parsed: a document frozen under another library must\n        # be named as such, not reported as a plan whose predicates this library lacks.\n        require_library_version(document, self.library)",
+      "mutated_file_sha256": "318c42422e8d2530bc9a9bdbbab7f56365f748a8f6499bc014834360711e77af",
+      "shipped_pytest": "1 failed, 47 passed (tests/unit/test_todo_plan_cli.py)",
+      "failed": [
+        "test_the_version_is_named_before_a_predicate_this_library_lacks"
+      ],
+      "finding": "exactly one test pins the ordering; every other mismatch test is satisfied by load_run's guard alone",
+      "restored_sha256": "c7dbcb85b0d66e8c91021aa624223dd7f8cf051f7485ab0f7f8c8211ccd3030e",
+      "restore_verified": true
+    },
+    {
+      "id": "M3",
+      "file": "core/todo_plan.py",
+      "planted_by": "me (reviewer)",
+      "intent": "witness for 'a missing version is refused, not assumed current': make a missing key default to the running version",
+      "patch": "    # core/todo_plan.py, require_library_version: replace\n    recorded, running = document.get(\"library_version\"), library.version\n    # with\n    recorded, running = document.get(\"library_version\", library.version), library.version",
+      "mutated_file_sha256": "568d40b1278d0e41d187a47f77c8764fc736ba0e6d98fbebdefb6f542e530d5a",
+      "shipped_pytest": "2 failed, 46 passed (tests/unit/test_todo_plan_cli.py)",
+      "failed": [
+        "test_a_document_with_no_library_version_is_refused_as_unmeasured",
+        "test_the_refusal_precedes_any_predicate_evaluation"
+      ],
+      "finding": "accepting a missing version reddens both the CLI witness and the in-process library-boundary test",
+      "restored_sha256": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "restore_verified": true
+    },
+    {
+      "id": "M4",
+      "file": "core/todo_plan.py",
+      "planted_by": "me (reviewer)",
+      "intent": "drop load_run's guard, keeping _Open's: is the library boundary (no run exists before the check) pinned on its own?",
+      "patch": "    # core/todo_plan.py, load_run: delete the line\n    require_library_version(document, library)   # the library boundary: no run, so no predicate, before this",
+      "mutated_file_sha256": "7c254a9cc81a056b564c5a79553e5ca4955edfe56cfc343273225e9c525aa1f1",
+      "shipped_pytest": "1 failed, 47 passed (tests/unit/test_todo_plan_cli.py)",
+      "failed": [
+        "test_the_refusal_precedes_any_predicate_evaluation"
+      ],
+      "finding": "the in-process test is the only thing that pins the load_run boundary; the CLI tests pass because _Open already refused",
+      "restored_sha256": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "restore_verified": true
+    }
+  ],
+  "tree_state": {
+    "mutated_files": [
+      "core/todo_plan.py",
+      "core/todo_cli.py"
+    ],
+    "byte_for_byte_restore": {
+      "core/todo_plan.py": "c911c72d7ec4aace562e66824480dee0047f49002b57175f5a355598159b9cf3",
+      "core/todo_cli.py": "c7dbcb85b0d66e8c91021aa624223dd7f8cf051f7485ab0f7f8c8211ccd3030e"
+    },
+    "restore_method": "pristine copies taken before the first mutant, copied back after each, sha256 compared to the pre-mutant value every time",
+    "git_status_after_restores": "clean (only this report is added by the commit that follows)",
+    "final_green_run_after_restores": "81 passed, 1 warning in 21.43s",
+    "nothing_pushed_or_merged": true,
+    "mutant_hash_provenance": "M1a's mutated hash was read off the mutated worktree file with sha256sum; M1b/M2/M3/M4 had already been restored when the hashes were wanted, so each patch text was re-applied exactly once (occurrence count asserted == 1) to a pristine copy under /tmp and hashed there. The re-application of M1a reproduced the hash measured in the worktree, which is what makes the other four trustworthy."
+  },
+  "unverified": [
+    "Any live production build: I did not restart, poke or inspect a running service, and I did not check whether the production checkout already carries 72483669. The store check was read-only, against the two driver stores on this host.",
+    "A v3 library actually shipping: every mismatch measurement uses synthetic PredicateLibrary instances (versions '1', '2', '3', '9'), so the refusal is proven for the mechanism, not for a future real version bump.",
+    "Concurrency: no test races a relabel against a writer (or two writers) on the same document. I only measured that no lock is held and the store works afterwards.",
+    "The wider test suite beyond tests/unit/test_todo_plan_cli.py, tests/unit/test_todo_runtime.py and tests/unit/test_todo_finish_on_real_state.py.",
+    "Whether any non-driver consumer keeps a private copy of a todo document and rehydrates it without going through this CLI: I grepped the checkout and found only core/todo_cli.py and core/todo_plan.py building a TodoRun from a document, but code outside this checkout was not searched."
+  ],
+  "reproduction": {
+    "how": "each probe was written under /tmp/review-probes-72483669 and mounted read-only into the same container shape (`-v /probes:ro`, one container at a time, -u 1000:1000, --network none)",
+    "probe_libraries.py": "\"\"\"Independent probe 1: does the library guard refuse BEFORE a foreign library could evaluate?\n\nBoth libraries define `probe` with the same signature, so the WRONG one is genuinely able to\nbind and evaluate this plan's predicate - the empty side effect must then be the guard's doing.\nEvery evaluation appends a line to one marker file; deltas are measured, not assumed.\n\"\"\"\nimport json\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nsys.path.insert(0, \"/w\")\n\nfrom core.todo_plan import Refusal, TodoPlan, load_run, new_document  # noqa: E402\nfrom core.todo_runtime import PredicateLibrary, PredicateResult  # noqa: E402\n\nT0 = 1_000_000.0\nsteps, failures = [], []\n\n\ndef note(step, **kw):\n    steps.append({\"step\": step, **kw})\n\n\ndef check(name, ok, observed=None):\n    steps.append({\"check\": name, \"ok\": bool(ok), \"observed\": observed})\n    if not ok:\n        failures.append(name)\n\n\nwork = Path(tempfile.mkdtemp(dir=\"/tmp\"))\nmarker = work / \"evaluated.txt\"\nmarker.touch()\n\n\ndef lines():\n    return marker.read_text().splitlines()\n\n\ndef library_at(version, tag):\n    \"\"\"Two libraries, same predicate name, same args - either could judge this plan.\"\"\"\n    library = PredicateLibrary(version=version)\n\n    @library.define(\"probe\")\n    def probe(*, workspace, pre_state, label):\n        marker.write_text(marker.read_text() + f\"{label}@{tag}/v{version}\\n\")\n        return PredicateResult(\"probe\", \"pass\", f\"evaluated by {tag}/v{version}\")\n\n    return library\n\n\nws = work / \"ws\"\nws.mkdir()\nplan_json = {\"attempt_id\": \"att-lib\", \"node_key\": \"execution.lib\", \"context_hash\": \"c\" * 64,\n             \"base_sha\": \"a\" * 40, \"workspace\": str(ws), \"scope\": [\"app.py\"], \"goal\": \"probe it\",\n             \"items\": [{\"id\": \"probe\", \"title\": \"probe\",\n                        \"predicates\": [{\"predicate\": \"probe\", \"args\": {\"label\": \"L\"}}]}]}\n\nA, B = library_at(\"2\", \"A\"), library_at(\"1\", \"B\")     # A froze the document; B is a foreign library\nnote(\"libraries\", a_version=A.version, b_version=B.version, a_names=A.names(), b_names=B.names())\n\nplan_a = TodoPlan.from_json(plan_json, A)\ndocument = new_document(plan_a, A, T0)\nnote(\"document\", library_version=document[\"library_version\"], plan_hash=plan_a.plan_hash)\ncheck(\"the document records the library that froze it\", document[\"library_version\"] == \"2\",\n      document[\"library_version\"])\n\n# (1) POSITIVE CONTROL: at its own version the very same document does measure.\nbefore = len(lines())\nrun = load_run(document, plan_a, A, lambda: T0)\nrun.begin(\"probe\")\nreport = run.observe(\"probe\")\ncheck(\"control/at-own-version it does evaluate\", report.outcome == \"pass\" and len(lines()) == before + 1,\n      {\"outcome\": report.outcome, \"marker\": lines()[before:]})\n\n# (2) B is not a strawman: it binds and evaluates THIS plan's binding on its own document.\nplan_b = TodoPlan.from_json(plan_json, B)\ndocument_b = new_document(plan_b, B, T0)\nbefore = len(lines())\nrun_b = load_run(document_b, plan_b, B, lambda: T0)\nrun_b.begin(\"probe\")\nreport_b = run_b.observe(\"probe\")\ncheck(\"control/the foreign library B really does bind and run the same name\",\n      report_b.outcome == \"pass\" and lines()[before:] == [\"L@B/v1\"],\n      {\"outcome\": report_b.outcome, \"delta\": lines()[before:], \"B.names()\": list(B.names())})\ncheck(\"control/B rebuilds the SAME plan from the stored plan (nothing about it is unparseable)\",\n      TodoPlan.from_stored(document[\"plan\"], B).plan_hash == plan_a.plan_hash,\n      TodoPlan.from_stored(document[\"plan\"], B).plan_hash)\n\n# (3) THE GUARD: the v2 document judged by v1 must refuse, and B must never be asked.\nbefore = len(lines())\nrefusal, evaluated = None, None\ntry:\n    run_wrong = load_run(document, plan_a, B, lambda: T0)\nexcept Refusal as exc:\n    refusal = exc\nelse:\n    # No guard: carry on exactly as a real command would, so \"nothing evaluated\" is measured.\n    run_wrong.begin(\"probe\")\n    wrong_report = run_wrong.observe(\"probe\")\n    evaluated = {\"outcome\": wrong_report.outcome,\n                 \"results\": [r.as_json() for r in wrong_report.results]}\ncheck(\"mismatch/refused\", refusal is not None and refusal.code == \"library_mismatch\",\n      refusal.as_json() if refusal else \"NO REFUSAL\")\ncheck(\"mismatch/no predicate evaluated by the wrong library\", lines()[before:] == [],\n      {\"delta\": lines()[before:], \"evaluated\": evaluated})\ncheck(\"mismatch/names both versions and the plan identity\",\n      refusal is not None and all(s in refusal.reason for s in (\"v2\", \"v1\", \"att-lib\", \"execution.lib\")),\n      refusal.as_json().get(\"reason\") if refusal else None)\ncheck(\"mismatch/identity is structured, not only prose\",\n      refusal is not None and refusal.as_json().get(\"attempt_id\") == \"att-lib\"\n      and refusal.as_json().get(\"node_key\") == \"execution.lib\"\n      and refusal.as_json().get(\"plan_library_version\") == \"2\"\n      and refusal.as_json().get(\"running_library_version\") == \"1\",\n      refusal.as_json() if refusal else None)\n\n# (4) A document that recorded nothing is UNMEASURED, not current - and still nothing evaluates.\nfor label, value in ((\"missing\", None), (\"empty string\", \"\"), (\"wrong type\", 2), (\"whitespace\", \"  \")):\n    doc = dict(document)\n    if value is None:\n        doc.pop(\"library_version\")\n    else:\n        doc[\"library_version\"] = value\n    before = len(lines())\n    try:\n        load_run(doc, plan_a, A, lambda: T0)\n        refusal = None\n    except Refusal as exc:\n        refusal = exc\n    check(f\"unmeasured/{label}: refused as unmeasured, nothing evaluated\",\n          refusal is not None and refusal.code == \"library_unmeasured\" and lines()[before:] == [],\n          {\"refused\": refusal.as_json() if refusal else \"NO REFUSAL\", \"delta\": lines()[before:]})\n\n# (5) A file that is not a plan at all stays damaged, a different finding from unmeasured.\nfor label, doc in ((\"no plan\", {\"items\": {}}), (\"no items\", {\"plan\": document[\"plan\"]}),\n                   (\"plan not an object\", {\"plan\": [], \"items\": {}})):\n    try:\n        load_run(doc, plan_a, A, lambda: T0)\n        refusal = None\n    except Refusal as exc:\n        refusal = exc\n    check(f\"corrupt/{label}: corrupt_plan\", refusal is not None and refusal.code == \"corrupt_plan\",\n          refusal.as_json() if refusal else \"NO REFUSAL\")\n\nprint(json.dumps({\"probe\": \"libraries\", \"marker_file_lines\": lines(), \"steps\": steps,\n                  \"failures\": failures}, indent=1))\nsys.exit(1 if failures else 0)\n",
+    "probe_cli.py": "\"\"\"Independent probe 2: the refusal through the real CLI process, at every entry point.\n\nCross-process: no monkeypatching, no in-process shortcuts - `python -m core.todo_cli` exactly as\nthe DSH tools call it. Every entry point is driven while the stored document records a foreign\nlibrary version; each must refuse with a structured JSON refusal, rewrite nothing, leave no lock\nheld, and the store must work again once the document records the running version.\n\"\"\"\nimport fcntl\nimport hashlib\nimport json\nimport os\nimport subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nREPO = Path(\"/w\")\nPY = sys.executable\nT0 = 1_000_000.0\nGIT_ENV = {\"GIT_AUTHOR_NAME\": \"t\", \"GIT_AUTHOR_EMAIL\": \"t@example.invalid\",\n           \"GIT_COMMITTER_NAME\": \"t\", \"GIT_COMMITTER_EMAIL\": \"t@example.invalid\",\n           \"GIT_CONFIG_NOSYSTEM\": \"1\", \"GIT_CONFIG_GLOBAL\": os.devnull}\nENV = {**os.environ, **GIT_ENV, \"PYTHONDONTWRITEBYTECODE\": \"1\", \"AITELIER_TODO_CLOCK_OVERRIDE\": \"1\",\n       \"AITELIER_GATE_DEFERRAL_WAIT_SECONDS\": \"300\", \"AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS\": \"1000\"}\n\nsteps, failures = [], []\n\n\ndef check(name, ok, observed=None):\n    steps.append({\"check\": name, \"ok\": bool(ok), \"observed\": observed})\n    if not ok:\n        failures.append(name)\n\n\ndef git(repo, *argv):\n    done = subprocess.run([\"git\", \"-C\", str(repo), *argv], capture_output=True, text=True,\n                          env={**os.environ, **GIT_ENV})\n    assert done.returncode == 0, done.stderr\n    return done.stdout.strip()\n\n\ndef cli(*argv, store, now=T0):\n    extra = [\"--store\", str(store)] + ([] if now is None else [\"--now\", str(now)])\n    done = subprocess.run([PY, \"-m\", \"core.todo_cli\", *argv, *extra], cwd=REPO,\n                          capture_output=True, text=True, env=ENV, timeout=180)\n    try:\n        out = json.loads(done.stdout)\n    except ValueError:\n        out = {\"_unparseable_stdout\": done.stdout[-400:]}\n    return {\"rc\": done.returncode, \"out\": out, \"stderr\": done.stderr[-400:], \"traceback\": \"Traceback\" in done.stderr}\n\n\nwork = Path(tempfile.mkdtemp(dir=\"/tmp\"))\nrepo, store, out_dir = work / \"ws\", work / \"store\", work / \"out\"\nrepo.mkdir()\ngit(repo, \"init\", \"-q\", \"-b\", \"main\")\n(repo / \"app.py\").write_text(\"x = 1\\n\")\ngit(repo, \"add\", \"-A\")\ngit(repo, \"commit\", \"-q\", \"-m\", \"base\")\nbase = git(repo, \"rev-parse\", \"HEAD\")\n\nplan = {\"attempt_id\": \"att-1\", \"node_key\": \"execution.demo\", \"context_hash\": \"c\" * 64, \"base_sha\": base,\n        \"workspace\": str(repo), \"scope\": [\"app.py\"], \"goal\": \"make app.py define y\",\n        \"items\": [{\"id\": \"edit\", \"title\": \"edit app.py\",\n                   \"predicates\": [{\"predicate\": \"file_changed\", \"args\": {\"path\": \"app.py\", \"contains\": \"y = 2\"}}]}]}\nplan_path = work / \"plan.json\"\nplan_path.write_text(json.dumps(plan))\n\ncreated = cli(\"create\", \"--plan-json\", str(plan_path), store=store)\ncheck(\"create at the running version writes a document recording it\", created[\"rc\"] == 0\n      and created[\"out\"].get(\"library_version\") == \"2\"\n      and created[\"out\"].get(\"created\") is True, {\"rc\": created[\"rc\"], \"out\": created[\"out\"].get(\"library_version\")})\n\ndocument_path = store / \"att-1.json\"\ngood_bytes = document_path.read_text()\ncheck(\"the running builtin library is v2\", json.loads(good_bytes)[\"library_version\"] == \"2\",\n      json.loads(good_bytes)[\"library_version\"])\n\n\ndef relabel(value):\n    document = json.loads(good_bytes)\n    if value is None:\n        document.pop(\"library_version\", None)\n    else:\n        document[\"library_version\"] = value\n    document_path.write_text(json.dumps(document))\n\n\nrelabel(\"1\")\nbefore_sha = hashlib.sha256(document_path.read_bytes()).hexdigest()\nmatrix = [(\"status\", [\"status\", \"--attempt\", \"att-1\"]),\n          (\"handback\", [\"handback\", \"--attempt\", \"att-1\"]),\n          (\"begin\", [\"begin\", \"--attempt\", \"att-1\", \"--item\", \"edit\"]),\n          (\"done\", [\"done\", \"--attempt\", \"att-1\", \"--item\", \"edit\"]),\n          (\"report\", [\"report\", \"--attempt\", \"att-1\", \"--item\", \"edit\", \"--note\", \"n\"]),\n          (\"finish\", [\"finish\", \"--attempt\", \"att-1\", \"--out\", str(out_dir)]),\n          (\"list\", [\"list\"]),\n          (\"create\", [\"create\", \"--plan-json\", str(plan_path)])]\nper_command = {}\nfor name, argv in matrix:\n    done = cli(*argv, store=store)\n    out = done[\"out\"]\n    if name == \"list\":\n        plans = out.get(\"plans\") or []\n        entry = plans[0] if plans else {}\n        per_command[name] = {\"rc\": done[\"rc\"], \"traceback\": done[\"traceback\"], \"entry\": entry,\n                             \"names_both\": \"v1\" in str(entry.get(\"error\")) and \"v2\" in str(entry.get(\"error\"))}\n        check(\"list/ the foreign plan is reported as an error naming both versions, not silently hidden\",\n              done[\"rc\"] == 0 and len(plans) == 1 and per_command[name][\"names_both\"], per_command[name])\n        continue\n    per_command[name] = {\"rc\": done[\"rc\"], \"traceback\": done[\"traceback\"], \"refused\": out.get(\"refused\"),\n                         \"reason\": str(out.get(\"reason\"))[:200],\n                         \"plan_library_version\": out.get(\"plan_library_version\"),\n                         \"running_library_version\": out.get(\"running_library_version\"),\n                         \"attempt_id\": out.get(\"attempt_id\"), \"node_key\": out.get(\"node_key\")}\n    check(f\"{name}/ structured refusal, exit 2, no traceback\",\n          done[\"rc\"] == 2 and out.get(\"refused\") == \"library_mismatch\" and not done[\"traceback\"],\n          per_command[name])\n    check(f\"{name}/ names both versions and the plan identity\",\n          out.get(\"plan_library_version\") == \"1\" and out.get(\"running_library_version\") == \"2\"\n          and out.get(\"attempt_id\") == \"att-1\" and out.get(\"node_key\") == \"execution.demo\"\n          and all(s in str(out.get(\"reason\")) for s in (\"v1\", \"v2\", \"att-1\")), per_command[name])\n\ncheck(\"a refusal rewrites nothing: the document is byte-identical\",\n      hashlib.sha256(document_path.read_bytes()).hexdigest() == before_sha, before_sha)\ncheck(\"a refusal leaves no temp file and no report directory\",\n      sorted(p.name for p in store.iterdir()) == [\"att-1.json\", \"att-1.lock\"]\n      and (not out_dir.exists() or not list(out_dir.iterdir())),\n      {\"store\": sorted(p.name for p in store.iterdir()), \"out_dir_exists\": out_dir.exists()})\n\nfd = os.open(store / \"att-1.lock\", os.O_RDWR)\ntry:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n    held = False\n    fcntl.flock(fd, fcntl.LOCK_UN)\nfinally:\n    os.close(fd)\ncheck(\"no lock is left held after the refusals\", held is False, {\"lock_held\": held})\n\n# unmeasured, through the CLI: a document that recorded nothing is refused, never assumed current\nrelabel(None)\nfor name, argv in ((\"status\", [\"status\", \"--attempt\", \"att-1\"]),\n                   (\"done\", [\"done\", \"--attempt\", \"att-1\", \"--item\", \"edit\"]),\n                   (\"handback\", [\"handback\", \"--attempt\", \"att-1\"])):\n    done = cli(*argv, store=store)\n    check(f\"unmeasured/{name}: refused as unmeasured (no silent 'current')\",\n          done[\"rc\"] == 2 and done[\"out\"].get(\"refused\") == \"library_unmeasured\"\n          and done[\"out\"].get(\"plan_library_version\") is None and not done[\"traceback\"],\n          {\"rc\": done[\"rc\"], \"refused\": done[\"out\"].get(\"refused\"), \"extra\": {\n              k: done[\"out\"].get(k) for k in (\"plan_library_version\", \"running_library_version\")}})\ncheck(\"the unmeasured refusal also rewrites nothing\", hashlib.sha256(document_path.read_bytes()).hexdigest()\n      != before_sha and json.loads(document_path.read_text()).get(\"library_version\") is None,\n      json.loads(document_path.read_text()).get(\"library_version\"))\n\n# restore exactly what the running library wrote: the store works again, end to end\ndocument_path.write_text(good_bytes)\nstatus = cli(\"status\", \"--attempt\", \"att-1\", store=store)\ncheck(\"after the refusals the same store opens again at its own version\",\n      status[\"rc\"] == 0 and status[\"out\"].get(\"next\") == \"edit\", {\"rc\": status[\"rc\"], \"next\": status[\"out\"].get(\"next\")})\nbegin = cli(\"begin\", \"--attempt\", \"att-1\", \"--item\", \"edit\", store=store)\n(repo / \"app.py\").write_text(\"x = 1\\ny = 2\\n\")\ndone = cli(\"done\", \"--attempt\", \"att-1\", \"--item\", \"edit\", store=store)\ncheck(\"begin+done at the running version really measures\",\n      begin[\"rc\"] == 0 and done[\"rc\"] == 0 and done[\"out\"].get(\"outcome\") == \"pass\",\n      {\"begin_rc\": begin[\"rc\"], \"done_rc\": done[\"rc\"], \"outcome\": done[\"out\"].get(\"outcome\")})\ngit(repo, \"add\", \"-A\")\ngit(repo, \"commit\", \"-q\", \"-m\", \"work\")\ncli(\"begin\", \"--attempt\", \"att-1\", \"--item\", \"deliver\", store=store)\ndeliver = cli(\"done\", \"--attempt\", \"att-1\", \"--item\", \"deliver\", store=store)\nfinish = cli(\"finish\", \"--attempt\", \"att-1\", \"--out\", str(out_dir), store=store)\ncheck(\"finish produces a candidate at the running version\",\n      deliver[\"out\"].get(\"outcome\") == \"pass\" and finish[\"rc\"] == 0 and finish[\"out\"].get(\"candidate\") is True\n      and Path(finish[\"out\"].get(\"report\", \"/nonexistent\")).is_file(),\n      {\"deliver\": deliver[\"out\"].get(\"outcome\"), \"finish_rc\": finish[\"rc\"],\n       \"candidate\": finish[\"out\"].get(\"candidate\"), \"report\": finish[\"out\"].get(\"report\")})\n\n# cross-process positive control: a gate command that leaves a line when it is really spawned\ngate_counter = work / \"ran.txt\"\ngate_store = work / \"gate-store\"\ngate_code = \"import sys, time; open(sys.argv[1], 'a').write('ran\\\\n'); time.sleep(30)\"\ngate_plan = {**plan, \"attempt_id\": \"att-gate\", \"items\": [\n    {\"id\": \"gate\", \"title\": \"gate\", \"predicates\": [\n        {\"predicate\": \"command_exit\", \"args\": {\"argv\": [PY, \"-c\", gate_code, str(gate_counter)], \"timeout\": 0.5}}]}]}\ngate_path = work / \"gate.json\"\ngate_path.write_text(json.dumps(gate_plan))\ncli(\"create\", \"--plan-json\", str(gate_path), store=gate_store)\ncli(\"begin\", \"--attempt\", \"att-gate\", \"--item\", \"gate\", store=gate_store)\n\n\ndef ran():\n    return len(gate_counter.read_text().splitlines()) if gate_counter.exists() else 0\n\n\ngate_doc = gate_store / \"att-gate.json\"\ngate_good = gate_doc.read_text()\ngate_doc.write_text(json.dumps({**json.loads(gate_good), \"library_version\": \"1\"}))\nmismatched_done = cli(\"done\", \"--attempt\", \"att-gate\", \"--item\", \"gate\", store=gate_store)\ncheck(\"gate/mismatched plan: refused and the command was never spawned\",\n      mismatched_done[\"out\"].get(\"refused\") == \"library_mismatch\" and ran() == 0,\n      {\"refused\": mismatched_done[\"out\"].get(\"refused\"), \"spawns\": ran()})\ngate_doc.write_text(gate_good)\nmatching_done = cli(\"done\", \"--attempt\", \"att-gate\", \"--item\", \"gate\", store=gate_store)\ncheck(\"gate/positive control: at its own version the same document DOES spawn it\",\n      matching_done[\"rc\"] == 0 and ran() == 1, {\"outcome\": matching_done[\"out\"].get(\"outcome\"), \"spawns\": ran()})\n\nprint(json.dumps({\"probe\": \"cli\", \"per_command\": per_command, \"steps\": steps, \"failures\": failures}, indent=1))\nsys.exit(1 if failures else 0)\n",
+    "probe_order.py": "\"\"\"Independent probe 4: which finding wins when a document is wrong in more than one way?\n\nOrdering is the whole point of the change (\"before the plan is even parsed\"), so the probe makes\nthe document wrong in two ways at once and reads off which refusal comes back through the real CLI.\n\"\"\"\nimport json\nimport os\nimport subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nPY = sys.executable\nT0 = 1_000_000.0\nENV = {**os.environ, \"PYTHONDONTWRITEBYTECODE\": \"1\", \"AITELIER_TODO_CLOCK_OVERRIDE\": \"1\",\n       \"GIT_AUTHOR_NAME\": \"t\", \"GIT_AUTHOR_EMAIL\": \"t@example.invalid\",\n       \"GIT_COMMITTER_NAME\": \"t\", \"GIT_COMMITTER_EMAIL\": \"t@example.invalid\",\n       \"GIT_CONFIG_NOSYSTEM\": \"1\", \"GIT_CONFIG_GLOBAL\": os.devnull}\nsteps, failures = [], []\n\n\ndef cli(*argv, store):\n    done = subprocess.run([PY, \"-m\", \"core.todo_cli\", *argv, \"--store\", str(store), \"--now\", str(T0)],\n                          cwd=\"/w\", capture_output=True, text=True, env=ENV, timeout=120)\n    return done.returncode, json.loads(done.stdout), \"Traceback\" in done.stderr\n\n\ndef git(repo, *argv):\n    done = subprocess.run([\"git\", \"-C\", str(repo), *argv], capture_output=True, text=True, env=ENV)\n    assert done.returncode == 0, done.stderr\n    return done.stdout.strip()\n\n\nwork = Path(tempfile.mkdtemp(dir=\"/tmp\"))\nrepo, store = work / \"ws\", work / \"store\"\nrepo.mkdir()\ngit(repo, \"init\", \"-q\", \"-b\", \"main\")\n(repo / \"app.py\").write_text(\"x = 1\\n\")\ngit(repo, \"add\", \"-A\")\ngit(repo, \"commit\", \"-q\", \"-m\", \"base\")\nbase = git(repo, \"rev-parse\", \"HEAD\")\nplan = {\"attempt_id\": \"att-1\", \"node_key\": \"execution.demo\", \"context_hash\": \"c\" * 64, \"base_sha\": base,\n        \"workspace\": str(repo), \"scope\": [\"app.py\"], \"goal\": \"make app.py define y\",\n        \"items\": [{\"id\": \"edit\", \"title\": \"edit app.py\",\n                   \"predicates\": [{\"predicate\": \"file_changed\", \"args\": {\"path\": \"app.py\", \"contains\": \"y = 2\"}}]}]}\nplan_path = work / \"plan.json\"\nplan_path.write_text(json.dumps(plan))\ncode, created, _ = cli(\"create\", \"--plan-json\", str(plan_path), store=store)\nassert code == 0, created\ngood = json.loads((store / \"att-1.json\").read_text())\npath = store / \"att-1.json\"\n\ncases = [\n    (\"a foreign version, otherwise valid\", \"1\", lambda d: d, \"library_mismatch\"),\n    (\"a foreign version AND a plan that would not parse\", \"1\",\n     lambda d: {**d, \"plan\": {**d[\"plan\"], \"stray_key\": 1}}, \"library_mismatch\"),\n    (\"the running version AND a plan that would not parse\", \"2\",\n     lambda d: {**d, \"plan\": {**d[\"plan\"], \"stray_key\": 1}}, \"invalid_plan\"),\n    (\"no version AND a plan that would not parse\", None,\n     lambda d: {**d, \"plan\": {**d[\"plan\"], \"stray_key\": 1}}, \"library_unmeasured\"),\n    (\"no version AND items that are not an object\", None,\n     lambda d: {**d, \"items\": None}, \"corrupt_plan\"),\n    (\"a foreign version AND items that are not an object\", \"1\",\n     lambda d: {**d, \"items\": None}, \"corrupt_plan\"),\n]\nfor label, version, damage, expected in cases:\n    document = damage(json.loads(json.dumps(good)))\n    if version is None:\n        document.pop(\"library_version\", None)\n    else:\n        document[\"library_version\"] = version\n    path.write_text(json.dumps(document))\n    code, out, traceback = cli(\"status\", \"--attempt\", \"att-1\", store=store)\n    ok = code == 2 and out.get(\"refused\") == expected and not traceback\n    steps.append({\"case\": label, \"expected\": expected, \"observed\": out.get(\"refused\"), \"rc\": code,\n                  \"reason\": str(out.get(\"reason\"))[:160], \"ok\": ok})\n    if not ok:\n        failures.append(label)\n\npath.write_text(json.dumps(good))\ncode, out, _ = cli(\"status\", \"--attempt\", \"att-1\", store=store)\nsteps.append({\"case\": \"restored document still opens\", \"observed\": out.get(\"next\"), \"rc\": code,\n              \"ok\": code == 0 and out.get(\"next\") == \"edit\"})\nif not steps[-1][\"ok\"]:\n    failures.append(\"restored document still opens\")\n\nprint(json.dumps({\"probe\": \"order\", \"steps\": steps, \"failures\": failures}, indent=1))\nsys.exit(1 if failures else 0)\n",
+    "probe_stores.py": "\"\"\"Independent probe 3: do the plans already in the driver stores still load this build?\n\nThe store directories are mounted READ-ONLY, so any attempt to write would fail loudly; and each\ndocument is opened both in-process (require_library_version against builtin_library()) and through\nthe real CLI (`status`, a read path that takes no lock), so \"keeps loading\" is measured on the\nstored files themselves rather than on a copy the probe made.\n\"\"\"\nimport collections\nimport hashlib\nimport json\nimport os\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nsys.path.insert(0, \"/w\")\n\nfrom core.todo_plan import Refusal, require_library_version  # noqa: E402\nfrom core.todo_runtime import builtin_library  # noqa: E402\n\nPY = sys.executable\nENV = {**os.environ, \"PYTHONDONTWRITEBYTECODE\": \"1\"}\nlibrary = builtin_library()\n\ndocuments, in_process, through_cli = [], {}, {}\nfor store in sorted(Path(\"/drivers\").glob(\"*/todo\")):\n    for path in sorted(store.glob(\"*.json\")):\n        key = f\"{store.parent.name}/todo/{path.name}\"\n        raw = path.read_bytes()\n        try:\n            document = json.loads(raw)\n        except ValueError as exc:\n            in_process[key] = {\"refused\": \"unparseable\", \"detail\": str(exc)[:120]}\n            continue\n        documents.append({\"key\": key, \"sha256\": hashlib.sha256(raw).hexdigest(),\n                          \"library_version\": document.get(\"library_version\"),\n                          \"schema\": document.get(\"schema\"), \"plan_hash\": str(document.get(\"plan_hash\"))[:16]})\n        try:\n            in_process[key] = {\"library_version\": require_library_version(document, library)}\n        except Refusal as exc:\n            in_process[key] = exc.as_json()\n        done = subprocess.run([PY, \"-m\", \"core.todo_cli\", \"status\", \"--attempt\", path.stem,\n                               \"--store\", str(store)], cwd=\"/w\", capture_output=True, text=True,\n                              env=ENV, timeout=180)\n        try:\n            out = json.loads(done.stdout)\n        except ValueError:\n            out = {\"_stdout\": done.stdout[-200:]}\n        through_cli[key] = {\"rc\": done.returncode, \"refused\": out.get(\"refused\"),\n                            \"attempt_id\": out.get(\"attempt_id\"),\n                            \"reason\": str(out.get(\"reason\"))[:160] if out.get(\"refused\") else None}\n\nversions = collections.Counter(str(d.get(\"library_version\")) for d in documents)\nsummary = {\n    \"stores\": sorted({d[\"key\"].split(\"/todo/\")[0] for d in documents}),\n    \"document_count\": len(documents),\n    \"library_versions\": dict(versions),\n    \"require_library_version_refusals\": {k: v for k, v in in_process.items() if \"refused\" in v},\n    \"cli_status_nonzero\": {k: v for k, v in through_cli.items() if v[\"rc\"] != 0},\n    \"cli_status_corrupt_or_refused\": {k: v for k, v in through_cli.items() if v.get(\"refused\")},\n    \"cli_status_loaded\": sum(1 for v in through_cli.values() if v[\"rc\"] == 0 and not v.get(\"refused\")),\n    \"fingerprint\": hashlib.sha256(json.dumps(\n        [[d[\"key\"], d[\"sha256\"]] for d in documents], sort_keys=True).encode()).hexdigest(),\n}\nprint(json.dumps({\"probe\": \"stores\", \"summary\": summary, \"documents\": documents,\n                  \"through_cli\": through_cli}, indent=1))\n",
+    "order_measurements": {
+      "a foreign version, otherwise valid": "library_mismatch",
+      "a foreign version AND a plan that would not parse": "library_mismatch",
+      "the running version AND a plan that would not parse": "invalid_plan",
+      "no version AND a plan that would not parse": "library_unmeasured",
+      "no version AND items that are not an object": "corrupt_plan",
+      "a foreign version AND items that are not an object": "corrupt_plan",
+      "restored document still opens": "edit (rc 0)"
+    },
+    "store_documents": {
+      "stores": [
+        "dsh-c61eed4a13ba4aaaae96",
+        "dsh-ef5b20d0a802467e8cbf"
+      ],
+      "count": 37,
+      "library_versions": {
+        "2": 37
+      },
+      "fingerprint": "73b911b21a3b2f96c0270025c671d0aa264e3ac62bc230efc7f99bdb0b6bdacd",
+      "all_pass_require_library_version": true,
+      "all_load_through_cli_status": 37
+    }
+  }
+}

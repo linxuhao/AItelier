@@ -108,14 +108,22 @@ export async function listProjectInbox(request, project, {
   limit = 100, pages = INBOX_SCAN_PAGES, keep = INBOX_PAGE_ITEMS, statuses = ['unread', 'acknowledged'],
 } = {}) {
   const items = [];
-  let after = 0, matched_total = 0, next_after = 0, more = false;
+  let after = 0, matched_total = 0, next_after = 0, more = false, started = false;
   for (let page = 0; page < pages; page++) {
     const response = await request('/api/state/query/list_director_messages', {
       project_id: project, protocol_version: 'v3', statuses, after, limit });
     const result = response?.result ?? response ?? {};
     const batch = Array.isArray(result.items) ? result.items : [];
     items.push(...batch);
-    matched_total = Number.isInteger(result.matched_total) ? result.matched_total : items.length;
+    // `matched_total` is a REMAINDER, not a total: the server counts deliveries
+    // with delivery_seq > after, so the last page of a 101-match walk answers 1.
+    // Only the first page can state the size of the match set (plus the seq the
+    // walk started past). Verified read-only against the live API 2026-11-05:
+    // after=0 -> 91, after=2 -> 89.
+    if (!started) {
+      matched_total = (Number.isInteger(result.matched_total) ? result.matched_total : items.length) + after;
+      started = true;
+    }
     next_after = result.next_after ?? next_after;
     more = result.has_more === true && batch.length > 0;
     if (!more) break;
@@ -130,8 +138,9 @@ export async function listProjectInbox(request, project, {
 /** One bounded, self-describing view of a `list_director_messages` page.
  *
  *  Per item: `message_id`, `subject`, `sender_project_id`, `created_at`, delivery
- *  `status`, `delivery_id` and `version` (exactly what acknowledge_director_message
- *  needs, so the director can settle a delivery from the payload it was given),
+ *  `status`, `delivery_id`, `delivery_seq` and `version` (exactly what
+ *  acknowledge_director_message needs - so the director can settle a delivery from
+ *  the payload it was given - and the cursor to re-read that delivery's page),
  *  cheap ack truth, `body_chars`, and a body excerpt of at most `excerpt`
  *  characters (`excerpt` is 240: a few hundred is enough to recognise a message,
  *  and it is under the 320 the server itself uses for standing guidance).
@@ -195,6 +204,7 @@ export function projectInboxDigest(page, {
       status: record.status,
       acked_by_me: record.acked,
       delivery_id: record.delivery.delivery_id ?? null,
+      delivery_seq: record.seq >= 0 ? record.seq : null,
       version: record.delivery.version ?? null,
       body_chars: record.body.length,
       ...(record.thread_size > 1 ? { thread_id: record.thread } : {}),
@@ -210,13 +220,16 @@ export function projectInboxDigest(page, {
   // these, a caller handing in one raw page means "this page is what I scanned".
   const scanned = Number.isInteger(result.scanned) ? result.scanned : items.length;
   const scan_complete = typeof result.scan_complete === 'boolean' ? result.scan_complete : result.has_more !== true;
+  // A truncated scan cannot claim the newest of the match set - it only saw a slice
+  // of it - so its window names the slice it saw and what it never reached.
   const assemble = (carried, excerptLen, omitted = 0) => {
     const projected = carried.map(record => project(record, excerptLen));
     return {
       page: {
         project_id: result.project_id ?? null,
         order: 'newest_first',
-        window: `newest ${projected.length} of ${matched_total}${scan_complete ? '' : ` (scanned ${scanned})`}`,
+        window: scan_complete ? `newest ${projected.length} of ${matched_total}`
+          : `newest ${projected.length} of the ${scanned} scanned (${matched_total} matched, ${Math.max(0, matched_total - scanned)} unscanned)`,
         items: projected.length,
         matched_total,
         scanned,

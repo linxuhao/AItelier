@@ -532,8 +532,9 @@ test('twenty four-kilobyte bodies cost one stated, enforced ceiling', () => {
   const text = JSON.stringify(digest);
 
   // The bound, measured: 20 items x 4 KB bodies with full excerpts would be tens of
-  // kilobytes (this fixture's raw page is 87,720 characters of project_inbox).
-  // Assert the real number, not just "smaller": 10,520 against the 12,000 ceiling.
+  // kilobytes (this fixture's raw page is 96,040 characters of project_inbox, JSON,
+  // as it is built here); the digest is 10,880. Assert the real number, not just
+  // "smaller".
   assert.ok(text.length <= INBOX_CEILING_CHARS,
     `project_inbox is ${text.length} chars, over its ${INBOX_CEILING_CHARS} ceiling`);
 
@@ -665,7 +666,10 @@ const inboxServer = store => {
     asked.push(after);
     const matches = store.filter(entry => entry.delivery.delivery_seq > after);
     const batch = matches.slice(0, body.limit);
-    return { result: { project_id: 'alpha', items: batch, matched_total: store.length,
+    // Exactly as the server computes it: matched_total counts deliveries with
+    // delivery_seq > after, so it is a REMAINDER of the query, not the size of the
+    // match set. A double that answers store.length hides every paging bug.
+    return { result: { project_id: 'alpha', items: batch, matched_total: matches.length,
       has_more: matches.length > batch.length,
       next_after: batch.at(-1)?.delivery.delivery_seq ?? after } };
   };
@@ -690,6 +694,26 @@ test('the message that just arrived is on the injected page, wherever the cursor
     'returning the first page as the API served it is the bug: the oldest 20 are not the page');
 });
 
+test('a walk past one page still states the whole match set, not the last remainder', async () => {
+  // 101 matches and a 100-item request: the second page answers matched_total 1.
+  // Stating that as the total would say "newest 20 of 1" while 81 messages are
+  // invisible - the silent drop this whole change exists to make impossible.
+  const store = Array.from({ length: 101 }, (_, i) => inboxItem({ seq: i + 1, body: fatBody((i % 20) + 1) }));
+  const { request, asked } = inboxServer(store);
+  const digest = projectInboxDigest(await listProjectInbox(request, 'alpha'));
+
+  assert.deepEqual(asked, [0, 100], 'two pages: 100 then the remainder');
+  assert.equal(digest.page.matched_total, 101, 'the last page answers 1; it is a remainder, not the match set');
+  assert.equal(digest.page.window, 'newest 20 of 101');
+  assert.equal(digest.page.scanned, 101);
+  assert.equal(digest.page.scan_complete, true);
+  assert.equal(digest.page.has_more, true);
+  assert.equal(digest.page.items, 20);
+  assert.equal(digest.items[0].message_id, 'dm_0101', 'the 101st delivery is on the second page and is still carried');
+  assert.equal(digest.items[0].delivery_seq, 101);
+  assert.ok(digest.items[0].body_excerpt.length > 0);
+});
+
 test('a scan that cannot reach the end of the matches says so instead of guessing the window', async () => {
   const store = Array.from({ length: 600 }, (_, i) => inboxItem({ seq: i + 1 }));
   const { request, asked } = inboxServer(store);
@@ -699,7 +723,8 @@ test('a scan that cannot reach the end of the matches says so instead of guessin
   assert.equal(digest.page.matched_total, 600);
   assert.equal(digest.page.scanned, 100);
   assert.equal(digest.page.scan_complete, false, 'a truncated scan is not the whole match set');
-  assert.equal(digest.page.window, 'newest 20 of 600 (scanned 100)');
+  assert.equal(digest.page.window, 'newest 20 of the 100 scanned (600 matched, 500 unscanned)',
+    'a truncated scan carries the newest of the slice it saw, not of the match set');
   assert.equal(digest.page.has_more, true);
   assert.equal(digest.items[0].delivery_id, 'dlv_0100', 'newest of what the scan could see');
 });

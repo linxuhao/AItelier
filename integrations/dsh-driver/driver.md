@@ -95,8 +95,15 @@ one line that starts with NOTHING_LEFT: naming why each candidate is blocked.
 A turn without a tool call or with NOTHING_LEFT parks you. For a long background
 job you started, call watch_process with its pid and note instead of polling its
 log: its exit wakes you. When nothing is actionable and nothing is in flight,
-call idle_dormant with the reason: the timed review stops until real input. The runtime stays subscribed to project State changes (including new
-issues), project/driver inbox messages, and native worker messages/completion.
+call idle_dormant with the reason: the timed review stops until real input.
+While you wait on a live worker or a watched job, one NOTHING_LEFT answer holds
+until that set changes. The runtime stays subscribed to project State changes
+(including new issues). Your own writes carry your actor - including your
+acknowledge and resolve of a message - so a tick of only those does not wake you.
+An event with no actor is a system event (a lease expiry names its holder in
+driver_id but has no actor), so it always reaches you, whatever ids it names;
+an event naming you is not your own write unless its actor says so.
+project/driver inbox messages, and native worker messages/completion.
 It wakes an idle agent automatically and queues busy-time input for the next
 step. Ordinary transport timeouts spend no model turns. An active director gets
 an idle review after 15 minutes to recheck ready work, issues and blockers. Do

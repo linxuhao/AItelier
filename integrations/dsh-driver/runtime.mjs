@@ -40,6 +40,26 @@ export function eventCarriesSomething(result) {
   return Boolean(result?.events?.length || result?.driver_inbox?.length || result?.project_inbox?.items?.length);
 }
 
+/** Is a tick only this driver's own State writes coming back?
+ *
+ *  Every claim, evidence record, note or attempt report a director makes is
+ *  published as a State event and arrives on its own subscription. Woken by it,
+ *  the director reads what it just did and ends the turn - and that turn then
+ *  draws a continuation question (measured 2026-11-05: about half of all wakes).
+ *  Own means exactly "the event says I wrote it": `actor` is `driver:<me>`.
+ *  An event with no `actor` is a system event, whatever else its payload names -
+ *  `lease_expired` carries the claim holder's `driver_id` and no actor, and it
+ *  must reach the holder too, so a `driver_id` alone is never own. Any inbox item
+ *  makes the tick input.
+ *  @param result - one `/wait` payload (with `project_inbox` when fetched).
+ *  @param driverId - this driver's id.
+ *  @returns true when the tick should only advance the cursor. */
+export function ownEchoOnly(result, driverId) {
+  if (!driverId || !result?.events?.length || result.driver_inbox?.length || result.project_inbox?.items?.length) return false;
+  const me = 'driver:' + driverId;
+  return result.events.every(({ payload = {} }) => payload.actor === me);
+}
+
 /** One durable snapshot per session bootstrap / successful compaction epoch. */
 export class StateInjection {
   constructor(session, runtime, createMessage) {
@@ -101,13 +121,19 @@ export const reviewInstruction = 'Recheck live State frontier (ready nodes), ope
  *  with work left (a cheap model tends to end a round after one step), so it is
  *  asked; a turn without a tool call, or one that answered NOTHING_LEFT, is the
  *  second consecutive stop and goes idle. Real input (wake sources) restores the
- *  budget of MAX_AUTO_CONTINUE questions, which bounds a director that only polls. */
+ *  budget of MAX_AUTO_CONTINUE questions, which bounds a director that only polls.
+ *
+ *  While the director waits on something that will wake it (`waitKey` non-empty:
+ *  its live children and watched jobs), one NOTHING_LEFT answer holds for that
+ *  wait: later turns are not asked again until the key changes. */
 export class Continuation {
-  constructor({ maxAuto = MAX_AUTO_CONTINUE } = {}) {
+  constructor({ maxAuto = MAX_AUTO_CONTINUE, waitKey = () => '' } = {}) {
     this.maxAuto = maxAuto;
+    this.waitKey = waitKey;
     this.auto = 0;
     this.tools = 0;
     this.text = '';
+    this.answeredWait = undefined;
   }
   observe(event) {
     if (event.type === 'tool/call') this.tools++;
@@ -117,10 +143,14 @@ export class Continuation {
   }
   /** At idle: true to ask once more, false to go idle. Always starts a new turn record. */
   turnEnded() {
-    const worked = this.tools > 0 && !this.text.includes(NOTHING_LEFT);
+    const answered = this.text.includes(NOTHING_LEFT);
+    const worked = this.tools > 0 && !answered;
+    const wait = this.waitKey();
+    if (answered) this.answeredWait = wait;
     this.tools = 0;
     this.text = '';
     if (!worked || this.auto >= this.maxAuto) return false;
+    if (wait && wait === this.answeredWait) return false;
     this.auto++;
     return true;
   }
@@ -651,9 +681,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     ? floorEnv : DORMANT_COMPACT_MIN_TOKENS;
   // idleReview is created after the agent; tools reach it only when called.
   let agent, agentCtx, idleReview, waiting = false, disposed = false;
-  const continuation = new Continuation();
   // watch_process: pid -> { note, since }. One poller while any watch exists.
   const watches = new Map();
+  // What the director is waiting on that will wake it: its live children and watched jobs.
+  const continuation = new Continuation({ waitKey: () => [...[...liveChildren].sort(),
+    ...[...watches.keys()].sort((a, b) => a - b).map(pid => 'pid:' + pid)].join(',') });
   let watchTimer;
   const pollWatches = () => {
     for (const [pid, watch] of watches) {
@@ -704,6 +736,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     // a driver woken with an empty payload either spins or learns to
     // ignore wakes - both are worse than not being woken.
     if (!eventCarriesSomething({ ...result, project_inbox: inbox })) return;
+    // Its own writes coming back: the director already knows; a turn on them is waste.
+    if (ownEchoOnly({ ...result, project_inbox: inbox }, env.AITELIER_DRIVER_ID)) return;
     await notify('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox }));
   };
   const setup = async (scope, subject) => {

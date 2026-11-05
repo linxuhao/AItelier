@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -240,6 +240,62 @@ test('continuation is bounded: at most MAX_AUTO_CONTINUE questions until real in
   assert.deepEqual(asked, [true, true, true, true, true, false, false, false]);
   c.observe(input('user')); c.observe(toolCall()); c.observe(said('owner asked'));
   assert.equal(c.turnEnded(), true, 'real input restores the budget');
+});
+test('continuation while waiting: one NOTHING_LEFT holds for the wait, a changed wait is asked again', () => {
+  let key = 'child-a';
+  const c = new Continuation({ waitKey: () => key });
+  const turn = text => { c.observe(input('aitelier-runtime-event')); c.observe(toolCall()); c.observe(said(text)); return c.turnEnded(); };
+  assert.equal(turn('dispatched a worker'), true, 'a fresh wait is asked once');
+  assert.equal(turn(NOTHING_LEFT + ': the worker owns the only free file'), false);
+  assert.equal(turn('checked the worker'), false, 'same wait, already answered: not asked');
+  assert.equal(turn('checked again'), false);
+  key = 'child-a,pid:7';
+  assert.equal(turn('started a job too'), true, 'the wait changed: asked again');
+  assert.equal(turn(NOTHING_LEFT + ': waiting'), false);
+  assert.equal(turn('looked'), false);
+  key = '';
+  assert.equal(turn('the job ended, collected it'), true, 'no wait: the ordinary rule');
+  assert.equal(turn(NOTHING_LEFT + ': done'), false);
+  assert.equal(turn('a new issue came in, triaged it'), true, 'outside a wait an earlier NOTHING_LEFT does not silence the check');
+  key = 'child-b';
+  assert.equal(turn('dispatched the next worker'), true);
+});
+test('own echo: a tick of only this driver\'s writes is not input; any other author, no author or inbox is', () => {
+  const me = 'dsh-x', ev = payload => ({ event_type: 'e', payload });
+  const own = ev({ actor: 'driver:dsh-x' }), claim = ev({ actor: 'driver:dsh-x', driver_id: 'dsh-x' });
+  const foreign = ev({ actor: 'driver:grok' }), authorless = ev({});
+  // The acker's own ack/resolve: core/director_messaging.py stamps the actor it
+  // acts as next to the acker's driver_id, so it is own like any other own write.
+  const acked = ev({ delivery_id: 'd-1', driver_id: 'dsh-x', actor: 'driver:dsh-x', acks: [] });
+  // The shape core/state_claims.py emits for an expired lease: no actor at all,
+  // the holder in driver_id. The holder must be woken by it, so it is not own.
+  const leaseExpired = ev({ subject: 'node:alpha/B', lease_id: 'lease-1', driver_id: 'dsh-x', phase: 'expired', fence: 4 });
+  // An acked event that names me in driver_id but carries no actor (a foreign or
+  // older payload): the identity is not stated, so it is input, not an echo.
+  const ackedNoActor = ev({ delivery_id: 'd-1', driver_id: 'dsh-x', acks: [] });
+  const table = [
+    [{ events: [own, claim] }, true, 'all own'],
+    [{ events: [acked] }, true, 'my own ack/resolve (actor stamped at the emitter) is an echo'],
+    [{ events: [acked, own] }, true, 'own acks mixed with own writes is an echo'],
+    [{ events: [ackedNoActor] }, false, 'an acked event naming me with no actor is input'],
+    [{ events: [acked, ackedNoActor] }, false, 'one actorless ack in the tick makes it input'],
+    [{ events: [leaseExpired] }, false, 'an authorless lease_expired naming me is not my own write'],
+    [{ events: [own, leaseExpired] }, false, 'one authorless event in the tick makes it input'],
+    [{ events: [ev({ actor: null, driver_id: 'dsh-x' })] }, false, 'an authorless event is not my own write'],
+    [{ events: [ev({ driver_id: 'dsh-x' })] }, false, 'driver_id alone never makes an event own'],
+    [{ events: [own, foreign] }, false, 'one foreign event makes it input'],
+    [{ events: [own, authorless] }, false, 'an event naming no author is not own'],
+    [{ events: [{ event_type: 'e' }] }, false, 'no payload at all is not own'],
+    [{ events: [ev({ actor: 'driver:grok', driver_id: 'dsh-x' })] }, false, 'actor decides over driver_id'],
+    [{ events: [ev({ actor: 'driver:dsh-x-2' })] }, false, 'a prefix is another driver'],
+    [{ events: [own], driver_inbox: [{ seq: 1 }] }, false, 'driver inbox is input'],
+    [{ events: [own], project_inbox: { items: [{ id: 1 }] } }, false, 'project inbox is input'],
+    [{ events: [] }, false, 'nothing is not an echo (eventCarriesSomething handles it)'],
+  ];
+  for (const [result, expected, why] of table) assert.equal(ownEchoOnly(result, me), expected, why);
+  assert.equal(ownEchoOnly({ events: [leaseExpired] }, 'dsh-y'), false, 'someone else\'s lease expiry is input too');
+  assert.equal(ownEchoOnly({ events: [own] }, undefined), false, 'no identity: never filter');
+  assert.equal(ownEchoOnly({ events: [own] }, ''), false);
 });
 test('idle review: continuation asks instead of arming the review; dormancy, inactive goals and failures do not ask', async t => {
   t.mock.timers.enable({apis:['setTimeout']});

@@ -581,7 +581,7 @@ class SQLiteDirectorMessaging:
                 conn.execute("UPDATE state_director_deliveries SET status=?,version=version+1 WHERE delivery_id=? AND version=?", (status,delivery_id,expected_version))
                 delivery.update(status=status,version=expected_version+1)
                 self.store._event(conn,project_id,None,"director_message_acked" if target_status=="acknowledged" else "director_message_resolved",
-                                  {"delivery_id":delivery_id,"driver_id":acker,"acks":details(conn,delivery,acker)["acks"]})
+                                  {"delivery_id":delivery_id,"driver_id":acker,"actor":self.actor,"acks":details(conn,delivery,acker)["acks"]})
                 if target_status == "acknowledged":
                     seq=conn.execute("SELECT MAX(seq) FROM state_events").fetchone()[0]
                     conn.execute("UPDATE state_director_delivery_acks SET ack_event_seq=? WHERE delivery_id=? AND driver_id=?", (seq,delivery_id,acker))

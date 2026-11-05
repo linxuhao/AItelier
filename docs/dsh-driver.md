@@ -441,15 +441,42 @@ steers the root with an `aitelier-runtime-event` message
 each with its latest predicate results (`[]` for an item never observed). It is
 an object, not the array named in the node goal. If the CLI refuses or fails, the
 steer carries `todo_error` instead of empty fields. If the plans cannot be listed
-at all, it is `{reason: "todo_handback_failed", child_session, todo_error}`. The
-idle review payload adds `todo_unfinished` (plans with remaining items and no
-live child), or `todo_error` when the plans cannot be read.
+at all, it is `{reason: "todo_handback_failed", child_session, todo_error}`. Only a
+plan with items left is handed back: an all-passed plan is never work to run
+again.
+
+The idle review payload and the compaction snapshot described below are the
+director's two views of the plans it still owns, and one rule shapes both:
+
+- A plan whose items have all passed while nobody finished it is not history. No
+  candidate report exists (the file `todo_finish` writes), the State attempt it is
+  named after is still live, and the only work left is the director's own:
+  `todo_finish`. Both views keep such a plan and mark it `ready_to_finish: true`,
+  with no remaining items and no `next` item, so a child killed right after its
+  last `todo_done` (a host restart) is still remembered - and never offered again
+  as items to dispatch. `idle_dormant` refuses it as `unfinished_plans`; its
+  reminder is this marker, not a handback.
+- A plan with items left is unfinished work for its child: it is reported with
+  `ready_to_finish: false` and its remaining items.
+- A plan stops counting once the State attempt it is named after has settled
+  (`candidate`, `failed`, `superseded`, `abandoned`): whatever is still open in
+  the plan is already accounted for by that terminal report, so nothing may run
+  it again. An all-passed plan also stops counting once its candidate report
+  exists, i.e. once `todo_finish` has run. A read that cannot prove either -
+  State unreachable, an unknown attempt, a status neither list names - fails
+  closed: the plan keeps counting.
+
+The idle review payload adds `todo_unfinished` - one entry per plan of those two
+kinds that also has no live child: `{attempt_id, node_key, next, remaining,
+ready_to_finish}` - or `todo_error` when the plans cannot be read.
 
 Compaction. The root's `aitelier-driver-state` snapshot (bootstrap and after each
 successful compaction) adds `todo: [{attempt_id, node_key, next, remaining_count,
-child_alive}]` for unfinished plans. When there are none, the key is absent, and
-finished plans drop out. A todo CLI failure never fails the snapshot: it renders
-`todo_error` instead.
+ready_to_finish, child_alive}]` for the plans the director still owns, with
+`remaining_count: 0` and `ready_to_finish: true` for the all-passed ones. When
+there are none the key is absent: a settled attempt's plan and a plan whose
+candidate report exists drop out. A todo CLI failure never fails the snapshot: it
+renders `todo_error` instead.
 
 A host-scoped `agent/pre-step` hook does fire for native children:
 

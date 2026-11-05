@@ -267,6 +267,14 @@ export function apply(ctx) {
         } else blocks = [next];
       } else if (role === 'root') {
         const handed = text.includes('AItelier todo handback:'), completed = text.includes('FULL_CHILD_DONE');
+        // The director waits for the runtime's idle review before it finishes a plan
+        // whose items have all passed (it is the reminder that tells it to). Keeping
+        // that order is what puts a real review payload - the one the runtime emitted
+        // while plan a was all-passed and unfinished - into this scenario; finishing
+        // in the same turn as the handback lets every review arrive after the
+        // candidate exists, when the plan has legitimately dropped out.
+        const reviewed = (options.messages ?? []).some(message => (message.content ?? [])
+          .some(part => typeof part.text === 'string' && part.text.startsWith('AItelier director review due:')));
         const block = once('templates', tool('root-todo_templates', 'todo_templates', {}))
           ?? once('plan-items', tool('root-todo_plan-items', 'todo_plan', { ...plans.bad.input, items: [{ id: 'improvised', title: 'x', needs: [], predicates: [] }] }))
           ?? once('plan-typo', tool('root-todo_plan-typo', 'todo_plan', { ...plans.bad.input, params: { ...plans.bad.input.params, paths: 'a.txt' } }))
@@ -276,7 +284,7 @@ export function apply(ctx) {
           ?? once('spawn-partial', tool('root-spawn-partial', 'subagent', { description: 'partial todo child', prompt: 'TODO_CHILD_PARTIAL attempt_id=' + plans.b.attempt_id + '; use todo_status, todo_begin and todo_done.' }))
           ?? once('judge', tool('root-judge-record_evidence', 'call_tool', { name: 'mcp__aitelier__state_graph_write', arguments: { action: 'record_evidence', arguments: { attempt_id: plans.a.attempt_id } } }))
           ?? (handed ? once('spawn-resume', tool('root-spawn-resume', 'subagent', { description: 'resume todo child', prompt: 'TODO_CHILD_RESUME attempt_id=' + plans.b.attempt_id + '; continue with todo_begin.' })) : undefined)
-          ?? (handed && completed ? once('finish', tool('root-todo_finish-a', 'todo_finish', { attempt_id: plans.a.attempt_id })) : undefined)
+          ?? (handed && completed && reviewed ? once('finish', tool('root-todo_finish-a', 'todo_finish', { attempt_id: plans.a.attempt_id })) : undefined)
           ?? (done.has('finish') ? once('pressure', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(14000) }) : undefined)
           ?? (woke ? once('status-b', tool('root-todo_status-after-compact', 'todo_status', { attempt_id: plans.b.attempt_id })) : undefined)
           ?? { type: 'text', text: done.has('status-b') ? 'ROOT_DONE' : 'Director idle.' };
@@ -500,16 +508,23 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
 
     // 3b. The real idle review (short interval) names the plan with items left. The
     // all-pass plan is named too, until its candidate exists - as ready_to_finish,
-    // with nothing left to run, never as items to dispatch again.
+    // with nothing left to run, never as items to dispatch again. The fixture root
+    // waits for a review before it finishes plan a (the gate in PROVIDER), so at least
+    // one payload is emitted while plan a is all-passed and nobody finished it: the
+    // loop below runs on real payloads, and a runtime that hides an all-passed plan
+    // from the review leaves it empty.
     assert.ok(reviewedB(), 'no idle review named the unfinished plan\n' + JSON.stringify(reviews()));
     const review = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.b.attempt_id)).at(-1);
     assert.deepEqual(review.todo_unfinished.filter(p => p.attempt_id === plans.b.attempt_id), [
       { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'], ready_to_finish: false }]);
     assert.ok(review.todo_unfinished.every(p => p.ready_to_finish === (p.remaining.length === 0)),
       'a plan was marked the wrong way round: ' + JSON.stringify(review.todo_unfinished));
-    for (const plan of review.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id)) {
-      assert.deepEqual(plan, { attempt_id: plans.a.attempt_id, node_key: 'execution.todo-full', next: null,
-        remaining: [], ready_to_finish: true }, 'the all-pass plan was handed back as items to run');
+    const allPassed = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.a.attempt_id));
+    assert.ok(allPassed.length, 'no idle review named the all-passed plan before it was finished: ' + JSON.stringify(reviews()));
+    for (const payload of allPassed) {
+      assert.deepEqual(payload.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id), [
+        { attempt_id: plans.a.attempt_id, node_key: 'execution.todo-full', next: null, remaining: [], ready_to_finish: true }],
+        'the all-passed plan was handed back as items to run: ' + JSON.stringify(payload.todo_unfinished));
     }
 
     // 4. Compaction: after each successful child compaction the child got one

@@ -3268,6 +3268,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
+            # The routing flag the configs read: did every node project get
+            # measured? It is written here, on every path out of this block, so
+            # no exit can carry `node_unmeasured` without it. False when any
+            # project was not measured. That includes the nothing-measured path,
+            # which writes no `node_unmeasured`: `skipped` is the signal there.
+            # Same rule as `executed.node_gate_ran` below. Absent when there is
+            # no node section at all (a Python-only repository), which keeps its
+            # routing exactly as it was.
+            report["node_gate_complete"] = not (node.get("skipped")
+                                                or node.get("unmeasured"))
             # Three states, kept apart. A project that could not be measured is
             # NEITHER a pass NOR a block: it is named plainly (`node_unmeasured`
             # and `node["unmeasured"]`), it cannot turn a green run red (the

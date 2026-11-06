@@ -50,6 +50,9 @@ end_conditions:
     - type: node_reached
       node: "done"
       result: "completed"
+    - type: node_reached
+      node: "node_gate_incomplete"
+      result: "failed"
     - type: max_total_steps
       limit: 60
 
@@ -86,11 +89,18 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
-      - to: "review"                       # tests green → adversarial review
-        match: { from_file: "test_report.json", field: "passed", value: true }
+      # Order is load-bearing (the engine takes the first match). A measured red
+      # keeps its fix loop even when a project was not measured, so the failing
+      # edge comes first. Only then does an unmeasured project stop a green from
+      # reaching the reviewer: a partial report with `passed: true` has no measured
+      # red, and without the partial edge it would go on to review as green.
       - to: "work"                         # tests red → fix, with the report
         match: { from_file: "test_report.json", field: "passed", value: false }
         max_loop: 3
+      - to: "node_gate_incomplete"         # green, but a node project was not measured → not a success
+        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
+      - to: "review"                       # tests green → adversarial review
+        match: { from_file: "test_report.json", field: "passed", value: true }
 
   - id: "review"
     step_type: "agent"
@@ -124,6 +134,15 @@ steps:
   # Loop-external terminal — reached only after the review passes; the node the
   # end-condition fires on. Gate = no completed step row, so it fires at most once.
   - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal: a node project the run did not measure. Reached only from `test`
+  # (edge above). Not a success, and not a review: the reviewer has no way to
+  # measure what the gate did not. Declared in end_conditions so the run ends
+  # here, as `failed`.
+  - id: "node_gate_incomplete"
     step_type: "gate"
     transitions:
       - to: null

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
-import { tmpdir, homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises';
+import { tmpdir, userInfo } from 'node:os';
+import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -31,15 +31,60 @@ function assertInjectionCadence(events) {
   assert.ok(injected.has(epoch), 'latest successful compaction was not followed by fresh State');
 }
 
+/** Canonical spelling of a path that may not exist (including its parent). */
+async function canonical(path) {
+  try { return await realpath(path); } catch { return resolve(path); }
+}
+
+/**
+ * A writable scratch root that the workspace-write policy actually denies.
+ *
+ * A workspace-write child may modify its session workspace and the platform
+ * temporary area — `/tmp` and `tmpdir()`, which `dsh-sandbox`'s `writableRoots`
+ * grants unconditionally — and nothing else. So both fixture roots must live
+ * outside the temporary area: with `HOME=/tmp`, the shape the repository gate
+ * runs every container in, a root built from `homedir()` sat under that
+ * unconditional grant, the "outside" write landed in `/tmp`, and the denial
+ * this test exists to prove was never exercised. The base is therefore the
+ * account's home directory as the OS records it (never `HOME`, which is
+ * exactly the variable the gate overrides) or `/var/tmp`; a base the policy
+ * would let the child write anyway is refused, and no usable base is reported
+ * as unmeasured rather than answered with a green that proves nothing.
+ */
+async function deniedScratchRoot(t) {
+  const candidates = [];
+  try { candidates.push(userInfo().homedir); } catch {}
+  candidates.push(join(sep, 'var', 'tmp'));
+  const granted = [...new Set([await canonical(join(sep, 'tmp')), await canonical(tmpdir())])];
+  const rejected = [];
+  for (const candidate of candidates) {
+    const base = await canonical(candidate);
+    if (granted.some(root => base === root || base.startsWith(root + sep))) {
+      rejected.push(`${candidate} (inside the temporary grant)`);
+      continue;
+    }
+    try { return await mkdtemp(join(base, 'dsh-native-smoke-')); }
+    catch (error) { rejected.push(`${candidate} (${error.code ?? error.message})`); }
+  }
+  t.skip(`no writable root outside the temporary grant to prove the outside-write denial from: ${rejected.join(', ')}`);
+  return null;
+}
+
 test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: 45000 }, async (t) => {
   // Measure the pinned harness or report this run unmeasured; never invent one.
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
-  // Use non-temporary roots: /tmp is writable independently of workspace policy.
-  const directory = await mkdtemp(join(homedir(), 'dsh-native-smoke-'));
-  const outsideDirectory = await mkdtemp(join(homedir(), 'dsh-outside-workspace-'));
+  // One scratch root outside the temporary grant, two sibling trees: the
+  // workspace the native child owns, and the outside directory the same policy
+  // must deny. Created explicitly, so the denial is about the file and not
+  // about a directory this test never made.
+  const scratch = await deniedScratchRoot(t);
+  if (!scratch) return;
+  const directory = join(scratch, 'workspace');
+  const outsideDirectory = join(scratch, 'outside');
   const childDirectory = join(directory, 'work', 'child');
   await mkdir(childDirectory, {recursive:true});
+  await mkdir(outsideDirectory, {recursive:true});
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], activity = [], events = [], workCalls = [], dispatches = [], parked = new Set(), childWaits = new Set();
   let changed = false, overflowChanged = false, contextReads = 0, output = '', proc;
@@ -146,7 +191,8 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(after.some(r => JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'standing director goal missing after compact');
     assert.equal(await readFile(join(childDirectory, 'worker-proof.txt'), 'utf8'), 'WORKER_SHELL_OK', 'native child could not write in its owned checkout under the parent workspace');
     assert.match(await readFile(join(childDirectory, 'commit-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/, 'native child could not commit using its own git metadata');
-    await assert.rejects(readFile(join(outsideDirectory, 'outside-probe.txt')), {code:'ENOENT'});
+    await assert.rejects(readFile(join(outsideDirectory, 'outside-probe.txt')), {code:'ENOENT'},
+      'the workspace-write child wrote outside its workspace');
     assert.ok(events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_DENIED')), 'child cwd was incorrectly treated as a new write grant');
     assert.ok(events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('goal_round')), 'precompact goal history grep missing\n' + output);
     assert.ok(activity.some(a => a.phase === 'waiting' && a.subagents.length > 0), 'parent never waited while the native child was active');
@@ -232,8 +278,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-    if (!process.env.DSH_TEST_KEEP) await rm(directory, { recursive: true });
-    await rm(outsideDirectory, { recursive: true, force: true });
+    if (!process.env.DSH_TEST_KEEP) await rm(scratch, { recursive: true, force: true });
   }
 });
 

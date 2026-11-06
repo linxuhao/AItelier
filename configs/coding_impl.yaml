@@ -55,6 +55,13 @@ end_conditions:
     - type: node_reached
       node: "test_gate_report_unattributable"
       result: "failed"
+    # Terminal: a GREEN round whose Node projects were NOT all measured (a
+    # partial node gate). Declared `failed` so the run ends here naming the
+    # partial gate instead of reading as completed — the third shipped config to
+    # do this (configs/fix_tests.yaml:38-40 and configs/subagent.yaml:53-55).
+    - type: node_reached
+      node: "node_gate_incomplete"
+      result: "failed"
 
 steps:
   - id: "baseline"
@@ -241,6 +248,110 @@ steps:
         match: { field: "repo_gate_absent", value: true }
       - to: "failed_candidate_evidence"
         match: { field: "retained_red_candidate", value: true }
+      # ── A PARTIAL NODE GATE MAY NOT CONCLUDE SUCCESS ──────────────────────
+      # A pytest-GREEN round whose Node projects were not all measured carries
+      # `node.unmeasured` / `node.skipped` in its report and
+      # `node_gate_complete: false` on `run_tests`' RETURN — the producer writes
+      # that boolean on every path out of the node block
+      # (aitelier/tools/run_tests/impl.py:3337-3338:
+      # `not (node.get("skipped") or node.get("unmeasured"))`). `passed` is
+      # honestly true there: the projects that RAN passed. Without this edge a
+      # return carrying `{passed: true, node_gate_complete: false}` reached
+      # `test_evidence` -> `test_outcome` -> `done` — measured on the shape whose
+      # report has `node.unmeasured` beside `node.skipped: false` — i.e. the run
+      # concluded SUCCESS while its own report said the node gate was partial.
+      # (With TODAY's producer that report also carries `node.skipped: true` and
+      # is refused one step later, which is why the next paragraph reports the
+      # measurement instead of claiming the short path was always open.)
+      # The other two shipped configs already refuse it
+      # (configs/fix_tests.yaml:112-113/:129, configs/subagent.yaml:124-125/:139);
+      # this is the third, and it reuses their terminal's name.
+      #
+      # BOTH TERMS, AND WHY THIS IS NOT THE ONE-TERM EDGE THE OTHER TWO USE.
+      # In fix_tests/subagent the measured-red edge comes FIRST (it reads the
+      # report's `passed: false`), so their partial edge cannot capture a red.
+      # HERE the red path is the FALL-THROUGH `written` edge below: red is a
+      # report that fails `test_outcome`'s `passed: const true` one step later.
+      # An edge matching `node_gate_complete: false` alone would therefore sit in
+      # FRONT of the repair path and send a measured red beside an unmeasured
+      # project to a terminal — charging an absence for a red the implementer can
+      # fix. `passed: true` is the term that keeps this refusal to the case it
+      # names (green AND not fully measured), and it is what lets
+      # `test_outcome -> implement` keep working for a measured red.
+      #
+      # MEASURED ON THIS BASE (2026-11-06), because it changes what this edge is
+      # worth: with the REAL producer report, a partial green did NOT in fact
+      # reach `done` — `test_evidence`'s inline schema requires
+      # `node.skipped: {const: false}`, and `_aggregate_node_projects` sets
+      # `skipped = bool(unmeasured)` (impl.py:1146), so a real partial
+      # report was refused one step later as EVIDENCE MISSING. Two consequences,
+      # both deliberate: (1) this edge makes the refusal explicit at the step
+      # that owns the verdict, naming the partial gate, instead of relying on a
+      # cross-field invariant inside ANOTHER step's shape check; (2) the guard
+      # also covers the shape a hand-built or older producer writes
+      # (`node.unmeasured` beside `skipped: false`), which does reach `done`
+      # through `test_outcome`. What it does NOT do is rescue a partial RED:
+      # that report is still refused by the same `node.skipped` const, and
+      # widening `test_evidence` for a measured red is the pending
+      # measured-red attempt's change (it keys on `returncode: 1`), not this
+      # card's — see the test module's control (b2). Adding a second branch here
+      # would collide with that attempt and is why this edge is a REFUSAL only.
+      #
+      # BOTH TERMS ARE FLAGS, NEVER `from_file`. The verdict travels on
+      # `run_tests`' RETURN (`_node_gate_verdict`, impl.py:2934-2971), which the
+      # engine merges into this step's flags. `from_file` is resolved against the
+      # EVALUATING step's own output dir (skillflow core `_make_file_reader`:
+      # `<config>/<step>/`), which is why the round-5 attempt on `test_evidence`
+      # never matched, and a report parsing to a list raises AttributeError
+      # inside `_flags_match` (see the comment above the `written` edge).
+      #
+      # CONSUMER INVENTORY — every reader of `node_gate_complete`,
+      # `node["unmeasured"]` and `node["skipped"]`, grep'd in this tree:
+      #   * impl.py:3337-3338 — the report's copy, computed from
+      #     `node["skipped"]` / `node["unmeasured"]`. GAINS: its `false` can no
+      #     longer be carried into a success; nothing about what it writes moves.
+      #   * impl.py:2934-2971 `_node_gate_verdict` — the RETURN's copy, and `True`
+      #     when the report carries no key at all (a Python-only repository).
+      #     GAINS its first routing reader in this config. The absent-key answer
+      #     stays `True`, so a repository with no node section does not match
+      #     this edge and routes exactly as before. LOSES nothing.
+      #   * impl.py:3086 (upstream-blocked fail-fast return) and :3666 (main
+      #     return) — the two paths that put the verdict on the flags. Unchanged;
+      #     :3086's `passed: False` keeps that path off this edge.
+      #   * impl.py:2877-2881 `_report_write_failure` — deliberately OMITS the
+      #     key, so a non-delivery return cannot match this edge and still ends
+      #     on `test_evidence_missing` (`written: None`).
+      #   * impl.py:3371 — writes the flattened `node_unmeasured` read by the
+      #     state vocabulary below. Unchanged.
+      #   * impl.py:3347 — the same two node keys decide
+      #     `executed.node_gate_ran`. Unchanged.
+      #   * configs/fix_tests.yaml:113 / :129 and configs/subagent.yaml:125 /
+      #     :139 — the same refusal and a POSITIVE success edge. Unchanged.
+      #   * configs/coding_impl.yaml `test_evidence` inline_schema
+      #     `node: {skipped: {const: false}}` — the config-side reader of
+      #     `node["skipped"]`: a report whose node gate was skipped is refused as
+      #     evidence. LOSES a case it used to be the only defence for (the
+      #     partial green now stops here first); GAINS nothing. Left as it is on
+      #     purpose: the whole-report `skipped` refusal next to it is a different
+      #     field, and widening THIS clause for a measured red is the pending
+      #     measured-red attempt's business.
+      #   * aitelier/gate_evidence.py:323 `report_state` — reads the FLATTENED
+      #     `node_unmeasured` and answers `partial` when a GREEN report carries
+      #     one. It does not read `node_gate_complete` (grep: no hit outside
+      #     run_tests). GAINS: the graph now agrees with the state the hold layer
+      #     already derived for the same report — before this edge one layer said
+      #     `partial` and the graph said `done`. LOSES nothing.
+      #   * aitelier/gate_deferral.py:428 — reads `repo_gate_unmeasured`, a
+      #     DIFFERENT key (the repository gate, not the node gate). Untouched.
+      #   * core/ — NO reader of `node_gate_complete`, `node_unmeasured` or
+      #     `node["skipped"]` (grep: zero hits for the first two; the only
+      #     `node`+`skipped` hit is prose in core/state_driver_guide.py:193).
+      #     Nothing under `core/` gains or loses; this edge changes which terminal
+      #     a run reaches, not the report any core reader sees.
+      # tests/unit/test_coding_impl_node_gate_partial.py drives this decision on
+      # the real producer's return and pins the order below.
+      - to: "node_gate_incomplete"
+        match: { node_gate_complete: false, passed: true }
       - to: "test_evidence"
         match: { written: "test_report.json" }
       - to: "test_evidence_missing"
@@ -333,6 +444,19 @@ steps:
   # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
   # to be the loop-external node the end-condition fires on (see end_conditions).
   - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal: a GREEN round whose Node projects were NOT all measured. Reached
+  # only from `test` (edge above, `{node_gate_complete: false, passed: true}`) and
+  # declared `failed` in end_conditions, so the run ends here naming the partial
+  # gate rather than reading as completed. Same id and same shape as
+  # configs/fix_tests.yaml:154 and configs/subagent.yaml:190, so all three shipped
+  # configs answer "a partial node gate" the same way. It has no outgoing edge:
+  # `implement` is not reachable from here — a repository that did not measure
+  # all of its own projects is a verdict no code edit can fix.
+  - id: "node_gate_incomplete"
     step_type: "gate"
     transitions:
       - to: null

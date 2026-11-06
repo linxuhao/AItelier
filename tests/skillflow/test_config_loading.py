@@ -141,6 +141,20 @@ class TestV2ConfigLoading:
             # on `test_evidence_missing`.
             ("failed_candidate_evidence",
              {"field": "retained_red_candidate", "value": True}),
+            # The partial node gate is refused on the step that owns the verdict:
+            # `run_tests`' RETURN carries `node_gate_complete`, and a GREEN report
+            # whose Node projects were not all measured (`passed: true` beside
+            # `node_gate_complete: false`) goes to a terminal instead of being
+            # validated and reaching `done` through `test_outcome`. BOTH terms:
+            # here the red path is the fall-through `written` edge, so a one-term
+            # edge would capture a measured red (configs/fix_tests.yaml:112-113
+            # can use one term because its red edge comes first). Order matters —
+            # this edge precedes `written`, or the report would be validated and
+            # routed past it. tests/unit/test_coding_impl_node_gate_partial.py
+            # drives the routing cases and fails if either term, the position or
+            # the terminal moves.
+            ("node_gate_incomplete",
+             {"node_gate_complete": False, "passed": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
@@ -170,26 +184,31 @@ class TestV2ConfigLoading:
         ]
 
     def test_coding_impl_end_condition_is_outside_the_loop(self):
-        """Success and the two evidence failures have distinct loop-external terminals."""
+        """Success and the evidence/partial-gate terminals are loop-external gates."""
         graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
         conditions = graph.end_conditions.conditions
         # `done` (green) and `done_candidate_tests_failed` (a MEASURED failure the
-        # run may not repair away) complete the run; the two evidence terminals
-        # fail it. `done_candidate_tests_failed` is listed here because it IS an
-        # end condition, and asserting the list is what notices an accidental
-        # fourth terminal — the list had been red since that one landed.
+        # run may not repair away) complete the run; the evidence terminals and
+        # the partial-node-gate terminal fail it. `node_gate_incomplete` is listed
+        # here because it IS an end condition, and asserting the list is what
+        # notices an accidental fifth terminal — the list had been red once
+        # already when `done_candidate_tests_failed` landed. Its name and its
+        # `failed` result are the same as `configs/fix_tests.yaml:38-40` and
+        # `configs/subagent.yaml:53-55`, so all three configs answer a partial
+        # node gate identically.
         assert [(c.type, c.node, c.result) for c in conditions] == [
             ("node_reached", "done", "completed"),
             ("node_reached", "done_candidate_tests_failed", "completed"),
             ("node_reached", "test_evidence_missing", "failed"),
             ("node_reached", "test_gate_report_unattributable", "failed"),
+            ("node_reached", "node_gate_incomplete", "failed"),
         ]
         # `implement` is NOT a terminal: the loop it sits in is bounded by
         # `test_outcome -> implement max_loop: 3`, so reaching it never ends a run.
         assert all(c.node != "implement" for c in conditions)
         for terminal in ("done", "test_evidence_missing",
                          "test_gate_report_unattributable",
-                         "done_candidate_tests_failed"):
+                         "done_candidate_tests_failed", "node_gate_incomplete"):
             node = next(s for s in graph.steps if s.id == terminal)
             assert node.step_type == "gate"
             assert [t.to for t in node.transitions] == [None]

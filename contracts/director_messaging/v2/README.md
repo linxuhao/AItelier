@@ -146,4 +146,8 @@ Error `code` remains the closed machine-readable enum. `detail.message` is bound
 to 1000 characters and may explain a declared field and stable validation kind or
 authorization requirement. It never echoes submitted values, unknown field names,
 validator context, message body, credentials or the supplied director identity.
-An explanation does not relax request validation or grant membership.
+One exception is deliberate and named here so it is not read as a leak: a refusal
+that is ABOUT a destination may name that destination project id, because the
+sender already named it and cannot act on the refusal without it. Nothing else
+from the request travels with it. An explanation does not relax request validation
+or grant membership.

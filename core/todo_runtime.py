@@ -27,7 +27,17 @@ state machine for it.
 A command that RAN and whose own report declares that it measured nothing is the
 SAME absence, whatever its exit code said: the failure such a gate prints is the
 one it could not measure, and an exit that happens to match cannot turn a gate
-that graded nothing into a release.
+that graded nothing into a release. "Its own" is established by CONSTRUCTION -
+the bound report path is cleared before the command starts - because a clock
+comparison is not an identity test: a leftover mtime in the future passed it, and
+a rounded one put a fresh report below the start. Establishing ownership this way
+also bounds what the harness may remove. What is contained is the report's
+PARENT, and what is removed is the directory ENTRY at the bound path: `unlink`
+never follows a symlink, so a link sitting at the report path is removed as a
+link and the file it names is untouched. A binding naming an absolute path, a
+`..` traversal, or a parent that resolves outside the workspace removes nothing
+and is reported instead, and a symlink loop anywhere in the parent is a reason
+rather than an exception escaping the measurement.
 """
 from __future__ import annotations
 
@@ -45,6 +55,7 @@ import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
 from core.gate_deferral import DeferralLedger, read_absence
+from core.security_jail import SecurityException, verify_path_safe
 
 Outcome = Literal["pass", "fail", "absent"]
 
@@ -301,27 +312,127 @@ def _file_delta(target: Path, rel: str, before: str | None, contains: str | None
     return ""
 
 
-def _report_absence(workspace: Path, report: str | None, started: float) -> dict | None:
-    """The absence this run's OWN report declares, or None when the exit code decides.
+def _report_path(workspace: Path, report: str | None) -> Path | None:
+    """The file `report` names: absolute stays absolute, anything else joins the workspace."""
+    if not report:
+        return None
+    return Path(report) if Path(report).is_absolute() else Path(workspace) / report
 
-    Only the report the command itself wrote counts, so it must exist and be no
-    older than the moment the command started: a file left behind by an earlier
-    run says nothing about this one. The declaration is then read exactly as the
+
+def _owned_entry(root: Path, target: Path) -> tuple[Path | None, str]:
+    """The directory entry at `target` that this run may touch, or None and why not.
+
+    The PARENT is what gets contained, never the whole path. Resolving the whole
+    path follows the FINAL component, and a symlink sitting at the report path
+    that happens to point inside the workspace passes containment while naming a
+    file the run never bound - unlinking the resolved path then deletes that file
+    and leaves a dangling link behind. `unlink` does not follow a symlink, so the
+    entry itself is what is removed: a link goes away as a link, and whatever it
+    named is untouched.
+
+    A parent that leaves the workspace (an absolute path, a `..` traversal, or a
+    symlink pointing out), a path whose last component is not a plain name, and a
+    symlink LOOP (where `resolve()` raises `RuntimeError` instead of escaping)
+    are all reasons - never a deletion, and never an exception out of a
+    measurement.
+
+    Returns (entry, "") when the entry may be touched, else (None, reason).
+    """
+    name = target.name
+    if name in ("", ".", ".."):
+        return None, (f"{target} does not end in a plain file name, and a path that is not a "
+                      f"name inside the workspace is neither removed nor read on this run's behalf")
+    try:
+        parent = verify_path_safe(root, target.parent)
+    except SecurityException:
+        # Nothing outside the workspace is this run's to remove, so nothing
+        # outside it can be established as this run's report either.
+        return None, (f"its parent resolves outside the workspace {root}, and a path outside "
+                      f"the workspace is neither removed nor read on this run's behalf")
+    except RuntimeError as exc:          # a symlink loop: resolve() raises instead of returning
+        return None, f"its parent could not be resolved ({exc})"
+    except OSError as exc:               # unreadable parent, a name too long, anything else
+        return None, f"its parent could not be resolved ({exc.strerror or exc.__class__.__name__})"
+    return parent / name, ""
+
+
+def _clear_report(workspace: Path, target: Path | None) -> str:
+    """Remove whatever sits at the bound report path, before the command runs.
+
+    This is what makes a report THIS run's: ownership is established by
+    CONSTRUCTION, not by comparing the file's mtime to the moment the command
+    started. A clock comparison is not an identity test - a leftover carrying a
+    future mtime passed it, so an untouched old declaration could override a
+    measured failure, and integer-second rounding could put a FRESH report below
+    the start, turning an exit-0 run that declared it measured nothing into a
+    release.
+
+    What the construction may touch is BOUNDED, and bounded in the right place:
+    the binding names a path and a path can leave the workspace (an absolute one,
+    `..`, or a parent that is a symlink). The PARENT must resolve inside the
+    resolved workspace - the same containment rule `core.security_jail` applies
+    to every other caller - and then the directory ENTRY at the bound path is
+    unlinked, which never follows it. So an escaping binding is a reason, never a
+    deletion, and a symlink at the report path is removed as a link while the
+    file it points at survives.
+
+    Returns "" when the path is clear, or the reason it could not be cleared. A
+    caller that gets a reason must NOT read a report at all: falling back to an
+    absence from a path somebody else owns would be the same laundering in the
+    other direction.
+    """
+    if target is None:
+        return ""
+    entry, why = _owned_entry(Path(workspace).resolve(), target)
+    if entry is None:
+        return why
+    try:
+        entry.unlink()
+    except FileNotFoundError:
+        return ""                        # nothing was there; nothing to establish
+    except OSError as exc:               # permission denied, a directory in the way, anything else
+        return f"{exc.strerror or exc.__class__.__name__}"
+    return ""
+
+
+def _report_absence(workspace: Path, target: Path | None) -> tuple[dict | None, str]:
+    """The absence the report THIS run wrote declares, and why none was read.
+
+    `target` was cleared before the command ran, so an entry at that path now was
+    written by this run - but only if it still lives where the clear left it. The
+    command had its own turn and can have replaced the report's PARENT with a
+    symlink to a directory outside the workspace, so the same containment is run
+    again here and the same `unlink`-safe entry is what gets read.
+
+    Nothing is read, and the exit code decides, when the parent no longer resolves
+    inside the workspace, when resolution fails (a loop, an unreadable parent), or
+    when the entry at the bound path is a symlink - a link is not a report this
+    run wrote, and following it would read a file it never named. The reason is
+    returned so that BOTH the pass and the fail detail can say why.
+
+    The mtime is still READ, only to describe the evidence in the detail - the
+    verdict never depends on it. The declaration itself is read exactly as the
     gate pipeline reads it (`core.gate_deferral.read_absence`) - `repo_gate_absent`,
     or `repo_gate_unmeasured` only from a report that has no `repo_gate_absent`
     key. A flag that is false names a gate that measured nothing beside a failure
     that WAS measured, which is a verdict, not an absence.
     """
-    if not report:
-        return None
-    target = Path(report) if Path(report).is_absolute() else Path(workspace) / report
+    if target is None:
+        return None, ""
+    entry, why = _owned_entry(Path(workspace).resolve(), target)
+    if entry is None:
+        return None, why
+    if entry.is_symlink():               # lstat, never followed: a link is not this run's report
+        return None, (f"the entry at {target} is a symlink, not a report this run wrote, "
+                      f"and it is not followed")
     try:
-        written = target.stat().st_mtime
+        written = entry.stat().st_mtime
     except OSError:
-        return None                      # the command named a report it did not write
-    if written < started:
-        return None                      # written before this run began: not its report
-    return read_absence(target)
+        return None, ""                  # the command named a report it did not write
+    declared = read_absence(entry)
+    if declared is None:
+        return None, ""
+    return {**declared, "written": written}, ""
 
 
 def builtin_library() -> PredicateLibrary:
@@ -369,10 +480,25 @@ def builtin_library() -> PredicateLibrary:
         has not graded the work: that is the same absence as a gate that never
         started, not the failure it printed and not a release because the exit
         happened to match `expect`.
+
+        The bound path is CLEARED before the command starts, so a report present
+        when it returns was written by this run. Nothing is compared against a
+        clock: an old declaration carrying a future mtime cannot outvote a
+        measured failure, and a fresh one with a rounded or backdated mtime
+        cannot be discarded into a release. The clearing is bounded to the
+        workspace and bounded in the right place: the report's PARENT must resolve
+        inside it and the directory ENTRY is removed, never followed, so a binding
+        that names a path outside it removes nothing and a symlink at the path is
+        removed as a link. The read after the run is contained the same way - the
+        command can have replaced the parent with a link - and a link at the path
+        is never read. When no report can be read the exit code decides and BOTH
+        details say why - an absence inferred from a file somebody else owns would
+        be the same laundering in reverse.
         """
         if not Path(workspace).is_dir():
             return PredicateResult("command_exit", "absent", f"workspace {workspace} does not exist")
-        started = time.time()             # a report older than this was not written by this run
+        target = _report_path(workspace, report)
+        uncleared = _clear_report(workspace, target)   # anything left here after the run is this run's
         try:
             done = _run_in_own_group(list(argv), str(workspace), timeout)
         except FileNotFoundError:
@@ -381,16 +507,27 @@ def builtin_library() -> PredicateLibrary:
             return PredicateResult("command_exit", "absent", f"{' '.join(argv)} timed out after {timeout}s")
         except OSError as exc:
             return PredicateResult("command_exit", "absent", f"{argv[0]!r} could not be run: {exc}")
-        declared = _report_absence(workspace, report, started)
+        declared, unread = (None, "") if uncleared else _report_absence(workspace, target)
         if declared is not None:
             return PredicateResult(
                 "command_exit", "absent",
                 f"{declared['gate']} declared in {report} that it measured nothing "
-                f"(exit {done.returncode}): an absence, not a verdict on the work")
+                f"(exit {done.returncode}; the report this run wrote at mtime "
+                f"{declared['written']:.3f}): an absence, not a verdict on the work")
+        # BOTH details say why no report was read: a pass on the exit code is not a
+        # release of a gate whose report this run could not establish ownership of.
+        if uncleared:
+            why = (f"; {report} could not be cleared before the run ({uncleared}), so no report "
+                   f"was read and the exit code decides")
+        elif unread:
+            why = (f"; no report was read from {report} ({unread}), so the exit code decides")
+        else:
+            why = ""
         if done.returncode == expect:
-            return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected")
+            return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected{why}")
         tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
-        return PredicateResult("command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}")
+        return PredicateResult(
+            "command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}{why}")
 
     @library.define("changes_within")
     def changes_within(*, workspace: Path, pre_state: Mapping[str, Any], base_sha: str,

@@ -535,6 +535,9 @@ def test_a_non_zero_exit_decides_the_verdict_when_no_absence_is_declared(tmp_pat
         stale = tmp_path / "out" / "test_report.json"
         stale.write_text(json.dumps(DECLARED_ABSENCE))
         os.utime(stale, (time.time() - 3600, time.time() - 3600))   # last run's declaration
+        # Not a clock comparison any more: the bound path is CLEARED before the command
+        # runs, so the leftover is simply gone and the exit code decides. Same verdict,
+        # a different reason - ownership is constructed rather than inferred from mtime.
         argv, args = _exits(2), {"report": named}
 
     result = builtin_library().evaluate(Binding("command_exit", {"argv": argv, "timeout": 120, **args}),
@@ -565,4 +568,273 @@ def test_the_report_may_be_named_by_an_absolute_path(tmp_path):
                                  "report": str(target), "timeout": 120}),
         workspace=tmp_path, pre_state={})
     assert result.outcome == "absent" and str(target) in result.detail
+
+
+
+def test_a_leftover_report_with_a_future_mtime_cannot_outvote_a_measured_failure(tmp_path):
+    """An untouched OLD declaration must not speak for a run that measured a red gate.
+
+    The clock rule (`written < started` -> not this run's report) is not an identity
+    test: a leftover whose mtime sits in the FUTURE passed it, so this case came back
+    `absent` - the worker charged nothing for a gate that never ran. Ownership is now
+    established by construction: the bound path is cleared before the command starts,
+    so the exit 2 the command really produced is the verdict.
+    """
+    named = "out/test_report.json"
+    (tmp_path / "out").mkdir()
+    leftover = tmp_path / "out" / "test_report.json"
+    leftover.write_text(json.dumps(DECLARED_ABSENCE))
+    now = time.time()
+    os.utime(leftover, (now + 3600, now + 3600))        # the clock rule was defeated by this
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(2), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "fail", \
+        f"a leftover declaring an absence is not this run's report: {result.detail}"
+    assert "exit 2, expected 0" in result.detail, result.detail
+    assert not leftover.exists(), \
+        "the bound path is cleared before the command runs: a report present after it is this run's"
+
+
+def test_a_report_this_run_wrote_is_its_own_even_with_a_backdated_mtime(tmp_path):
+    """A FRESH declaration must not be discarded because its mtime fell before the start.
+
+    Integer-second rounding can do that by itself; here the command forces it, which is
+    the same falsifier made deterministic. The report exists because THIS run wrote it -
+    it was absent when the run began - so the absence it declares still speaks. The old
+    clock rule (`written < started` -> not this run's report) answered `pass` here: an
+    absence becoming a release.
+    """
+    named = "test_report.json"
+    script = ("import json, os, pathlib, sys, time\n"
+              f"target = pathlib.Path({named!r})\n"
+              f"target.write_text({json.dumps(DECLARED_ABSENCE)!r})\n"
+              "now = time.time()\n"
+              "os.utime(target, (now - 3600, now - 3600))\n"
+              "sys.exit(0)\n")
+    began = time.time()
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": [sys.executable, "-c", script],
+                                 "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "absent", \
+        f"an exit 0 whose own report declares an absence is not a release: {result.detail}"
+    assert "repo_gate.sh" in result.detail and named in result.detail, \
+        f"the detail must still name the gate and the report: {result.detail!r}"
+    written = (tmp_path / named).stat().st_mtime
+    assert written < began - 1800, \
+        "the fixture must actually put the report's mtime behind the run, or it proves nothing"
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_path_that_cannot_be_cleared_lets_the_exit_code_decide(tmp_path, code, outcome):
+    """Falling back to an absence here would be the same laundering in the other direction.
+
+    A directory sits at the bound report path, so nothing can establish ownership of it.
+    No report may be read from a path this run does not own; the exit code decides, and
+    the detail says why the report could not be cleared - on the pass path too.
+    """
+    named = "blocked/test_report.json"
+    (tmp_path / "blocked").mkdir()
+    (tmp_path / "blocked" / "test_report.json").mkdir()      # unlink() cannot remove this
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == outcome, f"exit {code} must decide, not an absence: {result.detail}"
+    assert "could not be cleared" in result.detail and named in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+# -- the clearing is bounded: a binding cannot name a file outside the workspace -----------
+
+def _escapes(tmp_path: Path, kind: str) -> tuple[Path, str]:
+    """A report binding that names a file OUTSIDE the workspace, and the file it names.
+
+    `kind` is one of the three ways a path leaves: an absolute one, a `..`
+    traversal, or a parent that is a symlink to somewhere else.
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-{kind}-victim.json"
+    outside.write_text(json.dumps(DECLARED_ABSENCE))
+    if kind == "absolute":
+        return outside, str(outside)
+    if kind == "traversal":
+        return outside, f"../{outside.name}"
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-{kind}-elsewhere"
+    elsewhere.mkdir()
+    linked = elsewhere / "victim.json"
+    linked.write_text(json.dumps(DECLARED_ABSENCE))
+    (tmp_path / "link-out").symlink_to(elsewhere, target_is_directory=True)
+    return linked, "link-out/victim.json"
+
+
+@pytest.mark.parametrize("kind", ["absolute", "traversal", "symlinked-parent"])
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_outside_the_workspace_is_neither_removed_nor_read(tmp_path, kind, code, outcome):
+    """A binding names a path; the workspace is the only place this run may clear one.
+
+    Clearing what an absolute path, a `..` traversal or a symlinked parent points at
+    would make the harness delete a file it does not own - and then read the absence in
+    it, laundering a stranger's declaration as this run's. Containment is the bound:
+    nothing outside the resolved workspace is removed, the exit code decides, and the
+    detail says why on the pass path as well as the fail path.
+    """
+    outside, report = _escapes(tmp_path, kind)
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": report, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert outside.exists(), f"{kind}: a file outside the workspace must not be removed: {outside}"
+    assert result.outcome == outcome, \
+        f"{kind}: the exit code decides when the bound path is not this run's to clear: {result.detail}"
+    assert "outside the workspace" in result.detail and "could not be cleared" in result.detail, \
+        f"{kind}: the detail must say why no report was read: {result.detail!r}"
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+# -- the bound path is a directory ENTRY: contain the parent, never follow the entry ---------
+
+def test_a_symlink_at_the_report_path_is_removed_as_a_link_not_followed(tmp_path):
+    """The file the link names is the run's own source, and it is not the harness's to delete.
+
+    An in-workspace link at the bound path (`out/test_report.json -> ../src/app.py`)
+    RESOLVES inside the workspace, so containing the whole path let it through and
+    the resolved-unlink deleted `src/app.py` - a file the run never named - leaving
+    a dangling link. What is contained is the parent, and what is removed is the
+    entry: `unlink` does not follow a symlink, so the link goes and the source stays.
+    """
+    named = "out/test_report.json"
+    (tmp_path / "src").mkdir()
+    source = tmp_path / "src" / "app.py"
+    source.write_text("SENTINEL: this file belongs to the run's own source tree\n")
+    (tmp_path / "out").mkdir()
+    link = tmp_path / "out" / "test_report.json"
+    link.symlink_to("../src/app.py")
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(0), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == "pass", result.detail
+    assert source.exists() and source.read_text().startswith("SENTINEL"), \
+        f"the file the link pointed at is not the harness's to remove: {source}"
+    assert not link.is_symlink(), \
+        "the link IS the directory entry at the bound path: it is removed as a link, not followed"
+
+
+def test_a_symlink_loop_at_the_report_path_is_a_link_to_remove_not_a_crash(tmp_path):
+    """`out/report.json -> report.json`: resolving the whole path raised out of `evaluate`.
+
+    `Path.resolve()` reports a loop as `RuntimeError: Symlink loop`, and the old
+    clear resolved the whole target, so a pathological binding crashed the
+    measurement instead of returning a verdict. The entry is a link like any other,
+    so it is removed as one and the exit code decides - nothing is raised.
+    """
+    named = "out/report.json"
+    (tmp_path / "out").mkdir()
+    loop = tmp_path / "out" / "report.json"
+    loop.symlink_to("report.json")               # points at itself
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(0), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == "pass", f"the exit code decides; nothing may be raised: {result.detail}"
+    assert not loop.is_symlink(), "a loop at the bound path is an entry to remove, not a report to read"
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_symlink_loop_in_the_report_parent_is_a_reason_not_a_crash(tmp_path, code, outcome):
+    """A loop that `resolve()` cannot get through is a reason, on BOTH details.
+
+    `out -> out`: there is no directory to contain, so the path is not this run's
+    to clear and no report may be read from it. The `RuntimeError` pathlib raises
+    for the loop is caught and becomes a reason; the exit code decides, the detail
+    names the report and the reason, and nothing escapes `evaluate`.
+    """
+    named = "out/report.json"
+    (tmp_path / "out").symlink_to("out")        # a directory that is only itself
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == outcome, f"exit {code} must decide, not a crash: {result.detail}"
+    assert named in result.detail and "could not be cleared" in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "loop" in result.detail.lower(), \
+        f"the reason must name the loop it could not resolve: {result.detail!r}"
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_written_as_a_symlink_is_not_read_even_when_it_loops(tmp_path, code, outcome):
+    """The read after the run is contained too: a link there is not a report this run wrote.
+
+    The command creates `out/report.json -> report.json` - the probe's D2 shape, but
+    arriving AFTER the clear, so the bound path is occupied when the read happens.
+    Following it either reads a file the run never named or raises on the loop;
+    neither is a verdict. Nothing is read, the exit code decides, and the reason is
+    in the detail on that path's pass and its fail alike.
+    """
+    named = "out/report.json"
+    script = ("import os, pathlib, sys\n"
+              "out = pathlib.Path('out')\n"
+              "out.mkdir()\n"
+              "os.symlink('report.json', out / 'report.json')\n"
+              f"sys.exit({code})\n")
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": [sys.executable, "-c", script], "report": named,
+                                 "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == outcome, f"exit {code} must decide, not an absent report: {result.detail}"
+    assert "symlink" in result.detail and named in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "no report was read" in result.detail, result.detail
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+@pytest.mark.parametrize("age", ["stale", "fresh"])
+def test_a_parent_symlink_created_by_the_command_gets_no_absence_read(tmp_path, age, code, outcome):
+    """The command has its own turn, and it can move the report's parent out of the run.
+
+    At clear time `out/` did not exist, so there was nothing to remove. The command
+    then creates `out` as a symlink to a directory OUTSIDE the workspace that holds
+    a declaring report (stale in one case, fresh in the other - the mtime is not the
+    question). Reading it would launder a stranger's declaration as this run's and
+    turn a measured exit into an absence, so the parent is contained AGAIN: nothing
+    is read, the exit code decides, and the detail says why.
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-{age}"
+    outside.mkdir()
+    declared = outside / "test_report.json"
+    declared.write_text(json.dumps(DECLARED_ABSENCE))
+    if age == "stale":
+        old = time.time() - 3600
+        os.utime(declared, (old, old))           # last run's declaration, out there
+    named = "out/test_report.json"
+    creates_parent = [sys.executable, "-c",
+                      "import pathlib, sys\n"
+                      "pathlib.Path('out').symlink_to(sys.argv[1])\n"
+                      f"sys.exit({code})\n",
+                      str(outside)]
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": creates_parent, "report": named, "expect": 0,
+                                 "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert declared.exists(), f"{age}: a report outside the workspace must not be removed"
+    assert result.outcome == outcome, \
+        f"{age}: the exit code decides when the bound path left the workspace: {result.detail}"
+    assert "outside the workspace" in result.detail and named in result.detail, \
+        f"{age}: the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "no report was read" in result.detail, result.detail
+    if outcome == "fail":
+        assert f"exit {code}, expected 0" in result.detail, result.detail
 

@@ -1213,11 +1213,26 @@ async def _execute_skillflow_tick(project_id: str, loop):
 def _parked_checkpoint(sf, run_id: str) -> dict | None:
     """The checkpoint a PAUSED run is waiting on, or None if the run is not parked.
 
-    Only `status == "paused"` decides the answer, and it is asked FIRST: a run
-    that is not parked must fall through to the ordinary tick untouched, because
-    that path is where a run whose recorded worktree is gone is supposed to fail
-    closed (`core/run_isolation.resolve_for_resolver` refuses to substitute the
-    shared checkout, and refusing is the whole point of the module).
+    ONLY THE RUN ROW DECIDES, and it decides on the literal `status == "paused"`
+    that the engine writes into `skillflow_runs.status` (`sf.get_run`, the
+    skillflow store) in the same statement that bumps `updated_at`.
+
+    `"checkpoint:<label>"` MUST NOT be consulted here, and the two stores are
+    easy to confuse: that spelling is AItelier's PROJECT mirror, written below in
+    `_sync_project_status_to_db` (`status = f"checkpoint:{label}"`, from the
+    completed step whose node is the checkpoint) into the `runs` row of
+    aitelier.db — keyed by PROJECT id, never by run id. It exists to tell the UI
+    which checkpoint a project waits on; nothing writes it into a skillflow run
+    row, so treating it as a park here would invent a producer and would report
+    a pause for a run whose own row says something else.
+
+    The status is asked FIRST, and only `"paused"` counts: a run that is not
+    parked must fall through to the ordinary tick untouched, because that path
+    is where a run whose recorded worktree is gone is supposed to fail closed
+    (`core/run_isolation.resolve_for_resolver` refuses to substitute the shared
+    checkout, and refusing is the whole point of the module). A run row carrying
+    any other string — including the project mirror's — is therefore NOT parked,
+    and takes that fail-closed path.
 
     Everything else in the returned dict is decoration on the tick-log line —
     which step, its label, since when — and every piece of it is best-effort: a

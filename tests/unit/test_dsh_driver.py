@@ -573,6 +573,16 @@ def test_compaction_ratio_is_overridable_and_clamped(runtime, monkeypatch):
         assert config["thresholdRatio"] == 0.5, "the knob is the director's; workers keep theirs"
 
 
+def test_pressure_goes_straight_to_the_summary_without_the_tool_result_pruner(runtime, monkeypatch):
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    patch = _patch_document(runtime, row)
+    assert {"id": "tool-result-pruner", "disabled": True} in patch, (
+        "the pruner trims tool outputs first and can drop the context just under the "
+        "trigger, skipping the summary and breaking the prefix cache")
+    assert any(p.get("id") == "compaction-basic" for p in patch)
+
+
 def test_director_compacts_near_clear_and_workers_keep_the_previous_policy(runtime, monkeypatch):
     monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")

@@ -209,8 +209,15 @@ class DshDrivers:
             ratio = min(0.8, max(0.2, float(ratio)))
         except ValueError:
             ratio = 0.25
+        # dsh-base's tool-result-pruner runs first at pressure and trims old tool
+        # outputs in place. Measured 2026-11-06 (wuxia-myth, 253k): a 21.5k trim
+        # brought the context back under the trigger, so the summary never ran,
+        # and the rewrite mid-history cost a 165k uncached re-prefill; the session
+        # then hovers just under the trigger. Without it, pressure goes straight
+        # to the summary (the director's near-clear above).
         patches = [
             {"id": "hmr", "disabled": True},
+            {"id": "tool-result-pruner", "disabled": True},
             {"id": "compaction-basic", "config": {
                 "thresholdRatio": 0.5,
                 "modelPolicies": [{"provider": row["provider"], "model": row["model"],

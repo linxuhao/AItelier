@@ -106,15 +106,20 @@ steps:
         max_loop: 3
       - to: "node_gate_incomplete"        # green, but a node project was not measured → not a success
         match: { field: "node_gate_complete", value: false }
-      # Green AND said complete. BOTH conditions, not just the completeness one:
-      # an EXHAUSTED `max_loop` edge is skipped by the resolver (`continue`), so
-      # once the three repair laps are spent the red edge stops matching and
-      # comes back through here — measured: a success edge keyed only on
-      # `node_gate_complete: true` turned a suite that never passes into
-      # `completed` (tests/skillflow/test_gated_pipelines.py::
-      # test_fix_tests_never_passing_fails_bounded). Matching `passed` as a flag
-      # here is what keeps that run on its bound (`Cycle limit exceeded`), and
-      # the completeness term is what stops an absent key from ever arriving.
+      # Green AND said complete. BOTH conditions, not just the completeness one.
+      # THE RULE, because it is not visible from either edge alone: a step whose
+      # outgoing loop edge has EXHAUSTED its `max_loop` budget must not reach a
+      # success terminal through a later edge. The resolver enforces max_loop by
+      # SKIPPING the exhausted edge (`continue`), so once the three repair laps
+      # are spent the red edge above stops matching and the routing comes back
+      # through here. Measured failure this prevents: a success edge keyed only
+      # on `node_gate_complete: true` turned a suite that never passes into
+      # `completed` — a loop that spent its whole budget concluding success.
+      # Matching `passed` as a flag here is what keeps that run on its bound
+      # (`Cycle limit exceeded`); the completeness term is what stops an absent
+      # key from ever arriving. Remove the `passed` term and
+      # tests/skillflow/test_gated_pipelines.py::
+      # test_fix_tests_never_passing_fails_bounded goes red.
       - to: "done"                        # measured complete AND green → loop-external terminal
         match: { node_gate_complete: true, passed: true }
 

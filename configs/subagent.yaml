@@ -118,13 +118,18 @@ steps:
         max_loop: 3
       - to: "node_gate_incomplete"         # green, but a node project was not measured → not a success
         match: { field: "node_gate_complete", value: false }
-      # Green AND said complete. BOTH terms: an EXHAUSTED `max_loop` edge is
-      # skipped by the resolver, so once the three repair laps are spent the red
-      # edge stops matching and the routing comes back through here — measured,
-      # a success edge keyed only on `node_gate_complete: true` turned a suite
-      # that never passes into `completed`
-      # (tests/skillflow/test_gated_pipelines.py::test_subagent_test_never_green_fails_bounded).
-      # The completeness term is what an absent key can never satisfy.
+      # Green AND said complete. BOTH terms. THE RULE, which neither edge shows
+      # on its own: a step whose outgoing loop edge has EXHAUSTED its `max_loop`
+      # budget must not reach a success terminal through a later edge. The
+      # resolver enforces max_loop by SKIPPING the exhausted edge, so once the
+      # three repair laps are spent the red edge above stops matching and the
+      # routing comes back through here — measured, a success edge keyed only on
+      # `node_gate_complete: true` turned a suite that never passes into
+      # `completed`, i.e. a loop that spent its whole budget concluded success.
+      # The completeness term is what an absent key can never satisfy; the
+      # `passed` term is what keeps that loop on its bound. Remove the `passed`
+      # term and tests/skillflow/test_gated_pipelines.py::
+      # test_subagent_test_never_green_fails_bounded goes red.
       - to: "review"                       # measured complete AND green → adversarial review
         match: { node_gate_complete: true, passed: true }
 

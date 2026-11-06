@@ -262,6 +262,34 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
 DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
 
 
+# Who reads what `check_declared_paths` returns, as of this commit. Checked against the tree:
+#
+# * `PathAudit.as_json` (below) emits `workspace`, `workspace_is_a_directory`, `declared`, and the
+#   three buckets `existing`, `not_yet_existing` and `notes`.
+# * The only in-repo consumer is `core/todo_cli.py`: `_plan_from_args` calls `check_declared_paths`
+#   (line 174) and `cmd_create` forwards `paths.as_json()` unchanged under the key `paths` (line 193).
+#   No other module calls `check_declared_paths` or reads `PathAudit`.
+# * The refusal payload is `Refusal.as_json` (`core/todo_plan.py`), and `todo_cli.main` prints it with
+#   exit status 2. Both keep their fields and their exit status unchanged in this commit.
+# * The DSH tool wrapper is `TodoCli` in `integrations/dsh-driver/runtime.mjs`, which is in this repo
+#   (`TodoCli.call`, lines 512-518). On success it passes the buckets through unchanged: `create`
+#   already carries a `brief`, so the wrapper returns that result as it is. A refusal carries NO
+#   buckets (`cmd_create` raises before `paths` is built), and for a refusal the wrapper ADDS a
+#   `brief` field (`{ ...value, brief: ... }`). So a refusal payload is not byte-verbatim from the
+#   CLI. Documented in `docs/dsh-driver.md`.
+# * The plan-store rehydrate path (`core/todo_plan.py` `new_document`, `from_stored` and `load_run`;
+#   `_Open` in `core/todo_cli.py`) never calls `check_declared_paths`. The buckets are not persisted
+#   in the plan file, so nothing re-reads them after `create` returns.
+# * Nothing under `web/` or `docs/` interprets `existing`, `not_yet_existing`, `notes` or
+#   `workspace_is_a_directory`.
+#
+# BOUNDARY, against main `fa390d8f27`: this change refuses NO declared path that main accepted.
+# The directory, file-parent, FIFO and socket refusals were already on main at `c2f2a51c2b`, so
+# they are not new here. The only text that changes is the workspace-absent note. A missing parent
+# directory is still allowed, so an ordinary `write` or `mkdir` step is never refused.
+#
+# SAFEGUARDS: no acceptance criterion, evidence format, non-author review control or privacy
+# boundary is weakened by this change. Only the test sweep and this comment changed.
 @dataclass(frozen=True)
 class PathAudit:
     """What a plan's declared paths are, judged against the real workspace at freeze time."""
@@ -348,8 +376,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
 
     A workspace that is not a directory is said out loud rather than skipped, and nothing is
     assumed about it: the paths cannot be looked up, so they are not judged by a guess. The note
-    says which checks that cost - and which one it did not, since the duplicate refusal above
-    does not need a directory.
+    says which checks that cost - and which ones it did not: BOTH refusals that read the plan
+    rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
+    via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
+    missing directory cost.
     """
     workspace = Path(plan.workspace)
     measured = workspace.is_dir()
@@ -422,8 +452,9 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
         notes.append(
             f"workspace {plan.workspace} is not a directory, so the {len(declared)} declared path(s) {list(declared)} "
             f"could not be looked up: no directory, parent, non-regular-file or existence check was made about them, "
-            f"and nothing was assumed about them (a duplicate spelling of one path in one list is still refused: "
-            f"that check reads the plan, not the workspace)")
+            f"and nothing was assumed about them (the refusals that read the PLAN still ran: a duplicate spelling of "
+            f"one path in one list is still refused, and so is a path outside the workspace - neither needs a "
+            f"directory to decide)")
     elif created:
         notes.append(
             f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "

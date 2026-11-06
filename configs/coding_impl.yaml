@@ -405,10 +405,12 @@ steps:
       # (`node.unmeasured` beside `skipped: false`), which does reach `done`
       # through `test_outcome`. What it does NOT do is rescue a partial RED:
       # that report is still refused by the same `node.skipped` const, and
-      # widening `test_evidence` for a measured red is the pending
-      # measured-red attempt's change (it keys on `returncode: 1`), not this
-      # card's — see the test module's control (b2). Adding a second branch here
-      # would collide with that attempt and is why this edge is a REFUSAL only.
+      # widening `test_evidence` for a measured red was the measured-red
+      # attempt's change (it keys on `returncode: 1`), not this card's — that
+      # widening has since LANDED as a second `anyOf` branch of `test_evidence`'s
+      # inline schema below; see the test module's control (b2). Adding a second
+      # branch here would have collided with that attempt and is why this edge
+      # is a REFUSAL only.
       #
       # BOTH TERMS ARE FLAGS, NEVER `from_file`. The verdict travels on
       # `run_tests`' RETURN (`_node_gate_verdict`, impl.py:2934-2971), which the
@@ -464,8 +466,9 @@ steps:
       #     evidence. LOSES a case it used to be the only defence for (the
       #     partial green now stops here first); GAINS nothing. Left as it is on
       #     purpose: the whole-report `skipped` refusal next to it is a different
-      #     field, and widening THIS clause for a measured red is the pending
-      #     measured-red attempt's business.
+      #     field, and widening THIS clause for a measured red was that same
+      #     measured-red attempt's business — it has since landed as the second
+      #     `anyOf` branch below, leaving this clause as it was.
       #   * configs/gen_coop_shell_ui60_20260907.yaml:124-127 — the SAME
       #     `node: {skipped: {const: false}}` clause, in a shipped GENERATED
       #     config (its own header still says coding_impl). A second config-side
@@ -588,6 +591,38 @@ steps:
       # in tests/unit/test_coding_impl_node_gate_partial.py.
       # A DELIVERED RED: the evidence validators decide it (they own the
       # measured-red acceptance, and a partial red is still refused there).
+      #
+      # THE LIMIT OF THAT DELEGATION, measured by this card's non-author review
+      # rather than implied by the sentence above: THIS edge decides on the
+      # RETURN (`passed: false, written: "test_report.json"`) while the
+      # validators decide on the FILE (`$CONFIG_DIR/test/test_report.json`). A
+      # hand-written PAIR whose carriers DISAGREE — a RETURN saying
+      # `passed: false` with no `node_gate_complete` at all, beside a FILE
+      # saying `passed: true` — therefore matches the red edge, is ACCEPTED by
+      # `test_evidence` (its first `anyOf` branch puts no const on `passed`,
+      # and `test_outcome`'s `passed: {const: true}` is then satisfied by the
+      # FILE), and the round continues `test_outcome` -> `done`: such a pair
+      # CONCLUDES SUCCESS. The real producer cannot write it, because it
+      # writes both carriers from the SAME RUN: it publishes the report with
+      # `os.replace(staged, report_path)` and then returns
+      # `"passed": report["passed"]` (aitelier/tools/run_tests/impl.py:3613 and
+      # :3617), and the verdict on that same return is computed from that same
+      # report (`_node_gate_verdict(report)`, :3666). Agreement of the two
+      # CARRIERS is pinned in this tree for `node_gate_complete`, in both
+      # directions: `assert report["node_gate_complete"] is
+      # ret["node_gate_complete"]` in
+      # tests/unit/test_node_gate_complete_return.py:121
+      # (test_return_and_file_both_say_incomplete_for_the_measured_partial_shape)
+      # and :137 (test_return_and_file_both_say_complete_for_the_green_control).
+      # NO test pins `passed` that way — the closest are per-shape value
+      # assertions on one measurement, report and return both false at
+      # tests/unit/test_run_tests_unmeasured_declaration.py:105 and both true at
+      # :443 — so for `passed` the guarantee is the producer line above, not a
+      # witness. What would close the gap if that ever changed is a SINGLE
+      # carrier (route on the file everywhere, or on the return everywhere) or
+      # a validator that COMPARES the two; this card deliberately does neither,
+      # because the producer makes the disagreeing pair impossible and a
+      # comment-only card adds no gate, no step and no producer change.
       - to: "test_evidence"
         match: { passed: false, written: "test_report.json" }
       # A DELIVERED GREEN ROUND MUST STATE THE COMPLETENESS VERDICT.

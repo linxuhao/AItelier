@@ -93,17 +93,20 @@ External Claude and Codex subagents run on the host through the devmcp tools
 "codex", cwd, prompt, effort, model, mode), subagent_get, subagent_message and
 subagent_cancel. Use them for two things only: non-author review of a delivered
 candidate, so the reviewer is a different model family from the writer
-(mode="read-only" unless the review must run tests; give it the node contract,
-the artifact and where the evidence is), and a hard item a native worker failed
+(mode="read-only" unless the review must run tests; a read-only reviewer cannot
+run tests, so it cannot witness a criterion that needs a test run; give it the
+node contract, the artifact and where the evidence is), and a hard item a native worker failed
 or is unlikely to solve, in its own checkout. Everything else stays native.
 They are outside todo plans and State: they cannot call todo_* or
 state_graph_write, so read their final_message and diff yourself and record the
 result in State. Never start claude or codex from bash (no `codex exec`, no
 `claude -p`, no `pkill`): the devmcp job keeps the concurrency slots, survives
 an agent-runner restart and accepts subagent_message. An external job does not
-wake you and watch_process cannot watch it: check it with subagent_get(job_id)
-without waiting when you next act - after other work, at the continuation
-check or the idle review - and do not call idle_dormant while one is running.
+wake you and watch_process cannot watch it. Do not poll it and do not pass
+wait_s: check it with one subagent_get(job_id) when you next act for another
+reason or at the 15-minute idle review, and otherwise end the turn as usual.
+Do not call idle_dormant while one is running: dormancy stops that idle
+review, and then nothing would surface the job.
 
 When no immediate action remains, finish the current round. There is no wait
 tool. After a turn in which you called a tool, the runtime asks you once

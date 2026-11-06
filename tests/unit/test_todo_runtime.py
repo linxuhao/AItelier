@@ -838,3 +838,76 @@ def test_a_parent_symlink_created_by_the_command_gets_no_absence_read(tmp_path, 
     if outcome == "fail":
         assert f"exit {code}, expected 0" in result.detail, result.detail
 
+
+# -- a RELATIVE workspace: the bound report must still be the file the gate wrote -----
+
+@pytest.mark.parametrize("cwd_name", ["first-process-cwd", "second-process-cwd"])
+def test_a_relative_workspace_reads_the_report_the_gate_actually_wrote(monkeypatch, tmp_path, cwd_name):
+    """One workspace, one report path - even when the plan names it relatively.
+
+    `_owned_entry` contains the report's PARENT, and `verify_path_safe` binds a relative
+    path onto the ROOT, not onto the process working directory. A report path built as
+    `<ws>/out/x.json` without resolving `ws` is therefore bound a second time:
+    `<cwd>/ws/out/x.json` becomes `<cwd>/ws/ws/out/x.json`. That doubled path is still
+    inside the workspace, so the containment does not refuse it - the clear finds nothing
+    there, a missing entry reads as "nothing was there", and the read then stats the same
+    empty path. The gate's own declaration is never seen, the detail is empty, and the
+    exit code decides, which is the silent form of "you did not measure this" - the one
+    thing the absence channel exists to make impossible. Driven from two different process
+    working directories to make the reading variable explicit.
+    """
+    here = tmp_path / cwd_name
+    here.mkdir()
+    monkeypatch.chdir(here)                 # a relative workspace means THIS directory
+    (here / "ws").mkdir()
+    written = here / "ws" / "out" / "test_report.json"
+    argv = _writes(str(written), DECLARED_ABSENCE, code=2)
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": argv, "report": "out/test_report.json",
+                                 "expect": 0, "timeout": 120}),
+        workspace=Path("ws"), pre_state={})
+
+    assert written.exists(), "the gate must really have written the report the binding names"
+    assert result.outcome == "absent", (
+        "a non-zero exit whose own report declares it measured nothing is an absence, and a "
+        f"relative workspace must not hide it: {result.detail}")
+    assert "repo_gate.sh" in result.detail and "out/test_report.json" in result.detail, \
+        f"the absence detail must name the gate and the report it was read from: {result.detail!r}"
+
+
+def test_a_relative_workspace_still_refuses_a_report_that_escapes_it(monkeypatch, tmp_path):
+    """Resolving the join must not become a way out of the containment.
+
+    The sibling of the test above: a binding that names `../outside/...` is still refused
+    BEFORE resolution, so nothing outside the workspace is removed or read on this run's
+    behalf and the exit code decides. The bound path is planted with a declaration BEFORE
+    the run and the command writes its own report somewhere else, so this measures the
+    removal and the read rather than a file the command would have recreated afterwards: a
+    fix that made the relative case work by loosening `_owned_entry` would show up here as a
+    removed or rewritten sentinel, and one that read the escaped file would turn the pass
+    into an absence.
+    """
+    here = tmp_path / "cwd"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    (here / "ws").mkdir()
+    outside = here / "outside"
+    outside.mkdir()
+    escaped = outside / "test_report.json"
+    escaped.write_text(json.dumps(DECLARED_ABSENCE))     # a declaration a reader would believe
+    written = outside / "gate_report.json"
+    argv = _writes(str(written), DECLARED_ABSENCE, code=0)
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": argv, "report": "../outside/test_report.json",
+                                 "expect": 0, "timeout": 120}),
+        workspace=Path("ws"), pre_state={})
+
+    assert written.exists(), "the command must really have run, and written outside the workspace"
+    assert escaped.exists() and json.loads(escaped.read_text()) == DECLARED_ABSENCE, \
+        "a report outside the workspace must never be removed or rewritten on this run's behalf"
+    assert result.outcome == "pass", (
+        f"the exit code decides when the bound path leaves the workspace: {result.detail}")
+    assert "could not be cleared" in result.detail and "../outside/test_report.json" in result.detail, \
+        f"the detail must say the report was not established, and name it: {result.detail!r}"

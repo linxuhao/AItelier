@@ -313,10 +313,24 @@ def _file_delta(target: Path, rel: str, before: str | None, contains: str | None
 
 
 def _report_path(workspace: Path, report: str | None) -> Path | None:
-    """The file `report` names: absolute stays absolute, anything else joins the workspace."""
+    """The file `report` names, always absolute: a relative one joins the RESOLVED workspace.
+
+    The join has to be against the resolved root because `_owned_entry` contains the
+    report's PARENT and `verify_path_safe` binds a RELATIVE path onto that root, not onto
+    the process working directory: with an unresolved join, `<ws>/out/test_report.json` is
+    bound a second time and becomes `<cwd>/ws/ws/out/test_report.json`. That doubled path
+    is still INSIDE the workspace, so nothing refuses it - the clear unlinks nothing (a
+    missing entry reads as "nothing was there") and the read then stats the same empty
+    path, so the absence the gate declared in its own report is never seen and the empty
+    detail lets the exit code decide. A `..` in the binding goes quiet the same way:
+    `<ws>/../outside/x.json` becomes `<cwd>/ws/outside/x.json`, a different file inside the
+    root that the clear is free to remove. Latent rather than live: both callers
+    (`core/todo_plan.py`, the coding-impl evidence tool) require an absolute workspace
+    today, which is exactly the trap the next caller would walk into.
+    """
     if not report:
         return None
-    return Path(report) if Path(report).is_absolute() else Path(workspace) / report
+    return Path(report) if Path(report).is_absolute() else Path(workspace).resolve() / report
 
 
 def _owned_entry(root: Path, target: Path) -> tuple[Path | None, str]:

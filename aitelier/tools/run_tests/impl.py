@@ -942,11 +942,20 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
             "dir": directory,
             "reason": (f"not visited: more than {NODE_PROJECT_CAP} node projects "
                        "in this repository; the gate's cost is capped")})
+    # A project can be measured and green while running nothing but its install:
+    # `integrations/dsh` has a package.json with no scripts. That is not evidence
+    # its tests passed, and it must not be silent - so it is named here. It is
+    # NOT an absence (`unmeasured`), because nothing was withheld: there is
+    # nothing to run, and calling that "unmeasured" would park every run of this
+    # repository behind a human.
+    no_tests = [r["dir"] for r in measured
+                if not any(name in ("test", "spec") for name in (r.get("checks") or {}))]
     node: dict = {
         "dirs": [r["dir"] for r in results],
         "projects": results,
-        "checks": {f"{r['dir']}:{name}": check
+        "checks": {f"{r['dir']}:{name}": dict(check, dir=r["dir"])
                    for r in measured for name, check in (r.get("checks") or {}).items()},
+        **({"no_tests": no_tests} if no_tests else {}),
         "measured_dirs": [r["dir"] for r in measured],
         "unmeasured": unmeasured,
         "skipped": bool(unmeasured),
@@ -2032,17 +2041,19 @@ class Executed:
 
     def __init__(self, node_ids=(), pytest_complete: bool = False,
                  repo_gate_cases=None, node_gate_ran: bool = False,
-                 node_dirs=None):
+                 node_ran=None):
         self.node_ids = set(node_ids)
         self.pytest_complete = bool(pytest_complete)
         self.repo_gate_cases = repo_gate_cases
         self.node_gate_ran = bool(node_gate_ran)
-        # Which node PROJECTS actually ran. `node_gate_ran` is all-or-nothing,
-        # so with one unmeasurable project it answered False for the measured
-        # ones too and their known-red keys kept forever: a test that was fixed
-        # and then regressed again stayed forgiven. None means "the caller did
-        # not say", which keeps the old all-or-nothing answer.
-        self.node_dirs = None if node_dirs is None else frozenset(node_dirs)
+        # Which node CHECKS actually produced a result, as "<dir>:<check>".
+        # `node_gate_ran` is all-or-nothing, so with one unmeasurable project it
+        # answered False for the measured ones too and their known-red keys kept
+        # forever. Directory granularity was not enough either: if a project's
+        # install fails, its build/test never ran, and pruning their keys would
+        # blame the next round for a red it did not cause. None means "the
+        # caller did not say", which keeps the old all-or-nothing answer.
+        self.node_ran = None if node_ran is None else frozenset(node_ran)
 
     def ran(self, key: str) -> bool:
         """Did the subject named by this baseline key actually run this time?"""
@@ -2050,10 +2061,10 @@ class Executed:
             return self.repo_gate_cases is not None
         if key.startswith("node:"):
             rest = key[len("node:"):]
-            if self.node_dirs is not None and ":" in rest:
-                # Multi-project keys are namespaced "<dir>:<check>"; a directory
-                # that was not measured keeps its keys, whatever else ran.
-                return rest.rsplit(":", 1)[0] in self.node_dirs
+            if self.node_ran is not None and ":" in rest:
+                # Multi-project keys are namespaced "<dir>:<check>". The key is
+                # pruned only when THAT check produced a result this run.
+                return rest in self.node_ran
             return self.node_gate_ran
         if "::" in key:
             return key in self.node_ids
@@ -3062,10 +3073,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             unmeasured_projects = node.get("unmeasured") or []
             executed.node_gate_ran = (not node.get("skipped")
                                       and not unmeasured_projects)
-            measured_dirs = node.get("measured_dirs")
-            if measured_dirs is None and not node.get("skipped"):
-                measured_dirs = [node["dir"]] if node.get("dir") else []
-            executed.node_dirs = frozenset(measured_dirs or [])
+            ran_checks = set()
+            for name, chk in (node.get("checks") or {}).items():
+                entry = chk.get("dir")
+                ran_checks.add(f"{entry}:{name}" if entry else name)
+            if node.get("dir") and ":" not in next(iter(ran_checks), ":"):
+                ran_checks = {f"{node['dir']}:{name}" for name in ran_checks}
+            executed.node_ran = frozenset(ran_checks)
             if node.get("skipped") and not node.get("measured_dirs"):
                 # NOTHING was measured anywhere: the single-project absence,
                 # unchanged — not a red either, and never a pass.

@@ -30,7 +30,11 @@ one it could not measure, and an exit that happens to match cannot turn a gate
 that graded nothing into a release. "Its own" is established by CONSTRUCTION -
 the bound report path is cleared before the command starts - because a clock
 comparison is not an identity test: a leftover mtime in the future passed it, and
-a rounded one put a fresh report below the start.
+a rounded one put a fresh report below the start. Establishing ownership this way
+also bounds what the harness may remove: the target is resolved and must stay
+inside the resolved workspace, so a binding naming an absolute path, a `..`
+traversal or a path through a symlinked parent removes nothing and is reported
+instead.
 """
 from __future__ import annotations
 
@@ -48,6 +52,7 @@ import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
 from core.gate_deferral import DeferralLedger, read_absence
+from core.security_jail import SecurityException, verify_path_safe
 
 Outcome = Literal["pass", "fail", "absent"]
 
@@ -311,7 +316,7 @@ def _report_path(workspace: Path, report: str | None) -> Path | None:
     return Path(report) if Path(report).is_absolute() else Path(workspace) / report
 
 
-def _clear_report(target: Path | None) -> str:
+def _clear_report(workspace: Path, target: Path | None) -> str:
     """Remove whatever sits at the bound report path, before the command runs.
 
     This is what makes a report THIS run's: ownership is established by
@@ -322,6 +327,14 @@ def _clear_report(target: Path | None) -> str:
     the start, turning an exit-0 run that declared it measured nothing into a
     release.
 
+    What the construction may touch is BOUNDED: the binding names a path and a
+    path can leave the workspace (an absolute one, `..`, or a parent that is a
+    symlink), and deleting a file out there would be this harness removing what
+    it does not own. The target is resolved and required to stay inside the
+    resolved workspace - the same containment rule `core.security_jail` applies
+    to every other caller - so an escaping binding is a reason, never a
+    deletion.
+
     Returns "" when the path is clear, or the reason it could not be cleared. A
     caller that gets a reason must NOT read a report at all: falling back to an
     absence from a path somebody else owns would be the same laundering in the
@@ -329,8 +342,16 @@ def _clear_report(target: Path | None) -> str:
     """
     if target is None:
         return ""
+    root = Path(workspace).resolve()
     try:
-        target.unlink()
+        resolved = verify_path_safe(root, target)
+    except SecurityException:
+        # Nothing outside the workspace is this run's to remove, so nothing
+        # outside it can be established as this run's report either.
+        return (f"it resolves outside the workspace {root}, and a path outside the "
+                f"workspace is neither removed nor read on this run's behalf")
+    try:
+        resolved.unlink()
     except FileNotFoundError:
         return ""                        # nothing was there; nothing to establish
     except OSError as exc:               # permission denied, a directory in the way, anything else
@@ -411,14 +432,16 @@ def builtin_library() -> PredicateLibrary:
         when it returns was written by this run. Nothing is compared against a
         clock: an old declaration carrying a future mtime cannot outvote a
         measured failure, and a fresh one with a rounded or backdated mtime
-        cannot be discarded into a release. When the path cannot be cleared the
-        exit code decides and the fail detail says why - an absence inferred from
-        a file somebody else owns would be the same laundering in reverse.
+        cannot be discarded into a release. The clearing is bounded to the
+        workspace, so a binding that names a path outside it removes nothing.
+        When the path cannot be cleared the exit code decides and BOTH details
+        say why - an absence inferred from a file somebody else owns would be
+        the same laundering in reverse.
         """
         if not Path(workspace).is_dir():
             return PredicateResult("command_exit", "absent", f"workspace {workspace} does not exist")
         target = _report_path(workspace, report)
-        uncleared = _clear_report(target)   # anything left here after the run is this run's
+        uncleared = _clear_report(workspace, target)   # anything left here after the run is this run's
         try:
             done = _run_in_own_group(list(argv), str(workspace), timeout)
         except FileNotFoundError:
@@ -434,11 +457,13 @@ def builtin_library() -> PredicateLibrary:
                 f"{declared['gate']} declared in {report} that it measured nothing "
                 f"(exit {done.returncode}; the report this run wrote at mtime "
                 f"{declared['written']:.3f}): an absence, not a verdict on the work")
-        if done.returncode == expect:
-            return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected")
-        tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
+        # BOTH details say why no report was read: a pass on the exit code is not a
+        # release of a gate whose report this run could not establish ownership of.
         why = (f"; {report} could not be cleared before the run ({uncleared}), so no report was "
                f"read and the exit code decides") if uncleared else ""
+        if done.returncode == expect:
+            return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected{why}")
+        tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
         return PredicateResult(
             "command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}{why}")
 

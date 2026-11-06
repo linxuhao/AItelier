@@ -632,7 +632,7 @@ def test_a_report_path_that_cannot_be_cleared_lets_the_exit_code_decide(tmp_path
 
     A directory sits at the bound report path, so nothing can establish ownership of it.
     No report may be read from a path this run does not own; the exit code decides, and
-    the fail detail says why the report could not be cleared.
+    the detail says why the report could not be cleared - on the pass path too.
     """
     named = "blocked/test_report.json"
     (tmp_path / "blocked").mkdir()
@@ -641,7 +641,54 @@ def test_a_report_path_that_cannot_be_cleared_lets_the_exit_code_decide(tmp_path
         Binding("command_exit", {"argv": _exits(code), "report": named, "timeout": 120}),
         workspace=tmp_path, pre_state={})
     assert result.outcome == outcome, f"exit {code} must decide, not an absence: {result.detail}"
+    assert "could not be cleared" in result.detail and named in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
     if outcome == "fail":
-        assert "could not be cleared" in result.detail and named in result.detail, \
-            f"the fail detail must say why no report was read: {result.detail!r}"
         assert "exit 2, expected 0" in result.detail, result.detail
+
+
+# -- the clearing is bounded: a binding cannot name a file outside the workspace -----------
+
+def _escapes(tmp_path: Path, kind: str) -> tuple[Path, str]:
+    """A report binding that names a file OUTSIDE the workspace, and the file it names.
+
+    `kind` is one of the three ways a path leaves: an absolute one, a `..`
+    traversal, or a parent that is a symlink to somewhere else.
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-{kind}-victim.json"
+    outside.write_text(json.dumps(DECLARED_ABSENCE))
+    if kind == "absolute":
+        return outside, str(outside)
+    if kind == "traversal":
+        return outside, f"../{outside.name}"
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-{kind}-elsewhere"
+    elsewhere.mkdir()
+    linked = elsewhere / "victim.json"
+    linked.write_text(json.dumps(DECLARED_ABSENCE))
+    (tmp_path / "link-out").symlink_to(elsewhere, target_is_directory=True)
+    return linked, "link-out/victim.json"
+
+
+@pytest.mark.parametrize("kind", ["absolute", "traversal", "symlinked-parent"])
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_outside_the_workspace_is_neither_removed_nor_read(tmp_path, kind, code, outcome):
+    """A binding names a path; the workspace is the only place this run may clear one.
+
+    Clearing what an absolute path, a `..` traversal or a symlinked parent points at
+    would make the harness delete a file it does not own - and then read the absence in
+    it, laundering a stranger's declaration as this run's. Containment is the bound:
+    nothing outside the resolved workspace is removed, the exit code decides, and the
+    detail says why on the pass path as well as the fail path.
+    """
+    outside, report = _escapes(tmp_path, kind)
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": report, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert outside.exists(), f"{kind}: a file outside the workspace must not be removed: {outside}"
+    assert result.outcome == outcome, \
+        f"{kind}: the exit code decides when the bound path is not this run's to clear: {result.detail}"
+    assert "outside the workspace" in result.detail and "could not be cleared" in result.detail, \
+        f"{kind}: the detail must say why no report was read: {result.detail!r}"
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+

@@ -804,6 +804,28 @@ def test_the_version_is_named_before_a_predicate_this_library_lacks(cli, repo, b
     assert "file_rewritten" not in out["reason"]
 
 
+def test_a_missing_bound_name_is_a_different_refusal_from_a_foreign_library(cli, repo, base):
+    """A sweep must be able to tell "this build cannot evaluate a name the plan binds" from "another library froze it"."""
+    cli.create(plan(repo, base))
+    path = cli.store / "att-1.json"
+    document = json.loads(path.read_text())
+    document["plan"]["items"][0]["predicates"] = [{"predicate": "file_rewritten", "args": {}}]
+    path.write_text(json.dumps(document))                     # the library still matches; only the BINDING is broken
+
+    missing_name = cli.refused("status", "--attempt", "att-1")
+    assert missing_name["refused"] == "unknown_predicate", missing_name
+    assert "file_rewritten" in missing_name["reason"] and "v2" in missing_name["reason"], missing_name
+    assert "plan_library_version" not in missing_name, "a missing NAME is not a library-version finding"
+    assert "running_library_version" not in missing_name, missing_name
+
+    rewrite_version(cli, "1")
+    foreign = cli.refused("status", "--attempt", "att-1")
+    assert foreign["refused"] == "library_mismatch", foreign
+    assert (foreign["plan_library_version"], foreign["running_library_version"]) == ("1", "2"), foreign
+    assert missing_name["refused"] != foreign["refused"], \
+        "the two findings are told apart by their code, not by reading either reason"
+
+
 def test_a_document_with_no_library_version_is_refused_as_unmeasured(cli, repo, base):
     cli.create(plan(repo, base))
     rewrite_version(cli, _MISSING)
@@ -815,6 +837,80 @@ def test_a_document_with_no_library_version_is_refused_as_unmeasured(cli, repo, 
     rewrite_version(cli, 2)
     out = cli.refused("done", "--attempt", "att-1", "--item", "edit")
     assert out["refused"] == "library_unmeasured" and out["plan_library_version"] == 2, out
+
+
+def test_a_list_sweep_reads_every_refusal_from_fields_not_prose(cli, repo, base):
+    """`list` still exits 0 with one row per plan, but a refusing row now names WHY in a field.
+
+    A single-plan command answers {"refused": code, "reason": ..., versions} at exit 2; a sweep
+    used to get an untyped prose string at exit 0, so anything watching many plans had to parse
+    English - and would silently stop understanding it the next time the wording was improved.
+    """
+    assert cli.create(plan(repo, base))[0] == 0                                       # a healthy plan
+    assert cli.create({**plan(repo, base), "attempt_id": "att-frozen", "goal": "frozen elsewhere"})[0] == 0
+    assert cli.create({**plan(repo, base), "attempt_id": "att-unmeasured"})[0] == 0
+    for attempt_id, version in (("att-frozen", "1"), ("att-unmeasured", _MISSING)):
+        path = cli.store / f"{attempt_id}.json"
+        document = json.loads(path.read_text())
+        if version is _MISSING:
+            document.pop("library_version", None)
+        else:
+            document["library_version"] = version
+        path.write_text(json.dumps(document))
+    (cli.store / "att-damaged.json").write_text("{not json")
+
+    code, out = cli.run("list")
+    assert code == 0, f"a sweep is not a refusal, whatever it finds: {out}"
+    rows = {row["attempt_id"]: row for row in out["plans"]}
+    assert set(rows) == {"att-1", "att-frozen", "att-unmeasured", "att-damaged"}, sorted(rows)
+
+    healthy = {"attempt_id", "node_key", "plan_hash", "next", "done", "remaining", "unmeasurable", "child_session"}
+    assert set(rows["att-1"]) == healthy, "a plan that opens keeps exactly the row it always had"
+    assert "code" not in rows["att-1"], "a plan that opens is not a refusal"
+
+    assert rows["att-frozen"]["code"] == "library_mismatch", rows["att-frozen"]
+    assert set(rows["att-frozen"]) == {"attempt_id", "error", "code",
+                                       "plan_library_version", "running_library_version"}, rows["att-frozen"]
+    assert (rows["att-frozen"]["plan_library_version"], rows["att-frozen"]["running_library_version"]) == ("1", "2"), \
+        rows["att-frozen"]
+    assert "v1" in rows["att-frozen"]["error"] and "v2" in rows["att-frozen"]["error"], rows["att-frozen"]
+
+    assert rows["att-unmeasured"]["code"] == "library_unmeasured", rows["att-unmeasured"]
+    assert rows["att-unmeasured"]["plan_library_version"] is None, \
+        "unmeasured says so in a field; it must not read like a damaged plan that compares no version"
+    assert rows["att-unmeasured"]["running_library_version"] == "2", rows["att-unmeasured"]
+
+    assert rows["att-damaged"]["code"] == "corrupt_plan", rows["att-damaged"]
+    assert set(rows["att-damaged"]) == {"attempt_id", "error", "code"}, "a damaged plan compares no library"
+    assert "plan_library_version" not in rows["att-damaged"], rows["att-damaged"]
+    assert len({rows["att-frozen"]["code"], rows["att-unmeasured"]["code"], rows["att-damaged"]["code"]}) == 3, \
+        "every way of not opening is a code of its own"
+
+
+def test_every_shipped_template_is_proven_against_its_deliver_bindings():
+    """A template is proven by expanding it into a plan; that plan's LAST item is the deliver item.
+
+    `git_delivered` is bound by the harness-appended deliver item and by nothing a template
+    writes, so a library that was asked about it is a library the deliver item was judged by -
+    for `code_change`'s deliver, `test_fix`'s, and the single-item templates alike.
+    """
+    from core import todo_templates as templates
+    from core.todo_runtime import builtin_library
+
+    names = templates.available()
+    assert names, "no shipped templates were found, so nothing was proven"
+    for name in names:
+        library = builtin_library()
+        asked: list[str] = []
+        real = library.check
+
+        def record(binding, _asked=asked, _real=real):
+            _asked.append(binding.predicate)
+            return _real(binding)
+
+        library.check = record                     # what THIS expansion asked the library to judge
+        templates.load_template(name, library)     # a template that does not expand is refused
+        assert "git_delivered" in asked, f"template {name}: the deliver item's bindings were never checked"
 
 
 def test_the_library_refusal_is_a_json_error_and_not_a_traceback(cli, repo, base):
@@ -870,6 +966,19 @@ def test_the_refusal_precedes_any_predicate_evaluation(tmp_path):
         def probe(*, workspace, pre_state, label: str) -> PredicateResult:
             ran.append(f"{label}@{version}")
             return PredicateResult("probe", "pass", "evaluated")
+
+        # The harness-appended `deliver` item binds these two, so BOTH libraries have to
+        # define them for the plan to be parseable at all; and they record into `ran` too,
+        # so the witness below covers every item of the plan, deliver included.
+        @library.define("git_delivered")
+        def git_delivered(*, workspace, pre_state, base: str) -> PredicateResult:
+            ran.append(f"git_delivered@{version}")
+            return PredicateResult("git_delivered", "pass", "delivered")
+
+        @library.define("changes_within")
+        def changes_within(*, workspace, pre_state, base_sha: str, scope) -> PredicateResult:
+            ran.append(f"changes_within@{version}")
+            return PredicateResult("changes_within", "pass", "inside scope")
         return library
 
     frozen, running = library_at("2"), library_at("3")
@@ -882,14 +991,18 @@ def test_the_refusal_precedes_any_predicate_evaluation(tmp_path):
     plan = TodoPlan.from_json(plan_json, frozen)
     document = new_document(plan, frozen, T0)
     assert document["library_version"] == "2", "the document records the library that froze it"
+    assert plan.items[-1].id == "deliver", "the appended deliver item is the plan's LAST item"
 
     with pytest.raises(Refusal) as refused:
         load_run(document, plan, running, lambda: T0)
     assert refused.value.code == "library_mismatch", refused.value
+    assert refused.value.extra == {"attempt_id": "att-lib", "node_key": "execution.lib",
+                                   "plan_library_version": "2", "running_library_version": "3"}, refused.value.extra
     assert "v2" in refused.value.reason and "v3" in refused.value.reason and "att-lib" in refused.value.reason
-    assert ran == [], "the guard refused before the library was asked to evaluate the bound name"
+    assert ran == [], "the guard refused before the library was asked to evaluate any bound name"
 
-    # Positive control: judged by the library it recorded, the very same document DOES measure.
+    # Positive control: judged by the library it recorded, and by NO other, the very same
+    # document DOES measure.
     run = load_run(document, plan, frozen, lambda: T0)
     run.begin("probe")
     assert run.observe("probe").outcome == "pass" and ran == ["first@2"], \
@@ -900,3 +1013,63 @@ def test_the_refusal_precedes_any_predicate_evaluation(tmp_path):
     with pytest.raises(Refusal) as unmeasured:
         load_run(document, plan, frozen, lambda: T0)
     assert unmeasured.value.code == "library_unmeasured" and ran == ["first@2"]
+
+
+def test_the_deliver_item_is_bound_by_name_like_every_other_item(tmp_path):
+    """The deliver bindings get the same `library.check` as the director's, so no library can slip past them.
+
+    `git_delivered`/`changes_within` are appended by the harness, not written by the director,
+    which is exactly why they were the binding nothing checked: a plan consisting only of the
+    deliver item used to be accepted by a library defining nothing at all, and once accepted,
+    the only thing left standing between it and a verdict was the version comparison.
+    """
+    from core.todo_plan import Refusal, TodoPlan, load_run, new_document
+    from core.todo_runtime import PredicateLibrary, PredicateResult
+
+    def library_at(version: str, *, binds=("probe", "git_delivered", "changes_within")) -> PredicateLibrary:
+        library = PredicateLibrary(version=version)
+        if "probe" in binds:
+            @library.define("probe")
+            def probe(*, workspace, pre_state, label: str) -> PredicateResult:
+                return PredicateResult("probe", "pass", "evaluated")
+        if "git_delivered" in binds:
+            @library.define("git_delivered")
+            def git_delivered(*, workspace, pre_state, base: str) -> PredicateResult:
+                return PredicateResult("git_delivered", "pass", "delivered")
+        if "changes_within" in binds:
+            @library.define("changes_within")
+            def changes_within(*, workspace, pre_state, base_sha: str, scope) -> PredicateResult:
+                return PredicateResult("changes_within", "pass", "inside scope")
+        return library
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # An empty `items` list is legal: the whole plan is the appended deliver item.
+    plan_json = {"attempt_id": "att-deliver", "node_key": "execution.lib", "context_hash": "c" * 64,
+                 "base_sha": "a" * 40, "workspace": str(workspace), "scope": ["app.py"], "goal": "deliver it",
+                 "items": []}
+    for missing in ("git_delivered", "changes_within"):
+        with pytest.raises(Refusal) as refused_missing:
+            TodoPlan.from_json(plan_json, library_at("2", binds=tuple(
+                n for n in ("probe", "git_delivered", "changes_within") if n != missing)))
+        assert refused_missing.value.code == "unknown_predicate", refused_missing.value
+        assert f"item deliver: {missing!r}" in refused_missing.value.reason, refused_missing.value.reason
+    with pytest.raises(Refusal) as bare:
+        TodoPlan.from_json(plan_json, library_at("2", binds=()))
+    assert bare.value.code == "unknown_predicate" and "git_delivered" in bare.value.reason, bare.value
+
+    # A library that binds EVERY name is accepted - the plan is not refused for its binding -
+    # and the version comparison is then the ONLY thing that can refuse it.
+    frozen, foreign = library_at("2"), library_at("3")
+    plan = TodoPlan.from_json(plan_json, frozen)
+    assert [i.id for i in plan.items] == ["deliver"]
+    assert TodoPlan.from_json(plan_json, foreign).plan_hash == plan.plan_hash, \
+        "the foreign library binds every name the plan binds: nothing in the bindings can refuse it"
+    document = new_document(plan, frozen, T0)
+
+    with pytest.raises(Refusal) as refused:
+        load_run(document, plan, foreign, lambda: T0)
+    assert refused.value.code == "library_mismatch", refused.value
+    assert refused.value.extra == {"attempt_id": "att-deliver", "node_key": "execution.lib",
+                                   "plan_library_version": "2", "running_library_version": "3"}, refused.value.extra
+    assert load_run(document, plan, frozen, lambda: T0) is not None, "the positive control: its own library loads"

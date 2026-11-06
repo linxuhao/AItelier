@@ -35,6 +35,9 @@ end_conditions:
     - type: node_reached
       node: "done"
       result: "completed"
+    - type: node_reached
+      node: "node_gate_incomplete"
+      result: "failed"
     - type: max_total_steps
       limit: 40
 
@@ -65,6 +68,11 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
+      # Ordered FIRST: the engine takes the first match. A node project the gate
+      # did not measure leaves `passed` honestly true (the measured ones passed),
+      # so without this edge a partial report reaches `done` as a success.
+      - to: "node_gate_incomplete"        # a node project was not measured → not a success
+        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
       - to: "done"                        # tests pass → loop-external terminal
         match: { from_file: "test_report.json", field: "passed", value: true }
       - to: "fix"                         # tests fail → fix, with the report
@@ -75,6 +83,16 @@ steps:
   # end-condition fires on (see the comment on end_conditions). Gate = no
   # completed step row, so it fires at most once.
   - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal: a node project the run did not measure. Reached only from `test`
+  # (edge above). It is NOT a success and NOT a fix-loop: a repository that did not
+  # measure all of its own projects is a verdict nobody can act on by editing code.
+  # Declared in end_conditions so the run ends here, as `failed`, rather than
+  # parking or reading as completed.
+  - id: "node_gate_incomplete"
     step_type: "gate"
     transitions:
       - to: null

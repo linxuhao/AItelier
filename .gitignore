@@ -263,3 +263,13 @@ grokq.py
 grokinbox.py
 help-full.txt
 output/
+
+# Delivery, review and round reports belong next to the evidence they support,
+# outside the checkout. This one is a guard, not a preference: on 2026-11-06 a
+# review report committed here became input to a test that resolves its witness
+# against the process CWD, and the full suite stayed red on a clean checkout for
+# five hours (note://aitelier/f8c33777aae3). Ignored rather than merely
+# documented so `git add -A` cannot sweep one in again; a genuinely wanted file
+# under it needs `git add -f`, which is the moment to ask whether it belongs
+# in the product tree at all.
+/reports/

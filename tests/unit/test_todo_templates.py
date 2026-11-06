@@ -330,9 +330,12 @@ def test_a_template_plan_runs_end_to_end_to_a_candidate(cli, repo, base, tmp_pat
 # -- the paths a plan requires to change ------------------------------------------------------
 #
 # An item whose predicates say "every listed path must differ from its state at the start of the
-# step" cannot pass if one of those paths can never differ. That is caught here, at freeze time:
-# a frozen plan that cannot pass keeps its attempt running until someone abandons it, and the
-# director only hears about it at delivery.
+# step" compares a file's DIGEST with the one captured at `begin`. A declared path whose current
+# state has no digest - an existing directory, a FIFO, a socket, a device - gives that comparison
+# nothing to read, so the step cannot be SEEN to change it unless it first replaces it with a
+# regular file. That is caught here, at freeze time, and the refusal is a POLICY: it names the
+# regular file (or the files inside the directory) to declare instead. Without it the item is
+# written, run, and fails at `done`, and the director only hears about it at delivery.
 
 def test_a_declared_directory_is_refused_by_name_before_any_plan_file_exists(cli, repo, base):
     (repo / "out").mkdir()
@@ -395,8 +398,9 @@ def test_a_declared_path_under_a_fifo_is_refused_the_same_way(cli, repo, base):
 
 
 def test_a_declared_fifo_is_refused_rather_than_announced_as_existing(cli, repo, base):
-    # `_digest` reads None for anything that is not a regular file, so `files_changed` would fail a
-    # FIFO forever; listing it under "existing" claimed the opposite.
+    # `_digest` reads None for anything that is not a regular file, so `files_changed` cannot see
+    # a FIFO change unless the step replaces it with a regular file; listing it under "existing"
+    # (as a path the step will change in place) claimed the opposite.
     os.mkfifo(repo / "pipe")
     code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "pipe"]})
     assert code == 2 and out["refused"] == "impossible_path", out
@@ -684,12 +688,13 @@ def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
     ("fifo", ["app.py", "pipe"], "exists and is a FIFO"),
     ("socket", ["app.py", "sock"], "exists and is a socket"),
 ])
-def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path, shape, paths, named):
+def test_every_no_digest_shape_is_refused_by_the_audit_function_itself(tmp_path, shape, paths, named):
     """The CLI cases above pin the route a director uses; this pins the FUNCTION that route calls.
 
-    Each case asserts the refusal CODE, the path it names (the impossible one, not the file that
-    precedes it in the list) and the KIND it says it found, so a refusal that fired for another
-    reason - or one narrowed to a single file kind - cannot pass here by accident.
+    Each case asserts the refusal CODE, the path it names (the one with no digest for
+    `files_changed` to compare, not the regular file that precedes it in the list) and the KIND it
+    says it found, so a refusal that fired for another reason - or one narrowed to a single file
+    kind - cannot pass here by accident.
     """
     from core.todo_plan import Refusal, TodoPlan
 
@@ -719,5 +724,5 @@ def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path
             listener.close()
     assert caught.value.code == "impossible_path", caught.value.reason
     assert (caught.value.extra["item"], caught.value.extra["predicate"]) == ("edit", "files_changed")
-    assert caught.value.extra["path"] == paths[-1], "the refusal names the impossible path, not the one before it"
+    assert caught.value.extra["path"] == paths[-1], "the refusal names the no-digest path, not the one before it"
     assert named in caught.value.reason, caught.value.reason

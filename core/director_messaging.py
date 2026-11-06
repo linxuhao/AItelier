@@ -353,6 +353,26 @@ class SQLiteDirectorMessaging:
 
             from core.director_messaging_quorum import members
             if self.v3 and ack_mode == "at_least_n" and any(ack_quorum > len(members(conn,t)) for t in targets):
+                if self.reply_schema != V3_SCHEMA_ID:
+                    # A v2 reply is a closed enum that does not declare
+                    # ack_quorum_unreachable: constructing that code for a v2
+                    # schema would only be rewritten by _message_errors into a
+                    # message-less invalid_request. Refuse with a code the v2
+                    # enum does declare, naming the State project that cannot
+                    # satisfy the quorum and what would make it deliverable.
+                    # Never a value from subject/body: the project id is an
+                    # identifier the caller already named, not caller content.
+                    counts = [(t, len(members(conn, t))) for t in sorted(targets)]
+                    blocked = [(t, held) for t, held in counts if ack_quorum > held]
+                    project, held = blocked[0]
+                    also = (f" and {len(blocked) - 1} more target project(s)"
+                            if len(blocked) > 1 else "")
+                    raise DirectorMessageError(
+                        "no_recipients", SCHEMA_ID,
+                        message=(f"target project {project}{also} has {held} registered member "
+                                 f"driver(s), fewer than ack_quorum={ack_quorum}: delivery under "
+                                 "at_least_n needs that many member drivers registered in the "
+                                 "target project, or send with ack_mode=broadcast"))
                 raise DirectorMessageError("ack_quorum_unreachable", V3_SCHEMA_ID)
             message_id = self._new_id()
             thread_id = thread_id or message_id

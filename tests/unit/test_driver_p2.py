@@ -124,6 +124,43 @@ def test_quorum_unreachable_and_same_project_error(peers):
  assert result["code"]=="use_driver_inbox"
  assert s["bob"].director_messages.list_director_messages("beta",protocol_version="v3")["result"]["items"]==[]
 
+def test_v2_quorum_refusal_names_the_target_project(peers):
+ # The dev-mcp case: a target project with zero project_drivers rows. A default
+ # send is a v2 caller, and the v2 closed enum has no ack_quorum_unreachable, so
+ # the refusal must arrive as a code v2 declares AND say which project it is and
+ # what would make the target deliverable. It must not echo caller content.
+ _,s=peers
+ StateService(s["ada"].db,actor="fixture",project_read_trusted=True).create_project("gamma","gamma")
+ with s["ada"].db.get_connection() as conn:
+  assert conn.execute("SELECT COUNT(*) FROM project_drivers WHERE project_id='gamma'").fetchone()[0]==0
+ result=execute(s["ada"],"send_director_message",{"sender_project_id":"alpha","target_project_id":"gamma",
+     "director_identity":"ada","request_key":"v2-quorum","subject":"SECRET_SUBJECT_77","body":"SECRET_BODY_77"},allow_write=True)
+ assert result["schema"]=="aitelier.director-messaging.v2"
+ assert result["code"]=="no_recipients"
+ message=result["detail"]["message"]
+ assert message and "gamma" in message
+ assert "SECRET_SUBJECT_77" not in message and "SECRET_BODY_77" not in message
+ assert "ack_quorum" in message and "ack_mode=broadcast" in message
+
+def test_quorum_guard_still_refuses_and_still_delivers(peers):
+ _,s=peers;db=s["ada"].db
+ StateService(db,actor="fixture",project_read_trusted=True).create_project("gamma","gamma")
+ def total(table):
+  with db.get_connection() as conn:
+   return conn.execute("SELECT COUNT(*) FROM "+table).fetchone()[0]
+ before=total("state_director_deliveries");messages=total("state_director_messages")
+ refused=execute(s["bob"],"send_director_message",{"sender_project_id":"beta","target_project_id":"alpha",
+     "director_identity":"bob","request_key":"guard-few","subject":"s","body":"","ack_quorum":2},allow_write=True)
+ assert refused["code"]=="ack_quorum_unreachable"
+ refused=execute(s["ada"],"send_director_message",{"sender_project_id":"alpha","target_project_id":"gamma",
+     "director_identity":"ada","request_key":"guard-none","subject":"s","body":""},allow_write=True)
+ assert refused["code"]=="no_recipients"
+ assert total("state_director_deliveries")==before and total("state_director_messages")==messages
+ delivered=execute(s["ada"],"send_director_message",{"sender_project_id":"alpha","target_project_id":"beta",
+     "director_identity":"ada","request_key":"guard-ok","subject":"s","body":"","ack_quorum":2},allow_write=True)
+ assert delivered["result"]["deliveries"][0]["target_project_id"]=="beta"
+ assert total("state_director_deliveries")==before+1 and total("state_director_messages")==messages+1
+
 def test_migration_preserves_existing_status_version_events_and_idempotency(tmp_path):
  import subprocess,importlib.util
  from core.state_graph import StateGraphStore

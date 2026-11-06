@@ -48,9 +48,11 @@ review measured on the first version of the exceptional branch: an unmeasured
 thing read as a measured one.
 
 CONSUMER MAP — every PRODUCTION reader and writer of the fields this diff touches, grep'd
-in THIS tree, plus the TEST CONSUMERS section at the end: the tests whose assertions would
-break if one of these fields changed, which is the witness a later reader runs instead of
-re-deriving this map. CITATION CONVENTION: each one is named by its `path` plus the SYMBOL
+in THIS tree, plus the TEST CONSUMERS section at the end: the modules that NAME those
+keys, swept rather than remembered, with the sweep and its numbers beside them. That
+section is a census of NAMES, not of assertions: a mention is not a witness, and the
+command is what a later reader runs instead of re-deriving this map.
+CITATION CONVENTION: each one is named by its `path` plus the SYMBOL
 or the exact clause it holds — e.g. ``aitelier/tools/run_tests/impl.py
 `_aggregate_node_projects` (`"skipped": bool(unmeasured)`)``. A line number appears only
 where the number is part of the thing described, and never as the sole identifier: parallel
@@ -366,30 +368,34 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           diagnosis is refused because it is the producer's own statement that storage cost
           the measurement.
 
-TEST CONSUMERS — the tests whose assertions would break if one of these fields changed.
-They are not production readers; they are the WITNESS a later reader runs instead of
-re-deriving this map, so each is named with the field it reads. Below is the map
-GENERATED from the tree, one sweep per unambiguous key (`grep -rl --include=*.py <key>
-tests/`, from the repository root), each module tagged with the keys it names: 41 modules,
-repo_gate_absent 17 / evidence_state 16 / release_evidence 23 /
-node_gate_complete 6, overlapping. The counts are here so a later reader can
-tell whether the tree has moved under this list. A module that drives `run_tests` end to
-end and never names a key is not here by construction - that class is what the earlier
-four-module edition of this paragraph missed, and why this list is now the output of a
-command instead of a reading.
+TEST CONSUMERS — the modules that NAME one of these fields. They are not production
+readers, and naming a key is not the same as asserting on it: this section is a SWEEP, and
+its numbers are a snapshot of THIS tree rather than a standing claim. One sweep per
+unambiguous key, from the repository root:
+
+    grep -rl --include=*.py <key> tests/
+
+answers 42 modules here - repo_gate_absent 18 / evidence_state 17 / release_evidence 24 /
+node_gate_complete 7, overlapping. The list below is those 42 minus this module, which
+names all four because it IS this map: 41 rows, 17 / 16 / 23 / 6. If a merge moves the
+tree, re-run the sweep; the numbers are stated only so a later reader can see at a glance
+that they should. Two earlier editions of this paragraph were hand-written readings and
+both were wrong - the first named four modules, the second named 41 and still could not be
+reproduced, and it called `test_outcome` a reader of a `skipped` key it does not read. The
+command, not the list, is the witness.
 
     tests/integration/test_full_pipeline_real_runner.py                 release_evidence
     tests/integration/test_new_pipelines_mocked_agent.py                node_gate_complete
     tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py  repo_gate_absent, evidence_state
-    tests/skillflow/test_coding_impl_gate.py                            repo_gate_absent, skipped x4
+    tests/skillflow/test_coding_impl_gate.py                            repo_gate_absent
     tests/skillflow/test_coding_impl_gate_absence.py                    repo_gate_absent
     tests/skillflow/test_config_loading.py                              repo_gate_absent, node_gate_complete
     tests/skillflow/test_gated_pipelines.py                             node_gate_complete
-    tests/unit/test_absence_survives_the_stamp.py                       repo_gate_absent, evidence_state, release_evidence, skipped x2
-    tests/unit/test_addon_registry.py                                   release_evidence, skipped x1
+    tests/unit/test_absence_survives_the_stamp.py                       repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_addon_registry.py                                   release_evidence
     tests/unit/test_baseline_write_failure_keeps_absence.py             repo_gate_absent, evidence_state, release_evidence
-    tests/unit/test_coding_impl_node_gate_partial.py                    evidence_state, release_evidence, node_gate_complete, skipped x18
-    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py     release_evidence, skipped x1
+    tests/unit/test_coding_impl_node_gate_partial.py                    evidence_state, release_evidence, node_gate_complete
+    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py     release_evidence
     tests/unit/test_dpe_test_caller_budget.py                           release_evidence
     tests/unit/test_gate_consumer_composition.py                        repo_gate_absent, release_evidence
     tests/unit/test_gate_deferral_execution_points.py                   repo_gate_absent
@@ -399,50 +405,51 @@ command instead of a reading.
     tests/unit/test_harness_render_queue.py                             release_evidence
     tests/unit/test_node_gate_complete_return.py                        node_gate_complete
     tests/unit/test_normal_gate_binding_matches_engine.py               release_evidence
-    tests/unit/test_partial_gate_cannot_reach_done.py                   node_gate_complete, skipped x1
-    tests/unit/test_provisional_round_cannot_conclude_success.py        repo_gate_absent, release_evidence, skipped x2
-    tests/unit/test_release_fail_fast.py                                evidence_state, release_evidence, skipped x2
+    tests/unit/test_partial_gate_cannot_reach_done.py                   node_gate_complete
+    tests/unit/test_provisional_round_cannot_conclude_success.py        repo_gate_absent, release_evidence
+    tests/unit/test_release_fail_fast.py                                evidence_state, release_evidence
     tests/unit/test_repo_gate_admission.py                              repo_gate_absent, evidence_state, release_evidence
-    tests/unit/test_repo_gate_early_contract_red.py                     repo_gate_absent, evidence_state, release_evidence, skipped x6
-    tests/unit/test_repo_gate_outcome_table.py                          repo_gate_absent, release_evidence, skipped x2
+    tests/unit/test_repo_gate_early_contract_red.py                     repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_repo_gate_outcome_table.py                          repo_gate_absent, release_evidence
     tests/unit/test_repo_gate_red_beats_absence.py                      repo_gate_absent, evidence_state
     tests/unit/test_round_feedback.py                                   release_evidence
     tests/unit/test_run_tests_delivery_truthfulness.py                  evidence_state, release_evidence
-    tests/unit/test_run_tests_gate.py                                   evidence_state, skipped x4
-    tests/unit/test_run_tests_node_multi_project.py                     evidence_state, skipped x9
+    tests/unit/test_run_tests_gate.py                                   evidence_state
+    tests/unit/test_run_tests_node_multi_project.py                     evidence_state
     tests/unit/test_run_tests_pytest_wall.py                            evidence_state, release_evidence
     tests/unit/test_run_tests_required_async_plugin.py                  evidence_state
-    tests/unit/test_run_tests_storage_boundaries.py                     evidence_state, release_evidence, skipped x1
-    tests/unit/test_run_tests_storage_exhaustion.py                     evidence_state, release_evidence, skipped x3
-    tests/unit/test_run_tests_storage_namespace.py                      release_evidence, skipped x1
+    tests/unit/test_run_tests_storage_boundaries.py                     evidence_state, release_evidence
+    tests/unit/test_run_tests_storage_exhaustion.py                     evidence_state, release_evidence
+    tests/unit/test_run_tests_storage_namespace.py                      release_evidence
     tests/unit/test_run_tests_unmeasured_declaration.py                 repo_gate_absent
     tests/unit/test_scoped_gate.py                                      release_evidence
     tests/unit/test_tree_level_accounting_witnesses.py                  repo_gate_absent
     tests/unit/test_vision_handoff.py                                   release_evidence
 
-  `skipped` is deliberately NOT a column above: the word is overloaded (pytest's own skip
-  outcome, other tables' keys), so `grep -rl skipped tests/` answers 50 modules and not
-  "who reads this report's `skipped`". The modules above that ALSO carry the word are
-  the ones where it sits in a `run_tests` report context: 15 of the 41 -
-    tests/skillflow/test_coding_impl_gate.py
-    tests/unit/test_absence_survives_the_stamp.py
-    tests/unit/test_addon_registry.py
-    tests/unit/test_coding_impl_node_gate_partial.py
-    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py
-    tests/unit/test_partial_gate_cannot_reach_done.py
-    tests/unit/test_provisional_round_cannot_conclude_success.py
-    tests/unit/test_release_fail_fast.py
-    tests/unit/test_repo_gate_early_contract_red.py
-    tests/unit/test_repo_gate_outcome_table.py
-    tests/unit/test_run_tests_gate.py
-    tests/unit/test_run_tests_node_multi_project.py
-    tests/unit/test_run_tests_storage_boundaries.py
-    tests/unit/test_run_tests_storage_exhaustion.py
-    tests/unit/test_run_tests_storage_namespace.py
-  Beside them the production readers are the ones named in the block above (impl.py's
-  absence path writes `skipped: true`; the `test_evidence` and `test_outcome` inline
-  schemas pin `skipped: {const: false}`), and this module itself, which reads it off the
-  producer's own reports.
+  `skipped` is deliberately NOT a column above, and it gets no list either. The word is
+  three different things in this tree: the WHOLE-REPORT absence flag this change is about
+  (`report["skipped"]`, `node["skipped"]`); the DERIVED evidence-state label
+  `report_state(...) == "skipped"` that an absence answers, which several tests assert
+  about an absence and not about this flag; and neighbours or prose (`skipped_because`,
+  `gate_skipped`, `skipped_gates`, comment text). `grep -rl --include=*.py skipped tests/`
+  therefore answers 98 modules and is not a consumer census, and the narrower sweep for
+  the flag's syntax (`["skipped"]`, `.get("skipped")`, `node.skipped`,
+  `"skipped": true|false`) answers 22 - of which several only MENTION it. Which of those
+  22 read the flag cannot be decided by grep, so the readers named below are the
+  PRODUCTION ones plus this module, which reads the flag off the producer's own reports:
+
+    aitelier/tools/run_tests/impl.py  `run_tests` WRITES it at its two
+        `report.update(passed=False, skipped=True, ...)` sites - the nothing-measured
+        branch and the Node-gate-unavailable path, beside `infrastructure_unavailable`
+        and `evidence_state` (:2819 and :3353 in this tree)
+    configs/coding_impl.yaml  `test_evidence`'s inline schema REFUSES either form -
+        the first `anyOf` branch's `skipped: { const: false }` (:628) and
+        `node: { skipped: { const: false } }` (:632), with both of its failing
+        transitions landing on `test_evidence_missing` (:736 and :740 here)
+    configs/coding_impl.yaml  `test_outcome` is NOT a reader of the flag: its inline
+        schema (:748-752 here) requires `passed: { const: true }` and reads nothing
+        else, which is why the whole-report flag alone cannot stop a green-looking
+        report - the `test_evidence` refusal above is the only place it bites
   * tests/unit/test_node_gate_complete_return.py
     `test_return_and_file_both_say_incomplete_for_the_measured_partial_shape` — reads
     `node_gate_complete` on BOTH carriers of ONE report: the `run_tests` RETURN

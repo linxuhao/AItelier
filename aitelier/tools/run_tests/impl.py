@@ -566,7 +566,8 @@ def _find_node_projects(repo: Path) -> tuple[list[Path], list[Path]]:
 
     if (repo / "package.json").exists():
         add(repo / "package.json")
-    for pattern in ("*/package.json", "integrations/*/package.json"):
+    for pattern in ("*/package.json", "integrations/*/package.json",
+                    "packages/*/package.json", "apps/*/package.json"):
         for path in sorted(repo.glob(pattern)):
             add(path)
     return candidates[:NODE_PROJECT_CAP], candidates[NODE_PROJECT_CAP:]
@@ -893,7 +894,18 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
         # ONE project: its report is what every consumer of this section has
         # always read (`dir`, `checks`, `passed`), unchanged.
         return _run_node_project(repo, projects[0], run_id=run_id)
-    results = [_run_node_project(repo, project, run_id=run_id) for project in projects]
+    results = []
+    for project in projects:
+        try:
+            results.append(_run_node_project(repo, project, run_id=run_id))
+        except Exception as e:                      # noqa: BLE001 - see below
+            # One project must not be able to cost the others their result, and it
+            # must not cost the run its report: before this, a RuntimeError in the
+            # second project propagated out of run_tests with nothing written at
+            # all. It becomes an absence, with the reason, like any other.
+            results.append(unmeasured_entry(
+                str(project.relative_to(repo)) or ".",
+                f"{type(e).__name__}: {e}"))
     return _aggregate_node_projects(
         results, [str(path.relative_to(repo)) for path in not_visited])
 
@@ -910,6 +922,17 @@ def _ran_no_tests(checks: dict) -> bool:
     install = next((chk for name, chk in checks.items()
                     if name.rsplit(":", 1)[-1] == "install"), None)
     return bool(install and install.get("passed"))
+
+
+def unmeasured_entry(directory: str, reason: str) -> dict:
+    """A project entry that says, plainly, that nothing was measured for it.
+
+    Same shape `_run_node_project` returns from its own `unmeasured()` closure: an
+    absence is not a red, and an absence must never be read as a pass.
+    """
+    return {"dir": directory, "passed": True, "skipped": True,
+            "checks": {}, "unmeasured_reason": reason,
+            "summary": f"node gate not measured: {reason}"}
 
 
 def _node_ran_checks(node: dict) -> set:

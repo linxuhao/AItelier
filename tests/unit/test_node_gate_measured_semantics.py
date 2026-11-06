@@ -373,3 +373,31 @@ def test_the_real_entry_names_checks_the_way_the_baseline_asks_for_them(tmp_path
     assert ("node:web:test", True) in seen.get("asked", []), (
         "web's test ran and passed, so the baseline must prune it: "
         f"{seen.get('asked')}")
+
+
+# ---------------------------------------------------------------- the loop
+def test_one_project_that_raises_does_not_cost_the_others_their_result(tmp_path, monkeypatch):
+    """An exception in project 2 must not take the whole run's report with it.
+
+    Before this, a RuntimeError raised inside `_run_node_project` propagated out of
+    `run_tests` and NOTHING was written - the one path where one project could
+    still take another's result down, and the whole run with it.
+    """
+    repo = _repo(tmp_path, projects=(("web", True),
+                                     ("integrations/dsh-driver", True)))
+    real = rt._run_node_project
+
+    def explode(repo_path, project, *, run_id=""):
+        if "dsh-driver" in str(project):
+            raise RuntimeError("snapshot refused")
+        return real(repo_path, project, run_id=run_id)
+
+    monkeypatch.setattr(rt, "_run_node_project", explode)
+    _result, report, _calls = _run(tmp_path, monkeypatch, repo, "boom")
+    node = report["node"]
+    assert node["dirs"], node
+    reasons = {entry["dir"]: entry["reason"] for entry in node.get("unmeasured", [])}
+    assert "integrations/dsh-driver" in reasons, reasons
+    assert "RuntimeError" in reasons["integrations/dsh-driver"], reasons
+    assert node["passed"] is True, "the measured project passed; the absence is not its red"
+    assert report["node_unmeasured"]

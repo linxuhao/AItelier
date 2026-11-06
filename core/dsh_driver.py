@@ -202,7 +202,8 @@ class DshDrivers:
         # the verbatim tail was most of what a compaction left behind (measured
         # 2026-11-06: 245-316k left at a 500k trigger with the shipped 16% tail,
         # ~50k after idle compaction, which retains nothing). Workers have no such
-        # snapshot, so they keep a small verbatim tail.
+        # snapshot: every other route keeps the previous policy (half the window,
+        # DSH's default 16% verbatim tail).
         ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", "0.25").strip()
         try:
             ratio = min(0.8, max(0.2, float(ratio)))
@@ -211,7 +212,7 @@ class DshDrivers:
         patches = [
             {"id": "hmr", "disabled": True},
             {"id": "compaction-basic", "config": {
-                "thresholdRatio": 0.25, "retainRatio": 0.04,
+                "thresholdRatio": 0.5,
                 "modelPolicies": [{"provider": row["provider"], "model": row["model"],
                                    "thresholdRatio": ratio, "retainTokens": 0}]}},
             *[{"id": tool, "config": {"provider": provider, "toolName": name,

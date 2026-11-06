@@ -552,7 +552,7 @@ def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch
 # DSH fires automatic compaction at min(W * thresholdRatio, W - O - B), shipped
 # ratio 0.8. The director's own route compacts near-clear: the State snapshot is
 # re-injected once after every successful compaction, so its verbatim tail is
-# cost, not memory. Workers (every other route) keep a small tail. The director
+# cost, not memory. Workers (every other route) keep the previous policy. The director
 # knob is a RATIO of the model's own window, clamped so a typo cannot silently
 # disable compaction or make it constant.
 
@@ -570,10 +570,10 @@ def test_compaction_ratio_is_overridable_and_clamped(runtime, monkeypatch):
         config = _compaction(runtime, row)
         seen[raw] = config["modelPolicies"][0]["thresholdRatio"]
         assert seen[raw] == expected, f"{raw!r} should land on {expected}"
-        assert config["thresholdRatio"] == 0.25, "the knob is the director's; workers keep theirs"
+        assert config["thresholdRatio"] == 0.5, "the knob is the director's; workers keep theirs"
 
 
-def test_director_compacts_near_clear_and_workers_keep_a_small_tail(runtime, monkeypatch):
+def test_director_compacts_near_clear_and_workers_keep_the_previous_policy(runtime, monkeypatch):
     monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     config = _compaction(runtime, row)
@@ -582,7 +582,7 @@ def test_director_compacts_near_clear_and_workers_keep_a_small_tail(runtime, mon
         "thresholdRatio": 0.25, "retainTokens": 0}], (
         "exactly one policy, for the director's own route: compact at a quarter of "
         "the window and keep only the last balanced step")
-    assert (config["thresholdRatio"], config["retainRatio"]) == (0.25, 0.04), (
-        "every other route (the aitelier/worker subagents) compacts at a quarter of "
-        "the window and keeps 4% verbatim")
-    assert "retainTokens" not in config, "retainRatio and retainTokens are mutually exclusive in DSH"
+    assert config["thresholdRatio"] == 0.5, (
+        "every other route (the aitelier/worker subagents) compacts at half the window")
+    assert "retainTokens" not in config and "retainRatio" not in config, (
+        "workers keep DSH's default verbatim tail (16%)")

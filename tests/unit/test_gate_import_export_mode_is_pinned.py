@@ -20,6 +20,8 @@ import fnmatch
 import posixpath
 import re
 import shlex
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,6 +138,26 @@ def _is_recursive(flags: list[str]) -> bool:
     return False
 
 
+def _command_words(words: list[str]) -> list[str]:
+    """One simple command's words, with the wrappers that only RUN it taken off.
+
+    `RUN --mount=type=cache,target=/x chmod ...` puts the RUN options in front of the
+    command, and `env install -d -m 0700 <dir>` / `env FOO=1 chmod ...` run the command
+    that follows the `env`. The third non-author review measured
+    `RUN /usr/bin/install -d -m 0700 /opt/aitelier-gate-imports/docker/godot` (the head
+    word was compared with `== "install"`, exactly) and `env install ...` both leaving
+    this file green while `install -d -m 0700` took a pinned directory to 0700 - a
+    directory uid 1000 cannot enter, the original bug.
+    """
+    while words and words[0].startswith("--"):
+        words = words[1:]
+    while words and words[0].rsplit("/", 1)[-1] == "env":
+        words = words[1:]
+        while words and (words[0].startswith("-") or "=" in words[0]):
+            words = words[1:]
+    return words
+
+
 def _unparsed_mode_instructions(text: str) -> list[str]:
     """RUN commands that set a mode in a shape this file cannot read.
 
@@ -159,8 +181,7 @@ def _unparsed_mode_instructions(text: str) -> list[str]:
             offenders.append(f"a RUN opens a heredoc, whose body this file never reads: {command}")
             continue
         for words in _simple_commands(command):
-            while words and words[0].startswith("--"):
-                words = words[1:]
+            words = _command_words(words)
             if not words:
                 continue
             if words[0].rsplit("/", 1)[-1] == "chmod":
@@ -194,13 +215,14 @@ def _mode_changes(text: str) -> list[_ModeChange]:
     changes: list[_ModeChange] = []
     for command in _run_commands(text):
         for words in _simple_commands(command):
-            while words and words[0].startswith("--"):
-                # `RUN --mount=... chmod ...`: RUN options are not part of the shell
-                # command, so the head word of the instruction is behind them.
-                words = words[1:]
+            # `RUN --mount=...` and `env X ...` put the command behind their own words,
+            # and the command is read by its LAST path component so `/usr/bin/install`
+            # and `/bin/chmod` are read as the commands they are.
+            words = _command_words(words)
             if not words:
                 continue
-            if words[0].rsplit("/", 1)[-1] == "chmod":   # `/bin/chmod` sets a mode too
+            head = words[0].rsplit("/", 1)[-1]
+            if head == "chmod":                     # `/bin/chmod` sets a mode too
                 flags = [word for word in words[1:] if word.startswith("-")]
                 operands = [word for word in words[1:] if not word.startswith("-")]
                 if len(operands) < 2:
@@ -210,7 +232,11 @@ def _mode_changes(text: str) -> list[_ModeChange]:
                     # never see. Both reach the pinned paths, so both are refused - and
                     # so is a glob, a variable or a relative word that could become one
                     # of them (`chmod -R 0755 /opt/*` names no pinned path at all).
-                    named = tuple(_normalise_path(word) for word in words[1:]
+                    # Only the OPERANDS are read here: the FLAG word `-x` is not a path,
+                    # and counting it as a relative one refused `chmod -x
+                    # /usr/local/bin/tool`, which touches nothing pinned (F1 of the
+                    # third non-author review).
+                    named = tuple(_normalise_path(word) for word in operands
                                   if _touches_export(word))
                     if named:
                         changes.append(_ModeChange(
@@ -220,9 +246,9 @@ def _mode_changes(text: str) -> list[_ModeChange]:
                     "chmod", _canonical_mode(operands[0]),
                     tuple(_normalise_path(word) for word in operands[1:]),
                     _is_recursive(flags)))
-            elif words[0] == "install":
+            elif head == "install":
                 mode = None
-                paths: list[str] = []
+                operands = []
                 index = 1
                 while index < len(words):
                     word = words[index]
@@ -230,15 +256,24 @@ def _mode_changes(text: str) -> list[_ModeChange]:
                         mode = _canonical_mode(words[index + 1])
                         index += 2
                         continue
-                    if not word.startswith("-"):
-                        paths.append(_normalise_path(word))
+                    if word.startswith("--mode="):
+                        mode = _canonical_mode(word[len("--mode="):])
+                    elif not word.startswith("-"):
+                        operands.append(_normalise_path(word))
                     index += 1
-                if "-d" in words and mode is not None:
-                    changes.append(_ModeChange("install", mode, tuple(paths), False))
-                elif any(_touches_export(named) for named in paths):
-                    # `install -dm0777 DIR` / `--mode=` spellings this parser does not
-                    # read, on a path inside the export tree: refused, not skipped.
-                    changes.append(_ModeChange("install", None, tuple(paths), False))
+                if "-d" in words:
+                    # every operand of `install -d` is a directory created with `mode`
+                    changes.append(_ModeChange("install", mode, tuple(operands), False))
+                else:
+                    # Only the LAST operand is a target: the earlier ones are SOURCES,
+                    # read rather than set. Treating a source as a target refused
+                    # `install -m 0755 scripts/tool /usr/local/bin/tool` - a relative
+                    # source word, no pinned path named (F2 of the third review). With
+                    # the destination named and the mode unreadable, the change is still
+                    # refused below.
+                    target = tuple(operands[-1:])
+                    if any(_touches_export(named) for named in target):
+                        changes.append(_ModeChange("install", mode, target, False))
     return changes
 
 
@@ -265,26 +300,77 @@ def _covers(change_path: str, required: str) -> bool:
     return required == root or required.startswith(root + "/")
 
 
-def _normalise_path(word: str) -> str:
-    """The path an operand names, with `//`, `/./` and `..` collapsed.
+def _has_parent_component(word: str) -> bool:
+    """True when this word carries a `..` PATH COMPONENT (`a..b` is a name, not one)."""
+    return ".." in word.split("/")
 
-    The shell collapses those, so a raw-text comparison does not: measured on the
-    second non-author review, `chmod -R 0755 /opt//aitelier-gate-imports` and
-    `chmod -R 0755 /opt/aitelier-gate-imports/docker/../..` both left this file green
-    while the shell re-moded the pinned tree. A word the shell would EXPAND (a
-    variable, a command substitution, a glob) or resolve elsewhere (a relative path)
-    keeps its spelling: it is not a path this file can place, and `_reaches_pinned`
-    refuses it rather than guess.
+
+def _unplaceable(word: str) -> str | None:
+    """Why this word cannot be placed as a path, or None when it can be read as one.
+
+    Two spellings left this file green on the third non-author review while the build
+    re-moded a pinned path, because both were COLLAPSED by text before anything
+    compared them:
+
+      * `ARG GODOT_DIR=/opt/aitelier-gate-imports/docker/godot` plus `COPY
+        --chmod=0600 docker/godot/godot_harness.py ${GODOT_DIR}/../godot/`:
+        `posixpath.normpath` dropped `${GODOT_DIR}` together with the `..` and left
+        `/app/godot` (the stage's WORKDIR), so no destination named the export tree at
+        all - while BuildKit expanded the variable and baked the client 0600, the
+        original bug. The same two lines as `WORKDIR ${GODOT_DIR}/../godot` then
+        `COPY ... ./` escaped the same way.
+      * `chmod -R 0700 /var/run/../opt/aitelier-gate-imports`: the text collapsed to
+        `/var/opt/...`, but `/var/run` is a symlink to `/run` and the KERNEL resolves
+        `..` after following it, so the operand the build re-moded was `/opt/...`.
+
+    The shell expands a variable and passes `..` through unchanged, so a word carrying
+    either is refused instead of normalised. `RUN chmod -R 0755 /opt/aitelier-
+    gate-imports/docker/../..` is refused by the same rule; that is a knowingly
+    accepted false refusal, and it is the direction this file already refuses an
+    unreadable chmod shape in.
     """
-    if word.startswith("/") and not any(mark in word for mark in "*?[$`"):
+    if "$" in word or "`" in word:
+        return f"`{word}` carries a variable or a command substitution"
+    if _has_parent_component(word):
+        return (f"`{word}` carries a `..` component, which the kernel resolves after "
+                "following any symlink in the path")
+    return None
+
+
+def _normalise_path(word: str) -> str:
+    """The path an operand names, with `//` and `/./` collapsed and nothing else.
+
+    A raw-text comparison does not see those: measured on the second non-author review,
+    `chmod -R 0755 /opt//aitelier-gate-imports` left this file green while the kernel
+    re-moded the pinned tree.
+
+    A `..` component is deliberately NOT collapsed. The shell passes `..` through
+    unchanged and the kernel resolves it AFTER following every symlink in the prefix,
+    so `/var/run/../opt/...` names `/opt/...` on this image (`/var/run` is a symlink to
+    `/run`) and `/var/opt/...` only as text - the third non-author review measured
+    `chmod -R 0700 /var/run/../opt/aitelier-gate-imports` green through exactly that
+    textual collapse. Such a word keeps its spelling, and `_unplaceable` /
+    `_reaches_pinned` refuse it. A word the shell would EXPAND (a variable, a command
+    substitution, a glob) or resolve elsewhere (a relative path) keeps its spelling for
+    the same reason: it is not a path this file can place.
+    """
+    if (word.startswith("/") and not any(mark in word for mark in "*?[$`")
+            and not _has_parent_component(word)):
         return posixpath.normpath(word)
     return word
 
 
 def _paths_above(path: str) -> tuple[str, ...]:
-    """Every directory from the root down to `path`, `path` included."""
+    """Every directory from the root down to `path`, `path` included.
+
+    The root itself is included, because `RUN chmod 0700 /*/..` collapses to `/` and a
+    chmod of the root re-modes every pinned path - while `/` is nobody's prefix, so a
+    list that started at the first component matched nothing at all and that mutant
+    (N7) stayed green.
+    """
     parts = path.strip("/").split("/")
-    return tuple("/" + "/".join(parts[:index]) for index in range(1, len(parts) + 1))
+    return ("/",) + tuple("/" + "/".join(parts[:index])
+                          for index in range(1, len(parts) + 1))
 
 
 #: Every pinned path and every directory above it. A glob is matched against all of
@@ -299,24 +385,38 @@ GUARDED_PATHS: tuple[str, ...] = tuple(dict.fromkeys(
 
 
 def _reaches_pinned(word: str) -> bool:
-    """True when an operand cannot be shown to leave the pinned paths alone.
+    r"""True when an operand cannot be shown to leave the pinned paths alone.
 
-    Three spellings are unplaceable, and each is refused the way it could escape
-    rather than skipped:
-      * a glob (`/opt/*`, `/opt/aitelier-gate-imports*`, `godot?`, `[a]itelier-...`)
-        is matched with `fnmatch` against every pinned path and every directory above
-        one - `/opt/*` names no pinned path at all and still re-modes all of them;
+    Every unplaceable spelling is refused the way it could escape rather than skipped:
       * a variable or a command substitution (`$EXPORT_ROOT`, `` `pwd` ``) is refused
         whatever it expands to, because this file never runs the shell;
+      * a `..` component is refused although `posixpath.normpath` can collapse it: the
+        kernel resolves it after symlinks, so `/var/run/../opt/...` is `/opt/...`
+        (N3, measured green through the textual collapse);
+      * a BRACKET expression is refused outright instead of being handed to `fnmatch`,
+        which reads `[[:alpha:]]` and `[^x]` as literals - `[\[:alpha:]\]` matches
+        nothing - while dash/bash expand both to the export root's name, so
+        `chmod -R 0700 /opt/aitelier-gate-import[[:alpha:]]` and `...import[^x]` re-moded
+        the pinned tree while this file stayed green (N2, N2b);
+      * the root itself is refused: `chmod 0700 /*/..` collapses to `/` (N7);
+      * a glob (`/opt/*`, `/opt/aitelier-gate-imports*`, `godot?`) is matched with
+        `fnmatch` against every pinned path and every directory above one - `/opt/*`
+        names no pinned path at all and still re-modes all of them;
       * a relative word (`cd /opt && chmod -R 0755 aitelier-gate-imports`) is refused
         because the RUN's working directory is not tracked here.
     """
     if "$" in word or "`" in word:
         return True
+    if _has_parent_component(word):
+        return True
     if not word.startswith("/"):
         return True
     normalised = posixpath.normpath(word)
-    if any(mark in word for mark in "*?["):
+    if normalised == "/":
+        return True
+    if "[" in word:
+        return True
+    if any(mark in word for mark in "*?"):
         # The OPERAND is the pattern and the pinned path is the name it may cover.
         # Getting those two the wrong way round is not a crash: it answers False for
         # every wildcard operand and leaves `/opt/*` green, which is why the mutants
@@ -328,8 +428,95 @@ def _reaches_pinned(word: str) -> bool:
 
 def _touches_export(named: str) -> bool:
     """True when this operand names the export tree, something inside it, or a word
-    that can reach it (an ancestor, a glob, a variable, a relative path)."""
+    that can reach it (an ancestor, a glob, a variable, a `..` component, a relative
+    path)."""
     return _covers(EXPORT, named) or _reaches_pinned(named)
+
+
+def _names_export_outright(word: str) -> bool:
+    """True when this word names or reaches the export tree and is NOT a relative word.
+
+    A relative word is left out of this reading on purpose. `_touches_export` counts
+    "relative" as "could reach the tree", which is right when the word is an operand of
+    a chmod - but `chmod -x /usr/local/bin/tool`'s FLAG word `-x` went through the same
+    test and refused a build that touches nothing pinned (F1 of the third non-author
+    review). A word carrying a variable stays IN, because
+    `cp -p docker/godot/godot_harness.py $EXPORT/docker/godot/` does reach the tree and
+    this file cannot read where `$EXPORT` lands.
+    """
+    if EXPORT in word:
+        # Named INSIDE a token the shell hands to another program:
+        # `python -c "os.chmod('/opt/aitelier-gate-imports', 0o700)"` names the tree
+        # without ever being an operand of a chmod, so the word is not an absolute path
+        # and the reading below would miss it.
+        return True
+    if not word.startswith("/"):
+        return "$" in word or "`" in word
+    return _touches_export(word)
+
+
+#: Commands that cannot change the MODE of a path that already exists. `touch` and
+#: `mkdir` only create one - and the two marker files the shipped build creates are
+#: REQUIRED_MODES entries whose modes the same RUN pins with `chmod 0644`, so removing
+#: that chmod fails the pinned-mode assertion above. `chown`/`chgrp` move ownership, not
+#: the mode bits uid 1000 needs in order to read the tree. Everything else that names
+#: the export tree - `ln`, `cp -p`, `mv`, `rsync`, `tar`, `dd` - can carry a mode in.
+_MODE_PRESERVING_COMMANDS = ("touch", "mkdir", "chown", "chgrp")
+
+
+def _mode_carriers_this_file_does_not_read(text: str) -> list[str]:
+    """Mode changes carried by an instruction or a command this file does not parse.
+
+    Two shapes left the tree re-moded while every assertion above stayed green (third
+    non-author review):
+
+      * a `SHELL` instruction - `SHELL ["/bin/sh","-c","chmod -R 0700
+        /opt/aitelier-gate-imports; eval \\"$1\\"","sh"]` - installs the shell every
+        LATER RUN is executed through, so the chmod above it never has to appear on a
+        RUN line at all. Only RUN lines were read, so nothing saw it.
+      * a symlink alias - `RUN ln -s /opt/aitelier-gate-imports/docker/godot /tmp/g &&
+        chmod 0700 /tmp/g` - is a plain `chmod` of `/tmp/g`, which names no pinned path;
+        chmod follows a symlink named on its command line, so the pinned directories
+        were re-moded under an alias this file never resolves. `cp -p` (which carries
+        the source's mode onto a pinned path) and a `mv` out and back are the same hole.
+
+    So the reviewer's rule, applied as written: only a RUN may carry a mode change, and
+    only a plain `chmod`/`install` simple command may name the export tree. What a
+    command this file cannot read WOULD do to a pinned path is exactly what must not be
+    guessed at, so it is refused and named.
+    """
+    offenders: list[str] = []
+    for keyword, args in _directives(text):
+        if keyword in ("RUN", "COPY", "ADD"):
+            # RUN is parsed by _mode_changes; `COPY --chmod=` is the pin itself, and a
+            # COPY destination is read by _copies.
+            continue
+        heads = {word.rsplit("/", 1)[-1].strip("\"',[]")
+                 for word in re.split(r"[\s\"'\[\],]+", args)}
+        if heads & {"chmod", "install"}:
+            offenders.append(
+                f"the {keyword} instruction can carry a mode change this file does not "
+                f"read (only a RUN is parsed), so it cannot be shown to leave the pinned "
+                f"paths alone: {keyword} {args}")
+    for command in _run_commands(text):
+        if "<<" in command:
+            continue          # a heredoc body is refused by _unparsed_mode_instructions
+        for words in _simple_commands(command):
+            words = _command_words(words)
+            if not words:
+                continue
+            head = words[0].rsplit("/", 1)[-1]
+            if head in ("chmod", "install") or head in _MODE_PRESERVING_COMMANDS:
+                continue
+            naming = [word for word in words[1:] if _names_export_outright(word)]
+            if naming:
+                offenders.append(
+                    f"`{' '.join(words)}` is not a plain chmod or install, but it names "
+                    f"{naming[0]}: a command this file does not parse can put the export "
+                    "tree's mode under an alias (`ln -s` then `chmod`), carry a source mode "
+                    "onto it (`cp -p`), move it out and back (`mv`), or re-mode it another "
+                    "way - so it is refused rather than waved through.")
+    return offenders
 
 
 def test_the_import_tree_is_searchable_and_not_only_the_file():
@@ -367,6 +554,15 @@ def test_the_import_tree_is_searchable_and_not_only_the_file():
     `/opt//aitelier-gate-imports`, `/opt/aitelier-gate-imports*`, a `?` in a middle
     component, `$EXPORT_ROOT` and `cd /opt && chmod -R 0755 aitelier-gate-imports`
     all leaving this file green. `_reaches_pinned` says how each is refused.
+
+    The third non-author review measured nine more spellings green, every one of them
+    a shape whose mode-change this file never read: a `..` the kernel resolves after a
+    symlink, a bracket expression `fnmatch` reads as a literal (`_reaches_pinned`), an
+    `install` behind its full path or behind `env` (`_command_words`), a `chmod` carried
+    by a `SHELL` instruction or hidden behind a symlink alias
+    (`_mode_carriers_this_file_does_not_read`), and a chmod of `/` (`_paths_above`).
+    Each is refused rather than guessed at, and the shape it removes is the one the
+    failing case is named after.
     """
     text = (ROOT / "Dockerfile").read_text()
     changes = _mode_changes(text)
@@ -407,12 +603,14 @@ def test_the_import_tree_is_searchable_and_not_only_the_file():
             if _touches_export(named):
                 problems.append(
                     f"`{change.command}` names {named}, which is not one of the pinned paths "
-                    "but can still reach one (a parent directory, a glob, a variable, or a "
-                    "relative word): a chmod of anything under the export root - `*.py`, "
-                    "`docker/*`, `/opt/*` - can change the client's mode without naming it. "
+                    "but can still reach one (a parent directory, a glob, a variable, a `..` "
+                    "component, a bracket expression, or a relative word): a chmod of anything "
+                    "under the export root - `*.py`, `docker/*`, `/opt/*` - can change the "
+                    "client's mode without naming it. "
                     f"Pin the paths themselves: {', '.join(REQUIRED_MODES)}.")
 
     problems.extend(_unparsed_mode_instructions(text))
+    problems.extend(_mode_carriers_this_file_does_not_read(text))
 
     for command in _run_commands(text):
         if "godot_harness.py" in command:
@@ -458,21 +656,34 @@ def _copies(text: str) -> list[_Copy]:
     destination is placed, not refused. One that appears in a stage which has not
     declared a WORKDIR cannot be placed at all (the base image's is unknown), and a
     JSON-form instruction's destination is not read by this file: both are refused.
+
+    A destination, or the WORKDIR a relative destination is resolved against, that
+    carries a variable or a `..` component is refused BEFORE either is collapsed - the
+    third non-author review measured both spellings green (N1, N1b): a variable and a
+    `..` cancelled each other out under `posixpath.normpath`, leaving `/app/godot`,
+    while BuildKit expanded the variable and baked the pinned client 0600.
     """
     copies: list[_Copy] = []
     workdir: str | None = None
+    workdir_reason: str | None = None
     for keyword, args in _directives(text):
         if keyword == "FROM":
-            workdir = None
+            workdir, workdir_reason = None, None
             continue
         if keyword == "WORKDIR":
             words = args.split()
-            if not words:
-                workdir = None
+            reason = _unplaceable(words[0]) if words else "its stage declares an empty WORKDIR"
+            if reason is not None:
+                # `WORKDIR ${GODOT_DIR}/../godot` + `COPY --chmod=0600 ... ./` (N1b):
+                # the stage's working directory is not a path this file can place, so
+                # neither is a destination resolved against it.
+                workdir, workdir_reason = None, (
+                    f"its stage's WORKDIR cannot be placed ({reason})")
             elif words[0].startswith("/"):
-                workdir = posixpath.normpath(words[0])
+                workdir, workdir_reason = posixpath.normpath(words[0]), None
             elif workdir is not None:
-                workdir = posixpath.normpath(posixpath.join(workdir, words[0]))
+                workdir, workdir_reason = (
+                    posixpath.normpath(posixpath.join(workdir, words[0])), None)
             continue
         if keyword not in ("COPY", "ADD"):
             continue
@@ -484,12 +695,19 @@ def _copies(text: str) -> list[_Copy]:
         destination, mode = _copy_destination(args)
         if not destination:
             copies.append(_Copy(instruction, "", mode, "no destination word"))
+            continue
+        reason = _unplaceable(destination)
+        if reason is not None:
+            # N1: `COPY --chmod=0600 docker/godot/godot_harness.py ${GODOT_DIR}/../godot/`
+            # collapsed to the stage's WORKDIR and named no pinned path at all.
+            copies.append(_Copy(instruction, destination, mode, reason))
         elif destination.startswith("/"):
             copies.append(_Copy(instruction, posixpath.normpath(destination), mode, None))
         elif workdir is None:
             copies.append(_Copy(instruction, destination, mode,
-                                f"`{destination}` is relative and its stage declares no "
-                                "WORKDIR, so where it lands is unknown"))
+                                workdir_reason or (
+                                    f"`{destination}` is relative and its stage declares no "
+                                    "WORKDIR, so where it lands is unknown")))
         else:
             copies.append(_Copy(
                 instruction, posixpath.normpath(posixpath.join(workdir, destination)),
@@ -533,3 +751,130 @@ def test_nothing_but_the_pinned_copy_writes_into_the_export_tree():
                 "re-modes the pinned directories, and every file under them, to "
                 "whatever that COPY carries.")
     assert not problems, "\n\n".join(problems)
+
+
+def _refusals_for(dockerfile: str) -> str:
+    """Every assertion the four tests above raise when ROOT holds this Dockerfile.
+
+    The regression cases below need a Dockerfile they can mutate, so this writes one
+    into a private directory, points the module-level `ROOT` at it (the same global the
+    mutant matrix sets by hand) and puts the real one back afterwards. Empty text means
+    all four stayed green.
+    """
+    global ROOT
+    original = ROOT
+    root = Path(tempfile.mkdtemp(prefix="gate-guard-case-"))
+    try:
+        (root / "Dockerfile").write_text(dockerfile)
+        ROOT = root
+        refusals: list[str] = []
+        for test in (test_the_baked_gate_client_pins_its_mode,
+                     test_no_other_opt_copy_of_repository_source_is_left_unpinned,
+                     test_the_import_tree_is_searchable_and_not_only_the_file,
+                     test_nothing_but_the_pinned_copy_writes_into_the_export_tree):
+            try:
+                test()
+            except AssertionError as exc:
+                refusals.append(str(exc))
+        return "\n\n".join(refusals)
+    finally:
+        ROOT = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
+#: The nine shapes the third non-author review measured GREEN against bb2e5a53, with
+#: the words each is now refused with. A shape that is refused for an UNRELATED reason
+#: fails this case rather than passing it, which is what keeps the listed rule the rule
+#: that is being tested.
+THIRD_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
+    ("N1  COPY destination built from a variable plus `..`",
+     "ARG GODOT_DIR=/opt/aitelier-gate-imports/docker/godot\n"
+     "COPY --chmod=0600 docker/godot/godot_harness.py ${GODOT_DIR}/../godot/",
+     "cannot be shown to stay out of"),
+    ("N1b WORKDIR built from a variable plus `..`, then `COPY ... ./`",
+     "ARG GODOT_DIR=/opt/aitelier-gate-imports/docker/godot\n"
+     "WORKDIR ${GODOT_DIR}/../godot\n"
+     "COPY --chmod=0600 docker/godot/godot_harness.py ./",
+     "cannot be shown to stay out of"),
+    ("N2  shell-only glob `[[:alpha:]]`",
+     "RUN chmod -R 0700 /opt/aitelier-gate-import[[:alpha:]]",
+     "can still reach one"),
+    ("N2b shell negation glob `[^x]`",
+     "RUN chmod -R 0700 /opt/aitelier-gate-import[^x]",
+     "can still reach one"),
+    ("N3  `..` resolved through a symlink",
+     "RUN chmod -R 0700 /var/run/../opt/aitelier-gate-imports",
+     "can still reach one"),
+    ("N4  `install` reached by its full path",
+     "RUN /usr/bin/install -d -m 0700 /opt/aitelier-gate-imports/docker/godot",
+     "instead of 0755"),
+    ("N5  a mode change carried by a SHELL instruction",
+     'SHELL ["/bin/sh","-c",'
+     '"chmod -R 0700 /opt/aitelier-gate-imports; eval \\"$1\\"","sh"]',
+     "can carry a mode change this file does not read"),
+    ("N6  a symlink alias, then a chmod of the alias",
+     "RUN ln -s /opt/aitelier-gate-imports/docker/godot /tmp/g && chmod 0700 /tmp/g",
+     "is not a plain chmod or install"),
+    ("N7  a chmod of `/` spelled `/*/..`",
+     "RUN chmod 0700 /*/..",
+     "can still reach one"),
+)
+
+
+def test_every_shape_the_third_review_measured_green_is_now_refused():
+    """The nine spellings that re-moded a pinned path while this file stayed green.
+
+    Measured (not theorised) on bb2e5a53 with the mutant matrix: "mutants: 27,
+    escapes: 9, shipped green: True". Each line below is one of those nine appended to
+    the shipped Dockerfile, and each must now be refused - by the rule named in
+    `THIRD_REVIEW_SHAPES`'s expectation, not merely by falling over somewhere.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for name, extra, expected in THIRD_REVIEW_SHAPES:
+        refusals = _refusals_for(f"{shipped}\n{extra}\n")
+        assert refusals, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
+        assert expected in refusals, (
+            f"{name} was refused, but not by the rule that closes it (expected "
+            f"{expected!r}):\n{refusals}")
+
+
+def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
+    """The other direction: a correct line must not be refused.
+
+    Both of these were false refusals the third non-author review named (F1, F2),
+    because a FLAG word and a relative SOURCE word were each counted as "a relative
+    path, therefore it can reach the export tree". A guard that refuses them is not
+    stricter, it is wrong about a build that touches nothing pinned - and the cheapest
+    way to silence a wrong guard is to weaken it.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for line in ("RUN chmod -x /usr/local/bin/tool",
+                 "RUN install -m 0755 scripts/tool /usr/local/bin/tool"):
+        assert not _refusals_for(f"{shipped}\n{line}\n"), (
+            f"this line names no pinned path and must not be refused: {line}")
+
+
+def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
+    """The other three shapes the N6 rule exists for, beyond the reviewer's `ln -s`.
+
+    `chmod` follows a symlink, `cp -p` carries the SOURCE's mode onto the destination,
+    and a `python -c` one-liner names the tree inside a string - none of them is a
+    `chmod` operand this file reads, and all three re-mode a pinned path. The `ln` row
+    of `THIRD_REVIEW_SHAPES` is the measured one; these are the same hole.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for line, expected in (
+        ("RUN cp -p docker/godot/godot_harness.py "
+         "/opt/aitelier-gate-imports/docker/godot/godot_harness.py",
+         "is not a plain chmod or install"),
+        ("RUN mv /opt/aitelier-gate-imports/docker /tmp/d && mv /tmp/d "
+         "/opt/aitelier-gate-imports/docker",
+         "is not a plain chmod or install"),
+        ("RUN python -c \"import os; os.chmod('/opt/aitelier-gate-imports', 0o700)\"",
+         "changes a mode in a shape this file cannot read"),
+    ):
+        refusals = _refusals_for(f"{shipped}\n{line}\n")
+        assert refusals, f"this line re-modes a pinned path and must be refused: {line}"
+        assert expected in refusals, (
+            f"{line} was refused, but not by the rule that closes it (expected "
+            f"{expected!r}):\n{refusals}")

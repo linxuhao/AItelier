@@ -66,13 +66,15 @@
 #     :3086       the upstream-blocked fail-fast return carries the verdict and
 #                 `passed: false` — cannot match the new edge.
 #     :3666       the main return — the value that becomes `test`'s flags.
-#     :2877-2881  `_report_write_failure` OMITS the key, so a non-delivery return
-#                 cannot match; it still ends on `test_evidence_missing`.
+#     :2868       `_report_write_failure` OMITS the key (the docstring paragraph
+#                 at :2877-2882, its payload at :2916-2930), so a non-delivery
+#                 return cannot match; it still ends on `test_evidence_missing`.
 #     :3371       the flattened `node_unmeasured` (read by gate_evidence below).
 #     :3347       the same two node keys decide `executed.node_gate_ran`.
 #     :1146       `_aggregate_node_projects`: `skipped = bool(unmeasured)` — the
 #                 invariant behind D1.
-#   configs — the three shipped graphs that run `run_tests`
+#   configs — the graphs that READ the verdict. Six configs invoke `run_tests`;
+#   the steps that read none of these three fields are listed at the end.
 #     fix_tests.yaml:112-113 / :129   partial -> terminal; success REQUIRES
 #                                     `node_gate_complete: true` + `passed: true`.
 #     subagent.yaml:124-125 / :139    the same pair.
@@ -94,22 +96,54 @@
 #                                     tests/skillflow/test_coding_impl_gate.py's
 #                                     scripted producer returns today). That is a
 #                                     separate fail-open card for this config.
-#     coding_impl.yaml `test_evidence` `node: {skipped: {const: false}}` — the
-#                                     config-side reader of `node["skipped"]`:
+#     coding_impl.yaml:411-414 `test_evidence` `node: {skipped: {const: false}}`
+#                                     — a config-side reader of `node["skipped"]`:
 #                                     a node gate that skipped is refused as
 #                                     evidence. Left untouched (see D2); it loses
 #                                     the partial-green case to the earlier edge
 #                                     and gains nothing.
+#     gen_coop_shell_ui60_20260907.yaml:124-127
+#                                     the SAME `node: {skipped: {const: false}}`
+#                                     clause in a shipped GENERATED config (its
+#                                     header still says coding_impl) — a second
+#                                     config-side reader of `node.skipped`. Listed
+#                                     because an inventory of only the
+#                                     hand-written graphs missed it. Unchanged and
+#                                     UNAFFECTED: that graph has no
+#                                     `node_gate_complete` edge at all, so its
+#                                     partial-green route is `test_evidence` ->
+#                                     `test_evidence_missing` before and after.
 #   aitelier/gate_evidence.py:323 — `report_state` answers `partial` when a GREEN
 #     report carries `node_unmeasured` (the FLATTENED key, not `node[...]`, and
-#     not `node_gate_complete`). Gains: the graph now agrees with the state the
+#     not `node_gate_complete`: that name occurs once in the module, as prose in
+#     its own docstring at :488). Gains: the graph now agrees with the state the
 #     hold/deferral layer already derived for the same report. Loses nothing.
-#   aitelier/gate_deferral.py:428 — reads `repo_gate_unmeasured`, a DIFFERENT key
+#   core/coding_impl_outcome.py:147-153 — `measurement` reads the NODE leg's
+#     `skipped` (and `passed`) through a loop variable, which is why a literal
+#     `node["skipped"]` grep does not find it: `for key in ("node", "repo_gate")`
+#     -> `leg = report.get(key)` -> `ValueError("unsupported nonpassing leg")`
+#     when `leg.get("skipped")` is truthy or `leg.get("passed")` is not True.
+#     It measures a candidate's pre-change report (`finish_measurement` ->
+#     `measurement`, called from run_tests' prechange path at impl.py:3571, and
+#     `coding_impl`'s own `baseline` step sets `prechange_capture: true`), so a
+#     report whose node leg was skipped or nonpassing cannot become that
+#     baseline — the capture degrades to `prechange_unavailable`. Gains/loses
+#     nothing: this card moves which terminal a partial-green run reaches, not
+#     one byte of the report this reader parses.
+#   core/gate_deferral.py:428 — reads `repo_gate_unmeasured`, a DIFFERENT key
 #     (the repository gate, not the node gate). Untouched.
-#   core/ — NO reader of `node_gate_complete` or `node_unmeasured` (grep: zero
-#     hits), and no reader of `node["skipped"]` (the only `node`+`skipped` hit is
-#     prose in core/state_driver_guide.py:193). This edge changes which terminal a
-#     run reaches, not the report any core reader sees.
+#   NOT node readers (named so the next `skipped` sweep need not re-derive them):
+#     core/coding_impl_outcome.py:142-145 and :240-243 and
+#     core/release_gate_migration.py:373 read the WHOLE-REPORT `skipped` off
+#     test_report.json; core/tool_routes.py:152-159 counts skipped TEST CASES in
+#     a session; core/state_driver_guide.py:193 is prose about a `test` node's
+#     deliverable, and docs/repo-gate-unmeasured-protocol.md:48 names
+#     `node.skipped` in prose.
+#   configs that run `run_tests` while reading none of these three fields:
+#     coding_impl.yaml:67-81 `baseline` (the prechange capture this card does not
+#     touch), dpe_default.yaml:906 `5_test` (one unconditional edge; its verdict
+#     is folded later) and addons/game_harness.yaml:475 `5_final_test` (routes on
+#     `release_evidence`). No `node_gate_complete` term is added to any of them.
 import json
 from pathlib import Path
 

@@ -130,8 +130,19 @@ def test_quorum_refusal_keeps_real_negotiated_consumer(peers,version,route):
         assert envelope["code"]=="ack_quorum_unreachable"
         validate_envelope(envelope)
     else:
-        assert envelope=={"schema":"aitelier.director-messaging.v2",
-                          "code":"invalid_request","detail":{"message":"invalid_request"}}
-        Draft202012Validator(json.loads(Path("contracts/director_messaging/v2/schema.json").read_text())).validate(envelope)
+        schema=json.loads(Path("contracts/director_messaging/v2/schema.json").read_text())
+        # A v2 consumer declares a closed error enum with no
+        # `ack_quorum_unreachable`, so a v2 refusal must use a code that enum
+        # does declare; anything else reaches the caller as the message-less
+        # `invalid_request` this test used to pin. Read the legal set from the
+        # contract rather than restating it here.
+        assert envelope["schema"]=="aitelier.director-messaging.v2"
+        assert envelope["code"] in schema["$defs"]["errorCode"]["enum"]
+        assert envelope["code"]=="no_recipients"
+        # Whichever route reached the guard, the refusal names the target
+        # project that cannot satisfy the quorum.
+        blocked="alpha" if route=="reply" else "beta"
+        assert envelope["detail"]["message"].strip() and blocked in envelope["detail"]["message"]
+        Draft202012Validator(schema).validate(envelope)
     with caller.db.get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM state_director_messages").fetchone()[0]==count

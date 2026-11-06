@@ -38,7 +38,10 @@ from aitelier import gate_admission
 # variable 'release_disposition'` before writing a report at all. That is a
 # step that never produced a verdict for a reason that has nothing to do with
 # the code under test — the exact shape this card exists to remove.
-from aitelier.gate_evidence import release_disposition, report_state
+from aitelier.gate_evidence import (
+    ABSENCE_CAPPED, ABSENCE_DECLARATION, ABSENCE_ISOLATION, ABSENCE_RAISED,
+    ABSENCE_TICKET, ABSENCE_UNDECLARED, ABSENCE_UNREADABLE,
+    release_disposition, report_state)
 from aitelier.gate_coverage import validate_coverage
 import sys
 import tempfile
@@ -529,28 +532,35 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
     return None, None
 
 
-# How many node projects one gate run will visit. Each project costs a full
-# snapshot plus its own npm install; a pathological tree (a vendored copy, a
-# generated example per fixture) must not make one gate run unbounded. A
-# project past the cap is REPORTED as not visited — which is not a pass (see
-# `_aggregate_node_projects`) — never silently dropped.
+# How many node projects one gate run will visit when the repository says
+# nothing about its own coverage. Each project costs a full snapshot plus its
+# own npm install; a pathological tree (a vendored copy, a generated example per
+# fixture) must not make one gate run unbounded. A project past the cap is
+# REPORTED as not visited — which is not a pass (see `_aggregate_node_projects`)
+# — never silently dropped.
 NODE_PROJECT_CAP = 8
 
+# Where a repository states its own node coverage. Absent is not an error: the
+# gate then infers coverage exactly as it always did, and a tree over the cap
+# says so with the one edit that would remove the absence.
+NODE_PROJECTS_DECLARATION = "node_projects.json"
 
-def _find_node_projects(repo: Path) -> tuple[list[Path], list[Path]]:
-    """Locate EVERY node project the gate must run, deterministically.
+# A declaration is a bound the repository puts on the gate's work, so it is
+# bounded in turn — four times the inferred cap. Over this the gate refuses the
+# declaration and says so, rather than letting one file turn one run unbounded.
+NODE_PROJECT_CEILING = 4 * NODE_PROJECT_CAP
+
+
+def _discovered_node_projects(repo: Path) -> list[Path]:
+    """Every node project the patterns find, in the order the gate runs them.
 
     Order: the root ``package.json`` if there is one, then every
     ``*/package.json``, then every ``integrations/*/package.json`` (depth 2 is
     where this repository keeps its own tooling — ``integrations/dsh-driver``,
     a fifteen-file suite with a pinned end-to-end run that the gate never
-    executed because ``web/`` happened to sort first), each group sorted.
+    executed because ``web/`` happened to sort first), then ``packages/*`` and
+    ``apps/*`` for the two layouts the gate learned later, each group sorted.
     Nothing under ``node_modules`` is a project.
-
-    Returns ``(visited, not_visited)``: the first ``NODE_PROJECT_CAP`` entries
-    and the remainder. The remainder is returned rather than dropped so the
-    caller can report it as unmeasured instead of letting an unrun project
-    become a pass.
     """
     candidates: list[Path] = []
     seen: set[Path] = set()
@@ -570,7 +580,121 @@ def _find_node_projects(repo: Path) -> tuple[list[Path], list[Path]]:
                     "packages/*/package.json", "apps/*/package.json"):
         for path in sorted(repo.glob(pattern)):
             add(path)
-    return candidates[:NODE_PROJECT_CAP], candidates[NODE_PROJECT_CAP:]
+    return candidates
+
+
+def _declared_node_projects(repo: Path) -> tuple[list[Path] | None, list[dict]]:
+    """The repository's own coverage statement, or why it is unusable.
+
+    ``node_projects.json`` is ``{"projects": ["web", "integrations/dsh", ...]}``
+    — repo-relative directories, in the order the repository wants them run.
+    Returns ``(declared, problems)``: ``None`` means the gate must infer coverage
+    (no file, or a file it will not honour), and ``problems`` then carries the
+    reason as one absence entry.
+
+    An unusable declaration is never silently ignored. It falls back to
+    inference AND reports itself, because a declaration that narrowed coverage
+    by being broken is the one failure mode that would hide a project — and the
+    whole point of reading this file is that a repository cannot hide a project
+    from its own gate.
+    """
+    path = repo / NODE_PROJECTS_DECLARATION
+
+    def broken(reason: str) -> tuple[None, list[dict]]:
+        return None, [{"dir": NODE_PROJECTS_DECLARATION,
+                       "kind": ABSENCE_DECLARATION, "reason": reason}]
+
+    if not path.exists():
+        return None, []
+    try:
+        if path.stat().st_size > 64 * 1024:
+            return broken(f"{NODE_PROJECTS_DECLARATION} is larger than 64 KiB; "
+                           "it lists directories, not trees")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:                      # noqa: BLE001 - reported, not raised
+        return broken(f"{NODE_PROJECTS_DECLARATION} is not readable JSON: "
+                      f"{type(e).__name__}: {e}")
+    entries = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return broken(f"{NODE_PROJECTS_DECLARATION} must be an object with a "
+                       "non-empty 'projects' list of repository-relative "
+                       "directories")
+    if len(entries) > NODE_PROJECT_CEILING:
+        return broken(f"{NODE_PROJECTS_DECLARATION} lists {len(entries)} projects; "
+                       f"the gate visits at most {NODE_PROJECT_CEILING} in one run "
+                       "(each costs a snapshot and an install)")
+    root = repo.resolve()
+    declared: list[Path] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            return broken(f"{NODE_PROJECTS_DECLARATION} entries must be non-empty "
+                           "strings")
+        relative = Path(entry)
+        if relative.is_absolute() or ".." in relative.parts:
+            return broken(f"{NODE_PROJECTS_DECLARATION} entry {entry!r} must be a "
+                           "path inside the repository")
+        directory = repo / relative
+        try:
+            resolved = directory.resolve()
+        except OSError as e:
+            return broken(f"{NODE_PROJECTS_DECLARATION} entry {entry!r} cannot be "
+                          f"resolved: {e}")
+        if resolved != root and root not in resolved.parents:
+            return broken(f"{NODE_PROJECTS_DECLARATION} entry {entry!r} resolves "
+                           "outside the repository")
+        if not (directory / "package.json").is_file():
+            return broken(f"{NODE_PROJECTS_DECLARATION} entry {entry!r} has no "
+                           "package.json")
+        key = str(directory.relative_to(repo))
+        if key in seen:
+            continue
+        seen.add(key)
+        declared.append(directory)
+    return declared, []
+
+
+def _find_node_projects(repo: Path) -> tuple[list[Path], list[dict]]:
+    """Decide which node projects this run visits, and name the ones it will not.
+
+    Two sources, one rule. The repository may state its coverage
+    (``node_projects.json``); discovery runs regardless. So a declaration can
+    ADD coverage — a project the patterns miss is still measured if the
+    repository names it — and it can never HIDE one: every discovered project
+    the declaration omits becomes an absence that names the file to edit. That
+    asymmetry is the whole safety argument for reading a repository-authored
+    file here: the file is a statement held against discovery, not an exemption
+    the repository grants itself.
+
+    Returns ``(visited, absent)``. ``absent`` entries are ``{"dir", "reason",
+    "kind"}`` and are the ONLY way a project this run did not measure can be
+    described: they are appended to the report's own ``unmeasured`` list, so a
+    reader can never mistake the absence for a pass, and the disposition parks
+    the run (see `aitelier.gate_evidence.release_disposition`).
+    """
+    discovered = _discovered_node_projects(repo)
+    declared, problems = _declared_node_projects(repo)
+    absent: list[dict] = list(problems)
+    if declared is None:
+        for path in discovered[NODE_PROJECT_CAP:]:
+            absent.append({
+                "dir": str(path.relative_to(repo)) or ".",
+                "kind": ABSENCE_CAPPED,
+                "reason": (f"not visited: more than {NODE_PROJECT_CAP} node "
+                           f"projects and no {NODE_PROJECTS_DECLARATION}; list "
+                           "every node project there to have them all measured "
+                           "in one run")})
+        return discovered[:NODE_PROJECT_CAP], absent
+    declared_dirs = {str(path.relative_to(repo)) for path in declared}
+    for path in discovered:
+        key = str(path.relative_to(repo))
+        if key not in declared_dirs:
+            absent.append({
+                "dir": key or ".",
+                "kind": ABSENCE_UNDECLARED,
+                "reason": (f"not visited: {NODE_PROJECTS_DECLARATION} does not "
+                           "list it; add it there so the gate measures it")})
+    return declared, absent
 
 
 # Keep routine output bounded. Diagnostics and explicit case records are read
@@ -887,10 +1011,10 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
        backend HOME is not writable by the running uid (coding_impl f3560860,
        rc 243).
     """
-    projects, not_visited = _find_node_projects(repo)
-    if not projects:
+    projects, absent = _find_node_projects(repo)
+    if not projects and not absent:
         return None
-    if len(projects) == 1 and not not_visited:
+    if len(projects) == 1 and not absent:
         # ONE project: its report is what every consumer of this section has
         # always read (`dir`, `checks`, `passed`), unchanged.
         return _run_node_project(repo, projects[0], run_id=run_id)
@@ -905,9 +1029,9 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
             # all. It becomes an absence, with the reason, like any other.
             results.append(unmeasured_entry(
                 str(project.relative_to(repo)) or ".",
-                f"{type(e).__name__}: {e}"))
-    return _aggregate_node_projects(
-        results, [str(path.relative_to(repo)) for path in not_visited])
+                f"{type(e).__name__}: {e}",
+                kind=ABSENCE_RAISED))
+    return _aggregate_node_projects(results, absent)
 
 
 def _ran_no_tests(checks: dict) -> bool:
@@ -924,14 +1048,17 @@ def _ran_no_tests(checks: dict) -> bool:
     return bool(install and install.get("passed"))
 
 
-def unmeasured_entry(directory: str, reason: str) -> dict:
+def unmeasured_entry(directory: str, reason: str, *,
+                     kind: str = ABSENCE_RAISED) -> dict:
     """A project entry that says, plainly, that nothing was measured for it.
 
     Same shape `_run_node_project` returns from its own `unmeasured()` closure: an
-    absence is not a red, and an absence must never be read as a pass.
+    absence is not a red, and an absence must never be read as a pass. `kind` is
+    what `release_disposition` routes on — the prose in `reason` is for people,
+    and a disposition that parsed it would change when someone rewrote it.
     """
     return {"dir": directory, "passed": True, "skipped": True,
-            "checks": {}, "unmeasured_reason": reason,
+            "checks": {}, "unmeasured_reason": reason, "kind": kind,
             "summary": f"node gate not measured: {reason}"}
 
 
@@ -950,7 +1077,7 @@ def _node_ran_checks(node: dict) -> set:
     return ran
 
 
-def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dict:
+def _aggregate_node_projects(results: list[dict], absent: list[dict]) -> dict:
     """ONE node section for a repository that holds more than one project.
 
     An unmeasurable project is NEITHER a pass NOR a block. Measured 2026-11-06
@@ -967,8 +1094,10 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
       ``"<dir>:<check>"`` (e.g. ``integrations/dsh-driver:test``). A project
       that could not install contributes nothing: its absence is not a red.
     * ``unmeasured`` names every project that was not measured — one entry per
-      project, with its reason, including projects past ``NODE_PROJECT_CAP`` —
-      so a reader can never mistake the absence for a pass.
+      project, with its reason and its ``kind``, including projects past
+      ``NODE_PROJECT_CAP``, projects the repository's own
+      ``node_projects.json`` omits, and a declaration the gate would not honour
+      — so a reader can never mistake the absence for a pass.
     * ``skipped`` is True whenever something was not measured. When NOTHING was
       measured it keeps its single-project meaning (`passed: True, skipped:
       True`, the old "node gate not measured: ..." words), which the fold turns
@@ -987,13 +1116,15 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
     measured = [r for r in results if not r.get("skipped")]
     unmeasured = [{"dir": r["dir"],
                    "reason": (r.get("unmeasured_reason") or r.get("summary")
-                              or "not measured")}
+                              or "not measured"),
+                   # Carried, not re-derived: the producer is the only party
+                   # that knows whether a rerun could measure this project.
+                   "kind": (r.get("kind") or ABSENCE_RAISED)}
                   for r in results if r.get("skipped")]
-    for directory in not_visited:
-        unmeasured.append({
-            "dir": directory,
-            "reason": (f"not visited: more than {NODE_PROJECT_CAP} node projects "
-                       "in this repository; the gate's cost is capped")})
+    # Whatever the run decided not to visit, in the words of the code that
+    # decided it (`_find_node_projects`): a project past the cap, one the
+    # repository's own declaration omits, and a declaration it cannot honour.
+    unmeasured.extend(dict(entry) for entry in absent)
     # A project can be measured and green while running nothing but its install:
     # `integrations/dsh` has a package.json with no scripts. That is not evidence
     # its tests passed, and it must not be silent - so it is named here. It is
@@ -1019,11 +1150,22 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
         node.update(passed=True, skipped=True, unmeasured_reason=reason,
                     summary=f"node gate not measured: {reason}")
         return node
-    total = len(results) + len(not_visited)
+    # A refused declaration is an absence of COVERAGE, not a project: counting
+    # it as one makes "N of M measured" arithmetic that cannot be checked
+    # against the list beside it. The projects are counted; the declaration is
+    # named in its own clause.
+    refused = [e for e in unmeasured if e.get("kind") == ABSENCE_DECLARATION]
+    unmeasured_projects = [e for e in unmeasured if e.get("kind") != ABSENCE_DECLARATION]
+    total = len(results) + len(unmeasured_projects)
     node["summary"] = (f"{len(measured)} of {total} node project(s) measured"
-                       + (f"; {len(unmeasured)} not measured: "
-                          + "; ".join(f"{e['dir']}: {e['reason']}" for e in unmeasured)
-                          if unmeasured else "")
+                       + (f"; {len(unmeasured_projects)} not measured: "
+                          + "; ".join(f"{e['dir']}: {e['reason']}"
+                                      for e in unmeasured_projects)
+                          if unmeasured_projects else "")
+                       + (f"; the coverage declaration was refused and inference "
+                          "was used instead: "
+                          + "; ".join(f"{e['dir']}: {e['reason']}" for e in refused)
+                          if refused else "")
                        # Said here as well as in the key: the previous version of
                        # this change claimed the summary named these projects and
                        # did not, which a reviewer caught by reading the report.
@@ -1044,9 +1186,9 @@ def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
     rel = pkg_dir.relative_to(repo)
     node: dict = {"passed": True, "dir": str(rel) or ".", "checks": {}}
 
-    def unmeasured(reason: str) -> dict:
+    def unmeasured(reason: str, kind: str) -> dict:
         node.update(passed=True, skipped=True, unmeasured_reason=reason,
-                    summary=f"node gate not measured: {reason}")
+                    kind=kind, summary=f"node gate not measured: {reason}")
         return node
 
     root = repository_executor.node_report_root(datadir.aitelier_home(), run_id)
@@ -1054,14 +1196,15 @@ def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
         root.mkdir(parents=True, exist_ok=True)
         ticket = Path(tempfile.mkdtemp(prefix=repository_executor.NODE_TICKET_PREFIX, dir=root))
     except OSError as e:
-        return unmeasured(f"cannot create the run-owned node ticket under {root}: {e}")
+        return unmeasured(f"cannot create the run-owned node ticket under {root}: {e}",
+                          ABSENCE_TICKET)
     try:
         src, cache = ticket / "src", ticket / "cache"
         cache.mkdir(mode=0o700)
         try:
             identity = _snapshot_tree(repo, src)
         except (SnapshotRefused, OSError) as e:
-            return unmeasured(f"repository snapshot refused: {e}")
+            return unmeasured(f"repository snapshot refused: {e}", ABSENCE_TICKET)
         identity["git"] = _snapshot_git(repo, src)
         identity["source"] = str(repo)
         node["snapshot"] = identity
@@ -1074,7 +1217,8 @@ def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
             has_lock = any(read(src, f"{rel_posix}/{name}", repository_executor.NODE_LOCK_CAP)
                            is not None for name in repository_executor.NODE_LOCKFILES)
         except (repository_executor.NodeRefused, ValueError) as e:
-            return unmeasured(f"package.json/lockfile not readable as plain files: {e}")
+            return unmeasured(f"package.json/lockfile not readable as plain files: {e}",
+                              ABSENCE_UNREADABLE)
         _write_new(ticket / repository_executor.NODE_USERCONFIG,
                    repository_executor.NODE_USERCONFIG_TEXT.encode())
         scripts = manifest.get("scripts", {}) if isinstance(manifest, dict) else {}
@@ -1097,7 +1241,7 @@ def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
             if fetch.get("isolation_unavailable"):
                 node["isolation"]["fetch"] = "refused"
                 node["checks"]["install"] = fetch
-                return unmeasured(fetch["output"])
+                return unmeasured(fetch["output"], ABSENCE_ISOLATION)
             node["isolation"]["fetch"] = "operator_network"
             if not fetch["passed"]:
                 node["checks"]["install"] = fetch
@@ -1112,15 +1256,18 @@ def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
         node["checks"]["install"] = run("install", ["npm", install, "--offline"],
                                         NODE_INSTALL_TIMEOUT, "node_run", workdir)
         if node["checks"]["install"].get("isolation_unavailable"):
-            return unmeasured(node["checks"]["install"]["output"])
+            return unmeasured(node["checks"]["install"]["output"],
+                              ABSENCE_ISOLATION)
         if node["checks"]["install"]["passed"]:
             for name, args in (("build", ["npm", "run", "build"]), ("test", ["npm", "test"])):
                 if name in scripts:
                     node["checks"][name] = run(name, args, NODE_SCRIPT_TIMEOUT, "node_run", workdir)
                     if node["checks"][name].get("isolation_unavailable"):
-                        return unmeasured(node["checks"][name]["output"])
+                        return unmeasured(node["checks"][name]["output"],
+                                          ABSENCE_ISOLATION)
     except (OSError, repository_executor.NodeRefused) as e:
-        return unmeasured(f"node ticket could not be prepared: {type(e).__name__}: {e}")
+        return unmeasured(f"node ticket could not be prepared: {type(e).__name__}: {e}",
+                          ABSENCE_TICKET)
     finally:
         _remove_owned(ticket)
 

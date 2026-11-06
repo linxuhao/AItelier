@@ -31,6 +31,21 @@ _BASELINE_MEASURED = {"seeded", "compared"}
 # report `passed_relative: true` — so it is absent from `_BASELINE_MEASURED`
 # above on purpose, and a reader that sees it must not read the red as old.
 
+# WHY a project was not measured, in the producer's own words. `run_tests`
+# writes this `kind` on every entry of `node["unmeasured"]` and
+# `node_unmeasured`, so that no reader has to parse the sentence beside it to
+# know what to do about it. It does NOT change the disposition: see
+# `release_disposition` for why every absence still parks, and where the
+# permanence was actually removed instead.
+ABSENCE_CAPPED = "capped"                      # past NODE_PROJECT_CAP, no declaration
+ABSENCE_UNDECLARED = "undeclared"             # the repo declared a set; this was not in it
+ABSENCE_DECLARATION = "declaration"           # the repo's own declaration is unusable
+ABSENCE_UNREADABLE = "unreadable"             # package.json/lockfile not a plain file
+ABSENCE_UNPROVISIONABLE = "unprovisionable"   # install/fetch cannot be satisfied here
+ABSENCE_ISOLATION = "isolation"               # the executor refused (or lost) isolation
+ABSENCE_TICKET = "ticket"                     # run-owned ticket/snapshot not prepared
+ABSENCE_RAISED = "raised"                     # the project's own run raised
+
 
 def _read_json(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -168,6 +183,57 @@ def release_disposition(report: dict) -> str:
     re-enter planning. Evidence that is absent, stale, pending, blind, skipped,
     unreadable, UNATTRIBUTED (a relative pass with no baseline behind it), or
     blocked by infrastructure needs verification instead.
+
+    WHAT A PARTIALLY MEASURED NODE GATE MEANS TO THE RELEASE (decided
+    2026-11-06, `design.gate-absence-has-a-disposition-20261106`).
+
+    Three states exist and stay apart: every project measured and green
+    (`passed`), a measured project failed (`failed`, which wins below and always
+    did), and some project not measured (`partial` — `report_state` refuses to
+    call that "passed" for exactly this reason).
+
+    THE DECISION: a partial gate stays `unresolved`. It parks, and it parks at
+    the human checkpoint. That is not a compromise forced by caution; releasing
+    on a recorded gap was the candidate answer and it is wrong, for one reason
+    that no wording can fix: the projects that were not measured include the
+    one that would have failed, and a release record nobody reads is not
+    evidence. "Absence never reads as a pass" is only true if absence does not
+    release.
+
+    THE DEFECT WAS NOT THE DISPOSITION. It was that the third state had no
+    remedy: a repository could not do anything to stop being truncated. A park
+    is a request for evidence, and a request nobody can answer is not a gate,
+    it is a tax — it teaches the person clicking it to click through it, and
+    that lesson transfers to the parks that matter. So the fix belongs in the
+    producer, not here: `run_tests._find_node_projects` now takes the
+    repository's own coverage declaration (`node_projects.json`) and holds it
+    against discovery, so a repository that states its node projects is
+    measured in full up to the declaration ceiling, and a project that the
+    declaration omits — or a declaration the gate will not honour — is reported
+    as an absence that NAMES the one edit which removes it. The disposition is unchanged on purpose: every consumer that
+    exists reads `partial` as not-passed today, and none of them had to be
+    taught a new way to say yes.
+
+    Rejected, and why:
+    * (a) "a distinct bounded state that lets the release proceed and records
+      what was not measured" — see above: it converts an absence into a
+      release, and the record does not fail a test, so it changes nothing about
+      the code that ships.
+    * (b) "keep parking, raise the cap" — raising a bound moves the cliff.
+      Whatever number is chosen, the state comes back at N+1, and the
+      disposition would again depend on the size of the repository rather than
+      on whether anything is wrong with it. The declaration removes the
+      dependency instead of shifting it.
+    * counting the absence as a red — measured as "worse than the defect being
+      fixed": every run of the repository red for a reason no code change can
+      touch.
+
+    Two properties are restated here because both are load-bearing and both are
+    preserved by this decision: an absence never reads as a pass to any
+    consumer (this function returns "unresolved", never "passed"), and a
+    measured red still fails beside it (`partial` is reachable only when
+    `passed` is honestly True, so a failed project routes as `failed` before
+    this branch is consulted).
     """
     if report.get("purpose") == "provisional_round_feedback":
         return "unresolved"

@@ -692,3 +692,149 @@ def test_a_report_outside_the_workspace_is_neither_removed_nor_read(tmp_path, ki
     if outcome == "fail":
         assert "exit 2, expected 0" in result.detail, result.detail
 
+
+# -- the bound path is a directory ENTRY: contain the parent, never follow the entry ---------
+
+def test_a_symlink_at_the_report_path_is_removed_as_a_link_not_followed(tmp_path):
+    """The file the link names is the run's own source, and it is not the harness's to delete.
+
+    An in-workspace link at the bound path (`out/test_report.json -> ../src/app.py`)
+    RESOLVES inside the workspace, so containing the whole path let it through and
+    the resolved-unlink deleted `src/app.py` - a file the run never named - leaving
+    a dangling link. What is contained is the parent, and what is removed is the
+    entry: `unlink` does not follow a symlink, so the link goes and the source stays.
+    """
+    named = "out/test_report.json"
+    (tmp_path / "src").mkdir()
+    source = tmp_path / "src" / "app.py"
+    source.write_text("SENTINEL: this file belongs to the run's own source tree\n")
+    (tmp_path / "out").mkdir()
+    link = tmp_path / "out" / "test_report.json"
+    link.symlink_to("../src/app.py")
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(0), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == "pass", result.detail
+    assert source.exists() and source.read_text().startswith("SENTINEL"), \
+        f"the file the link pointed at is not the harness's to remove: {source}"
+    assert not link.is_symlink(), \
+        "the link IS the directory entry at the bound path: it is removed as a link, not followed"
+
+
+def test_a_symlink_loop_at_the_report_path_is_a_link_to_remove_not_a_crash(tmp_path):
+    """`out/report.json -> report.json`: resolving the whole path raised out of `evaluate`.
+
+    `Path.resolve()` reports a loop as `RuntimeError: Symlink loop`, and the old
+    clear resolved the whole target, so a pathological binding crashed the
+    measurement instead of returning a verdict. The entry is a link like any other,
+    so it is removed as one and the exit code decides - nothing is raised.
+    """
+    named = "out/report.json"
+    (tmp_path / "out").mkdir()
+    loop = tmp_path / "out" / "report.json"
+    loop.symlink_to("report.json")               # points at itself
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(0), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == "pass", f"the exit code decides; nothing may be raised: {result.detail}"
+    assert not loop.is_symlink(), "a loop at the bound path is an entry to remove, not a report to read"
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_symlink_loop_in_the_report_parent_is_a_reason_not_a_crash(tmp_path, code, outcome):
+    """A loop that `resolve()` cannot get through is a reason, on BOTH details.
+
+    `out -> out`: there is no directory to contain, so the path is not this run's
+    to clear and no report may be read from it. The `RuntimeError` pathlib raises
+    for the loop is caught and becomes a reason; the exit code decides, the detail
+    names the report and the reason, and nothing escapes `evaluate`.
+    """
+    named = "out/report.json"
+    (tmp_path / "out").symlink_to("out")        # a directory that is only itself
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == outcome, f"exit {code} must decide, not a crash: {result.detail}"
+    assert named in result.detail and "could not be cleared" in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "loop" in result.detail.lower(), \
+        f"the reason must name the loop it could not resolve: {result.detail!r}"
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_written_as_a_symlink_is_not_read_even_when_it_loops(tmp_path, code, outcome):
+    """The read after the run is contained too: a link there is not a report this run wrote.
+
+    The command creates `out/report.json -> report.json` - the probe's D2 shape, but
+    arriving AFTER the clear, so the bound path is occupied when the read happens.
+    Following it either reads a file the run never named or raises on the loop;
+    neither is a verdict. Nothing is read, the exit code decides, and the reason is
+    in the detail on that path's pass and its fail alike.
+    """
+    named = "out/report.json"
+    script = ("import os, pathlib, sys\n"
+              "out = pathlib.Path('out')\n"
+              "out.mkdir()\n"
+              "os.symlink('report.json', out / 'report.json')\n"
+              f"sys.exit({code})\n")
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": [sys.executable, "-c", script], "report": named,
+                                 "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert result.outcome == outcome, f"exit {code} must decide, not an absent report: {result.detail}"
+    assert "symlink" in result.detail and named in result.detail, \
+        f"the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "no report was read" in result.detail, result.detail
+    if outcome == "fail":
+        assert "exit 2, expected 0" in result.detail, result.detail
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+@pytest.mark.parametrize("age", ["stale", "fresh"])
+def test_a_parent_symlink_created_by_the_command_gets_no_absence_read(tmp_path, age, code, outcome):
+    """The command has its own turn, and it can move the report's parent out of the run.
+
+    At clear time `out/` did not exist, so there was nothing to remove. The command
+    then creates `out` as a symlink to a directory OUTSIDE the workspace that holds
+    a declaring report (stale in one case, fresh in the other - the mtime is not the
+    question). Reading it would launder a stranger's declaration as this run's and
+    turn a measured exit into an absence, so the parent is contained AGAIN: nothing
+    is read, the exit code decides, and the detail says why.
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-{age}"
+    outside.mkdir()
+    declared = outside / "test_report.json"
+    declared.write_text(json.dumps(DECLARED_ABSENCE))
+    if age == "stale":
+        old = time.time() - 3600
+        os.utime(declared, (old, old))           # last run's declaration, out there
+    named = "out/test_report.json"
+    creates_parent = [sys.executable, "-c",
+                      "import pathlib, sys\n"
+                      "pathlib.Path('out').symlink_to(sys.argv[1])\n"
+                      f"sys.exit({code})\n",
+                      str(outside)]
+
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": creates_parent, "report": named, "expect": 0,
+                                 "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+
+    assert declared.exists(), f"{age}: a report outside the workspace must not be removed"
+    assert result.outcome == outcome, \
+        f"{age}: the exit code decides when the bound path left the workspace: {result.detail}"
+    assert "outside the workspace" in result.detail and named in result.detail, \
+        f"{age}: the {outcome} detail must say why no report was read: {result.detail!r}"
+    assert "no report was read" in result.detail, result.detail
+    if outcome == "fail":
+        assert f"exit {code}, expected 0" in result.detail, result.detail
+

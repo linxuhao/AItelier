@@ -47,13 +47,15 @@ loses `type: boolean` (`"banana"` validates). That is the defect a non-author
 review measured on the first version of the exceptional branch: an unmeasured
 thing read as a measured one.
 
-CONSUMER MAP — every reader and writer of the fields this diff touches, grep'd in THIS
-tree. CITATION CONVENTION: each one is named by its `path` plus the SYMBOL or the exact
-clause it holds — e.g. ``aitelier/tools/run_tests/impl.py `_aggregate_node_projects`
-(`"skipped": bool(unmeasured)`)``. A line number appears only where the number is part of
-the thing described, and never as the sole identifier: parallel branches merge over every
-number, and the earlier edition of this map was cited in numbers that had already rotted
-on its own base. Re-grep the symbol before trusting a claim.
+CONSUMER MAP — every PRODUCTION reader and writer of the fields this diff touches, grep'd
+in THIS tree, plus the TEST CONSUMERS section at the end: the tests whose assertions would
+break if one of these fields changed, which is the witness a later reader runs instead of
+re-deriving this map. CITATION CONVENTION: each one is named by its `path` plus the SYMBOL
+or the exact clause it holds — e.g. ``aitelier/tools/run_tests/impl.py
+`_aggregate_node_projects` (`"skipped": bool(unmeasured)`)``. A line number appears only
+where the number is part of the thing described, and never as the sole identifier: parallel
+branches merge over every number, and the earlier edition of this map was cited in numbers
+that had already rotted on its own base. Re-grep the symbol before trusting a claim.
 
 The diff changes NO producer byte: it narrows `configs/coding_impl.yaml`'s `test_evidence`
 from `skipped: {const: false}` + `node.skipped: {const: false}` to an `anyOf` whose FIRST
@@ -110,12 +112,24 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           `_absence_state` holds the executable read (`markers = [name for name in
           _SKIP_MARKERS if report.get(name)]`, `_SKIP_MARKERS` at the top of the module)
           and answers `skipped`; `report_state` calls it and returns that word verbatim —
-          but for the shape this branch admits, the clause that fires FIRST is
+          but for an ORDINARY (non-provisional) report of the shape this branch admits,
+          the clause that fires FIRST is
           `report.get("infrastructure_unavailable") is True or status in _INFRA_STATUSES`,
           so `report_state` answers `infrastructure_unavailable`, not `skipped` and not
-          `unresolved`; `release_disposition` is the function that answers `unresolved`
-          (its final `return "unresolved"`), for every word in that vocabulary;
-          `audit_evidence` buckets them apart (`"skipped": "skipped_gates"`,
+          `unresolved`; `release_disposition` then answers `unresolved` (its final
+          `return "unresolved"`), for every word in that absence vocabulary.
+          A PROVISIONAL MEASURED RED IS THE EXCEPTION, and this branch admits that report
+          too: when its `purpose` is `provisional_round_feedback`, its
+          `PROVISIONAL_PRODUCER` is `run_tests`, its `returncode` is 1 and it carries
+          neither `measurement_not_taken` nor `storage_unmeasured`,
+          `_provisional_red_is_measured` answers True, so `report_state` SKIPS
+          `_absence_state` (`if not measured_red:`) and answers `failed`, and
+          `release_disposition` answers `known_failure` through its `state in
+          _KNOWN_FAILURE_STATES` branch — NOT `infrastructure_unavailable` /
+          `unresolved`. The very same `node.skipped: true` section that makes an ordinary
+          absence an absence buys such a red no softening; the absence beside it is
+          neither a pass nor a park.
+          `audit_evidence` buckets the absence words apart (`"skipped": "skipped_gates"`,
           `"infrastructure_unavailable": "infrastructure_unavailable_gates"`), and
           `_audit_one` derives `skipped_because` (`gate_unrun` / `gate_skipped`) from
           the report's own `status` / `unrun` when the state is `skipped`.
@@ -149,7 +163,9 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
   reads   impl.py `_aggregate_node_projects` itself, on the ENTRY level before the section
           exists (`measured = [r for r in results if not r.get("skipped")]`, and the
           `unmeasured` comprehension `for r in results if r.get("skipped")`).
-  reads   impl.py, on the SECTION, the node block's three EXECUTABLE readers:
+  reads   impl.py, on the SECTION, the three EXECUTABLE readers in the node block of
+          `run_tests` — the function that contains them, NOT `_aggregate_node_projects`,
+          which only builds the node dict above and writes none of these:
           `report["node_gate_complete"] = not (node.get("skipped") or
           node.get("unmeasured"))` (completeness, written to the report and returned by
           `_node_gate_verdict`); `executed.node_gate_ran = (not node.get("skipped") and
@@ -226,12 +242,13 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           plus `_commit_baseline`'s write-failure branch, which restates through
           aitelier/gate_evidence.py `restate_classification(report, create=False)` and so
           through `report_state`. The stamp writes it too (gate_evidence `_write_state`,
-          reached from `restate_classification` and `stamp_report`/`stamp_file`), and so do
-          other tools' producers: aitelier/round_feedback.py `run_feedback`
-          (`"evidence_state": "partial"`), aitelier/tools/godot_playtest/impl.py,
-          aitelier/tools/godot_compile/impl.py `_refuse_incomplete_pass` and
-          `_godot_compile_unstamped`'s builder-unreachable branch, and
-          docker/godot/godot_harness.py — all for their own reports.
+          reached from `_stamp_classification` via `stamp_report`/`stamp_file`, and from
+          `_commit_baseline` with `create=False` — see the readers-and-writers entry
+          below), and so do other tools' producers: aitelier/round_feedback.py
+          `run_feedback` (`"evidence_state": "partial"`),
+          aitelier/tools/godot_playtest/impl.py, aitelier/tools/godot_compile/impl.py
+          `_refuse_incomplete_pass` and `_godot_compile_unstamped`'s builder-unreachable
+          branch, and docker/godot/godot_harness.py — all for their own reports.
   reads   aitelier/gate_evidence.py `_absence_state`
           (`status = str(report.get("evidence_state")
           or report.get("status") or "")`, which classifies the evidence for
@@ -240,6 +257,22 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           engine merges into the step (`"evidence_state": report.get("evidence_state")`);
           and this schema's second branch, which now pins
           `const: infrastructure_unavailable`.
+  reads AND writes  aitelier/gate_evidence.py `_write_state` — one function, both roles,
+          and the READ is what makes the write safe. It reads the field it is about to
+          overwrite (`had_label = "evidence_state" in report`, `prior =
+          report.get("evidence_state")`) and then reads it BACK through the derivation
+          (`report["evidence_state"] = state; if report_state(report) == state: return`),
+          restoring the producer's own word when the label does not read back as itself.
+          Its docstring states the rule this map must not lose: a label may be written
+          only when the report still reads as that label afterwards — the FIXPOINT, asked
+          of `report_state` rather than of a list, so the vocabulary and its reader move
+          together. Ignore the read and the write is a RENAME: `skipped` is not one of
+          the module's absence statuses (`_UNRUN_STATUSES` / `_INFRA_STATUSES`), so
+          stamping a report whose producer said `evidence_state: "not_run"` (green pytest
+          leg, repository gate unmeasured) CARRIED THE ABSENCE OUT OF THE FILE, every
+          later reader of that file answered `failed` / `known_failure`, and a failure
+          RELEASES the run past the hold (`iss-b161216de6a14a81`). The pinned witness is
+          `tests/unit/test_baseline_write_failure_keeps_absence.py`.
   changes THIS: the branch admits only the report in which the producer itself said the
           evidence state is `infrastructure_unavailable`. A report saying `unattributable`,
           `not_run`, `partial` or `skipped` is refused — those are not a measured red.
@@ -261,10 +294,38 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           `release_disposition(compile_report)`, and the stamped path that folds the two
           per-report dispositions into one); aitelier/tools/godot_vision/impl.py (the same
           two shapes for `vision_report.json`); and aitelier/round_feedback.py
-          `run_feedback` plus aitelier/tools/godot_playtest/impl.py, which write the
-          constant `"release_disposition": "unresolved"` as the producers of their own
-          reports. (The earlier edition listed three of these, two of them by a line number
-          that had already moved; the symbols above are the inventory.)
+          `run_feedback`, which writes THIS field only THROUGH the stamp — it calls
+          `stamp_report(report, run_id=owner["run_id"], out_dir=...)` when `run_id` is set,
+          and that reaches `restate_classification`, which is what sets
+          `report["release_evidence"]`. It writes no `release_evidence` literal of its own.
+          (The earlier edition listed three of these, two of them by a line number that
+          had already moved; the symbols above are the inventory.)
+  reads AND writes  aitelier/gate_evidence.py `restate_classification` reads the PRESENCE
+          of both fields before writing either (`if create or "evidence_state" in
+          report:`, `if create or "release_evidence" in report:`). With `create=True` the
+          read cannot refuse; with `create=False` — the shape `_commit_baseline`'s
+          write-failure branch calls — it is the entire safety property: a report whose
+          producer wrote no label and no disposition must come out of a failed baseline
+          write carrying NEITHER, never the stamp's answers invented for it. Ignore that
+          read and a report that stated nothing gains a stated answer, which is the same
+          class of defect as an absence read as a measured one. It is pinned by
+          `tests/unit/test_baseline_write_failure_keeps_absence.py`
+          (`test_an_unstamped_absence_gets_no_label_or_disposition_it_never_had`).
+          `_classify` (above it) makes the same point from the other side: it reads
+          BOTH ANSWERS before either is written, so neither is computed from the other's
+          annotation.
+  NOT `release_evidence` — a DIFFERENT KEY, stated so the two are never blurred again:
+          aitelier/round_feedback.py `run_feedback` and
+          aitelier/tools/godot_playtest/impl.py each write the CONSTANT
+          `"release_disposition": "unresolved"` onto the report they AUTHOR. That key is
+          named after `gate_evidence.release_disposition`, but it is not its output field:
+          no reader above and no config edge reads it, `restate_classification` never
+          writes it, and NEITHER producer writes `release_evidence` — the playtest
+          fallback writes none itself and calls no stamp, and `run_feedback` only gets one
+          from the `stamp_report` call above. An earlier edition listed both as
+          `release_evidence` writers; a non-author review measured that against
+          `round_feedback.py`'s dict literal, which is the confusion this paragraph exists
+          to end.
   reads   core/release_gate_migration.py `_TARGET_COMPILE` / `_TARGET_VISION` /
           `_TARGET_FINAL` (the legacy dpe graph's `5_compile` -> `5_vision`, `5_vision` ->
           `5_final_test` / `5_knowledge` and `5_final_test` -> `5_review` /
@@ -304,6 +365,50 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           instead of being read as "storage was measured and is fine", and an exhausted
           diagnosis is refused because it is the producer's own statement that storage cost
           the measurement.
+
+TEST CONSUMERS — the tests whose assertions would break if one of these fields changed.
+They are not production readers; they are the WITNESS a later reader runs instead of
+re-deriving this map, so each is named with the field it reads. Re-derive a wider set with
+`grep -rln '<field>' tests/` — that sweep returns more than this list, because most
+absence tests drive `run_tests` end to end instead of reading one field by name.
+  * tests/unit/test_node_gate_complete_return.py
+    `test_return_and_file_both_say_incomplete_for_the_measured_partial_shape` — reads
+    `node_gate_complete` on BOTH carriers of ONE report: the `run_tests` RETURN
+    (`ret["node_gate_complete"] is False`, plus `isinstance(..., bool)` so a truthy
+    non-boolean cannot stand in) and `test_report.json`
+    (`report["node_gate_complete"] is ret["node_gate_complete"]`, which also requires the
+    two to AGREE). It fails if the key leaves the file or the return, or stops being a
+    boolean; its sibling `test_return_and_file_both_say_complete_for_the_green_control`
+    reads the same two carriers for `True`.
+  * tests/unit/test_node_gate_measured_semantics.py
+    `test_PROBE_single_project_report_shape_is_unchanged` — reads `node.passed` (`is
+    True`) and the ABSENCE of five aggregate-only keys on a one-project section
+    (`projects`, `dirs`, `measured_dirs`, `unmeasured`, `no_tests`), then validates the
+    whole report through `_validate` against the SHIPPED `test_evidence` `inline_schema`
+    (`_evidence_schema`), i.e. against the first `anyOf` branch's `skipped` /
+    `node.skipped` consts; and it reads `evidence_state`'s derivation by asserting
+    `report_state(report) == "passed"`.
+    `test_PROBE_single_project_a_gate_that_measured_nothing_keeps_the_key` reads
+    `node.skipped` (`absent["node"]["skipped"] is True`) beside `absent["passed"] is
+    False`: it fails if the nothing-measured path stops setting `node.skipped`, the key
+    this diff's second branch requires.
+  * tests/unit/test_baseline_write_failure_keeps_absence.py
+    `test_an_absence_whose_baseline_cannot_be_written_stays_an_absence` — reads three of
+    these fields off the report AND off the return: `repo_gate_absent` (`is True`),
+    `evidence_state` (`== "not_run"`: the producer's word survived the restatement) and
+    `release_evidence` (`== "unresolved"`, on `report` and on `result`), and then asks
+    `report_state` / `release_disposition` for their answer on the FILE and on a JSON
+    round-trip of it. It fails if `_write_state` stops keeping the producer's absence
+    word, or if `restate_classification` starts inventing a disposition the report never
+    had.
+  * tests/unit/test_run_tests_storage_boundaries.py
+    `test_repository_text_claiming_numbered_dir_failure_is_not_trusted_evidence` — reads
+    `storage_diagnosis.state` (`== "clean"`) and the ABSENCE of `skipped` /
+    `infrastructure_unavailable` on a report whose own stdout says "no space left", then
+    requires `report_state(report)` to be one of `failed` / `known_failure` /
+    `unattributed` (which is `evidence_state`'s derivation answering a MEASURED red, not
+    an absence). It fails if the diagnosis starts copying the repository's text, or if a
+    clean diagnosis starts writing an absence flag.
 """
 from __future__ import annotations
 

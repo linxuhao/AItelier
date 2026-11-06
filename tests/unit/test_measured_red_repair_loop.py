@@ -47,92 +47,259 @@ loses `type: boolean` (`"banana"` validates). That is the defect a non-author
 review measured on the first version of the exceptional branch: an unmeasured
 thing read as a measured one.
 
-CONSUMER MAP — every reader of the fields this diff touches, grep'd in THIS tree (re-grep
-before trusting a line; the numbers move). The diff changes NO producer byte: it narrows
-`configs/coding_impl.yaml`'s `test_evidence` from `skipped: {const: false}` +
-`node.skipped: {const: false}` to an `anyOf` whose FIRST branch is exactly that and whose
-second branch admits ONE shape — a MEASURED pytest red (`returncode: 1`) beside a Node leg
-the producer could not measure — and requires the node verdict inside it.
+CONSUMER MAP — every reader and writer of the fields this diff touches, grep'd in THIS
+tree. CITATION CONVENTION: each one is named by its `path` plus the SYMBOL or the exact
+clause it holds — e.g. ``aitelier/tools/run_tests/impl.py `_aggregate_node_projects`
+(`"skipped": bool(unmeasured)`)``. A line number appears only where the number is part of
+the thing described, and never as the sole identifier: parallel branches merge over every
+number, and the earlier edition of this map was cited in numbers that had already rotted
+on its own base. Re-grep the symbol before trusting a claim.
+
+The diff changes NO producer byte: it narrows `configs/coding_impl.yaml`'s `test_evidence`
+from `skipped: {const: false}` + `node.skipped: {const: false}` to an `anyOf` whose FIRST
+branch is exactly that and whose second branch admits ONE shape — a MEASURED pytest red
+(`returncode: 1`) beside a Node leg the producer could not measure — and requires the node
+verdict inside it.
+
+PROTECTED BOUNDARIES — all four were checked against this diff and NONE is weakened:
+ (a) ACCEPTANCE CRITERIA: the second branch moves WHICH ROUTE an absence-beside-a-red takes
+     to the repair loop; it admits no report that was ever an acceptance. `done` is still
+     reachable only through `test_outcome`'s `passed: {const: true}`, the first branch is
+     the shipped predicate unchanged, and no end condition or `max_loop` in
+     `configs/coding_impl.yaml` changed.
+ (b) THE EVIDENCE FORMAT: no producer byte moved. `run_tests` writes the same keys with the
+     same values (`skipped: true`, `node.skipped: true`, `returncode: 1`, and the node
+     verdict); the schema gained a second admissible SHAPE, not a new field, so every
+     other consumer's input is unchanged — per-field below.
+ (c) THE NON-AUTHOR REVIEW CONTROL: neither file removes, relaxes or bypasses a review or
+     verification step. The change is a comment-only map plus one test fixture that now
+     deep-copies (a control can only catch MORE), and no assertion was loosened. Acceptance
+     of this card still comes from a non-author review of the delivered commit; nothing
+     here approves itself.
+ (d) THE PRIVACY / PUBLICATION BOUNDARY: nothing is published by this card and the
+     publication gate is untouched — `release_disposition`'s
+     `publication_scope_refusal(report.get("gate_coverage"))` branch, the
+     `PROVISIONAL_PURPOSE` handling and `configs/addons/game_harness.yaml`'s release edges
+     are all as they were. No source, artifact, manifest or PCK leaves the workspace.
 
 `skipped` (whole report; the absence statement).
-  writes  aitelier/tools/run_tests/impl.py:3340-3345 (the node block's nothing-measured
-          branch sets `skipped`, `infrastructure_unavailable` and `evidence_state` together)
-          and the retained non-delivery report at :2916-2920.
-  reads   core/coding_impl_outcome.py:142-145 (`measurement()` raises "incomplete pytest
-          measurement") and :240-243 (`load_coding_outcome` raises "contradictory unmeasured
-          completed report"); core/release_gate_migration.py:372-374 (the LEGACY dpe graph's
-          `5_final_test` replan edge matches `skipped: true` `from_file`);
-          aitelier/gate_evidence.py `report_state` (:220, :305, `_SKIP_MARKERS` at :15)
-          answers `partial`/`unresolved`; the first branch of this schema; and
-          configs/fix_tests.yaml, configs/subagent.yaml and
-          configs/gen_coop_shell_ui60_20260907.yaml, each carrying the same `skipped` const
-          in its own `test_evidence`.
-  changes NOTHING for them: the second branch REQUIRES `skipped: true`, so every report it
-          admits is still the absence those readers already refuse or classify. The diff
-          moves which ROUTE such a report takes in coding_impl, not what it says.
+  writes  aitelier/tools/run_tests/impl.py, six branches, each setting the top-level
+          `skipped=True` beside its own reason: `_resolve_pytest_python`'s
+          persistent-outage branch (`skipped=True, infrastructure_unavailable=True,
+          evidence_state="infrastructure_unavailable", returncode=0` — no pytest toolchain
+          could be provisioned); `_mark_storage_unmeasured` (`skipped_because=
+          "storage_exhausted"`); `_host_storage_failure`'s non-exhausted branch
+          (`skipped_because="test_workspace_unavailable"`); `run_tests`'s own
+          `pytest_wall_seconds` validation
+          (`skipped_because="invalid_pytest_wall_seconds"`);
+          its `except repository_executor.IsolationUnavailable` branch (`skipped_because=
+          "cpu_executor_unavailable"`); and the node block's nothing-measured branch
+          (`if node.get("skipped") and not node.get("measured_dirs")`, which sets
+          `skipped`, `infrastructure_unavailable` and `evidence_state` together). The
+          retained non-delivery payload from `_report_write_failure` is NOT one of them:
+          it carries `infrastructure_unavailable` and `evidence_state` but writes no
+          `skipped` key (the earlier edition claimed a `skipped` write there; there is
+          none).
+  reads   core/coding_impl_outcome.py `measurement` (`any(report.get(k) for k in
+          ("skipped", ...))` raises "incomplete pytest measurement") and
+          `load_coding_outcome` (the same tuple raises "contradictory unmeasured completed
+          report"); core/release_gate_migration.py `old_final`, the LEGACY dpe graph's
+          `5_final_test` replan edge — `{"match": {"field": "skipped", "from_file":
+          "test_report.json", "value": True}, "to": "5_final_test_replan"}`.
+  reads   aitelier/gate_evidence.py, and WHICH FUNCTION ANSWERS WHICH WORD is the point:
+          `_absence_state` holds the executable read (`markers = [name for name in
+          _SKIP_MARKERS if report.get(name)]`, `_SKIP_MARKERS` at the top of the module)
+          and answers `skipped`; `report_state` calls it and returns that word verbatim —
+          but for the shape this branch admits, the clause that fires FIRST is
+          `report.get("infrastructure_unavailable") is True or status in _INFRA_STATUSES`,
+          so `report_state` answers `infrastructure_unavailable`, not `skipped` and not
+          `unresolved`; `release_disposition` is the function that answers `unresolved`
+          (its final `return "unresolved"`), for every word in that vocabulary;
+          `audit_evidence` buckets them apart (`"skipped": "skipped_gates"`,
+          `"infrastructure_unavailable": "infrastructure_unavailable_gates"`), and
+          `_audit_one` derives `skipped_because` (`gate_unrun` / `gate_skipped`) from
+          the report's own `status` / `unrun` when the state is `skipped`.
+  reads   (config-side routing) the FIRST branch of this schema (`skipped: {const:
+          false}`); configs/coding_impl.yaml's own `failed_candidate_evidence` step —
+          reached by the `test` step's transition `- to: "failed_candidate_evidence"`
+          `match: {field: retained_red_candidate, value: true}`, and validating
+          `skipped: {const: false}` in its own `inline_schema`; and
+          configs/gen_coop_shell_ui60_20260907.yaml's `test_evidence`
+          (`properties: skipped: {const: false}` beside `node: {skipped: {const:
+          false}}`).
+  reads   (NOT this const — a CONTRAST, stated accurately): configs/fix_tests.yaml and
+          configs/subagent.yaml have NO `test_evidence` step and no `skipped` constraint
+          anywhere. Their edges are `match: {field: "node_gate_complete", value: false}`
+          and `match: {node_gate_complete: true, passed: true}` — they route on the
+          producer's RETURN flag, not on this const. The earlier edition claimed each of
+          them carried "the same `skipped` const in its own `test_evidence`"; neither has
+          a `test_evidence` step at all.
+  changes NOTHING for any of them: the second branch REQUIRES `skipped: true`, so every
+          report it admits is still the absence those readers already refuse or classify.
+          The diff moves which ROUTE such a report takes in coding_impl, not what it says.
 
 `node.skipped` (the Node leg's own absence statement).
-  writes  impl.py:1146 (`skipped = bool(unmeasured)`) into the aggregate dict at :1138,
-          :1153 on the nothing-measured path, :1193 in `_run_node_project`'s `unmeasured`.
-  reads   impl.py:3337 (copied onto the report) and :3347 (`executed.node_gate_ran`); the
-          first branch of this schema; configs/gen_coop_shell_ui60_20260907.yaml:124-127;
-          and core/coding_impl_outcome.py:147-153 THROUGH A LOOP VARIABLE (`leg =
-          report.get(key)` for key in ("node", "repo_gate"), then `leg.get("skipped")`), so
-          a literal grep for `node["skipped"]` misses it — that reader refuses a pre-change
-          measurement whose node leg was skipped.
+  writes  impl.py `_aggregate_node_projects` (`"skipped": bool(unmeasured)` in the
+          aggregate dict literal, and `node.update(passed=True, skipped=True,
+          unmeasured_reason=reason, ...)` on its nothing-measured path),
+          `_run_node_project`'s `unmeasured()` closure (`node.update(passed=True,
+          skipped=True, unmeasured_reason=reason, kind=kind, ...)`), and
+          `unmeasured_entry` (`{"dir": ..., "passed": True, "skipped": True, ...}` for a
+          project past the cap, omitted by the repository's declaration, or raised).
+  reads   impl.py `_aggregate_node_projects` itself, on the ENTRY level before the section
+          exists (`measured = [r for r in results if not r.get("skipped")]`, and the
+          `unmeasured` comprehension `for r in results if r.get("skipped")`).
+  reads   impl.py, on the SECTION, the node block's three EXECUTABLE readers:
+          `report["node_gate_complete"] = not (node.get("skipped") or
+          node.get("unmeasured"))` (completeness, written to the report and returned by
+          `_node_gate_verdict`); `executed.node_gate_ran = (not node.get("skipped") and
+          not unmeasured_projects)` (execution bookkeeping — the `unmeasured_projects =
+          node.get("unmeasured") or []` line above it only reads the list, it does no
+          bookkeeping); and `if node.get("skipped") and not node.get("measured_dirs"):`,
+          the nothing-measured branch that sets the whole-report `skipped`,
+          `infrastructure_unavailable` and `evidence_state`. `run_tests._node_gate_verdict`
+          is a DIFFERENT reader: it reads `node_gate_complete` (absent answers True), not
+          this key.
+  reads   the first branch of this schema and configs/gen_coop_shell_ui60_20260907.yaml
+          (`node: {skipped: {const: false}}` in its `test_evidence`); and
+          core/coding_impl_outcome.py `measurement` THROUGH A LOOP VARIABLE —
+          `for key in ("node", "repo_gate"): leg = report.get(key)`, and two lines later
+          the verdict `if leg is not None and (leg.get("passed") is not True or
+          leg.get("skipped") or ...)` raising `ValueError("unsupported nonpassing leg")`
+          — so a literal grep for `node["skipped"]` misses it. That reader refuses a
+          pre-change measurement whose node leg was skipped.
   changes the same nothing: the field is REQUIRED, not relaxed (`skipped: {const: true}`).
 
 `node.passed` (the verdict over the Node projects the gate could MEASURE).
-  writes  impl.py:1138 (`all(r["passed"] for r in measured)`), :1153 (absence: True), :1190
-          (`{"passed": True, ...}`) and :1277 (`all(checks)`).
-  reads   impl.py:3350 (`if not node["passed"]` turns the report red) and
-          core/coding_impl_outcome.py:148 (`leg.get("passed") is not True` refuses a
-          non-passing leg for the pre-change baseline).
+  writes  impl.py `_aggregate_node_projects` (`"passed": all(r["passed"] for r in
+          measured)` in the aggregate dict, and `passed=True` in the nothing-measured
+          `node.update`); `_run_node_project` — the initial `node: dict = {"passed": True,
+          "dir": ..., "checks": {}}`, `node["passed"] = False` when the `node_fetch`
+          install fails, `node["passed"] = all(c["passed"] for c in
+          node["checks"].values())` as the final verdict, and `passed=True` in its
+          `unmeasured()` closure; and `unmeasured_entry`.
+  reads   impl.py `_aggregate_node_projects`'s own `all(r["passed"] for r in measured)` (the
+          per-project boolean is its input) and the node block's `if not node["passed"]:`,
+          which turns the report red and appends one failure entry per failing check;
+          core/coding_impl_outcome.py `measurement`'s `leg.get("passed") is not True`
+          (refuses a non-passing leg for the pre-change baseline).
   THIS DIFF IS WHERE IT MOVES: the field was already `type: boolean` here; it is now also
           REQUIRED, so a node section that omits it is refused as evidence instead of being
           read as a verdict. GAINS the refusal; LOSES nothing the producer writes — every
-          path that writes a node section writes the boolean (the only path with no node
-          section at all is the storage-preflight refusal, impl.py:3316 `node = None`, and
-          that report is an absence that cannot match this branch either way).
+          path that writes a node section writes the boolean. The earlier edition called the
+          storage-preflight refusal "the only path with no node section", and that is FALSE
+          twice over: `_run_node_checks` returns `None` before it runs any project when the
+          repository has none (`projects, absent = _find_node_projects(repo)`; `if not
+          projects and not absent: return None`), so a Python-only repository carries no
+          `node` key at all — the plain-green control in this module (control B: a real
+          repository whose pytest suite passes and which has no `package.json`) asserts
+          exactly that absence — beside the storage-preflight `node = None if
+          storage_preflight_refused else ...`. Both are absences, and neither can match
+          this branch either way.
 
 `repo_gate_absent` (the REPOSITORY gate's absence — a different leg from the node gate).
-  writes  impl.py:3456 (`report["repo_gate_absent"] = absent`), :3402 (False on the
-          unattributable path), and the flattened copy on the RETURN at :3642.
-  reads   core/gate_deferral.py:427 (`data.get("repo_gate_absent")` decides whether a
-          deferral is actionable); core/coding_impl_outcome.py:144 and :241 (refuse);
-          impl.py:2541 (`_apply_baseline`'s `absent`); and coding_impl's own `test` step,
-          whose `repo_gate_absent: true` absence edge fires BEFORE the `written` edge — so a
-          return carrying it never reaches `test_evidence` at all.
-  changes NOTHING: the second branch names no clause for it, and the earlier edge keeps that
-          shape out of reach.
+  writes  impl.py `report["repo_gate_absent"] = absent` in the `REPO_GATE_UNMEASURED` branch
+          (`absent = (not measured_elsewhere and not
+          report.get("infrastructure_unavailable"))`), `report["repo_gate_absent"] = False`
+          on the unattributable path, and the flattened copy on the RETURN
+          (`"repo_gate_absent": bool(report.get("repo_gate_absent"))`).
+  reads   core/gate_deferral.py `read_absence` (`absent = (data.get("repo_gate_absent") if
+          "repo_gate_absent" in data else data.get("repo_gate_unmeasured"))` decides
+          whether a deferral is actionable); core/coding_impl_outcome.py `measurement` and
+          `load_coding_outcome` (both refuse a report carrying it); impl.py
+          `_apply_baseline` (`absent = bool(report.get("repo_gate_absent") or
+          report.get("repo_gate_unmeasured"))`); and — the config-side routing consumer —
+          configs/coding_impl.yaml's `test` step transition `- to: "test_gate_absent"`
+          `match: {field: "repo_gate_absent", value: true}`, which fires BEFORE the
+          `written: "test_report.json"` edge, so a return carrying it never reaches
+          `test_evidence` at all.
+  changes NOTHING: the second branch names no clause for it, and the earlier edge keeps
+          that shape out of reach.
 
-`evidence_state` (the one word the producer writes about its own pytest leg's evidence).
-  writes  impl.py:3345 and :2920 (`infrastructure_unavailable`), :3406 (`unattributable`),
-          :3441 (`not_run`); :2647 recomputes it through `gate_evidence.report_state`.
-  reads   aitelier/round_feedback.py:210 (the feedback report's own copy);
-          aitelier/tools/godot_compile/impl.py:223/:275 write their own for a different
-          tool; and this schema's second branch, which now pins
+`evidence_state` (the producer's own word for the state of this report's evidence).
+  writes  impl.py, on the report: `_resolve_pytest_python`'s persistent-outage branch
+          (toolchain unavailable), `_mark_storage_unmeasured`, `_report_write_failure`'s
+          retained non-delivery payload (a report that could not be stored at all), the
+          `except repository_executor.IsolationUnavailable` branch, the node block's
+          nothing-measured branch (this writer says the NODE leg was unavailable), and
+          `report["evidence_state"] = "unattributable"` / `"not_run"` on those two paths;
+          plus `_commit_baseline`'s write-failure branch, which restates through
+          aitelier/gate_evidence.py `restate_classification(report, create=False)` and so
+          through `report_state`. The stamp writes it too (gate_evidence `_write_state`,
+          reached from `restate_classification` and `stamp_report`/`stamp_file`), and so do
+          other tools' producers: aitelier/round_feedback.py `run_feedback`
+          (`"evidence_state": "partial"`), aitelier/tools/godot_playtest/impl.py,
+          aitelier/tools/godot_compile/impl.py `_refuse_incomplete_pass` and
+          `_godot_compile_unstamped`'s builder-unreachable branch, and
+          docker/godot/godot_harness.py — all for their own reports.
+  reads   aitelier/gate_evidence.py `_absence_state`
+          (`status = str(report.get("evidence_state")
+          or report.get("status") or "")`, which classifies the evidence for
+          `report_state`; `_provisional_red_is_measured` deliberately reads NO state
+          vocabulary); impl.py's main RETURN, which copies the state onto the flags the
+          engine merges into the step (`"evidence_state": report.get("evidence_state")`);
+          and this schema's second branch, which now pins
           `const: infrastructure_unavailable`.
   changes THIS: the branch admits only the report in which the producer itself said the
-          pytest leg's evidence state is `infrastructure_unavailable`. A report saying
-          `unattributable`, `not_run` or `partial` is refused — those are not a measured red.
+          evidence state is `infrastructure_unavailable`. A report saying `unattributable`,
+          `not_run`, `partial` or `skipped` is refused — those are not a measured red.
+  NOT "the pytest leg's state", which is what the earlier edition called it: it is the
+          report's evidence state, and one of its writers (the node block's
+          nothing-measured branch) writes it because the NODE leg could not be measured, not
+          the pytest leg. aitelier/round_feedback.py is a WRITER of this field, not a
+          READER of it.
 
 `release_evidence` (the release disposition the producer folds onto the report).
-  writes  impl.py:2648-2649 (`release_disposition(report)`), aitelier/tools/godot_compile/
-          impl.py:382/:401.
-  reads   core/release_gate_migration.py:55-68 (the legacy dpe graph's edges) and
-          configs/addons/game_harness.yaml:78/:80/:185/:187/:497/:499.
+  writes  aitelier/gate_evidence.py `restate_classification` (`report["release_evidence"] =
+          disposition` — the path `_stamp_classification`/`stamp_report`/`stamp_file` takes
+          with `create=True`, and `_commit_baseline` takes with `create=False`) and
+          `upstream_failed_report` (`"release_evidence": disposition` on the fresh blocker
+          report); impl.py `release_disposition(report)` on the upstream-blocked fail-fast
+          RETURN and on the main RETURN, beside the constant
+          `"release_evidence": "unresolved"` in `_report_write_failure`;
+          aitelier/tools/godot_compile/impl.py (the upstream-blocked return's
+          `release_disposition(compile_report)`, and the stamped path that folds the two
+          per-report dispositions into one); aitelier/tools/godot_vision/impl.py (the same
+          two shapes for `vision_report.json`); and aitelier/round_feedback.py
+          `run_feedback` plus aitelier/tools/godot_playtest/impl.py, which write the
+          constant `"release_disposition": "unresolved"` as the producers of their own
+          reports. (The earlier edition listed three of these, two of them by a line number
+          that had already moved; the symbols above are the inventory.)
+  reads   core/release_gate_migration.py `_TARGET_COMPILE` / `_TARGET_VISION` /
+          `_TARGET_FINAL` (the legacy dpe graph's `5_compile` -> `5_vision`, `5_vision` ->
+          `5_final_test` / `5_knowledge` and `5_final_test` -> `5_review` /
+          `5_final_test_replan` edges), and configs/addons/game_harness.yaml, three pairs of
+          `{field: release_evidence, value: known_failure|passed}` edges.
   changes NOTHING: no clause here reads it. It is named because a review suspected this
           branch of moving it and it does not.
 
 `storage_diagnosis.state` (the storage diagnosis, one of five strings).
-  writes  impl.py:2827-2855 `_apply_storage_diagnosis` (called at :3249): one of
-          exhausted_preflight / exhausted_during_run / ambiguous / clean / unknown.
-  reads   impl.py:2511 (`_apply_baseline`'s pruning), :3267 (`storage_preflight_refused`),
-          :3616 (the RETURN's `storage_state`); core/repository_executor.py:849 (a comment
-          about the entry, not a reader); and this schema's second branch, which now pins
-          `type: string` + `minLength: 1` + `not: {enum: [exhausted_preflight,
-          exhausted_during_run]}`.
+  writes  impl.py `_apply_storage_diagnosis` (`report["storage_diagnosis"] = diagnosis`, the
+          verdict of `diagnose_storage`: exhausted_preflight / exhausted_during_run /
+          ambiguous / clean / unknown) and `_host_storage_failure`
+          (`report["storage_diagnosis"] = {"state": state, "scope":
+          "backend_output_root", ...}` for the backend's own output root).
+  reads   impl.py `_mark_storage_unmeasured` (`ran = diagnosis["state"] ==
+          "exhausted_during_run"`, which chooses the sentence it writes);
+          `_apply_storage_diagnosis` itself (`if diagnosis["state"] in
+          STORAGE_EXHAUSTED_STATES:` and, inside it, `if diagnosis["state"] ==
+          "exhausted_preflight":`); its call site in `run_tests`, three reads
+          (`== "exhausted_preflight"` sets `storage_preflight_refused`, `in
+          STORAGE_EXHAUSTED_STATES` withdraws the prune licence, `==
+          "exhausted_during_run"` retains the reds completed before the refusal);
+          `_report_write_failure` (`retained["storage_diagnosis"] = diagnosis` and
+          `retained["storage_state"] = diagnosis.get("state")`); the main RETURN
+          (`"storage_state": (report.get("storage_diagnosis") or {}).get("state")`); and
+          `_apply_baseline` (`diagnosed = (report.get("storage_diagnosis") or
+          {}).get("state") or "unknown"`), which puts that word into a DIAGNOSTIC SENTENCE
+          in `baseline_error` and returns with `baseline_state: "unmeasured"`. That last one
+          is NOT a prune — nothing is pruned on this path, and the earlier edition's
+          "`_apply_baseline`'s pruning" was wrong. The `except _HostPrepError` branch reads
+          a NEIGHBOUR of this field, `report["storage_diagnosis"]["proof"]`, to decide
+          `storage_preflight_refused`: `proof`, not `state`.
+  reads   core/repository_executor.py has a comment ABOUT the entry and is not a reader; and
+          this schema's second branch pins `type: string` + `minLength: 1` + `not: {enum:
+          [exhausted_preflight, exhausted_during_run]}`.
   changes THIS: a diagnosis that states NOTHING (null, false, 0, "", [] and {}) is refused
           instead of being read as "storage was measured and is fine", and an exhausted
           diagnosis is refused because it is the producer's own statement that storage cost
@@ -358,10 +525,17 @@ def _contradictory_shapes(report: dict) -> dict:
     and they reached `implement`; the rest pin the producer's own witnesses.
     """
     def without(key):
-        return {k: v for k, v in report.items() if k != key}
+        shape = copy.deepcopy(report)
+        shape.pop(key, None)
+        return shape
 
     def node_without(key):
-        return dict(report, node={k: v for k, v in report["node"].items() if k != key})
+        # A DEEP copy, not `dict(report, node=<new dict>)`: deleting a nested
+        # property must not be able to reach the fixture it came from, and the
+        # fixture is one object shared by every shape in this table.
+        shape = copy.deepcopy(report)
+        shape["node"].pop(key, None)
+        return shape
 
     exhausted = {"state": "exhausted_during_run", "findings": [], "proof": []}
     return {

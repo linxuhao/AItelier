@@ -559,27 +559,53 @@ steps:
       #
       # THE PRODUCER'S REPORT SHAPE WAS NOT CHANGED, deliberately. `skipped`,
       # `infrastructure_unavailable` and `node.skipped` are the whole-report
-      # absence vocabulary that OTHER consumers read (the consumer map, with
-      # file:line, is in the module docstring of
-      # `tests/unit/test_measured_red_repair_loop.py`): `gate_evidence`
-      # (`report_state`, `release_disposition`, `audit_evidence`), `core/coding_impl_outcome`
-      # (`measurement()` and `load_coding_outcome` refuse such a report),
-      # `configs/coding_impl.yaml`'s own `failed_candidate_evidence` (line 434),
+      # absence vocabulary that OTHER consumers read (the consumer map is the
+      # module docstring of `tests/unit/test_measured_red_repair_loop.py`, and it
+      # cites each reader by SYMBOL rather than by line number, because a merge
+      # moves every number in this file): `gate_evidence` (`report_state`,
+      # `release_disposition`, `audit_evidence`), `core/coding_impl_outcome`
+      # (`measurement()` and `load_coding_outcome` refuse such a report), this
+      # file's own `failed_candidate_evidence` step — reached by the `test`
+      # step's `retained_red_candidate` transition and validating
+      # `skipped: {const: false}` — and
       # `configs/gen_coop_shell_ui60_20260907.yaml`; `run_tests`'s own three
-      # EXECUTABLE `node.skipped` consumers in `aitelier/tools/run_tests/impl.py`
-      # — line 3327 (`report["node_gate_complete"]`, the completeness flag),
-      # line 3337 (`executed.node_gate_ran`, execution bookkeeping) and line
-      # 3340 (`node.get("skipped") and not node.get("measured_dirs")`, the
-      # whole-report absence that sets `skipped` / `infrastructure_unavailable`
-      # / `evidence_state` on the report); `run_tests._node_gate_verdict`
-      # (line 2933), a DIFFERENT reader: it reads `node_gate_complete`, not
-      # `node.skipped`; the `release_evidence`
+      # EXECUTABLE `node.skipped` consumers — `_aggregate_node_projects`'s
+      # `report["node_gate_complete"] = not (node.get("skipped") or
+      # node.get("unmeasured"))` (the completeness flag), the node block's
+      # `executed.node_gate_ran = (not node.get("skipped") and not
+      # unmeasured_projects)` (execution bookkeeping; the line above it,
+      # `unmeasured_projects = node.get("unmeasured") or []`, only reads that
+      # list) and the nothing-measured branch `if node.get("skipped") and not
+      # node.get("measured_dirs")`, which sets `skipped` /
+      # `infrastructure_unavailable` / `evidence_state` on the report;
+      # `run_tests._node_gate_verdict`, a DIFFERENT reader: it reads
+      # `node_gate_complete`, not `node.skipped`; the `release_evidence`
       # consumers in `core/release_gate_migration.py` and
       # `configs/addons/game_harness.yaml`, and `run_tests._apply_baseline`
       # (reads `storage_unmeasured`). Dropping the flag there would silently
       # redefine an absence for every one of them to fix one route; widening this
       # gate touches exactly one consumer, and leaves every other reader of an
       # absence with the input it already has.
+      #
+      # PROTECTED BOUNDARIES — all four checked, none weakened by this widening:
+      #   (a) ACCEPTANCE CRITERIA: only the ROUTE an absence-beside-a-measured-red
+      #       takes changes. No report that was not an acceptance becomes one:
+      #       `test_outcome`'s `passed: {const: true}` still gates `done`, the
+      #       first `anyOf` branch is the shipped predicate verbatim, and no end
+      #       condition or `max_loop` in this file changed.
+      #   (b) THE EVIDENCE FORMAT: no producer byte moved. `run_tests` writes the
+      #       same keys with the same values; the schema admits a second SHAPE,
+      #       and adds no field, so every consumer's input above is unchanged.
+      #   (c) THE NON-AUTHOR REVIEW CONTROL: neither this file nor the test module
+      #       removes or relaxes a review or verification step; the change is a
+      #       comment-only map plus a test fixture that now deep-copies (it can
+      #       only catch more), and no assertion was loosened. Acceptance still
+      #       comes from a non-author review of the delivered commit.
+      #   (d) THE PRIVACY / PUBLICATION BOUNDARY: nothing is published by this
+      #       change and the publication gate is untouched — the
+      #       `publication_scope_refusal` branch of `release_disposition`, the
+      #       `provisional_round_feedback` handling and
+      #       `configs/addons/game_harness.yaml`'s release edges are as they were.
       inline_schema:
         type: object
         required: [passed, summary, failures]
@@ -653,15 +679,22 @@ steps:
           # report still validated, because only `skipped` was required inside
           # `node` - i.e. a section that states no verdict was read as a verdict.
           # Every producer path that writes a node section writes the boolean:
-          # `_aggregate_node_projects`'s dict literal (impl.py:1138, plus the
-          # `node.update(passed=True, ...)` on its nothing-measured path at
-          # :1153) and `_run_node_project`'s initial `{"passed": True, ...}`
-          # (:1190), which is overwritten with `all(...)` at :1277. The only
-          # path that writes NO node section is the storage-preflight refusal
-          # (:3316, `node = None`), and that report is an absence: it carries no
-          # `node`, so it cannot match this branch either way. A control in
-          # `tests/unit/test_measured_red_repair_loop.py` deletes the key from the
-          # real report and requires `test_evidence_missing`.
+          # `_aggregate_node_projects`'s dict literal (`"passed": all(r["passed"]
+          # for r in measured)`, plus `passed=True` in the `node.update` on its
+          # nothing-measured path) and `_run_node_project`'s initial
+          # `{"passed": True, ...}`, which is overwritten with `all(...)` over its
+          # checks (and with `False` when the `node_fetch` install fails). TWO
+          # paths write NO node section, not one: the storage-preflight refusal
+          # (`node = None if storage_preflight_refused else ...`) AND a repository
+          # that declares no node project at all — `_run_node_checks` returns
+          # `None` before running anything when `_find_node_projects` finds
+          # neither a project nor an absence (`if not projects and not absent:
+          # return None`), which is a Python-only repository. Both are absences;
+          # neither carries a `node`, so neither can match this branch either way.
+          # A control in `tests/unit/test_measured_red_repair_loop.py` deletes the
+          # key from the real report and requires `test_evidence_missing`, and
+          # another asserts the plain-green absence of a report with no node
+          # section reaches `done`.
           - required: [passed, returncode, skipped, infrastructure_unavailable,
                        evidence_state, node, storage_diagnosis]
             properties:

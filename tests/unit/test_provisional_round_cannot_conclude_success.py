@@ -43,6 +43,33 @@
 #   complete green       passed:true, no marker           passed        done
 #   no measured coverage no_tests_collected:true          skipped       test_evidence_missing
 #
+# WHO ELSE READS THE PRODUCER'S FACTS. The full grep-verified inventory lives
+# beside the new edge in `configs/coding_impl.yaml` (file:line, re-checkable);
+# it is kept there rather than in a delivery message so the next person editing
+# the edge finds it. The readers this suite's subject is most easily confused
+# with, and what each gains or loses:
+#   * `gate_coverage.provisional_producer` (:39) and `publication_scope_refusal`
+#     (:123) — a provisional round may not authorize publication;
+#   * `gate_evidence.report_state` (:320) answers the marker `partial`,
+#     `release_disposition` (:359) `unresolved`, and
+#     `_provisional_red_is_measured` (:260) / `_audit_one` (:614) separate a
+#     `run_tests` red from `round_feedback`'s by-construction `passed: false`;
+#   * `run_tests` itself refuses a provisional scope as full test evidence
+#     (`_retained_coverage`, impl.py:1727), stamps the report (:3383), and keeps
+#     every old gate red in its baseline pruning (:3475/:3505);
+#   * `round_feedback.run_feedback` (:220) refuses a coverage scope whose
+#     `purpose` is not its own — the producer of the OTHER report carrying this
+#     marker, and the reader an earlier inventory of these facts missed;
+#   * `godot_playtest`'s `purpose` TOOL PARAMETER (:770/:773/:775) selects that
+#     feedback round, and `core/coding_impl_outcome.py:152` refuses a
+#     provisional round as a passing pre-change measurement.
+# `full_test_passed` is read by this edge, the tests and prose only
+# (`docs/scoped-gate-coverage.md:93`, `godot_playtest/tool.yaml:48`); nothing
+# under core/, api/, web_api/ or cli/ reads it. `gate_coverage` is read by
+# `run_tests` (`_retained_coverage` impl.py:1722, report folding :3375, baseline
+# decisions :3468/:3501) and, through `publication_scope_refusal`, by
+# `release_disposition` (:467-:468) and `_audit_one` (:655-:657).
+#
 # The one seam, named because it is a seam: `run_tests._retained_coverage`
 # refuses a provisional coverage, so a repository gate that declares one is
 # `unmeasured` — an ABSENCE — rather than a measured pass, and the shipped
@@ -56,6 +83,8 @@
 import json
 import sys
 from pathlib import Path
+
+import pytest
 
 from skillflow.graph import GraphResolver, PipelineGraph
 from skillflow.tools.json_schema.impl import json_schema
@@ -324,6 +353,167 @@ def test_a_report_with_no_measured_coverage_still_ends_at_test_evidence_missing(
     fallthrough = next(t for t in _resolver().get_node("test_evidence").transitions
                        if t.match is None)
     assert fallthrough.to == "test_evidence_missing"
+
+
+# ────────────────── the four shapes, one table, three readings ───────────────
+# The four tests above each pin ONE shape's details. This table pins the
+# property they share: for every shape the real producer writes, the producer's
+# own key values, `gate_evidence`'s classification and the shipped config's
+# resolved destination may not tell three different stories. Every row is
+# produced by the REAL `run_tests` (the same seam and helpers the tests above
+# use) and all three readings are taken off the SAME report:
+#   * the producer's facts, off the report and off the returned verdict (the
+#     carrier the router reads) — they may not disagree;
+#   * `report_state` / `release_disposition` on that report;
+#   * the route the SHIPPED config walks: `test`'s edge from `run_tests`'
+#     return, then each validator step from its OWN `all_passed` on the report.
+#
+# The layers do NOT share a word, and the table does not ask them to: on the
+# provisional-green row the producer says `full_test_passed: false` (a boolean),
+# `report_state` says `partial` (a classifier word) and the router ends at
+# `test_evidence_provisional` (a graph node). What is pinned is the STORY each
+# layer tells, derived per layer from its own answer, so a change that makes any
+# layer tell a different story for any row turns exactly that row red.
+#
+# MEASURED (2026-11-06), one mutant per layer, each a read-only overlay of one
+# file into the container — the worktree was not edited for any of them:
+#   * the edge removed from the config -> the provisional-green row red on the
+#     route (`('test_evidence', 'test_outcome', 'done')` for the expected
+#     `('test_evidence_provisional',)`), the other three rows green;
+#   * its `passed: true` term dropped -> the provisional-RED row red on the
+#     route (a red routed to the terminal), the other three green;
+#   * `report_state` made to answer the marker `passed` -> the
+#     provisional-green row red on the classifier pair
+#     (`('passed', 'unresolved')` for `('partial', 'unresolved')`);
+#   * `run_tests`' `full_test_passed` stamp removed -> BOTH provisional rows red
+#     on the producer facts (`None` for `False`).
+# So every one of the three readings is load-bearing, and a row names which
+# layer moved.
+ABSENT = object()          # the key must not be on the report at all
+
+SHAPES = [
+    pytest.param(
+        {"pytest_body": GREEN_PYTEST, "gate_coverage": _provisional_coverage()},
+        {"measured_pass": True},
+        {"passed": True, "returncode": 0, "purpose": PROVISIONAL_PURPOSE,
+         PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS, "full_test_passed": False,
+         "no_tests_collected": ABSENT},
+        ("partial", "unresolved"),
+        (PROVISIONAL_TERMINAL,),
+        "not_full_evidence",
+        id="provisional-green",
+    ),
+    pytest.param(
+        {"pytest_body": RED_PYTEST, "gate_coverage": _provisional_coverage()},
+        {},
+        {"passed": False, "returncode": 1, "purpose": PROVISIONAL_PURPOSE,
+         "full_test_passed": False, "repo_gate_absent": False,
+         "no_tests_collected": ABSENT},
+        ("failed", "known_failure"),
+        ("test_evidence", "test_outcome", "implement"),
+        "repair",
+        id="provisional-red",
+    ),
+    pytest.param(
+        {"pytest_body": GREEN_PYTEST, "gate_coverage": _full_coverage()},
+        {},
+        {"passed": True, "returncode": 0, "purpose": ABSENT,
+         "full_test_passed": ABSENT, "no_tests_collected": ABSENT},
+        ("passed", "passed"),
+        ("test_evidence", "test_outcome", "done"),
+        "full_evidence",
+        id="complete-green",
+    ),
+    pytest.param(
+        {},
+        {},
+        {"passed": True, "returncode": 5, "purpose": ABSENT,
+         "full_test_passed": ABSENT, "no_tests_collected": True},
+        ("skipped", "unresolved"),
+        ("test_evidence", "test_evidence_missing"),
+        "absence",
+        id="no-measured-coverage",
+    ),
+]
+
+# The story each layer's answer has to mean. One vocabulary per layer, and none
+# of them is the other's: a state word, a graph node, and the producer's facts.
+STORY_BY_STATE = {"passed": "full_evidence", "failed": "repair",
+                  "partial": "not_full_evidence", "skipped": "absence"}
+STORY_BY_TERMINAL = {"done": "full_evidence", "implement": "repair",
+                     PROVISIONAL_TERMINAL: "not_full_evidence",
+                     "test_evidence_missing": "absence"}
+
+
+def _producer_story(report) -> str:
+    """What the producer's OWN written facts say this round is.
+
+    Read only from the report: an absence is `no_tests_collected`, a red is a
+    `passed` that is not true, and a green that carries the provisional marker
+    (or the `full_test_passed: false` beside it) is not full test evidence.
+    """
+    if report.get("no_tests_collected") is True:
+        return "absence"
+    if report.get("passed") is not True:
+        return "repair"
+    if (report.get("full_test_passed") is False
+            or report.get("purpose") == PROVISIONAL_PURPOSE):
+        return "not_full_evidence"
+    return "full_evidence"
+
+
+def _route(verdict, out) -> tuple:
+    """Every destination the SHIPPED config walks from `test` to the run's end.
+
+    `test` is routed by the engine's resolver over `run_tests`' return; each
+    validator step is routed by that resolver over its OWN validator's
+    `all_passed` on the same report — exactly the flags the engine hands it.
+    """
+    _, target = _select(verdict, out)
+    targets = [target]
+    while target in ("test_evidence", "test_outcome"):
+        passed, _ = _validate(target, out)
+        _, target = _resolver().resolve_transition(target, {"all_passed": passed}, {})
+        targets.append(target)
+    return tuple(targets)
+
+
+@pytest.mark.parametrize(
+    "repo_kwargs,run_kwargs,producer_facts,classifier,route,story", SHAPES)
+def test_the_four_shapes_tell_one_story_to_the_producer_the_classifier_and_the_router(
+        repo_kwargs, run_kwargs, producer_facts, classifier, route, story,
+        tmp_path, monkeypatch):
+    """Criterion 3: one row per shape, three readings off the SAME real report."""
+    repo = _repo(tmp_path, "repo-table", **repo_kwargs)
+    report, verdict, out = _run_tests(tmp_path, monkeypatch, repo, **run_kwargs)
+
+    # 1. The producer's own key values, on the report and on its return.
+    for key, expected in producer_facts.items():
+        if expected is ABSENT:
+            assert key not in report, (key, report.get(key))
+        else:
+            assert report.get(key) == expected, (key, report.get(key), expected)
+    # The RETURN is the carrier the router reads; it may not disagree.
+    assert verdict.get("purpose") == report.get("purpose")
+    assert verdict.get("full_test_passed") == report.get("full_test_passed")
+
+    # 2. The classifier's answer for that same report.
+    state, disposition = ge.report_state(report), ge.release_disposition(report)
+    assert (state, disposition) == classifier, (state, disposition, classifier)
+
+    # 3. The destination the shipped config resolves to, step by step.
+    walked = _route(verdict, out)
+    assert walked == route, (walked, route)
+
+    # One story, three vocabularies — and never one shared word.
+    assert _producer_story(report) == story, (report.get("passed"), story)
+    assert STORY_BY_STATE[state] == story, (state, story)
+    assert STORY_BY_TERMINAL[walked[-1]] == story, (walked, story)
+    if story == "not_full_evidence":
+        # The row that makes the point: the producer's boolean, the classifier's
+        # state word and the graph node are three different values, so no layer
+        # can be passing this table by agreeing on a spelling.
+        assert len({repr(report["full_test_passed"]), state, walked[-1]}) == 3
 
 
 # ─────────────────────────────────── end to end ─────────────────────────────

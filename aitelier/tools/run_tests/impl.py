@@ -529,18 +529,47 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
     return None, None
 
 
-def _find_node_project(repo: Path) -> Path | None:
-    """Locate the repo's node project: package.json at the root, else the
-    first one exactly one level deep (e.g. ``web/package.json`` — AItelier's
-    own layout; the root-only check is how two dogfood runs verified green
-    with a frontend that didn't even compile)."""
+# How many node projects one gate run will visit. Each project costs a full
+# snapshot plus its own npm install; a pathological tree (a vendored copy, a
+# generated example per fixture) must not make one gate run unbounded. A
+# project past the cap is REPORTED as not visited — which is not a pass (see
+# `_aggregate_node_projects`) — never silently dropped.
+NODE_PROJECT_CAP = 8
+
+
+def _find_node_projects(repo: Path) -> tuple[list[Path], list[Path]]:
+    """Locate EVERY node project the gate must run, deterministically.
+
+    Order: the root ``package.json`` if there is one, then every
+    ``*/package.json``, then every ``integrations/*/package.json`` (depth 2 is
+    where this repository keeps its own tooling — ``integrations/dsh-driver``,
+    a fifteen-file suite with a pinned end-to-end run that the gate never
+    executed because ``web/`` happened to sort first), each group sorted.
+    Nothing under ``node_modules`` is a project.
+
+    Returns ``(visited, not_visited)``: the first ``NODE_PROJECT_CAP`` entries
+    and the remainder. The remainder is returned rather than dropped so the
+    caller can report it as unmeasured instead of letting an unrun project
+    become a pass.
+    """
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        if "node_modules" in path.parts:
+            return
+        directory = path.parent
+        if directory in seen:
+            return
+        seen.add(directory)
+        candidates.append(directory)
+
     if (repo / "package.json").exists():
-        return repo
-    candidates = sorted(
-        p.parent for p in repo.glob("*/package.json")
-        if "node_modules" not in p.parts
-    )
-    return candidates[0] if candidates else None
+        add(repo / "package.json")
+    for pattern in ("*/package.json", "integrations/*/package.json"):
+        for path in sorted(repo.glob(pattern)):
+            add(path)
+    return candidates[:NODE_PROJECT_CAP], candidates[NODE_PROJECT_CAP:]
 
 
 # Keep routine output bounded. Diagnostics and explicit case records are read
@@ -821,7 +850,7 @@ def _remove_owned(ticket: Path) -> None:
 
 
 def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
-    """npm install/build/test gate for the repo's node project (if any).
+    """npm install/build/test gate for EVERY node project in the repository.
 
     Mirrors the pytest gate's skip semantics: no node project → None (no
     section in the report); no measurement possible → skipped=True with the
@@ -829,6 +858,13 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
     Otherwise install deps, then run the build and test scripts that
     package.json actually declares — the BUILD is what catches compile-level
     breakage (e.g. Svelte template errors) that unit tests alone never see.
+
+    One project keeps the report exactly as it has always been (``dir``,
+    ``checks``, ``passed``). More than one project gets that shape PER
+    PROJECT under ``projects``, plus an aggregate judged by
+    ``_aggregate_node_projects``; each project is snapshotted and run through
+    `_run_node_project` independently, so one project's red (or its inability
+    to install) can neither mask nor be masked by another's.
 
     Nothing of the repository executes in this process. Every npm command runs
     in the bounded CPU container on a snapshot under the gate's own ticket
@@ -850,9 +886,80 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
        backend HOME is not writable by the running uid (coding_impl f3560860,
        rc 243).
     """
-    pkg_dir = _find_node_project(repo)
-    if pkg_dir is None:
+    projects, not_visited = _find_node_projects(repo)
+    if not projects:
         return None
+    if len(projects) == 1 and not not_visited:
+        # ONE project: its report is what every consumer of this section has
+        # always read (`dir`, `checks`, `passed`), unchanged.
+        return _run_node_project(repo, projects[0], run_id=run_id)
+    results = [_run_node_project(repo, project, run_id=run_id) for project in projects]
+    return _aggregate_node_projects(
+        results, [str(path.relative_to(repo)) for path in not_visited])
+
+
+def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dict:
+    """ONE node section for a repository that holds more than one project.
+
+    The rule the aggregate may never break: it reads ``passed: True`` only
+    when every visited project was MEASURED and passed. `passed` is therefore
+    not ``all(p["passed"])`` — an unmeasured project's own entry keeps today's
+    ``passed: True, skipped: True`` (absence is not a red) and would otherwise
+    be counted as a pass here. Instead:
+
+    * ``checks`` holds only the checks of projects that WERE measured, keyed
+      ``"<dir>:<check>"`` (e.g. ``integrations/dsh-driver:test``). A project
+      that could not install contributes nothing: its absence is not a red.
+    * ``unmeasured`` names every project that was not measured — one entry per
+      project, with its reason, including projects past ``NODE_PROJECT_CAP``.
+    * ``skipped`` keeps its single-project meaning: NOTHING was measured.
+    * ``passed`` is True only when nothing is unmeasured and every measured
+      project passed. One project's red cannot be masked by another's green,
+      and an unmeasured project can never become a pass.
+    """
+    measured = [r for r in results if not r.get("skipped")]
+    unmeasured = [{"dir": r["dir"],
+                   "reason": (r.get("unmeasured_reason") or r.get("summary")
+                              or "not measured")}
+                  for r in results if r.get("skipped")]
+    for directory in not_visited:
+        unmeasured.append({
+            "dir": directory,
+            "reason": (f"not visited: more than {NODE_PROJECT_CAP} node projects "
+                       "in this repository; the gate's cost is capped")})
+    node: dict = {
+        "dirs": [r["dir"] for r in results],
+        "projects": results,
+        "checks": {f"{r['dir']}:{name}": check
+                   for r in measured for name, check in (r.get("checks") or {}).items()},
+        "measured_dirs": [r["dir"] for r in measured],
+        "unmeasured": unmeasured,
+        "passed": bool(measured) and not unmeasured
+                  and all(r["passed"] for r in measured),
+    }
+    if not measured:
+        # Nothing anywhere was measured: an absence, stated as one, never a
+        # red. Byte-compatible with the single-project report's own words.
+        reason = "; ".join(f"{e['dir']}: {e['reason']}" for e in unmeasured)
+        node.update(passed=True, skipped=True, unmeasured_reason=reason,
+                    summary=f"node gate not measured: {reason}")
+        return node
+    total = len(results) + len(not_visited)
+    node["summary"] = (f"{len(measured)} of {total} node project(s) measured"
+                       + (f"; {len(unmeasured)} not measured: "
+                          + "; ".join(f"{e['dir']}: {e['reason']}" for e in unmeasured)
+                          if unmeasured else ""))
+    return node
+
+
+def _run_node_project(repo: Path, pkg_dir: Path, *, run_id: str = "") -> dict:
+    """npm install/build/test for ONE node project, exactly as before.
+
+    Snapshots the repository under this project's own ticket and runs the
+    project's install/build/test in it. A project that cannot be measured
+    returns ``passed: True, skipped: True`` plus ``unmeasured_reason`` — see
+    `_aggregate_node_projects` for what that may and may not be counted as.
+    """
     rel = pkg_dir.relative_to(repo)
     node: dict = {"passed": True, "dir": str(rel) or ".", "checks": {}}
 
@@ -2918,7 +3025,14 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
-            executed.node_gate_ran = not node.get("skipped")
+            # A project that could not be measured is not a pass and may not
+            # erase a project that WAS measured: it is named in `failures` and
+            # in `node["unmeasured"]`, the measured projects keep their own
+            # result, and the run cannot pass on it. Its keys stay known-red in
+            # a baseline too, since not every node project ran here.
+            unmeasured_projects = node.get("unmeasured") or []
+            executed.node_gate_ran = (not node.get("skipped")
+                                      and not unmeasured_projects)
             if node.get("skipped"):
                 report.update(passed=False, skipped=True,
                               infrastructure_unavailable=True,
@@ -2933,6 +3047,21 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                         report["failures"].append(
                             f"node:{name} failed (rc={chk['returncode']}): "
                             f"{chk['output'][-500:]}")
+            if unmeasured_projects and not node.get("skipped"):
+                report["passed"] = False
+                for entry in unmeasured_projects:
+                    report["failures"].append(
+                        f"node gate unavailable for {entry['dir']}: {entry['reason']}")
+                    unmeasured_entries.append(report["failures"][-1])
+                # An absence is not a product red: only route this run as one
+                # ("not fully measured") when no measured project was red. A
+                # measured red goes back to the implementer beside the named
+                # absence. Same words the single-project branch above uses.
+                measured_red = any(not chk.get("passed")
+                                   for chk in node["checks"].values())
+                if not measured_red:
+                    report.update(skipped=True, infrastructure_unavailable=True,
+                                  evidence_state="infrastructure_unavailable")
 
     # The repo's own declared gate (run_tests.sh) — folded in like the node
     # gate. A green pytest run over a product pytest cannot compile is a

@@ -161,6 +161,7 @@ def test_quorum_guard_still_refuses_and_still_delivers(peers):
  assert delivered["result"]["deliveries"][0]["target_project_id"]=="beta"
  assert total("state_director_deliveries")==before+1 and total("state_director_messages")==messages+1
 
+@pytest.mark.docker  # needs a frozen Source WITH history: `git show 100a1886:core/director_messaging.py` is the pre-ack mailbox, and a linked worktree mounted alone has no repository
 def test_migration_preserves_existing_status_version_events_and_idempotency(tmp_path):
  import subprocess,importlib.util
  from core.state_graph import StateGraphStore

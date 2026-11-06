@@ -474,13 +474,29 @@ def test_the_default_index_never_lists_a_superseded_entry(service):
         (execute(service, "get_driver_note", {"project_id": "aitelier"}), "index"),
         (notes.entry_index("aitelier"), "entries"),
         (execute(service, "driver_note_index", {"project_id": "aitelier"}), "entries"),
-        (a3, "index"),  # the projection a write returns is the default index too
     ]
     for payload, key in defaults:
         assert addresses(payload, key) == current, payload
         assert all(item["lifecycle"] == "current" for item in payload[key])
         assert (payload["entry_count"], payload["listed_count"], payload["delisted_count"],
                 payload["superseded_count"]) == (4, 4, 0, 2)
+
+    # This used to read `(a3, "index")`: the write/supersede answer had to spread the
+    # default index too. That requirement WAS the defect (owner ruling 2026-11-06) -
+    # a mutation answers with the entry it touched plus the counts, and the two reads
+    # above are where the lines live. The counts it keeps are the read's own counts.
+    note = notes.get("aitelier")
+    counts = {"entry_count", "listed_count", "delisted_count", "superseded_count",
+              "index_count"}
+    assert set(a) == set(notes.get_entry("aitelier", a["entry_id"])) | counts
+    for answer in (a2, a3):
+        assert set(answer) == {"superseded", "successor"} | counts
+    for answer in (a, a2, a3):
+        assert "index" not in answer
+    assert (a3["entry_count"], a3["listed_count"], a3["delisted_count"],
+            a3["superseded_count"], a3["index_count"]) == (
+        note["entry_count"], note["listed_count"], note["delisted_count"],
+        note["superseded_count"], note["index_count"])
 
     widened = [
         (notes.get("aitelier", include_superseded=True), "index"),

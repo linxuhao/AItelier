@@ -4,9 +4,51 @@ import anyio
 
 from core.state_driver_guide import (STATE_DRIVER_GUIDE, STATE_DRIVER_GUIDE_INDEX,
                                      guide_index_addresses)
-from core.state_commands import describe, execute
+from core.state_commands import READ_REQUESTS, describe, execute
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+
+
+# ── state_graph_read advertises the registry, it does not remember it ───────
+# The registry (`core.state_commands.READ_REQUESTS`) is the only answer to
+# "which actions does this tool dispatch?". The description used to be a second
+# hand-typed answer and it drifted: `get_receipt`, `project_catalog`,
+# `project_overview`, `project_run_summary`, `project_attempts`, `references`,
+# `run_owners`, `attempt_detail`, `design_catalog`, `get_design_revision`,
+# `get_design_baseline`, `get_design_bindings`, `export_design_markdown` and
+# `check_design_markdown` were dispatchable and unnamed. A caller that had been
+# handed a receipt id therefore had no way to learn the id could be dereferenced
+# (iss-81058e51b53d46b0). The list below is DERIVED at import time, so a new
+# read action is advertised the moment it is registered, and a name the registry
+# does not have cannot survive in the text. The prose stays hand-written: it
+# explains semantics, which a registry cannot.
+UNDESCRIBED_READ_ACTIONS: dict[str, str] = {
+    # name -> why it stays out of the description. EMPTY on purpose: every
+    # READ_REQUESTS action is dispatchable through this tool, so hiding one is
+    # the same defect in the other direction. An entry here is a recorded
+    # decision and must carry its reason (e.g. "hook-internal", "mailbox-
+    # internal"); tests/unit/test_state_read_description.py refuses an unknown
+    # name, a reason-less entry, or an entry that is in fact still advertised.
+}
+DESCRIBED_READ_ACTIONS = tuple(sorted(set(READ_REQUESTS) - set(UNDESCRIBED_READ_ACTIONS)))
+# Markers, not decoration: the guard test recovers the advertised set from the
+# text a client really receives (between these two), so it compares the
+# REGISTERED description with the registry rather than a copy of itself.
+ACTION_LIST_MARKER = "Actions (generated from core.state_commands.READ_REQUESTS): "
+ACTION_LIST_END = ". "
+STATE_GRAPH_READ_DESCRIPTION = (
+    "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. "
+    + ACTION_LIST_MARKER + ", ".join(DESCRIBED_READ_ACTIONS) + ACTION_LIST_END
+    + "list_user_conversation reads both directions of one project's user conversation, keyset-paged. "
+    "get_driver_note returns the entry index, its counts and revision, never free text; the index "
+    "(and driver_note_index) lists only current, listed entries unless "
+    "include_superseded/include_delisted is set, and superseded_count/delisted_count report what it "
+    "hides. search_driver_note_entries matches entry assertions and bodies (Unicode case-insensitive "
+    "literal) with bounded redacted excerpts and a next_after cursor. search_driver_note_history "
+    "returns bounded redacted excerpts of retired section text in revision order. Design queries "
+    "return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact "
+    "arguments: state_graph_help. On the REST transport the table core.state_commands.PUBLIC_READS "
+    "decides which of these an anonymous visitor may read.")
 
 
 def mcp_read_trust(request) -> bool:
@@ -99,7 +141,9 @@ def register_state_tools(tool, mcp, service_factory=None):
         except DriverError as exc:
             raise MCPToolError(str(exc)) from exc
 
-    @tool("state_graph_read", "read", "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. Actions include list_director_messages, list_issues, get_issue, get_driver_note, driver_note_index, search_driver_note_entries, get_driver_note_entry, check_driver_note_index, get_driver_guide_section, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change, list_claims, get_claim, list_subagents, list_handoffs, get_handoff, list_user_messages, list_user_conversation (both directions of one project's user conversation, keyset-paged), user_conversation_unread. get_driver_note returns the entry index, its counts and revision, never free text; the index (and driver_note_index) lists only current, listed entries unless include_superseded/include_delisted is set, and superseded_count/delisted_count report what it hides. search_driver_note_entries matches entry assertions and bodies (Unicode case-insensitive literal) with bounded redacted excerpts and a next_after cursor. search_driver_note_history returns bounded redacted excerpts of retired section text in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help. On the REST transport the table core.state_commands.PUBLIC_READS decides which of these an anonymous visitor may read.")
+    # The description string is built at module import from READ_REQUESTS (see
+    # STATE_GRAPH_READ_DESCRIPTION above) - never typed out here again.
+    @tool("state_graph_read", "read", STATE_GRAPH_READ_DESCRIPTION)
     async def state_graph_read(action: str, arguments: dict) -> dict:
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:

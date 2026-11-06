@@ -911,6 +911,47 @@ def test_mcp_state_read_is_not_an_anonymous_read(live, monkeypatch):
     mcp_router._authorize("list_pipelines", None)
 
 
+def test_mcp_client_discovers_get_receipt_in_tools_list_and_reads_a_real_receipt(live, client, monkeypatch):
+    """The scenario iss-81058e51b53d46b0 was filed about, over the real wire.
+
+    A client's ONLY view of what `state_graph_read` can answer is `tools/list`.
+    The receipt read was dispatchable and absent from that view, so a caller
+    holding a receipt id - the one handle that survives a later revision
+    clearing the node's `verified_receipt` - had no way to learn it could be
+    dereferenced. Both halves are asserted through the transport and nothing
+    here reads the description out of the source: the name is taken from the
+    listing the transport published, then used to read a receipt this test
+    really published, which proves the advertised call is the working one."""
+    from api import mcp_router
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
+    handshake = rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "receipt-listing", "version": "1"}})
+    assert handshake.status_code == 200
+    tools = {tool["name"]: tool for tool in
+             rpc(client, "tools/list", {}).json()["result"]["tools"]}
+    assert "get_receipt" in tools["state_graph_read"]["description"]
+
+    # Publish the receipt with the writes a caller already has: one real
+    # attempt, evidence for every required criterion, then acceptance.
+    attempt = finish(live, start(live, request_key="receipt-read"))
+    for check in ("behaviour", "review"):
+        evidence(live, attempt, check)
+    receipt = live.service.verify_node("game", "a", 1, attempt["attempt_id"])
+    assert receipt["receipt_id"]
+
+    called = rpc(client, "tools/call", {"name": "state_graph_read", "arguments": {
+        "action": "get_receipt", "arguments": {"project_id": "game",
+                                               "receipt_id": receipt["receipt_id"]}}}).json()["result"]
+    assert not called.get("isError"), called
+    body = json.loads(called["content"][0]["text"])["result"]
+    assert body["receipt_id"] == receipt["receipt_id"]
+    assert body["project_id"] == "game"
+    assert body["node_key"] == "a"
+    assert body["artifact_ref"] == attempt["artifact_ref"]
+    assert [row["criterion_id"] for row in body["evidence"]] == ["behaviour", "review"]
+
+
 @pytest.mark.asyncio
 async def test_internal_driver_uses_same_persistent_contracts(live):
     from core.meta_agent import MetaAgent, TOOL_DEFINITIONS

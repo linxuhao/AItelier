@@ -8,16 +8,22 @@ import re
 # ── the provisional marker, and the TWO producers that stamp it ────────────
 #
 # `purpose: provisional_round_feedback` says "this round's measurement was
-# provisional". Two producers write it, and they mean DIFFERENT things:
+# provisional". Three write sites author it, and they mean DIFFERENT things:
 #
 #   * `round_feedback.run_feedback` — the report IS the feedback round. Its
 #     `passed` is False BY CONSTRUCTION (a feedback round is not a gate result
 #     at all), and `tests/unit/test_round_feedback.py` pins that answer at
-#     `partial` in eleven parametrized verifier shapes plus two more tests.
+#     `provisional` (`gate_evidence.PROVISIONAL_ROUND`) in thirteen
+#     parametrized verifier shapes plus two more tests. That word used to be
+#     `partial`, which is now the NODE-GATE word and says a different fact.
 #   * `run_tests` — the report IS a test report whose repository-gate coverage
 #     was provisional (the stamp beside `_retained_coverage`'s refusal). Its
 #     `passed` is the real pytest outcome and can be False, and that red
 #     belongs to the implementer who has to repair it.
+#   * the playtest planning/contract-error fallback in
+#     `aitelier/tools/godot_playtest/impl.py` — the feedback round's own report,
+#     written when `run_feedback`'s entry cannot plan or read the contract. It
+#     means what the first producer means, and it writes the same answer.
 #
 # The purpose VALUE cannot tell them apart — one reader that tried to classify
 # first softened every feedback report — so the marker ALSO carries the name of

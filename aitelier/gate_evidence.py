@@ -53,6 +53,52 @@ ABSENCE_ISOLATION = "isolation"               # the executor refused (or lost) i
 ABSENCE_TICKET = "ticket"                     # run-owned ticket/snapshot not prepared
 ABSENCE_RAISED = "raised"                     # the project's own run raised
 
+# THE TWO FACTS THIS VOCABULARY KEEPS APART — one word each, and they are two
+# words because they are two facts (`iss-98467b372f0c4cb7` item 2).
+#
+# They shared ONE word (`partial`) until 2026-11-06, so a consumer that wanted
+# to refuse "some node project was not measured" could not say it with the
+# state name alone: the same answer belonged to a report that measured nothing
+# of the kind and was supposed to continue. The two answers stay separately
+# expressible, and neither changes the path it selects:
+#
+#   * `partial` (NODE_GATE_PARTIAL) — a NODE GATE that measured SOME of a
+#     repository's projects and could not measure others, beside an honestly
+#     green `passed`. `report_state` refuses to call that a pass; the shipped
+#     configs route it to the terminal that NAMES the partial gate
+#     (`node_gate_incomplete`), and the audit files it as incomplete coverage.
+#     See `release_disposition` for why it parks instead of releasing.
+#   * `provisional` (PROVISIONAL_ROUND) — a PROVISIONAL DIAGNOSTICS ROUND: a
+#     report stamped `purpose: provisional_round_feedback` by a producer that
+#     measured no red (see `_provisional_red_is_measured`). It is not a gate
+#     verdict at all, it is SUPPOSED to continue, and `release_disposition`
+#     answers it `unresolved` — a park, never a repair and never a pass. When
+#     the two facts were split, only the WORD this one answers changed: every
+#     path it selects is the path it selected under the shared label, in both
+#     shipped configs and in `release_disposition`.
+#
+# Named here, once, because a PRODUCER (which writes the word on a report it
+# authors) and a READER (which matches it) must move together: the two shipped
+# producers of the marker import `PROVISIONAL_ROUND` from this module instead
+# of spelling the string again.
+#
+# THREE WRITE SITES author a report that carries the provisional marker:
+# `aitelier/round_feedback.py` (the feedback round; the marker at `:210`, the
+# state word at `:221`), the planning/contract-error fallback in
+# `aitelier/tools/godot_playtest/impl.py` (the marker at `:803`, the state word
+# at `:805`), and the stamp in `aitelier/tools/run_tests/impl.py` (`:3393`). The
+# first two write `PROVISIONAL_ROUND` as the state word, imported from this
+# module rather than spelled. The third writes the marker and its producer name
+# but no state word: the coverage it checks comes from a gate manifest (around
+# `:1723-1727`), and `stamp_report` DERIVES its word, which is
+# `PROVISIONAL_ROUND` unless the report's own pytest leg measured a red. The
+# state word is always DERIVED from the marker, never read off the label, which
+# is why `_write_state` can rename an older producer's `partial` label without
+# losing information. `partial` remains the NODE GATE's word for a project it
+# could not measure; that is the reason the two answers were split.
+NODE_GATE_PARTIAL = "partial"
+PROVISIONAL_ROUND = "provisional"
+
 
 def _read_json(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -138,6 +184,16 @@ def _write_state(report: dict, state: str) -> None:
     sides together. This is a deliberate consequence and not a side effect —
     a label that reads back differently is a label that lost information, and
     no consumer has to know which labels those are.
+
+    THE ONE RENAME THE SPLIT MADE goes through this same rule, not around it.
+    A report stamped `purpose: provisional_round_feedback` by a producer that
+    measured no red used to answer `partial`; it now answers `PROVISIONAL_ROUND`
+    (`provisional`), so the stamp rewrites an older producer's `partial` label
+    with the new word. Nothing is lost by that write, and the fixpoint is what
+    proves it: the word is DERIVED from the marker, never read off the label, so
+    the report reads `provisional` before the write and after it. A report whose
+    node gate left a project unmeasured is a different fact and keeps `partial`
+    (`NODE_GATE_PARTIAL`) — written, read back, and unchanged.
     """
     had_label = "evidence_state" in report
     prior = report.get("evidence_state")
@@ -191,12 +247,13 @@ def restate_classification(report: dict, *, create: bool) -> None:
       into `"release_evidence"`;
     * `aitelier/tools/godot_vision/impl.py:775` and `:790` — the same two
       shapes for `vision_report.json`;
-    * `round_feedback` (`aitelier/round_feedback.py:210`) and the playtest
-      fallback (`aitelier/tools/godot_playtest/impl.py:797`) write constant
+    * `round_feedback` (`aitelier/round_feedback.py`) and the playtest
+      fallback (`aitelier/tools/godot_playtest/impl.py`) write constant
       producer labels — `"release_disposition": "unresolved"`,
-      `"evidence_state": "partial"` — on a report they AUTHOR: they are its
-      producer, so those words are a first answer and never a restatement of
-      an earlier producer's.
+      `"evidence_state": PROVISIONAL_ROUND` (`provisional`; the literal was
+      `partial` until the two facts were split) — on a report they AUTHOR: they
+      are its producer, so those words are a first answer and never a
+      restatement of an earlier producer's.
 
     None of those is the defect this function exists for, and the reason is
     one reason: they put a disposition on a RETURNED result, or a constant
@@ -320,8 +377,13 @@ def _absence_state(report: dict, raw_passed) -> str | None:
     # no absence at all. `passed` is honestly true there (the measured projects
     # passed), so the report needs a state of its own rather than the word
     # "passed". Anything that DID fail is handled below, unchanged.
+    #
+    # THIS IS `partial` AND NOTHING ELSE IS. The word used to be shared with a
+    # provisional feedback round (see `PROVISIONAL_ROUND`), which is not this
+    # fact and must never be refusable as if it were: a consumer asking "was a
+    # node project left unmeasured?" reads this word and gets this fact only.
     if report.get("node_unmeasured") and raw_passed is True:
-        return "partial"
+        return NODE_GATE_PARTIAL
     markers = [name for name in _SKIP_MARKERS if report.get(name)]
     unrun = (report.get("unrun") is True or report.get("ran") is False
              or report.get("executed") is False or status in _UNRUN_STATUSES)
@@ -353,13 +415,15 @@ def _provisional_red_is_measured(report: dict) -> bool:
 
       * `round_feedback.run_feedback` builds its report with `passed: False` BY
         CONSTRUCTION. A feedback round is not a gate result, there is nothing
-        for an implementer to repair in it, and `partial` is its shipped,
-        pinned answer — so it must never take this branch.
+        for an implementer to repair in it, and `provisional` is its shipped,
+        pinned answer (`PROVISIONAL_ROUND`; it was `partial` while that word
+        also named an unmeasured node project) — so it must never take this
+        branch.
       * `run_tests` stamps the same marker on ITS report when the round's
         repository-gate coverage was provisional, and there `passed` is the
-        real pytest outcome. A red there was answered `partial` by the marker
-        alone, i.e. softened into "not a red", and never reached the repair
-        path that a red is for.
+        real pytest outcome. A red there was answered by the marker alone, i.e.
+        softened into "not a red", and never reached the repair path that a red
+        is for.
 
     THE QUESTION IS "WAS A RED MEASURED?", NOT "IS ANY ABSENCE PRESENT?".
     Answering the second question was wrong in both directions, and both were
@@ -373,7 +437,8 @@ def _provisional_red_is_measured(report: dict) -> bool:
         (`run_tests` marks a whole-report `skipped: true` when the Node gate
         could not be measured) made the vocabulary answer
         `infrastructure_unavailable`, and the pytest failure the report still
-        carries was answered `partial` — the exact softening this node is
+        carries was answered `partial` — the word a provisional round shared
+        with an unmeasured node gate then, and the exact softening this node is
         about.
 
     So the evidence is a POSITIVE WITNESS the producer wrote about ITS OWN
@@ -384,8 +449,8 @@ def _provisional_red_is_measured(report: dict) -> bool:
 
     WHAT THE CLASSIFICATION DOES NOT DEPEND ON, and must not be made to. This
     function reads no state vocabulary at all, so what `stamp_report` annotates
-    a report with — `partial` over a producer's `not_run`, `unattributable` or
-    `infrastructure_unavailable` — cannot change the answer it gives. That
+    a report with — `provisional` over a producer's `not_run`, `unattributable`
+    or `infrastructure_unavailable` — cannot change the answer it gives. That
     independence is load-bearing twice over: the same rename used to turn an
     absence into a failure for a LATER READER of the file (`audit_evidence`
     called the stamped `not_run`/`skipped` report `failed` and a release read
@@ -406,16 +471,25 @@ def _provisional_red_is_measured(report: dict) -> bool:
 
 
 def report_state(report: dict) -> str:
-    """Return one release state without collapsing distinct non-pass outcomes."""
+    """Return one release state without collapsing distinct non-pass outcomes.
+
+    THE PROVISIONAL MARKER AND THE UNMEASURED NODE GATE ARE TWO ANSWERS. They
+    shared `partial` until 2026-11-06 and no longer do: a provisional round
+    answers `PROVISIONAL_ROUND` here, an unmeasured node project keeps
+    `NODE_GATE_PARTIAL` (see both constants at the top of this module for why
+    one word could not say both). Only the WORD moved — `release_disposition`
+    answers `unresolved` for either, so a provisional round parks exactly where
+    it parked before and the configs select the path they selected before.
+    """
     raw_passed = report.get("passed", report.get("all_passed"))
     measured_red = _provisional_red_is_measured(report)
-    # The provisional marker is answered `partial` BEFORE any classification,
-    # because a feedback round has no gate verdict to classify — with ONE
-    # exception, the reason this branch is not a bare string compare: a
+    # The provisional marker is answered `PROVISIONAL_ROUND` BEFORE any
+    # classification, because a feedback round has no gate verdict to classify —
+    # with ONE exception, the reason this branch is not a bare string compare: a
     # `run_tests` report whose own pytest leg failed is a red, and `passed` is
     # the real outcome there. See `_provisional_red_is_measured`.
     if report.get("purpose") == PROVISIONAL_PURPOSE and not measured_red:
-        return "partial"
+        return PROVISIONAL_ROUND
     if raw_passed is not True and raw_passed is not False:
         return "unreadable"
     # A red this report MEASURED is classified as a red, so the absence
@@ -508,6 +582,17 @@ def release_disposition(report: dict) -> str:
     `known_failure` below. An unlabelled marker keeps the older, stricter
     answer.
 
+    THE STATE WORD A PROVISIONAL ROUND ANSWERS IS ITS OWN (split 2026-11-06).
+    It used to be `partial`, the same word a node gate answers when it left a
+    project unmeasured — two facts one word, so a consumer could not refuse the
+    second without also refusing the first (`iss-98467b372f0c4cb7` item 2). A
+    provisional round now answers `PROVISIONAL_ROUND` (`provisional`) and an
+    unmeasured node project keeps `NODE_GATE_PARTIAL` (`partial`). THIS
+    FUNCTION DID NOT MOVE WITH THE WORD, on purpose: it answers `unresolved` for
+    both, before it ever reads `report_state` for the provisional shape, so
+    every path a provisional round selects is the path it selected under the
+    shared label.
+
     "Measured" is the producer's own witness (`returncode: 1` from a pytest
     session that ran to the end), not the absence of a doubt: neither another
     leg being unavailable nor an absence the stamp renamed may soften it, and
@@ -532,7 +617,9 @@ def release_disposition(report: dict) -> str:
     preserved by this decision: an absence never reads as a pass to any
     consumer (this function returns "unresolved", never "passed"), and a
     measured red is not softened beside it (`partial` is reachable only when
-    `passed` is honestly True, so a failed project arrives here as `failed`).
+    `passed` is honestly True, so a failed project arrives here as `failed`;
+    `provisional` is reachable only for a report whose producer measured no red,
+    and such a report is `unresolved` here whatever its `passed` says).
 
     What "not softened" means exactly, because an earlier version of this
     paragraph overstated it and a reviewer measured the difference: `failed`
@@ -673,6 +760,21 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
         if entry["passed"]:
             continue
         verdict["passed"] = False
+        # EVERY non-pass word needs its row here. The default is `failed_gates`,
+        # which CHARGES the code — so a word that starts arriving unlisted is
+        # silently read as a product failure. That is exactly what the split of
+        # `partial` would have done to a provisional round had the new word not
+        # been added beside it.
+        #
+        # Both coverage words keep the SAME bucket on purpose. The bucket is an
+        # aggregate (`coverage_incomplete` when the audit is read as a whole) and
+        # nothing routes on it — `release_disposition` reads `report_state`
+        # directly, and `verify_evidence` does not even return this list — while
+        # the entry's own `state` is what a consumer reads to tell the two facts
+        # apart, and that is where the split had to land. A provisional round IS
+        # incomplete coverage (that is what "provisional" means here), so moving
+        # it to a bucket of its own would rename the aggregate every existing
+        # reader of a provisional report already sees for no gain.
         bucket = {
             "stale": "stale_reports", "unreadable": "stale_reports",
             "missing": "missing_reports", "skipped": "skipped_gates",
@@ -680,7 +782,8 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
             "pending": "pending_gates", "blind": "blind_gates",
             "infrastructure_unavailable": "infrastructure_unavailable_gates",
             "coverage_incomplete": "incomplete_coverage_gates",
-            "partial": "incomplete_coverage_gates",
+            NODE_GATE_PARTIAL: "incomplete_coverage_gates",
+            PROVISIONAL_ROUND: "incomplete_coverage_gates",
         }.get(entry["state"], "failed_gates")
         verdict[bucket].append(entry)
 
@@ -732,11 +835,12 @@ def _audit_one(graph_dir: Path, step_id: str, filename: str, run_id: str,
         entry["purpose"] = report["purpose"]
         entry["selected_state"] = report.get("selected_state")
         # WHICH producer stamped it. The audit entry has to say this because
-        # `state` no longer identifies the shape on its own: a feedback round
-        # arrives here as `partial` (it is not a gate result), while a
-        # `run_tests` report whose pytest leg failed arrives as `failed`.
-        # Carried only when the report names one, so an older report cannot
-        # acquire a producer it never had.
+        # `state` alone does not identify the producer: a feedback round arrives
+        # here as `provisional` (it is not a gate result at all), while a
+        # `run_tests` report whose pytest leg failed arrives as `failed`, and
+        # `run_tests`' provisional-but-measured shapes arrive as whatever their
+        # evidence answers. Carried only when the report names one, so an older
+        # report cannot acquire a producer it never had.
         producer = provisional_producer(report)
         if producer:
             entry[PROVISIONAL_PRODUCER] = producer

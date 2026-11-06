@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+EXPORT = "/opt/aitelier-gate-imports"
 TARGET = "/opt/aitelier-gate-imports/docker/godot/godot_harness.py"
 
 
@@ -44,3 +45,60 @@ def test_no_other_opt_copy_of_repository_source_is_left_unpinned():
     assert not offenders, (
         "these COPY lines bake repository source outside /app without pinning a mode:\n  "
         + "\n  ".join(offenders))
+
+
+def _run_commands(text: str) -> list[str]:
+    """Every RUN command, with its `\\` continuations joined into one line."""
+    commands: list[str] = []
+    current: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if current is None:
+            if stripped.upper().startswith("RUN "):
+                current = stripped[4:]
+            else:
+                continue
+        else:
+            current = current + " " + stripped
+        if current.endswith("\\"):
+            current = current[:-1].rstrip() + " "
+            continue
+        commands.append(" ".join(current.split()))
+        current = None
+    if current is not None:
+        commands.append(" ".join(current.split()))
+    return commands
+
+
+def test_the_import_tree_is_searchable_and_not_only_the_file():
+    """A pinned FILE inside an untraversable DIRECTORY is still unreadable.
+
+    `COPY --chmod=0644 <file> /opt/.../godot/<file>` also applies 0644 to the
+    parent directories BuildKit creates for it. Measured on an image built from
+    82bb9718f7 (2026-11-06, image e177dafdb87f): /opt/aitelier-gate-imports,
+    /opt/aitelier-gate-imports/docker and .../docker/godot all came out
+    0644 root:root, so as uid 1000 `ls` answered "Permission denied" and
+    `import docker.godot.godot_harness` was a ModuleNotFoundError - a worse
+    failure than the 0600 file the neighbouring test fixed, while that test
+    stayed green because the Dockerfile does say `--chmod=0644`.
+
+    This file reads the Dockerfile because the alternative is finding out from
+    a deployed gate. What it can assert is the normalisation step; the modes
+    actually baked can only be measured inside a built image, and that
+    measurement belongs to the deployment that builds it. Accepts either shape:
+    a `chmod 0755 <dirs>` (or `install -d -m 0755 <dirs>`) naming all three
+    directories, plus the package markers pinned readable.
+    """
+    commands = _run_commands((ROOT / "Dockerfile").read_text())
+    directories = (EXPORT, f"{EXPORT}/docker", f"{EXPORT}/docker/godot")
+    for directory in directories:
+        assert any(directory in command.split() and "0755" in command
+                   for command in commands), (
+            f"nothing normalises {directory} to 0755: a 0644 directory cannot be "
+            "traversed, so the gate client inside it is unreadable even though the "
+            "file itself is 0644.\nRUN commands seen:\n  " + "\n  ".join(commands))
+    for marker in (f"{EXPORT}/docker/__init__.py", f"{EXPORT}/docker/godot/__init__.py"):
+        assert any(marker in command.split() and "0644" in command
+                   for command in commands), (
+            f"{marker} is created by `touch` and inherits the build umask; pin it 0644.")
+

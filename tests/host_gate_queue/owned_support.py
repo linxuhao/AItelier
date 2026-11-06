@@ -16,11 +16,14 @@ import tarfile
 import threading
 import time
 
+import pytest
+
 TIMEOUT = 20
 BASE = "8a755972cc1733441c37408689d96fefe9ff28e7"
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = json.loads(Path(__file__).with_name("owned-fixture.json").read_text())
 SHA = FIXTURE["git_objects"]["source_sha"]
+VENV_REQUIREMENT = "GATE_QUEUE_TEST_VENV_PYTHON must name the existing read-only CLI venv interpreter"
 
 CHILD = '''#!/usr/bin/env python3
 import json, os, sys
@@ -76,6 +79,11 @@ def checksum(raw):
 
 class Harness:
     def __init__(self, path):
+        # An absent capability is a skip that names the requirement (shown by -rs).
+        # It is checked before any disposable tree exists, so a skip leaves nothing behind.
+        self.python = os.environ.get("GATE_QUEUE_TEST_VENV_PYTHON")
+        if not self.python:
+            pytest.skip(VENV_REQUIREMENT)
         path.mkdir(parents=True, exist_ok=True)
         self.path, self.root, self.reports = path, path / "queue", path / "reports"
         self.aroot, self.home = path / "aroot", path / "home"
@@ -89,10 +97,11 @@ class Harness:
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(self.aroot, filter="data")
         self.source = self.aroot / "scripts/gate_queue.py"
-        self.python = os.environ.get("GATE_QUEUE_TEST_VENV_PYTHON")
         self.ordinary = os.environ.get("GATE_QUEUE_TEST_ORDINARY_PYTHON", "/usr/bin/python3")
-        if not self.python or not Path(self.python).is_absolute() or not Path(self.python).is_file():
-            raise RuntimeError("GATE_QUEUE_TEST_VENV_PYTHON must name the existing read-only CLI venv interpreter")
+        # A supplied value that does not name a file is a broken setup, not an absent
+        # capability, so it stays an error. Only an unset/empty variable skips above.
+        if not Path(self.python).is_absolute() or not Path(self.python).is_file():
+            raise RuntimeError(VENV_REQUIREMENT)
         self.timeline, self.requests, self.processes, self.controls = [], [], [], {}
         self.child_pidfds = []
         self.nodes, self.attempts, self.evidence = {}, {}, {}

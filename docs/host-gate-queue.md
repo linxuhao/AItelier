@@ -185,8 +185,11 @@ python3 -m pytest -c tests/host_gate_queue/pytest.ini \
 The owned suite exports only six required tracked files from exact `HEAD` into a
 disposable root (queue, package initializers, client, credentials and datadir;
 about 95 KiB, with no full-repository copy per test), uses the real
-APIClient/httpx/credential modules and a loopback stdlib HTTP fixture. Missing
-interpreter/modules or an escaped credential path is an error, never a skip.
+APIClient/httpx/credential modules and a loopback stdlib HTTP fixture.
+An unset or empty `GATE_QUEUE_TEST_VENV_PYTHON` makes the owned suite skip,
+naming that variable as the requirement: an absence, not a pass and not a
+failure. A value that names a missing interpreter or missing modules, or an
+escaped credential path, is still an error, never a skip.
 It builds the accepted literal harmless Git objects and five registrations,
 exercises real CLI transitions and a pipe-controlled harmless child, and prints
 nonempty timelines and literal request transcripts without token bytes. All

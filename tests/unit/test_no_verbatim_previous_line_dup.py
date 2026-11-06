@@ -54,6 +54,9 @@ TEST_INTENTIONAL_REPEATS = [
     ("tests/unit/test_knowledge_sync.py", '_call(repo, ws, "proj1")', 1),
     ("tests/unit/test_native_empty_response.py", 'assert g.generate_native(MSGS).text == "visible answer"', 1),
     ("tests/unit/test_postcompact_driver_hook.py", '"driver_whoami", "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",', 1),
+    # Two empty dicts ARE two separate parameters of this param case (a gate
+    # report and the flags beside it); the repeat is the point, not a splice.
+    ("tests/unit/test_provisional_round_cannot_conclude_success.py", '{},', 1),
     ("tests/unit/test_public_read_hardening.py", '_read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)', 1),
     ("tests/unit/test_quota_hold.py", 'sched.tick_log("p", outcome)', 1),
     ("tests/unit/test_route_rotation.py", 'assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]', 1),
@@ -105,7 +108,7 @@ def test_named_test_repeats_are_pinned_and_current():
         f"only-in-tree={sorted(set(derived) - set(listed))} "
         f"only-in-list={sorted(set(listed) - set(derived))} "
         f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
-    assert len(TEST_INTENTIONAL_REPEATS) == 19
+    assert len(TEST_INTENTIONAL_REPEATS) == 20
 
 
 

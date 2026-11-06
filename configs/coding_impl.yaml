@@ -55,6 +55,16 @@ end_conditions:
     - type: node_reached
       node: "test_gate_report_unattributable"
       result: "failed"
+    # A round whose gate coverage was PROVISIONAL (`run_tests` says so itself:
+    # `purpose: provisional_round_feedback`, `full_test_passed: false`) is not
+    # full test evidence, so a green pytest leg over it may not conclude the
+    # run. Named here as a FAILED terminal rather than parked like an absence:
+    # `gate_evidence` answers this shape `partial` / `unresolved` (a release
+    # needs verification, not a repair) and no re-run of the gate turns a
+    # provisional declaration into a full one — see `test_evidence_provisional`.
+    - type: node_reached
+      node: "test_evidence_provisional"
+      result: "failed"
 
 steps:
   - id: "baseline"
@@ -241,6 +251,43 @@ steps:
         match: { field: "repo_gate_absent", value: true }
       - to: "failed_candidate_evidence"
         match: { field: "retained_red_candidate", value: true }
+      # A PROVISIONAL ROUND CANNOT CONCLUDE SUCCESS, whatever pytest said.
+      #
+      # `run_tests` stamps `purpose: provisional_round_feedback` and
+      # `full_test_passed: false` on ITS OWN report whenever the repository
+      # gate's coverage was provisional, and returns the same verdict
+      # (`aitelier/tools/run_tests/impl.py`). Nothing in this graph read either
+      # fact: the `test_evidence` schema below requires only
+      # `passed`/`summary`/`failures`, so a provisional round whose PYTEST leg
+      # was green passed every validator here and went `test_outcome` -> `done`
+      # — the run concluded success on evidence its own report says is not full
+      # test evidence (`gate_evidence.report_state` answers that shape
+      # `partial`, `release_disposition` `unresolved`). The acquisition refuses
+      # a provisional coverage as `unmeasured` today, so what this edge closes
+      # is the CONFIG's half of it: the graph no longer depends on that upstream
+      # refusal, and a report carrying the marker can never conclude the run.
+      #
+      # The match is on the producer's own RETURN (`full_test_passed`), not on
+      # `test_report.json`: `from_file` is resolved against the EVALUATING
+      # step's own output dir and the engine's `_flags_match` raises on a
+      # report that parses to anything but an object — the same two reasons the
+      # absence edge above is a flag match.
+      #
+      # BOTH terms are load-bearing, and the BARE-KEY form is deliberate:
+      #   * `full_test_passed: false` is the producer's own statement that this
+      #     round is not full evidence. A complete round returns it as None and
+      #     carries no such key at all, and a non-delivery return (`written:
+      #     None`) does not carry it either — so neither can match here.
+      #   * `passed: true` keeps a MEASURED RED on its repair route. A
+      #     provisional red carries `full_test_passed: false` as well, and
+      #     `gate_evidence` answers it `failed` / `known_failure`: it is the
+      #     implementer's to fix, so it must reach `test_outcome` and loop back
+      #     to `implement`, never this terminal. Written as
+      #     `{field: ..., value: ...}` this match would silently drop the
+      #     `passed` term: `_flags_match` returns on `field`/`value` alone and
+      #     never reads the rest of the dict.
+      - to: "test_evidence_provisional"
+        match: { full_test_passed: false, passed: true }
       - to: "test_evidence"
         match: { written: "test_report.json" }
       - to: "test_evidence_missing"
@@ -298,6 +345,22 @@ steps:
         max_loop: 3
 
   - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal: the tests were green and `run_tests` said the round's repository
+  # gate coverage was PROVISIONAL — its own report carries
+  # `purpose: provisional_round_feedback` and `full_test_passed: false`, i.e.
+  # it is not full test evidence, so the run may not conclude `done` on it.
+  # `gate_evidence` answers this shape `partial` and `release_disposition`
+  # `unresolved`, which is a release that needs VERIFICATION, not a repair:
+  # there is nothing here for the implementer to fix, and a re-run of the gate
+  # cannot turn a provisional declaration into a full one, so this is neither a
+  # loop-back nor a park. It is a named terminal (see the end_conditions above),
+  # so reaching it fails the run saying which shape it stopped at, instead of
+  # reporting success on evidence the report itself disowns.
+  - id: "test_evidence_provisional"
     step_type: "gate"
     transitions:
       - to: null

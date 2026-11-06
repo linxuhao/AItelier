@@ -141,6 +141,23 @@ class TestV2ConfigLoading:
             # on `test_evidence_missing`.
             ("failed_candidate_evidence",
              {"field": "retained_red_candidate", "value": True}),
+            # A PROVISIONAL round cannot conclude `done`: `run_tests` says of its
+            # own report that it is not full test evidence
+            # (`full_test_passed: false`, `purpose:
+            # provisional_round_feedback`), and `test_evidence`'s schema reads
+            # none of that. The match is TWO direct flag keys on the producer's
+            # RETURN — `full_test_passed: false` (the provisional fact) and
+            # `passed: true` (the leg was green, so this is not a red the
+            # implementer must repair). It has to be the bare-key form: the
+            # engine's `_flags_match` returns on `{field, value}` alone and
+            # would drop the `passed` term, sending a measured red to the
+            # provisional terminal. It sits after the absence edges (those
+            # shapes carry `full_test_passed: false` too and still park) and
+            # before `written`, because the validator below ACCEPTS this shape.
+            # tests/unit/test_provisional_round_cannot_conclude_success.py drives
+            # the real producer, the real validator and this order.
+            ("test_evidence_provisional",
+             {"full_test_passed": False, "passed": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
@@ -170,25 +187,30 @@ class TestV2ConfigLoading:
         ]
 
     def test_coding_impl_end_condition_is_outside_the_loop(self):
-        """Success and the two evidence failures have distinct loop-external terminals."""
+        """Success and the evidence failures have distinct loop-external terminals."""
         graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
         conditions = graph.end_conditions.conditions
         # `done` (green) and `done_candidate_tests_failed` (a MEASURED failure the
-        # run may not repair away) complete the run; the two evidence terminals
-        # fail it. `done_candidate_tests_failed` is listed here because it IS an
-        # end condition, and asserting the list is what notices an accidental
-        # fourth terminal — the list had been red since that one landed.
+        # run may not repair away) complete the run; the evidence terminals fail
+        # it. `done_candidate_tests_failed` is listed here because it IS an end
+        # condition, and asserting the list is what notices an accidental extra
+        # terminal — the list had been red since that one landed.
+        # `test_evidence_provisional` is the third evidence terminal: `run_tests`
+        # said its own report is not full test evidence (a provisional round), so
+        # a green pytest leg over it fails the run instead of completing it.
         assert [(c.type, c.node, c.result) for c in conditions] == [
             ("node_reached", "done", "completed"),
             ("node_reached", "done_candidate_tests_failed", "completed"),
             ("node_reached", "test_evidence_missing", "failed"),
             ("node_reached", "test_gate_report_unattributable", "failed"),
+            ("node_reached", "test_evidence_provisional", "failed"),
         ]
         # `implement` is NOT a terminal: the loop it sits in is bounded by
         # `test_outcome -> implement max_loop: 3`, so reaching it never ends a run.
         assert all(c.node != "implement" for c in conditions)
         for terminal in ("done", "test_evidence_missing",
                          "test_gate_report_unattributable",
+                         "test_evidence_provisional",
                          "done_candidate_tests_failed"):
             node = next(s for s in graph.steps if s.id == terminal)
             assert node.step_type == "gate"

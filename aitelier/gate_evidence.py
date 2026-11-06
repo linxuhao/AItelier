@@ -153,11 +153,65 @@ def _write_state(report: dict, state: str) -> None:
 def restate_classification(report: dict, *, create: bool) -> None:
     """Write the derived answers back into `report`, by the one rule.
 
-    Every writer that derives `evidence_state` or `release_evidence` goes
-    through here, so they cannot disagree about an absence: both answers are
-    read first (`_classify`), and the label goes through `_write_state`, which
-    keeps the producer's own absence word when replacing it would change
-    `report_state`.
+    Both answers are read first (`_classify`), and the label goes through
+    `_write_state`, which keeps the producer's own absence word when replacing
+    it would change `report_state`. That is the rule this function holds. The
+    inventory of who comes through it — and who still derives the answer
+    without it — is below, because an earlier version of this docstring
+    claimed that EVERY such writer came through here. That claim was false,
+    and the writers it left out are named rather than waved at.
+
+    Writers that DO go through the one rule:
+
+    * `_stamp_classification`, called from `stamp_report` (and so from
+      `stamp_file`), with `create=True` — it stamps a report a producer
+      already wrote;
+    * `run_tests._commit_baseline`'s write-failure branch
+      (`aitelier/tools/run_tests/impl.py:2650`) with `create=False` — it
+      restates a stored report in place, adding no field the producer did not
+      write.
+
+    What this rule does not cover. These writers derive the answer themselves
+    and never call this function:
+
+    * `aitelier/tools/run_tests/impl.py:3081` and `:3622` — each return path
+      puts `release_disposition(report)` on the dict the tool RETURNS, the
+      flags the engine merges into the step;
+    * `aitelier/tools/run_tests/impl.py:2922` — `_report_write_failure`
+      writes a CONSTANT `"release_evidence": "unresolved"` beside
+      `"evidence_state": "infrastructure_unavailable"` on the return payload
+      for a report that could not be written at all;
+    * `upstream_failed_report` in this module — it asks
+      `release_disposition` of a fresh one-key dict (`passed: False` plus the
+      upstream's state) in order to build a NEW producer report;
+    * `aitelier/tools/godot_compile/impl.py:382` and `:401` — the
+      upstream-blocked return carries `release_disposition(compile_report)`,
+      and the stamped path folds the two per-report dispositions (`:399`)
+      into `"release_evidence"`;
+    * `aitelier/tools/godot_vision/impl.py:775` and `:790` — the same two
+      shapes for `vision_report.json`;
+    * `round_feedback` (`aitelier/round_feedback.py:210`) and the playtest
+      fallback (`aitelier/tools/godot_playtest/impl.py:797`) write constant
+      producer labels — `"release_disposition": "unresolved"`,
+      `"evidence_state": "partial"` — on a report they are CREATING, before
+      anything stamps it.
+
+    None of those is the defect this function exists for, and the reason is
+    one reason: they put a disposition on a RETURNED result, or a constant
+    producer label on a FRESH report, instead of RESTATING a producer's own
+    stored word. The thing that can be degraded is a stored report — its
+    producer said `not_run` (green pytest leg, repository gate unmeasured),
+    the stamp replaced that with `skipped`, and every later reader answered
+    `failed` / `known_failure`. Such a report never passes through any writer
+    above: they either return a dict without writing a report, or write a
+    report whose every label they authored themselves, which is stamped
+    afterwards. The audited evidence is the FILE (`_audit_one` and
+    `first_upstream_blocker` read files), so a returned disposition is never
+    re-derived as evidence and cannot disagree with a file it never came from.
+    Producers that write their own `evidence_state` —
+    `run_tests/impl.py:3407` (`unattributable`) and `:3442` (`not_run`),
+    `docker/godot/godot_harness.py:1209` (`infrastructure_unavailable`) — are
+    writing the word this rule PRESERVES, not deriving one.
 
     `create` says whether a field the report does not already carry may be
     added. The stamp passes `create=True` and writes both. A writer that only

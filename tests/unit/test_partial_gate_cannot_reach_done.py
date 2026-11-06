@@ -250,3 +250,37 @@ def test_terminal_is_a_gate_with_no_outgoing_edge_and_ends_failed(config_name):
     failed = [c for c in graph.end_conditions.conditions
               if c.type == "node_reached" and c.node == PARTIAL_TARGET]
     assert failed and all(c.result == "failed" for c in failed)
+
+
+def test_the_flag_is_false_when_the_only_project_was_not_measured(tmp_path, monkeypatch):
+    """The single-project path returns a node dict with `skipped` and NO
+    `unmeasured` key, so a flag computed from `unmeasured` alone says "complete"
+    about a gate that measured nothing. Round 2's mutant that dropped the
+    `skipped` term survived 147 tests; this is the path that distinguishes it."""
+    repo = tmp_path / "repo"
+    _project(repo / "web")
+    (repo / "tests").mkdir(parents=True, exist_ok=True)
+    (repo / "tests" / "test_probe_ok.py").write_text(
+        "def test_probe_ok():\n    assert True\n")
+
+    from tests.gate_fixture import install_entry_executor
+
+    install_entry_executor(monkeypatch)
+    inner = rt.repository_executor.execute
+
+    def execute(repo_dir, args, timeout, **kw):
+        if not kw.get("profile"):
+            return inner(repo_dir, args, timeout, **kw)
+        raise rt.repository_executor.IsolationUnavailable(
+            "no bounded execution profile for this command (fixture)")
+
+    monkeypatch.setattr(rt.repository_executor, "execute", execute)
+    out = tmp_path / "out"
+    rt.run_tests(project_root=str(repo), out_dir=str(out), repo_gate=False,
+                 state_dir=str(tmp_path / "state"))
+    report = json.loads((out / "test_report.json").read_text())
+
+    node = report["node"]
+    assert node["skipped"] is True
+    assert "unmeasured" not in node, node.keys()
+    assert report["node_gate_complete"] is False, report["node_gate_complete"]

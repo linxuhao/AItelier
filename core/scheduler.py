@@ -1210,6 +1210,48 @@ async def _execute_skillflow_tick(project_id: str, loop):
         lock.release()
 
 
+def _parked_checkpoint(sf, run_id: str) -> dict | None:
+    """The checkpoint a PAUSED run is waiting on, or None if the run is not parked.
+
+    Only `status == "paused"` decides the answer, and it is asked FIRST: a run
+    that is not parked must fall through to the ordinary tick untouched, because
+    that path is where a run whose recorded worktree is gone is supposed to fail
+    closed (`core/run_isolation.resolve_for_resolver` refuses to substitute the
+    shared checkout, and refusing is the whole point of the module).
+
+    Everything else in the returned dict is decoration on the tick-log line —
+    which step, its label, since when — and every piece of it is best-effort: a
+    failure to read the label must never turn a parked tick back into a raising
+    one, and a pause stated without its label is still a stated pause.
+
+    The step is inferred the way `api/meta_routers.get_pending_checkpoint`
+    infers it — the most recent COMPLETED step whose node is a checkpoint —
+    because `current_node` is the step AFTER the checkpoint and is NULL
+    whenever a reaped claim or a restart cleared it. `updated_at` is the pause
+    moment: skillflow bumps it in the same statement that sets status='paused'.
+    """
+    try:
+        run = sf.get_run(run_id) or {}
+    except Exception:
+        return None
+    if run.get("status") != "paused":
+        return None
+    waiter = {"step": "", "label": "", "since": run.get("updated_at") or ""}
+    try:
+        resolver = sf._get_resolver_for_run(run_id)
+        for s in reversed(sf.get_steps(run_id) or []):
+            if s.get("status") != "completed":
+                continue
+            node = resolver.get_node(s["step_id"]) if resolver else None
+            if node and getattr(node, "checkpoint", False):
+                waiter["step"] = s["step_id"]
+                waiter["label"] = node.checkpoint_label or s["step_id"]
+                break
+    except Exception:
+        pass          # a pause named by its timestamp beats no line at all
+    return waiter
+
+
 async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
     held = _quota_hold_remaining()
@@ -1260,6 +1302,38 @@ async def _run_skillflow_tick(project_id: str, loop):
     # This is a safety net for edge cases.
     if _has_active_claim(sf, run_id):
         tick_log(project_id, "active_claim", run=run_id[:8])
+        return
+
+    # A run parked at a human checkpoint has nothing for this tick to advance,
+    # and advancing it anyway is not harmless: skillflow resolves the run's code
+    # path on the way, and for a run whose recorded worktree is gone that
+    # resolution raises by design (core/run_isolation.resolve_for_resolver will
+    # not substitute the shared checkout). The exception escaped the WHOLE tick
+    # into `_on_detached_tick_done`'s `tick_error`, so every poll wrote, per
+    # parked project:
+    #
+    #   2026-11-06T22:29:53Z project=sg-0bfccd9c… outcome=tick_error
+    #     error=run c5d7fc06-… is recorded as worktree in '…/worktrees/…' …
+    #
+    # — two lines every ~5 s for two runs paused at a checkpoint since
+    # 2026-10-31 whose worktrees had since been reaped, which buried the rest of
+    # this log. So state the pause that is being waited on and resolve nothing.
+    # `tick_log` already coalesces `terminal status=paused` PER PROJECT over an
+    # unchanged pause, so an unchanging checkpoint costs one line a minute
+    # instead of twelve a minute; any change in run/step/label/since emits at
+    # once, and any other outcome clears the entry.
+    #
+    # Nothing above this point resolves a code path, and a run that is NOT
+    # parked does not reach this branch at all: it advances, the resolver still
+    # raises for it, and that failure still lands on the tick surface
+    # (`outcome=tick_error`) where it is actionable. This reports a wait; it
+    # does not forgive a broken tree.
+    parked = _parked_checkpoint(sf, run_id)
+    if parked is not None:
+        tick_log(project_id, "terminal", run=run_id[:8], status="paused",
+                 step=parked["step"] or None,
+                 waits=parked["label"] or None,
+                 since=parked["since"] or None)
         return
 
     # An absence must never be charged to the implementer. `observe_run` reads

@@ -64,6 +64,12 @@ def test_shared_autoload_recommends_full_and_does_not_run(world):
     assert report["selected_state"] == "unavailable" and not report["passed"]
 
 
+# THE PINNED ANSWER IS `gate_evidence.PROVISIONAL_ROUND` (`provisional`), the
+# word a feedback round answers. It was `partial` until 2026-11-06, when that
+# word was left to the OTHER fact it also named — a node gate that measured some
+# of a repository's projects and not all of them (`NODE_GATE_PARTIAL`). Do not
+# "restore" this to `partial`: the two facts must stay separately expressible,
+# and `tests/unit/test_partial_gate_cannot_reach_done.py` holds the other side.
 @pytest.mark.parametrize("mutation", ["good", "assert_fail", "zero", "missing", "truncated", "duplicate", "predicate", "unrun", "hard", "spec_error", "dirty", "float_frame", "assert_error"])
 def test_exact_rows_and_hard_polarities_remain_partial(world, mutation):
     repo, _, _, spec, scope, out = world
@@ -88,7 +94,7 @@ def test_exact_rows_and_hard_polarities_remain_partial(world, mutation):
     report = rf.run_feedback(repo, out, scope, spec, {"operation_id": "fixture-owner"}, transport)
     assert report["selected_state"] == ("selected_pass" if mutation == "good" else "selected_fail")
     assert report["passed"] is False and report["full_test_passed"] is False
-    assert ge.report_state(report) == "partial" and ge.release_disposition(report) == "unresolved"
+    assert ge.report_state(report) == ge.PROVISIONAL_ROUND and ge.release_disposition(report) == "unresolved"
     assert json.loads((out / "round_feedback_raw.json").read_text()) == reply or mutation == "missing"
     assert report["raw_artifact"]["sha256"] and report["gate_coverage"] == scope
     with pytest.raises(ValueError, match="first attempt"):
@@ -100,7 +106,7 @@ def test_even_all_selected_feedback_cannot_publish_or_override_release(world):
     scope = full_coverage(head, spec); scope["purpose"] = rf.PURPOSE
     assert publication_scope_refusal(scope)
     report = {"passed": True, "purpose": rf.PURPOSE, "upstream_state": "passed", "gate_coverage": scope}
-    assert ge.report_state(report) == "partial" and ge.release_disposition(report) == "unresolved"
+    assert ge.report_state(report) == ge.PROVISIONAL_ROUND and ge.release_disposition(report) == "unresolved"
 
 
 def test_invalid_scope_and_zero_authored_never_contact_transport(world):
@@ -129,7 +135,7 @@ def test_stamped_goal_audit_keeps_partial_machine_scope(world):
     ge.stamp_report(result, run_id='feedback-fixture', out_dir=str(out), start_cycle=True)
     (out / 'playtest_report.json').write_text(json.dumps(result))
     entry = ge._audit_one(out.parent, 'out', 'playtest_report.json', 'feedback-fixture', result[ge.CYCLE_FIELD])
-    assert entry['state'] == 'partial' and entry['passed'] is False
+    assert entry['state'] == ge.PROVISIONAL_ROUND and entry['passed'] is False
     assert entry['gate_coverage'] == scope and entry['purpose'] == rf.PURPOSE
     assert result['release_evidence'] == 'unresolved'
 

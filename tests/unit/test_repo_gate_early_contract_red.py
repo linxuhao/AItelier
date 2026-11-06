@@ -174,11 +174,12 @@ def test_partial_green_cannot_be_full_evidence(tmp_path, monkeypatch, mode, cove
 #
 #   * `round_feedback.run_feedback` — the report IS the feedback round. Its
 #     `passed` is False BY CONSTRUCTION, and `tests/unit/test_round_feedback.py`
-#     pins its verifier failures at `partial` (a shipped contract).
+#     pins its verifier failures at `PROVISIONAL_ROUND` (`provisional`, a
+#     shipped contract; it was `partial` while that word named two facts).
 #   * `run_tests` (below) — the report IS a test report whose repository-gate
 #     coverage was provisional. Its `passed` is the real pytest outcome, so a
-#     red there was answered `partial` by the marker alone and never reached
-#     the repair path.
+#     red there was answered by the marker alone and never reached the repair
+#     path.
 #
 # `gate_evidence.report_state` answered both on the string. These two probes are
 # the ones that hold the difference: a red on the second producer's report is a
@@ -319,28 +320,32 @@ def test_a_red_in_a_provisional_measurement_round_is_not_softened(tmp_path, monk
 
     # Control 1 — a measured GREEN pytest leg beside a gate that measured
     # nothing. The report is an absence (`passed: false`, `repo_gate_absent`),
-    # and it keeps the answer it had: not a red, not a pass.
+    # and it keeps the answer it had: not a red, not a pass. The WORD is the
+    # provisional one, not `partial` — `partial` now belongs to the other fact
+    # (a node gate that left a project unmeasured), and the two must not be
+    # confusable again.
     assert green["returncode"] == 0
     assert green["passed"] is False and green["repo_gate_absent"] is True
     assert green["repo_gate_unmeasured"] is True
-    assert green["evidence_state"] == "partial" and red["evidence_state"] == "failed"
-    assert ge.report_state(green) == "partial"
+    assert (green["evidence_state"] == ge.PROVISIONAL_ROUND
+            and red["evidence_state"] == "failed")
+    assert ge.report_state(green) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(green) == "unresolved"
     assert green["release_evidence"] == "unresolved" == green_result["release_evidence"]
     green_audit = ge.audit_evidence(green_out.parent, "provisional-round",
                                     [["test", "test_report.json"]])
     assert green_audit["passed"] is False
-    assert green_audit["incomplete_coverage_gates"][0]["state"] == "partial"
+    assert green_audit["incomplete_coverage_gates"][0]["state"] == ge.PROVISIONAL_ROUND
     assert green_audit["failed_gates"] == []
 
     # Control 2 — the measured GREEN report that DOES carry the marker with
-    # nothing absent beside it. Also unchanged: `partial`, and the coverage
-    # refusal still stops it from authorizing a publication.
+    # nothing absent beside it. Also unchanged: the provisional word, and the
+    # coverage refusal still stops it from authorizing a publication.
     assert measured_green["passed"] is True
     assert measured_green["purpose"] == PROVISIONAL_PURPOSE
     assert measured_green[PROVISIONAL_PRODUCER] == PRODUCER_RUN_TESTS
     assert publication_scope_refusal(measured_green["gate_coverage"])
-    assert ge.report_state(measured_green) == "partial"
+    assert ge.report_state(measured_green) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(measured_green) == "unresolved"
     assert measured_green["release_evidence"] == "unresolved"
     assert measured_green_result["release_evidence"] == "unresolved"
@@ -388,31 +393,95 @@ def test_the_two_provisional_producers_are_distinguishable(tmp_path, monkeypatch
     assert feedback[PROVISIONAL_PRODUCER] != stamped[PROVISIONAL_PRODUCER]
 
     # The feedback round is a feedback round: `passed` False by construction,
-    # and `partial` is its shipped answer (unchanged by this change).
+    # and `PROVISIONAL_ROUND` is its shipped answer (unchanged by this change
+    # apart from the WORD — it was `partial` until the two facts were split).
     assert feedback["passed"] is False
-    assert ge.report_state(feedback) == "partial"
+    assert ge.report_state(feedback) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(feedback) == "unresolved"
 
-    # The test report is a test report: the same `partial` here comes from a
-    # green measurement, and it is the same value for a different reason.
+    # The test report is a test report: the same provisional word here comes
+    # from a green measurement, and it is the same value for a different reason.
     assert stamped["passed"] is True
-    assert ge.report_state(stamped) == "partial"
+    assert ge.report_state(stamped) == ge.PROVISIONAL_ROUND
 
     # …and the field is what carries the difference. Stripped of it, the SAME
     # report is read as the feedback producer and its red would be softened
     # again — the fail-closed default, and the reason the field has to exist.
     unnamed = {k: v for k, v in stamped.items() if k != PROVISIONAL_PRODUCER}
     assert provisional_producer(unnamed) == ""
-    assert ge.report_state(unnamed) == "partial"
+    assert ge.report_state(unnamed) == ge.PROVISIONAL_ROUND
     red = dict(unnamed, passed=False, failures=["FAILED tests/test_x.py::test_x"],
                returncode=1)
-    assert ge.report_state(red) == "partial"
+    assert ge.report_state(red) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(red) == "unresolved"
     # With the producer named, the same red is the red it is.
     assert ge.report_state(dict(red, **{PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS})) == "failed"
     assert ge.release_disposition(
         dict(red, **{PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS})) == "known_failure"
 
+
+def test_a_provisional_round_and_a_partial_node_gate_do_not_share_a_word(
+        tmp_path, monkeypatch):
+    """THE DEFECT, driven on THREE reports the real producers wrote.
+
+    `report_state` answered the SAME word (`partial`) for two different facts,
+    so a consumer that wanted to refuse "some node project was not measured"
+    refused a provisional diagnostics round with it too — a round that is
+    SUPPOSED to continue. The vocabulary now answers one word each, and this
+    probe fails the moment they are the same word again:
+
+      * `NODE_GATE_PARTIAL` (`partial`) — a green pytest leg beside
+        `node_unmeasured`: a node gate that measured some of the repository's
+        projects and not all of them. Real report: the `run_tests` producer over
+        a nine-project repository with no coverage declaration, i.e. the ninth
+        project is a genuine `capped` absence.
+      * `PROVISIONAL_ROUND` (`provisional`) — `purpose:
+        provisional_round_feedback` from a producer that measured no red. Both
+        producers are here: `round_feedback.run_feedback`, and `run_tests`
+        stamping the marker on ITS report.
+
+    What may NOT move with the word: both still park (`release_disposition`
+    `unresolved`). The split is in the state NAME, not in the release path, so
+    a provisional round selects exactly the route it selected under the shared
+    label.
+    """
+    # Imported here, not at module scope, to keep the dependency between these
+    # two suites one-way and visible: the node-gate producer's own helper.
+    from tests.unit.test_partial_gate_cannot_reach_done import _nine, _run
+
+    feedback = _feedback_report(tmp_path)
+    _result, provisional, _out = _provisional_round(
+        tmp_path, monkeypatch, pytest_red=False, gate_measured_pass=True)
+    node_repo = tmp_path / "node-repo"
+    order = _nine(node_repo)          # nine projects, no coverage declaration
+    node_gate, _ret, _node_out = _run(tmp_path, monkeypatch, node_repo)
+
+    # The two shapes are the two facts, and they are not one word.
+    assert ge.NODE_GATE_PARTIAL == "partial"
+    assert ge.PROVISIONAL_ROUND != ge.NODE_GATE_PARTIAL, (
+        "a provisional round and an unmeasured node gate must not answer the "
+        "same state word: that is the defect this vocabulary was split for")
+    assert node_gate["node_unmeasured"] and node_gate["passed"] is True
+    assert [e["dir"] for e in node_gate["node_unmeasured"]] == [order[8]]
+    assert node_gate["node_gate_complete"] is False
+    assert ge.report_state(node_gate) == ge.NODE_GATE_PARTIAL
+    assert ge.report_state(feedback) == ge.report_state(provisional) == ge.PROVISIONAL_ROUND
+    assert ge.report_state(node_gate) != ge.report_state(feedback)
+    assert ge.report_state(node_gate) != ge.report_state(provisional)
+
+    # The split did NOT change the release path: both park, and neither is a
+    # pass. A provisional round is not a red to repair either.
+    assert ge.release_disposition(node_gate) == "unresolved"
+    assert ge.release_disposition(feedback) == "unresolved"
+    assert ge.release_disposition(provisional) == "unresolved"
+
+    # And the producers WRITE the word their reader answers, so the file says
+    # the same thing the classification does — the fixpoint, on the reports
+    # themselves rather than on a hand-built dict.
+    assert feedback["evidence_state"] == ge.PROVISIONAL_ROUND
+    assert provisional["evidence_state"] == ge.PROVISIONAL_ROUND
+    assert ge.report_state(dict(feedback, evidence_state=ge.NODE_GATE_PARTIAL)) \
+        == ge.PROVISIONAL_ROUND, "the word is derived, not read off the label"
 
 
 # ── the two holes the review of b765f570 found ─────────────────────────────
@@ -459,7 +528,7 @@ def test_a_pytest_red_survives_an_unavailable_node_leg(tmp_path, monkeypatch):
     that shape — `passed: false`, `skipped: true`,
     `infrastructure_unavailable: true` — and keeps the pytest failure and its
     own `returncode`. The old predicate read the absence vocabulary, so this
-    report answered `partial` over a red that had been measured.
+    report was answered by the marker alone over a red that had been measured.
     """
     result, report, out = _provisional_round(
         tmp_path, monkeypatch, pytest_red=True, node_project=True)
@@ -474,7 +543,7 @@ def test_a_pytest_red_survives_an_unavailable_node_leg(tmp_path, monkeypatch):
     assert report["node"]["skipped"] is True and report["node"]["passed"] is True
     assert report["node"]["checks"]["install"]["isolation_unavailable"] is True
     # …and the vocabulary the old predicate consulted still says "absence",
-    # which is precisely why it answered `partial` here.
+    # which is precisely why it answered with the marker's word here.
     assert ge._absence_state(report, False) == "infrastructure_unavailable"
 
     assert ge.report_state(report) == "failed"
@@ -519,7 +588,7 @@ ABSENCE_SHAPES = {
 
 
 @pytest.mark.parametrize("shape", sorted(ABSENCE_SHAPES))
-def test_an_absence_under_the_marker_stays_partial_through_the_stamp(tmp_path, shape):
+def test_an_absence_under_the_marker_keeps_its_park_through_the_stamp(tmp_path, shape):
     """HOLE 1 — an absence is never charged as a failure, stamped or not.
 
     Asserted on the RAW report and then through the real `stamp_report` +
@@ -529,21 +598,27 @@ def test_an_absence_under_the_marker_stays_partial_through_the_stamp(tmp_path, s
     `unattributable` / `not_run` / `infrastructure_unavailable` and called the
     report a measured failure — which the audit then filed under
     `failed_gates`, i.e. charged to the implementer.
+
+    The state these answer is `PROVISIONAL_ROUND` (`provisional`), NOT
+    `partial`: the latter now names one fact only — a node gate that left a
+    project unmeasured — and this test's whole point is that an absence under
+    this marker is a different fact from that one.
     """
     report = dict(ABSENCE_SHAPES[shape], purpose=PROVISIONAL_PURPOSE,
                   **{PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS},
                   passed=False, gate_coverage=_provisional_coverage())
 
     # The RAW report: an absence parks, and it never reads as a red.
-    assert ge.report_state(report) == "partial"
+    assert ge.report_state(report) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(report) == "unresolved"
 
     # The SAME report after the real stamp and through the real audit.
     stamped, audit = _stamp_and_audit(tmp_path, shape, report)
-    assert stamped["evidence_state"] == "partial"
+    assert stamped["evidence_state"] == ge.PROVISIONAL_ROUND
     assert stamped["release_evidence"] == "unresolved"
-    assert ge.report_state(stamped) == "partial"
+    assert ge.report_state(stamped) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(stamped) == "unresolved"
     assert audit["passed"] is False
-    assert [entry["state"] for entry in audit["incomplete_coverage_gates"]] == ["partial"]
+    assert [entry["state"] for entry in audit["incomplete_coverage_gates"]] == [
+        ge.PROVISIONAL_ROUND]
     assert audit["failed_gates"] == []

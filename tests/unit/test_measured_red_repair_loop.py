@@ -247,7 +247,10 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           reached from `_stamp_classification` via `stamp_report`/`stamp_file`, and from
           `_commit_baseline` with `create=False` — see the readers-and-writers entry
           below), and so do other tools' producers: aitelier/round_feedback.py
-          `run_feedback` (`"evidence_state": "partial"`),
+          `run_feedback` (`"evidence_state": gate_evidence.PROVISIONAL_ROUND`, i.e.
+          `provisional` — it wrote the literal `partial` until 2026-11-06, when that word
+          was left to the OTHER fact it named: a node gate that could not measure every
+          project, `NODE_GATE_PARTIAL`),
           aitelier/tools/godot_playtest/impl.py, aitelier/tools/godot_compile/impl.py
           `_refuse_incomplete_pass` and `_godot_compile_unstamped`'s builder-unreachable
           branch, and docker/godot/godot_harness.py — all for their own reports.
@@ -277,7 +280,8 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           `tests/unit/test_baseline_write_failure_keeps_absence.py`.
   changes THIS: the branch admits only the report in which the producer itself said the
           evidence state is `infrastructure_unavailable`. A report saying `unattributable`,
-          `not_run`, `partial` or `skipped` is refused — those are not a measured red.
+          `not_run`, `partial`, `provisional` or `skipped` is refused — those are not a
+          measured red.
   NOT "the pytest leg's state", which is what the earlier edition called it: it is the
           report's evidence state, and one of its writers (the node block's
           nothing-measured branch) writes it because the NODE leg could not be measured, not

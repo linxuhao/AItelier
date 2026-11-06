@@ -59,9 +59,12 @@ end_conditions:
     # `purpose: provisional_round_feedback`, `full_test_passed: false`) is not
     # full test evidence, so a green pytest leg over it may not conclude the
     # run. Named here as a FAILED terminal rather than parked like an absence:
-    # `gate_evidence` answers this shape `partial` / `unresolved` (a release
+    # `gate_evidence` answers this shape `provisional` / `unresolved` (a release
     # needs verification, not a repair) and no re-run of the gate turns a
     # provisional declaration into a full one — see `test_evidence_provisional`.
+    # `partial` is the OTHER word (`node_gate_incomplete` below): a node gate
+    # that could not measure every project. The two were one word until
+    # 2026-11-06; this terminal is the provisional fact, not that one.
     - type: node_reached
       node: "test_evidence_provisional"
       result: "failed"
@@ -269,7 +272,7 @@ steps:
       # was green passed every validator here and went `test_outcome` -> `done`
       # — the run concluded success on evidence its own report says is not full
       # test evidence (`gate_evidence.report_state` answers that shape
-      # `partial`, `release_disposition` `unresolved`). The acquisition refuses
+      # `provisional`, `release_disposition` `unresolved`). The acquisition refuses
       # a provisional coverage as `unmeasured` today, so what this edge closes
       # is the CONFIG's half of it: the graph no longer depends on that upstream
       # refusal, and a report carrying the marker can never conclude the run.
@@ -322,11 +325,14 @@ steps:
       #                PARAMETER — it selects the feedback round);
       #                core/coding_impl_outcome.py:152 (a provisional round is
       #                not a passing pre-change measurement).
-      #   gains/loses  `report_state` answers this marker `partial` and
+      #   gains/loses  `report_state` answers this marker `provisional` and
       #                `release_disposition` `unresolved` because of it, and
       #                run_tests refuses the scope as full test evidence — so
       #                the marker stays on the report even though this edge
-      #                reads the RETURN, not the file.
+      #                reads the RETURN, not the file. (`provisional` was
+      #                `partial` until 2026-11-06; that word now names the node
+      #                gate that could not measure every project, which is a
+      #                different terminal — `node_gate_incomplete`.)
       #
       # `full_test_passed`:
       #   written by   run_tests/impl.py:3385 (report) and :3628 (return),
@@ -883,7 +889,7 @@ steps:
   # gate coverage was PROVISIONAL — its own report carries
   # `purpose: provisional_round_feedback` and `full_test_passed: false`, i.e.
   # it is not full test evidence, so the run may not conclude `done` on it.
-  # `gate_evidence` answers this shape `partial` and `release_disposition`
+  # `gate_evidence` answers this shape `provisional` and `release_disposition`
   # `unresolved`, which is a release that needs VERIFICATION, not a repair:
   # there is nothing here for the implementer to fix, and a re-run of the gate
   # cannot turn a provisional declaration into a full one, so this is neither a

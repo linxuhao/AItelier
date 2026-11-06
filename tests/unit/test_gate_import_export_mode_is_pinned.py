@@ -179,6 +179,14 @@ def _mode_changes(text: str) -> list[_ModeChange]:
                 flags = [word for word in words[1:] if word.startswith("-")]
                 operands = [word for word in words[1:] if not word.startswith("-")]
                 if len(operands) < 2:       # a mode with no path sets nothing
+                    # ...unless it names the export tree and we cannot read its mode:
+                    # `chmod -x DIR` (a leading-dash symbolic mode) makes a directory
+                    # untraversable, and `chmod --reference=OTHER DIR` takes a mode we
+                    # never see. Both reach the pinned paths, so both are refused.
+                    named = [word for word in words[1:] if _covers(EXPORT, word)]
+                    if named:
+                        changes.append(_ModeChange(
+                            "chmod", None, tuple(named), _is_recursive(flags)))
                     continue
                 changes.append(_ModeChange(
                     "chmod", _canonical_mode(operands[0]), tuple(operands[1:]),
@@ -198,6 +206,10 @@ def _mode_changes(text: str) -> list[_ModeChange]:
                     index += 1
                 if "-d" in words and mode is not None:
                     changes.append(_ModeChange("install", mode, tuple(paths), False))
+                elif any(_covers(EXPORT, named) for named in paths):
+                    # `install -dm0777 DIR` / `--mode=` spellings this parser does not
+                    # read, on a path inside the export tree: refused, not skipped.
+                    changes.append(_ModeChange("install", None, tuple(paths), False))
     return changes
 
 
@@ -275,6 +287,12 @@ def test_the_import_tree_is_searchable_and_not_only_the_file():
                 problems.append(
                     f"`{change.command} {' '.join(change.paths)}` sets {path} to "
                     f"{change.mode or 'a symbolic mode'} instead of {REQUIRED_MODES[path]}.")
+        if change.mode is None and any(_covers(EXPORT, named) for named in change.paths):
+            problems.append(
+                f"`{change.command} {' '.join(change.paths)}` names the export tree but its mode "
+                "cannot be read here (a leading-dash symbolic mode, `--reference=`, or an "
+                "`install` spelling this file does not parse): refuse it rather than let it "
+                "set an unmeasured mode on a pinned path.")
         for named in change.paths:
             if _covers(EXPORT, named):
                 if named not in REQUIRED_MODES:

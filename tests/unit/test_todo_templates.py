@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 
 import pytest
@@ -405,6 +406,19 @@ def test_a_declared_fifo_is_refused_rather_than_announced_as_existing(cli, repo,
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
 
 
+def test_a_declared_socket_is_refused_by_the_same_no_digest_rule_as_a_fifo(cli, repo, base):
+    # The rule is "a path that is not a regular file has no digest", not "a FIFO has no digest":
+    # `_digest` asks `is_file`, so a socket is in exactly the same class. A refusal narrowed to
+    # `is_fifo()` passed every shipped case and announced this one as a satisfiable path.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(repo / "sock"))
+        code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "sock"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'sock'" in out["reason"] and "exists and is a socket" in out["reason"], out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "sock")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
 def test_a_declared_symlink_to_a_regular_file_still_changes_with_its_target(cli, repo, base):
     # The other side of the two checks above: `_digest` follows a link, so this path has a digest and
     # the item can pass. Refusing symlinks outright would be a regression, not a stricter audit.
@@ -517,6 +531,30 @@ def test_a_missing_workspace_still_refuses_a_duplicate_and_the_note_does_not_cla
     assert "duplicate-spelling or existence check was made" not in note, note
 
 
+def test_a_missing_workspace_note_names_every_refusal_that_still_ran(cli, repo, base, tmp_path):
+    # TWO refusals read the PLAN and need no workspace: a duplicate spelling, and a path outside the
+    # workspace. The note named only the first, so a director read the second as one of the checks
+    # the missing directory had cost them - and only a workspace-dependent check may be said to cost.
+    ghost = tmp_path / "not-a-workspace"
+
+    def create(params):
+        return cli.run("create", "--template", "code_change", "--params", json.dumps(params),
+                       "--attempt", "att-1", "--node-key", "execution.demo", "--context-hash", "c" * 64,
+                       "--base-sha", base, "--workspace", str(ghost), "--goal", "make the change")
+
+    code, out = create({**CODE, "paths": ["app.py", "/etc/passwd"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert "/etc/passwd" in out["reason"] and "inside the workspace" in out["reason"], out["reason"]
+
+    code, out = create(CODE)
+    assert code == 0, out
+    note = out["paths"]["notes"][0]
+    assert "duplicate" in note and "outside the workspace" in note, note
+    assert "still refused" in note and "neither needs a directory" in note, note
+    assert "could not be looked up" in note and "nothing was assumed" in note, \
+        "the workspace-dependent checks that did not run are still said out loud"
+
+
 def test_the_free_plan_route_refuses_the_same_paths(cli, repo, base):
     (repo / "out").mkdir()
     directory = plan(repo, base, [item("edit", [{"predicate": "files_changed", "args": {"paths": ["out"]}}])])
@@ -576,3 +614,53 @@ def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
     with pytest.raises(Refusal) as caught:
         check_declared_paths(TodoPlan.from_json(data, builtin_library()))
     assert caught.value.code == "impossible_path" and caught.value.extra["path"] == "dir"
+
+
+@pytest.mark.parametrize("shape, paths, named", [
+    ("empty_directory", ["app.py", "out"], "DIRECTORY"),
+    ("full_directory", ["app.py", "out"], "DIRECTORY"),
+    ("symlinked_directory", ["app.py", "link"], "DIRECTORY"),
+    ("file_parent", ["app.py", "app.py/x/y.txt"], "a regular file, where a directory is required"),
+    ("fifo_parent", ["app.py", "pipe/x.txt"], "a FIFO, where a directory is required"),
+    ("fifo", ["app.py", "pipe"], "exists and is a FIFO"),
+    ("socket", ["app.py", "sock"], "exists and is a socket"),
+])
+def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path, shape, paths, named):
+    """The CLI cases above pin the route a director uses; this pins the FUNCTION that route calls.
+
+    Each case asserts the refusal CODE, the path it names (the impossible one, not the file that
+    precedes it in the list) and the KIND it says it found, so a refusal that fired for another
+    reason - or one narrowed to a single file kind - cannot pass here by accident.
+    """
+    from core.todo_plan import Refusal, TodoPlan
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("x = 1\n")
+    listener = None
+    if shape == "empty_directory":
+        (workspace / "out").mkdir()
+    elif shape == "full_directory":
+        (workspace / "out").mkdir()
+        (workspace / "out" / "keep.md").write_text("# not empty\n")
+    elif shape == "symlinked_directory":
+        (workspace / "real").mkdir()
+        (workspace / "link").symlink_to("real", target_is_directory=True)
+    elif shape in ("fifo", "fifo_parent"):
+        os.mkfifo(workspace / "pipe")
+    elif shape == "socket":
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(workspace / "sock"))
+    try:
+        data = {"attempt_id": "att-1", "node_key": "execution.demo", "context_hash": "c" * 64,
+                "base_sha": "0" * 40, "workspace": str(workspace), "scope": ["app.py"], "goal": "g",
+                "items": [item("edit", [{"predicate": "files_changed", "args": {"paths": paths}}])]}
+        with pytest.raises(Refusal) as caught:
+            check_declared_paths(TodoPlan.from_json(data, builtin_library()))
+    finally:
+        if listener is not None:
+            listener.close()
+    assert caught.value.code == "impossible_path", caught.value.reason
+    assert (caught.value.extra["item"], caught.value.extra["predicate"]) == ("edit", "files_changed")
+    assert caught.value.extra["path"] == paths[-1], "the refusal names the impossible path, not the one before it"
+    assert named in caught.value.reason, caught.value.reason

@@ -348,8 +348,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
 
     A workspace that is not a directory is said out loud rather than skipped, and nothing is
     assumed about it: the paths cannot be looked up, so they are not judged by a guess. The note
-    says which checks that cost - and which one it did not, since the duplicate refusal above
-    does not need a directory.
+    says which checks that cost - and which ones it did not: BOTH refusals that read the plan
+    rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
+    via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
+    missing directory cost.
     """
     workspace = Path(plan.workspace)
     measured = workspace.is_dir()
@@ -422,8 +424,9 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
         notes.append(
             f"workspace {plan.workspace} is not a directory, so the {len(declared)} declared path(s) {list(declared)} "
             f"could not be looked up: no directory, parent, non-regular-file or existence check was made about them, "
-            f"and nothing was assumed about them (a duplicate spelling of one path in one list is still refused: "
-            f"that check reads the plan, not the workspace)")
+            f"and nothing was assumed about them (the refusals that read the PLAN still ran: a duplicate spelling of "
+            f"one path in one list is still refused, and so is a path outside the workspace - neither needs a "
+            f"directory to decide)")
     elif created:
         notes.append(
             f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "

@@ -17,6 +17,8 @@ at review time, before a rebuild is spent.
 from __future__ import annotations
 
 import re
+import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +72,99 @@ def _run_commands(text: str) -> list[str]:
     return commands
 
 
+def _simple_commands(command: str) -> list[list[str]]:
+    """Split one RUN into its simple commands as words, on `&&`, `||` and `;`."""
+    try:
+        tokens = shlex.split(command, comments=False, posix=True)
+    except ValueError:                      # a quoting shape shlex rejects must not crash this file
+        tokens = command.split()
+    words: list[str] = []
+    for token in tokens:
+        for separator in ("&&", "||", ";"):
+            token = token.replace(separator, f" {separator} ")
+        words.extend(part for part in token.split() if part)
+    commands: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        if word in ("&&", "||", ";"):
+            if current:
+                commands.append(current)
+            current = []
+        else:
+            current.append(word)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def _canonical_mode(token: str) -> str | None:
+    """`0755`, `755`, `00755` -> `0755`; a symbolic mode (`u+rwx`) -> None."""
+    if not token or not set(token) <= set("01234567"):
+        return None
+    return f"0{int(token, 8):o}"
+
+
+@dataclass(frozen=True)
+class _ModeChange:
+    """One instruction that sets a mode, with that mode bound to the paths it names."""
+
+    command: str
+    mode: str | None
+    paths: tuple[str, ...]
+    recursive: bool
+
+
+def _mode_changes(text: str) -> list[_ModeChange]:
+    """Every chmod (and `install -d -m`) in the Dockerfile, parsed rather than grepped."""
+    changes: list[_ModeChange] = []
+    for command in _run_commands(text):
+        for words in _simple_commands(command):
+            if not words:
+                continue
+            if words[0] == "chmod":
+                flags = [word for word in words[1:] if word.startswith("-")]
+                operands = [word for word in words[1:] if not word.startswith("-")]
+                if len(operands) < 2:       # a mode with no path sets nothing
+                    continue
+                changes.append(_ModeChange(
+                    "chmod", _canonical_mode(operands[0]), tuple(operands[1:]),
+                    any(flag in ("-R", "--recursive", "-r") for flag in flags)))
+            elif words[0] == "install":
+                mode = None
+                paths: list[str] = []
+                index = 1
+                while index < len(words):
+                    word = words[index]
+                    if word == "-m" and index + 1 < len(words):
+                        mode = _canonical_mode(words[index + 1])
+                        index += 2
+                        continue
+                    if not word.startswith("-"):
+                        paths.append(word)
+                    index += 1
+                if "-d" in words and mode is not None:
+                    changes.append(_ModeChange("install", mode, tuple(paths), False))
+    return changes
+
+
+#: Paths the image must bake with a mode, and the mode each one needs. The three
+#: directories have to be traversable by uid 1000 (0644 cannot be entered); the two
+#: `touch`ed markers and the copied client have to be readable, and no wider.
+REQUIRED_MODES = {
+    EXPORT: "0755",
+    f"{EXPORT}/docker": "0755",
+    f"{EXPORT}/docker/godot": "0755",
+    f"{EXPORT}/docker/__init__.py": "0644",
+    f"{EXPORT}/docker/godot/__init__.py": "0644",
+}
+
+
+def _covers(change_path: str, required: str) -> bool:
+    """True when a chmod of `change_path` (recursively) also lands on `required`."""
+    root = change_path.rstrip("/")
+    return required == root or required.startswith(root + "/")
+
+
 def test_the_import_tree_is_searchable_and_not_only_the_file():
     """A pinned FILE inside an untraversable DIRECTORY is still unreadable.
 
@@ -85,20 +180,59 @@ def test_the_import_tree_is_searchable_and_not_only_the_file():
     This file reads the Dockerfile because the alternative is finding out from
     a deployed gate. What it can assert is the normalisation step; the modes
     actually baked can only be measured inside a built image, and that
-    measurement belongs to the deployment that builds it. Accepts either shape:
-    a `chmod 0755 <dirs>` (or `install -d -m 0755 <dirs>`) naming all three
-    directories, plus the package markers pinned readable.
-    """
-    commands = _run_commands((ROOT / "Dockerfile").read_text())
-    directories = (EXPORT, f"{EXPORT}/docker", f"{EXPORT}/docker/godot")
-    for directory in directories:
-        assert any(directory in command.split() and "0755" in command
-                   for command in commands), (
-            f"nothing normalises {directory} to 0755: a 0644 directory cannot be "
-            "traversed, so the gate client inside it is unreadable even though the "
-            "file itself is 0644.\nRUN commands seen:\n  " + "\n  ".join(commands))
-    for marker in (f"{EXPORT}/docker/__init__.py", f"{EXPORT}/docker/godot/__init__.py"):
-        assert any(marker in command.split() and "0644" in command
-                   for command in commands), (
-            f"{marker} is created by `touch` and inherits the build umask; pin it 0644.")
+    measurement belongs to the deployment that builds it.
 
+    The mode is bound to the paths the instruction NAMES, not searched for as a
+    substring of the whole RUN (iss-61d0ff8b8e564546, from the non-author review
+    of the change that added this test): a substring test let
+    `chmod -R 0755 /opt/aitelier-gate-imports` satisfy it - which takes
+    docker/godot/godot_harness.py to 0755 - let `chmod 0777` satisfy it, and let
+    any later RUN re-mode the client while both this and the neighbouring test
+    stayed green. So: recursive chmod is refused wherever it would reach a
+    pinned path, a pinned path named with another mode is refused, a chmod that
+    names anything else under the export root is refused (a `*.py` glob would
+    re-mode the client without naming it), and no RUN may name godot_harness.py
+    at all - its mode belongs solely to the `COPY --chmod=0644` line above.
+    """
+    text = (ROOT / "Dockerfile").read_text()
+    changes = _mode_changes(text)
+    problems: list[str] = []
+
+    for path, wanted in REQUIRED_MODES.items():
+        naming = [change for change in changes if path in change.paths]
+        if not any(change.mode == wanted and not change.recursive for change in naming):
+            seen = "; ".join(
+                f"{change.command}{' -R' if change.recursive else ''} "
+                f"{change.mode or 'symbolic'} -> {' '.join(change.paths)}"
+                for change in naming) or "no chmod or install names it at all"
+            problems.append(
+                f"{path} is not set to {wanted} by an instruction that names it "
+                f"({seen}). A directory at 0644 cannot be traversed, so the gate "
+                "client inside it is unreadable even though the file itself is 0644.")
+
+    for change in changes:
+        for path in REQUIRED_MODES:
+            if change.recursive and any(_covers(named, path) for named in change.paths):
+                problems.append(
+                    f"`{change.command} {' '.join(change.paths)}` is recursive and reaches {path}: "
+                    "it would re-mode that path (and, over the export root, take "
+                    "docker/godot/godot_harness.py to the directory mode) while naming no file.")
+            elif not change.recursive and path in change.paths and change.mode != REQUIRED_MODES[path]:
+                problems.append(
+                    f"`{change.command} {' '.join(change.paths)}` sets {path} to "
+                    f"{change.mode or 'a symbolic mode'} instead of {REQUIRED_MODES[path]}.")
+        for named in change.paths:
+            if _covers(EXPORT, named):
+                if named not in REQUIRED_MODES:
+                    problems.append(
+                        f"`{change.command}` names {named} under {EXPORT}, which is not one of the "
+                        "pinned paths: a parent directory or a glob there can change the client's "
+                        "mode without naming it. Pin the five paths themselves.")
+
+    for command in _run_commands(text):
+        if "godot_harness.py" in command:
+            problems.append(
+                "a RUN instruction names godot_harness.py, whose mode belongs to the "
+                f"`COPY --chmod=0644` line: {command}")
+
+    assert not problems, "\n\n".join(problems)

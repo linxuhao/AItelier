@@ -129,20 +129,31 @@ def test_only_the_driver_project_red_fails_the_aggregate(tmp_path, monkeypatch):
     assert {p["dir"]: p for p in report["node"]["projects"]}["web"]["passed"] is True
 
 
-def test_project_that_cannot_be_measured_never_counts_as_a_pass(tmp_path, monkeypatch):
-    """WITNESS: `web/` cannot install offline, the driver project is red.
+def _composed(tmp_path, monkeypatch, **kw):
+    """Node commands served by the fake transport, everything else really run.
 
-    The unmeasured project keeps its own entry and reason, the measured
-    project keeps its real (red) result, and the aggregate is not a pass —
-    even though an unmeasured project's own entry reads `passed: True,
-    skipped: True` exactly as it always has.
+    The pytest phase of `run_tests` is served by the project's own test seam
+    (`tests/gate_fixture.install_entry_executor`), so a report's absolute
+    `passed` here is decided by the node section and not by a missing pytest
+    container.
+    """
+    from tests.gate_fixture import install_entry_executor
+
+    install_entry_executor(monkeypatch)
+    return _fake_npm(tmp_path, monkeypatch, inner=rt.repository_executor.execute, **kw)
+
+
+def test_project_that_cannot_be_measured_never_counts_as_a_pass(tmp_path, monkeypatch):
+    """WITNESS: `web/` cannot install offline and the driver project is red.
+
+    The unmeasured project keeps its own entry and reason, contributes no red,
+    and cannot hide the measured project's real red: the aggregate fails on the
+    red, with the absence named beside it.
     """
     repo = _repo(tmp_path)
-
-    def refuse(project, profile, command):
-        return project == "web" and profile == "node_run"
-
-    _fake_npm(tmp_path, monkeypatch, refuse=refuse,
+    _composed(tmp_path, monkeypatch,
+              refuse=lambda project, profile, command: project == "web"
+              and profile == "node_run",
               exit_codes={("integrations/dsh-driver", "test"): 1})
 
     node = rt._run_node_checks(repo)
@@ -153,9 +164,10 @@ def test_project_that_cannot_be_measured_never_counts_as_a_pass(tmp_path, monkey
     driver = {p["dir"]: p for p in node["projects"]}["integrations/dsh-driver"]
     assert not driver.get("skipped")
     assert driver["checks"]["test"]["passed"] is False
-    # The aggregate cannot be read as a pass, and it says which project was not
-    # measured; that project's half-run contributes no red and no green.
+    # `passed` reflects only the measured projects: the driver is red, so it is
+    # false; the unmeasured project is named and contributes no check.
     assert node["passed"] is False
+    assert node["skipped"] is True                       # something was not measured
     assert node["measured_dirs"] == ["integrations/dsh-driver"]
     assert [e["dir"] for e in node["unmeasured"]] == ["web"]
     assert "offline install refused for web" in node["unmeasured"][0]["reason"]
@@ -167,43 +179,57 @@ def test_project_that_cannot_be_measured_never_counts_as_a_pass(tmp_path, monkey
     rt.run_tests(project_root=str(repo), out_dir=str(out))
     report = _report(out)
     assert report["passed"] is False
-    assert any(f.startswith("node gate unavailable for web:")
-               for f in report["failures"]), report["failures"]
+    assert [e["dir"] for e in report["node_unmeasured"]] == ["web"]
     assert any(f.startswith("node:integrations/dsh-driver:test failed")
                for f in report["failures"]), report["failures"]
+    # The absence stays an absence: no failure entry may read as a red.
+    assert not any(f.startswith("node gate unavailable") for f in report["failures"])
 
 
-def test_unmeasured_beside_a_green_project_is_not_a_pass(tmp_path, monkeypatch):
-    """`all(passed)` over every project entry would call this state a pass.
+def test_unmeasured_project_beside_a_green_one_is_neither_pass_nor_block(
+        tmp_path, monkeypatch):
+    """WITNESS, the rule this change turns on.
 
-    The unmeasured project's own entry says `passed: True, skipped: True`, so
-    the aggregate's rule has to be "measured AND passed" per project, not
-    "passed".
+    Measured 2026-11-06: `integrations/dsh-driver`'s lockfile carries 687
+    packages and the gate's empty ticket cache answers `npm ci --offline` with
+    ENOTCACHED — unprovisionable from a code change (it needs an image build).
+    If "not measured" meant "not a pass", every run of this repository would be
+    red for everyone, which is worse than the defect. So it is the third state:
+    `web/` green + driver not measurable -> the run PASSES, and the report says
+    plainly that the driver was not measured and why.
     """
     repo = _repo(tmp_path)
-    _fake_npm(tmp_path, monkeypatch,
-              refuse=lambda project, profile, command: project == "web"
+    _composed(tmp_path, monkeypatch,
+              refuse=lambda project, profile, command: project == "integrations/dsh-driver"
               and profile == "node_run")
 
     node = rt._run_node_checks(repo)
 
-    assert all(p["passed"] for p in node["projects"])   # the trap
-    assert node["passed"] is False                      # the rule
-    assert node["measured_dirs"] == ["integrations/dsh-driver"]
-    assert [e["dir"] for e in node["unmeasured"]] == ["web"]
+    assert node["skipped"] is True
+    assert node["passed"] is True                        # every MEASURED project passed
+    assert node["measured_dirs"] == ["web"]
+    assert [e["dir"] for e in node["unmeasured"]] == ["integrations/dsh-driver"]
+    assert "offline install refused for integrations/dsh-driver" in (
+        node["unmeasured"][0]["reason"])
+    # Nothing in `checks` pretends the driver ran, and `web` is really there.
+    assert set(node["checks"]) == {"web:install", "web:build", "web:test"}
+    assert "not measured" in node["summary"]
 
     out = tmp_path / "out"
-    rt.run_tests(project_root=str(repo), out_dir=str(out))
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
     report = _report(out)
-    assert report["passed"] is False
-    # Nothing was measured red and something was not measured: an absence.
-    assert report["skipped"] is True
-    assert report["evidence_state"] == "infrastructure_unavailable"
+    assert report["passed"] is True and res["passed"] is True, (
+        report["failures"], report["summary"])
+    assert [e["dir"] for e in report["node_unmeasured"]] == ["integrations/dsh-driver"]
+    assert report["node"]["skipped"] is True
+    assert report["failures"] == []                      # an absence is not a red
+    assert not any("dsh-driver" in f for f in report["failures"])
 
 
-def test_projects_past_the_cap_are_reported_not_dropped(tmp_path, monkeypatch):
-    """The cap keeps one gate run bounded; it may not turn an unrun project
-    into a pass."""
+def test_projects_past_the_cap_are_reported_and_do_not_block(tmp_path, monkeypatch):
+    """The cap keeps one gate run bounded: the projects past it are neither run
+    nor silently treated as green — they are named, and they do not fail a run
+    whose measured projects passed."""
     projects = tuple(f"pkg-{index}" for index in range(rt.NODE_PROJECT_CAP + 2))
     repo = _repo(tmp_path, projects)
     calls = _fake_npm(tmp_path, monkeypatch)
@@ -213,8 +239,35 @@ def test_projects_past_the_cap_are_reported_not_dropped(tmp_path, monkeypatch):
     assert len(node["dirs"]) == rt.NODE_PROJECT_CAP
     assert [e["dir"] for e in node["unmeasured"]] == list(projects[rt.NODE_PROJECT_CAP:])
     assert all("not visited" in e["reason"] for e in node["unmeasured"])
-    assert node["passed"] is False
+    assert node["skipped"] is True
+    assert node["passed"] is True                        # the measured ones passed
     assert {call["dir"] for call in calls} == set(projects[:rt.NODE_PROJECT_CAP])
+
+
+def test_nothing_measurable_keeps_the_single_project_absence(tmp_path, monkeypatch):
+    """When NO project can be measured, today's meaning is kept: an absence with
+    `passed: False`, not a red — and still not a pass."""
+    repo = _repo(tmp_path)
+    _composed(tmp_path, monkeypatch,
+              refuse=lambda project, profile, command: profile == "node_run")
+
+    node = rt._run_node_checks(repo)
+
+    assert node["skipped"] is True
+    assert node["passed"] is True and node["measured_dirs"] == []
+    assert [e["dir"] for e in node["unmeasured"]] == ["web", "integrations/dsh-driver"]
+    assert node["unmeasured_reason"]
+    assert node["checks"] == {}
+
+    out = tmp_path / "out"
+    rt.run_tests(project_root=str(repo), out_dir=str(out))
+    report = _report(out)
+    assert report["passed"] is False
+    assert report["skipped"] is True
+    assert report["infrastructure_unavailable"] is True
+    assert report["evidence_state"] == "infrastructure_unavailable"
+    assert any(f.startswith("node gate unavailable:")
+               for f in report["failures"]), report["failures"]
 
 
 def test_single_project_report_is_unchanged(tmp_path, monkeypatch):

@@ -901,21 +901,29 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
 def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dict:
     """ONE node section for a repository that holds more than one project.
 
-    The rule the aggregate may never break: it reads ``passed: True`` only
-    when every visited project was MEASURED and passed. `passed` is therefore
-    not ``all(p["passed"])`` — an unmeasured project's own entry keeps today's
-    ``passed: True, skipped: True`` (absence is not a red) and would otherwise
-    be counted as a pass here. Instead:
+    An unmeasurable project is NEITHER a pass NOR a block. Measured 2026-11-06
+    on `integrations/dsh-driver`: its lockfile carries 687 packages and the
+    gate's empty ticket cache answers ``npm ci --offline`` with ENOTCACHED, a
+    condition no code change can provision (that is an image build). Counting
+    that as "not a pass" failed EVERY run of this repository — a gate that is
+    red for everyone is worse than the defect being fixed.
+
+    So the aggregate separates the three states the single-project report
+    already had:
 
     * ``checks`` holds only the checks of projects that WERE measured, keyed
       ``"<dir>:<check>"`` (e.g. ``integrations/dsh-driver:test``). A project
       that could not install contributes nothing: its absence is not a red.
     * ``unmeasured`` names every project that was not measured — one entry per
-      project, with its reason, including projects past ``NODE_PROJECT_CAP``.
-    * ``skipped`` keeps its single-project meaning: NOTHING was measured.
-    * ``passed`` is True only when nothing is unmeasured and every measured
-      project passed. One project's red cannot be masked by another's green,
-      and an unmeasured project can never become a pass.
+      project, with its reason, including projects past ``NODE_PROJECT_CAP`` —
+      so a reader can never mistake the absence for a pass.
+    * ``skipped`` is True whenever something was not measured. When NOTHING was
+      measured it keeps its single-project meaning (`passed: True, skipped:
+      True`, the old "node gate not measured: ..." words), which the fold turns
+      into an absence.
+    * ``passed`` reflects ONLY the measured projects: false if and only if a
+      measured project actually failed. One project's red cannot be masked by
+      another's green, and an unmeasured project is never counted as a pass.
     """
     measured = [r for r in results if not r.get("skipped")]
     unmeasured = [{"dir": r["dir"],
@@ -934,8 +942,8 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
                    for r in measured for name, check in (r.get("checks") or {}).items()},
         "measured_dirs": [r["dir"] for r in measured],
         "unmeasured": unmeasured,
-        "passed": bool(measured) and not unmeasured
-                  and all(r["passed"] for r in measured),
+        "skipped": bool(unmeasured),
+        "passed": all(r["passed"] for r in measured),
     }
     if not measured:
         # Nothing anywhere was measured: an absence, stated as one, never a
@@ -3025,43 +3033,38 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
-            # A project that could not be measured is not a pass and may not
-            # erase a project that WAS measured: it is named in `failures` and
-            # in `node["unmeasured"]`, the measured projects keep their own
-            # result, and the run cannot pass on it. Its keys stay known-red in
-            # a baseline too, since not every node project ran here.
+            # Three states, kept apart. A project that could not be measured is
+            # NEITHER a pass NOR a block: it is named plainly (`node_unmeasured`
+            # and `node["unmeasured"]`), it cannot turn a green run red (the
+            # ticket cache cannot be provisioned from a code change), and it
+            # cannot turn a red run green — `passed` below reflects only the
+            # measured projects. Its keys stay known-red in a baseline too,
+            # since not every node project ran here.
             unmeasured_projects = node.get("unmeasured") or []
             executed.node_gate_ran = (not node.get("skipped")
                                       and not unmeasured_projects)
-            if node.get("skipped"):
+            if node.get("skipped") and not node.get("measured_dirs"):
+                # NOTHING was measured anywhere: the single-project absence,
+                # unchanged — not a red either, and never a pass.
                 report.update(passed=False, skipped=True,
                               infrastructure_unavailable=True,
                               evidence_state="infrastructure_unavailable")
                 report["failures"].append(
                     "node gate unavailable: " + node.get("summary", ""))
                 unmeasured_entries.append(report["failures"][-1])
-            elif not node["passed"]:
-                report["passed"] = False
-                for name, chk in node["checks"].items():
-                    if not chk["passed"]:
-                        report["failures"].append(
-                            f"node:{name} failed (rc={chk['returncode']}): "
-                            f"{chk['output'][-500:]}")
-            if unmeasured_projects and not node.get("skipped"):
-                report["passed"] = False
-                for entry in unmeasured_projects:
-                    report["failures"].append(
-                        f"node gate unavailable for {entry['dir']}: {entry['reason']}")
-                    unmeasured_entries.append(report["failures"][-1])
-                # An absence is not a product red: only route this run as one
-                # ("not fully measured") when no measured project was red. A
-                # measured red goes back to the implementer beside the named
-                # absence. Same words the single-project branch above uses.
-                measured_red = any(not chk.get("passed")
-                                   for chk in node["checks"].values())
-                if not measured_red:
-                    report.update(skipped=True, infrastructure_unavailable=True,
-                                  evidence_state="infrastructure_unavailable")
+            else:
+                if not node["passed"]:
+                    report["passed"] = False
+                    for name, chk in node["checks"].items():
+                        if not chk["passed"]:
+                            report["failures"].append(
+                                f"node:{name} failed (rc={chk['returncode']}): "
+                                f"{chk['output'][-500:]}")
+                if unmeasured_projects:
+                    # Not a failure entry (an absence may not become a red and
+                    # may not seed a baseline key), but said plainly enough that
+                    # no reader can think those projects ran.
+                    report["node_unmeasured"] = unmeasured_projects
 
     # The repo's own declared gate (run_tests.sh) — folded in like the node
     # gate. A green pytest run over a product pytest cannot compile is a

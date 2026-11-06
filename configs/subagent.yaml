@@ -94,13 +94,39 @@ steps:
       # edge comes first. Only then does an unmeasured project stop a green from
       # reaching the reviewer: a partial report with `passed: true` has no measured
       # red, and without the partial edge it would go on to review as green.
+      #
+      # THE COMPLETENESS VERDICT NOW COMES OFF `run_tests`' RETURN, AND THE
+      # SUCCESS EDGE IS POSITIVE — it requires `node_gate_complete: true`, not
+      # merely "not known to be incomplete". Measured fail-open this replaces: a
+      # report that did not CONTAIN the key at all (an executor image older than
+      # this config, a report written by another producer) matched neither the
+      # partial edge nor the success edge as worded below, fell through to the
+      # raw `passed: true` that used to sit here, and went on to review as a
+      # green build with the node gate unmeasured. Now an absent key matches
+      # NOTHING and the run dies on "No matching transition from 'test'".
+      # See `configs/fix_tests.yaml` for the same change and the two measured
+      # reasons `from_file` is not used for this field (`coding_impl.yaml:
+      # 205-235`: the reader is step-bound, and a report parsing to a list raises
+      # AttributeError inside the engine's `_flags_match`).
+      #
+      # The red edge stays on the file deliberately: a non-delivery return
+      # (`written: None`, a storage failure) carries `passed: false` with no
+      # report and no `node_gate_complete`, and matching it off the return would
+      # charge implement laps to something no edit can fix.
       - to: "work"                         # tests red → fix, with the report
         match: { from_file: "test_report.json", field: "passed", value: false }
         max_loop: 3
       - to: "node_gate_incomplete"         # green, but a node project was not measured → not a success
-        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
-      - to: "review"                       # tests green → adversarial review
-        match: { from_file: "test_report.json", field: "passed", value: true }
+        match: { field: "node_gate_complete", value: false }
+      # Green AND said complete. BOTH terms: an EXHAUSTED `max_loop` edge is
+      # skipped by the resolver, so once the three repair laps are spent the red
+      # edge stops matching and the routing comes back through here — measured,
+      # a success edge keyed only on `node_gate_complete: true` turned a suite
+      # that never passes into `completed`
+      # (tests/skillflow/test_gated_pipelines.py::test_subagent_test_never_green_fails_bounded).
+      # The completeness term is what an absent key can never satisfy.
+      - to: "review"                       # measured complete AND green → adversarial review
+        match: { node_gate_complete: true, passed: true }
 
   - id: "review"
     step_type: "agent"

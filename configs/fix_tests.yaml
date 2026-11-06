@@ -74,17 +74,54 @@ steps:
       # reaching `done`: a partial report with `passed: true` has no measured red,
       # and without the partial edge it would conclude success while a project
       # never ran.
+      #
+      # THE COMPLETENESS VERDICT NOW COMES OFF `run_tests`' RETURN, AND THE
+      # SUCCESS EDGE IS POSITIVE. That is the whole change: a success edge that
+      # matches `passed: true` accepts "not known to be incomplete", while this
+      # one requires someone to have SAID the node gate was measured in full.
+      # Measured fail-open this replaces: a report that did not contain the key
+      # at all (an executor image older than this config, or a report written by
+      # another producer) matched no edge that could have stopped it and fell
+      # through to the raw `passed: true` that used to sit here, concluding
+      # success with the node gate unmeasured. Now an absent key matches NOTHING
+      # and the run dies on "No matching transition from 'test'", which is a
+      # failure, not a success.
+      #
+      # `from_file` is gone from this field for the two measured reasons recorded
+      # in `configs/coding_impl.yaml:205-235`: the reader is resolved against the
+      # EVALUATING step's own output dir (so it only ever worked on this step),
+      # and a report that parses to a list raises AttributeError inside the
+      # engine's `_flags_match` instead of routing. `run_tests` puts
+      # `node_gate_complete` on its return for every report it writes; the FILE
+      # keeps it too, for `aitelier/gate_evidence.py` and the tests.
+      #
+      # The red edge still reads the file, and it stays on the file on purpose:
+      # a non-delivery return (`written: None`, a storage failure) carries
+      # `passed: false` WITH no report and deliberately no `node_gate_complete`,
+      # and matching `passed` off the return would charge three implement laps to
+      # something no edit can fix. As an unmatched edge it ends the run at once,
+      # naming the reason.
       - to: "fix"                         # tests fail → fix, with the report
         match: { from_file: "test_report.json", field: "passed", value: false }
         max_loop: 3
       - to: "node_gate_incomplete"        # green, but a node project was not measured → not a success
-        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
-      - to: "done"                        # tests pass → loop-external terminal
-        match: { from_file: "test_report.json", field: "passed", value: true }
+        match: { field: "node_gate_complete", value: false }
+      # Green AND said complete. BOTH conditions, not just the completeness one:
+      # an EXHAUSTED `max_loop` edge is skipped by the resolver (`continue`), so
+      # once the three repair laps are spent the red edge stops matching and
+      # comes back through here — measured: a success edge keyed only on
+      # `node_gate_complete: true` turned a suite that never passes into
+      # `completed` (tests/skillflow/test_gated_pipelines.py::
+      # test_fix_tests_never_passing_fails_bounded). Matching `passed` as a flag
+      # here is what keeps that run on its bound (`Cycle limit exceeded`), and
+      # the completeness term is what stops an absent key from ever arriving.
+      - to: "done"                        # measured complete AND green → loop-external terminal
+        match: { node_gate_complete: true, passed: true }
 
-  # Loop-external terminal — reached only after tests pass; the node the
-  # end-condition fires on (see the comment on end_conditions). Gate = no
-  # completed step row, so it fires at most once.
+  # Loop-external terminal — reached only when the test step says the node gate
+  # was measured in full AND the suite is green; the node the end-condition fires
+  # on (see the comment on end_conditions). Gate = no completed step row, so it
+  # fires at most once.
   - id: "done"
     step_type: "gate"
     transitions:

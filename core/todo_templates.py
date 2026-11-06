@@ -18,9 +18,10 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
 * A template binds paths into predicates that require them to CHANGE from their
   state at the start of the step. `check_declared_paths` judges those paths against
   the real workspace while the plan is still being frozen: a path that can never
-  differ (an existing directory, one outside the workspace, a repeat) is refused
-  there, and the ones that do not exist yet - legal, since creating a file is a
-  change - are announced in the result the director reads.
+  differ (an existing directory, an existing non-regular file, a path under an
+  existing non-directory, one outside the workspace, a repeat) is refused there,
+  and the ones that do not exist yet - legal, since creating a file is a change -
+  are announced in the result the director reads.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from typing import Any, Mapping
 
 # `_relative` is reused, not restated: a declared path that escapes the workspace must be
@@ -277,6 +279,48 @@ class PathAudit:
                 "not_yet_existing": list(self.not_yet_existing), "notes": list(self.notes)}
 
 
+def _existing_non_directory_parent(workspace: Path, rel: str) -> tuple[str, Path] | None:
+    """The first existing component of `rel`'s parent chain that is NOT a directory, if any.
+
+    A declared path is created by walking its directories; a component that already exists as a
+    file, a FIFO or a socket can never be walked through, so the path below it can never come into
+    being. The walk stops at the first component that does not exist: nothing deeper can exist
+    either, and creating below it is an ordinary change.
+    """
+    parts = PurePosixPath(rel).parts
+    for i in range(1, len(parts)):
+        component = str(PurePosixPath(*parts[:i]))
+        path = workspace / PurePosixPath(component)
+        if not path.exists():
+            return None
+        if not path.is_dir():
+            return component, path
+    return None
+
+
+def _what_it_is(path: Path) -> str:
+    """`a FIFO`, `a socket`, `a regular file`, ... for a refusal that names what it found.
+
+    `stat` follows symlinks on purpose: the component the walk would descend into is the target's
+    kind, and a symlink to a regular file must keep being judged by the file it points at.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError:                      # gone between the check and this look: a bare fact, not a claim
+        return "not a directory"
+    if stat.S_ISREG(mode):
+        return "a regular file"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    return "not a directory"
+
+
 def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
@@ -286,18 +330,26 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     abandons it and the director only finds out at delivery:
 
     * an existing DIRECTORY - `_digest` digests files only, so a directory has no state to
-      differ from: `files_changed` would fail it forever with "does not exist after the step";
+      differ from: `files_changed` would fail it forever with "does not exist after the step".
+      A symlink to a directory is a directory here: `_digest` follows the link;
+    * a path whose existing PARENT is not a directory (`app.py/x/y.txt`, where `app.py` is a
+      file) - nothing can be created under it, so the path can never appear;
+    * an existing path that is neither a directory nor a regular file (a FIFO, a socket, a
+      device) - `_digest` returns None for it, so it is never "changed" either;
     * a path outside the workspace (absolute, or holding a `..` component) - refused by the
       plan's own rule, `todo_plan._relative`, called here so there are never two rules;
     * the same path twice in one list, compared in normalised form so `./a` and `a` collide -
-      a list that repeats one file names fewer files than it looks like it does.
+      a list that repeats one file names fewer files than it looks like it does. This one reads
+      the plan, not the workspace, so it is refused whether or not the workspace exists.
 
     A path that does not exist yet stays LEGAL: creating a file is a normal change and
     `code_change` relies on it. It is ANNOUNCED instead ("the step will have to create it"), in
     the result that carries the frozen plan, so a director who will never create one sees it now.
 
     A workspace that is not a directory is said out loud rather than skipped, and nothing is
-    assumed about it: the paths cannot be looked up, so they are not judged by a guess.
+    assumed about it: the paths cannot be looked up, so they are not judged by a guess. The note
+    says which checks that cost - and which one it did not, since the duplicate refusal above
+    does not need a directory.
     """
     workspace = Path(plan.workspace)
     measured = workspace.is_dir()
@@ -339,13 +391,39 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         f"this item could never pass and the attempt would run until someone abandoned it; declare "
                         f"the files inside it",
                         item=item.id, predicate=binding.predicate, path=rel)
+                parent = _existing_non_directory_parent(workspace, rel)
+                if parent is not None:
+                    component, found = parent
+                    raise Refusal(
+                        "impossible_path",
+                        f"{where} declares {rel!r}, whose parent {component!r} is {_what_it_is(found)}, where a "
+                        f"directory is required, under workspace {plan.workspace}: the item requires every declared "
+                        f"path to differ from its state at the start of the step, and nothing can be created under a "
+                        f"path that is not a directory - the file can never appear, {binding.predicate} would fail "
+                        f"it forever, and this item could never pass; declare a path whose existing parents are all "
+                        f"directories",
+                        item=item.id, predicate=binding.predicate, path=rel)
+                # What the directory refusal above does not own: a path that exists and is neither a
+                # directory nor a regular file has no digest, so it can never be "changed" either. The
+                # `is_dir` term keeps the two refusals disjoint - anything that resolves to a directory
+                # is the directory refusal's case, including a symlink to one.
+                if target.exists() and not target.is_file() and not target.is_dir():
+                    raise Refusal(
+                        "impossible_path",
+                        f"{where} declares {rel!r}, which exists and is {_what_it_is(target)}, under workspace "
+                        f"{plan.workspace}: the item requires every declared path to differ from its state at the "
+                        f"start of the step, and {binding.predicate} compares a file's digest - a path that is not "
+                        f"a regular file has none, so this item could never pass and the attempt would run until "
+                        f"someone abandoned it; declare a regular file",
+                        item=item.id, predicate=binding.predicate, path=rel)
                 (existing if target.exists() else created).append(rel)
     notes: list[str] = []
     if not measured:
         notes.append(
             f"workspace {plan.workspace} is not a directory, so the {len(declared)} declared path(s) {list(declared)} "
-            f"could not be looked up: no directory, duplicate-spelling or existence check was made, and nothing was "
-            f"assumed about them")
+            f"could not be looked up: no directory, parent, non-regular-file or existence check was made about them, "
+            f"and nothing was assumed about them (a duplicate spelling of one path in one list is still refused: "
+            f"that check reads the plan, not the workspace)")
     elif created:
         notes.append(
             f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "

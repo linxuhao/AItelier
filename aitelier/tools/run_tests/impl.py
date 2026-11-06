@@ -41,7 +41,7 @@ from aitelier import gate_admission
 from aitelier.gate_evidence import (
     ABSENCE_CAPPED, ABSENCE_DECLARATION, ABSENCE_ISOLATION, ABSENCE_RAISED,
     ABSENCE_TICKET, ABSENCE_UNDECLARED, ABSENCE_UNREADABLE,
-    release_disposition, report_state)
+    release_disposition, report_state, restate_classification)
 from aitelier.gate_coverage import (
     PRODUCER_RUN_TESTS, PROVISIONAL_PRODUCER, PROVISIONAL_PURPOSE,
     validate_coverage)
@@ -2643,10 +2643,11 @@ def _commit_baseline(report: dict, pending: dict) -> bool:
         report["passed_relative"] = False
         report["baseline_failures"] = []
         report["baseline_state"] = "unmeasured"
-        if "evidence_state" in report:
-            report["evidence_state"] = report_state(report)
-        if "release_evidence" in report:
-            report["release_evidence"] = release_disposition(report)
+        # The same rule the stamp applies (`gate_evidence._write_state`): the
+        # producer's absence word is kept, so a failed write cannot turn an
+        # absence into a measured failure. Only fields the report already has
+        # are restated; this writer never adds a label or a disposition.
+        restate_classification(report, create=False)
         return False
     report["baseline_persisted"] = True
     return True

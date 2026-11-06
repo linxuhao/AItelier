@@ -150,11 +150,99 @@ def _write_state(report: dict, state: str) -> None:
         report.pop("evidence_state", None)
 
 
+def restate_classification(report: dict, *, create: bool) -> None:
+    """Write the derived answers back into `report`, by the one rule.
+
+    Both answers are read first (`_classify`), and the label goes through
+    `_write_state`, which keeps the producer's own absence word when replacing
+    it would change `report_state`. That is the rule this function holds. The
+    inventory of who comes through it — and who still derives the answer
+    without it — is below, because an earlier version of this docstring
+    claimed that EVERY such writer came through here. That claim was false,
+    and the writers it left out are named rather than waved at.
+
+    Writers that DO go through the one rule:
+
+    * `_stamp_classification`, called from `stamp_report` (and so from
+      `stamp_file`), with `create=True` — it stamps a report a producer
+      already wrote;
+    * `run_tests._commit_baseline`'s write-failure branch
+      (`aitelier/tools/run_tests/impl.py:2650`) with `create=False` — it
+      restates a stored report in place, adding no field the producer did not
+      write.
+
+    What this rule does not cover. These writers derive the answer themselves
+    and never call this function:
+
+    * `aitelier/tools/run_tests/impl.py:3081` and `:3622` — each return path
+      puts `release_disposition(report)` on the dict the tool RETURNS, the
+      flags the engine merges into the step;
+    * `aitelier/tools/run_tests/impl.py:2922` — `_report_write_failure`
+      writes a CONSTANT `"release_evidence": "unresolved"` beside
+      `"evidence_state": "infrastructure_unavailable"` on the return payload
+      for a report that could not be written at all;
+    * `upstream_failed_report` in this module — it asks
+      `release_disposition` of a dict it builds fresh, carrying `passed: False`
+      and the upstream's state (two keys), in order to build a NEW producer
+      report;
+    * `aitelier/tools/godot_compile/impl.py:382` and `:401` — the
+      upstream-blocked return carries `release_disposition(compile_report)`,
+      and the stamped path folds the two per-report dispositions (`:399`)
+      into `"release_evidence"`;
+    * `aitelier/tools/godot_vision/impl.py:775` and `:790` — the same two
+      shapes for `vision_report.json`;
+    * `round_feedback` (`aitelier/round_feedback.py:210`) and the playtest
+      fallback (`aitelier/tools/godot_playtest/impl.py:797`) write constant
+      producer labels — `"release_disposition": "unresolved"`,
+      `"evidence_state": "partial"` — on a report they AUTHOR: they are its
+      producer, so those words are a first answer and never a restatement of
+      an earlier producer's.
+
+    None of those is the defect this function exists for, and the reason is
+    one reason: they put a disposition on a RETURNED result, or a constant
+    producer label on a FRESH report, instead of RESTATING a producer's own
+    stored word. The thing that can be degraded is a stored report — its
+    producer said `not_run` (green pytest leg, repository gate unmeasured),
+    the stamp replaced that with `skipped`, and every later reader answered
+    `failed` / `known_failure`. Such a report never passes through any writer
+    above: they either return a dict without writing a report, or they AUTHOR
+    the report they write — every label on it is one they supplied — so
+    nothing there is an earlier producer's word to preserve or overwrite.
+    (`round_feedback` stamps the report it built before writing it; the
+    playtest fallback writes and returns with no stamp at all. Neither
+    restates.) The audited evidence is the FILE (`_audit_one` and
+    `first_upstream_blocker` read files), so a returned disposition is never
+    re-derived as evidence and cannot disagree with a file it never came from.
+    Producers that write their own `evidence_state` —
+    `run_tests/impl.py:3407` (`unattributable`) and `:3442` (`not_run`),
+    `docker/godot/godot_harness.py:1209` (`infrastructure_unavailable`) — are
+    writing the word this rule PRESERVES, not deriving one. Also outside this
+    inventory's subject: the constant
+    `evidence_state: "infrastructure_unavailable"` written by
+    `run_tests/impl.py`'s toolchain (`:529`), storage (`:2820`), executor
+    (`:3271`) and node-infrastructure (`:3346`) branches and by
+    `godot_compile/impl.py`'s `_refuse_incomplete_pass` (`:223`) and its
+    builder-unreachable branch (`:275`), plus the copy of the report's own
+    `evidence_state` that `run_tests`'s main return (`:3614`) puts on the
+    returned flags. None of them classifies a report, so none is a
+    derived-answer writer and none is in this inventory.
+
+    `create` says whether a field the report does not already carry may be
+    added. The stamp passes `create=True` and writes both. A writer that only
+    restates answers the producer already wrote passes `create=False`, so it
+    rewrites a field only where one exists and never adds a label or a
+    disposition the report did not have.
+    """
+    state, disposition = _classify(report)
+    if create or "evidence_state" in report:
+        _write_state(report, state)
+    if create or "release_evidence" in report:
+        report["release_evidence"] = disposition
+
+
 def _stamp_classification(report: dict) -> None:
     """Write this stamp's answers, in an order that cannot change them."""
-    state, disposition = _classify(report)
-    _write_state(report, state)
-    report["release_evidence"] = disposition
+    restate_classification(report, create=True)
 
 
 def stamp_report(report: dict, *, run_id: str, out_dir: str,

@@ -244,7 +244,10 @@ def test_a_provisional_green_round_is_refused_by_the_shipped_routing(
     assert verdict["full_test_passed"] is False, verdict.get("full_test_passed")
 
     # The classifier already answers this shape, and it does not call it a pass.
-    assert ge.report_state(report) == "partial"
+    # The word is the PROVISIONAL one (`provisional`); `partial` belongs to the
+    # other fact — a node gate that could not measure every project — and these
+    # two were one word until 2026-11-06.
+    assert ge.report_state(report) == ge.PROVISIONAL_ROUND
     assert ge.release_disposition(report) == "unresolved"
     assert report["release_evidence"] == "unresolved" == verdict["release_evidence"]
 
@@ -384,7 +387,9 @@ def test_a_report_with_no_measured_coverage_still_ends_at_test_evidence_missing(
 #     route (a red routed to the terminal), the other three green;
 #   * `report_state` made to answer the marker `passed` -> the
 #     provisional-green row red on the classifier pair
-#     (`('passed', 'unresolved')` for `('partial', 'unresolved')`);
+#     (`('passed', 'unresolved')` for `('provisional', 'unresolved')`; measured
+#     when the row still expected `('partial', 'unresolved')`, i.e. before the
+#     two facts were given one word each);
 #   * `run_tests`' `full_test_passed` stamp removed -> BOTH provisional rows red
 #     on the producer facts (`None` for `False`).
 # So every one of the three readings is load-bearing, and a row names which
@@ -398,7 +403,10 @@ SHAPES = [
         {"passed": True, "returncode": 0, "purpose": PROVISIONAL_PURPOSE,
          PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS, "full_test_passed": False,
          "no_tests_collected": ABSENT},
-        ("partial", "unresolved"),
+        # The PROVISIONAL word (`gate_evidence.PROVISIONAL_ROUND`). It was
+        # `partial` until 2026-11-06, when that word was left to the other fact
+        # it also named: a node gate that could not measure every project.
+        ("provisional", "unresolved"),
         (PROVISIONAL_TERMINAL,),
         "not_full_evidence",
         id="provisional-green",
@@ -438,7 +446,12 @@ SHAPES = [
 
 # The story each layer's answer has to mean. One vocabulary per layer, and none
 # of them is the other's: a state word, a graph node, and the producer's facts.
+# `partial` (a node gate that could not measure every project) and
+# `provisional` (a provisional diagnostics round) are two words for two facts
+# since 2026-11-06; neither is a full pass, and this table keeps BOTH so that a
+# state the vocabulary can answer never silently loses its story.
 STORY_BY_STATE = {"passed": "full_evidence", "failed": "repair",
+                  "provisional": "not_full_evidence",
                   "partial": "not_full_evidence", "skipped": "absence"}
 STORY_BY_TERMINAL = {"done": "full_evidence", "implement": "repair",
                      PROVISIONAL_TERMINAL: "not_full_evidence",

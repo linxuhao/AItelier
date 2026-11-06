@@ -280,7 +280,10 @@ class ProjectBoundaryTests(unittest.TestCase):
             self.assertTrue(publication_scope_refusal(scope))
             report = {"passed": True, "purpose": rf.PURPOSE, "gate_coverage": scope,
                       "upstream_state": "passed"}
-            self.assertEqual(ge.report_state(report), "partial")
+            # The provisional word, not `partial`: `partial` names the other
+            # fact (a node gate that could not measure every project) and the
+            # two were one word until 2026-11-06.
+            self.assertEqual(ge.report_state(report), ge.PROVISIONAL_ROUND)
             self.assertEqual(ge.release_disposition(report), "unresolved")
         with self.assertRaisesRegex(ValueError, "unknown feedback policy/request"):
             self.feedback(base, head, requested=["not-authored"])

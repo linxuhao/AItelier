@@ -12,6 +12,12 @@ import time
 from aitelier.gate_coverage import (
     PRODUCER_ROUND_FEEDBACK, PROVISIONAL_PRODUCER, PROVISIONAL_PURPOSE,
     spec_digest, validate_coverage)
+# The state word `report_state` answers for a report under this marker. It is
+# imported, not spelled, so this producer and the reader that classifies the
+# report it writes cannot disagree — and so the day the vocabulary splits a
+# word, the producer moves with it. (`gate_evidence` imports only
+# `gate_coverage`, so this is not a cycle.)
+from aitelier.gate_evidence import PROVISIONAL_ROUND
 from aitelier.scoped_gate import _git, _snapshot, _graph, _closure, _RESOURCE, _DECL
 
 # This producer's name for the marker, kept as-is because callers and tests use
@@ -205,9 +211,14 @@ def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=ver
               # THIS producer's name beside the marker it invented: `run_tests`
               # stamps the same purpose on a report whose `passed` is a real
               # outcome, and a reader that cannot tell the two apart answers
-              # both `partial` (see `gate_evidence.report_state`).
+              # both `PROVISIONAL_ROUND` (see `gate_evidence.report_state`).
               PROVISIONAL_PRODUCER: PRODUCER_ROUND_FEEDBACK,
-              "release_disposition": "unresolved", "evidence_state": "partial",
+              "release_disposition": "unresolved",
+              # The word `report_state` answers for THIS report, written by its
+              # producer: imported rather than spelled, so the label and the
+              # reader cannot drift apart. It used to be `partial`, which is now
+              # the NODE-GATE word and says a different fact.
+              "evidence_state": PROVISIONAL_ROUND,
               "baseline_pruning_allowed": False, "state_acceptance_allowed": False,
               "gate_coverage": scope, "owner_identity": owner,
               "started_at": datetime.now(timezone.utc).isoformat(), "errors": []}

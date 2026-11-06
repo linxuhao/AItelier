@@ -13,7 +13,9 @@ import re
 #   * `round_feedback.run_feedback` — the report IS the feedback round. Its
 #     `passed` is False BY CONSTRUCTION (a feedback round is not a gate result
 #     at all), and `tests/unit/test_round_feedback.py` pins that answer at
-#     `partial` in eleven parametrized verifier shapes plus two more tests.
+#     `provisional` (`gate_evidence.PROVISIONAL_ROUND`) in thirteen
+#     parametrized verifier shapes plus two more tests. That word used to be
+#     `partial`, which is now the NODE-GATE word and says a different fact.
 #   * `run_tests` — the report IS a test report whose repository-gate coverage
 #     was provisional (the stamp beside `_retained_coverage`'s refusal). Its
 #     `passed` is the real pytest outcome and can be False, and that red

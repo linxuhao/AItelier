@@ -26,14 +26,25 @@ Two things, and neither of them is "what a shell command does":
      bound to the path token its own `chmod` names: nothing can satisfy this file by
      putting 0755 somewhere in a RUN.
   2. no OTHER instruction names a pinned path, an ancestor whose mode decides whether
-     it is reachable (`/`, `/opt`), the client's own file name, or a token that builds
+     it is reachable (`/`, `/opt`), the client's own file name, or a WORD that builds
      such a path at parse time (a shell variable, a glob or a brace whose literal head
-     already points there). An instruction that mentions the tree and is not one of the
-     two expected ones is refused with the token it mentions, whatever command word it
-     uses - so `chmod -R 0755 /opt/aitelier-gate-imports`, `install -m 0755 /tmp/x
-     /opt/aitelier-gate-imports/docker`, `chmod --reference=/tmp/refmode 0755
+     already points there). A word is taken as a shell takes it: quoting and escaping
+     come off (`"/opt"`, `/o'pt'` and `\\/opt` are one word), `;`, `|`, `&`, `(`, `)`,
+     `<`, `>` and a TAB separate words exactly as a space does, the exec form is read as
+     the JSON array Docker reads it as, and a line continuation is DELETED rather than
+     spaced - `/opt/aitelier-gate-im\\` + `ports/...` is one word, which is the hole the
+     round-6 review measured green. An instruction that mentions the tree and is not one
+     of the two expected ones is refused with the word it mentions, whatever command
+     word it uses - so `chmod -R 0755 /opt/aitelier-gate-imports`, `install -m 0755
+     /tmp/x /opt/aitelier-gate-imports/docker`, `chmod --reference=/tmp/refmode 0755
      /opt/aitelier-gate-imports` and a later `chmod 0666 .../godot_harness.py` are all
      the same refusal.
+
+     A word that STARTS with an expansion is refused when the expansion supplies a path
+     (`${DIR}/x`, `${DIR}/..`): its literal head is empty, so the text says nothing about
+     where it goes. That also refuses a harmless `cp ${SRC}/x /tmp/`, and that false
+     refusal is the price of not modelling the shell; bare `$BUILD_TOOL` is a command
+     word with no path in it, and it is read.
 
 That is deliberately NOT a model of `chmod`, `install` or `COPY`: five review rounds
 each taught the parser the next shell spelling (a recursive `chmod`, an `install` into
@@ -42,6 +53,11 @@ through `/proc/self/root`, a TAB after `RUN`, a `chmod` glued inside a `SHELL` s
 and each fix was answered by the next spelling. The list of instruction SHAPES was the
 bug. What is left is an allowlist of exact instructions plus one mention test, which
 is why those rounds' findings now hold without a new rule per finding.
+
+The sixth round found what a spelling is made of rather than another command: a word is
+not the bytes between two spaces (`"/opt"`, `/opt;`, `//opt`, the exec form's JSON
+array, a continued line). That is fixed once, in `_words` and `_word`, and the shapes
+below are rows of a table rather than five more branches.
 
 What it cannot decide, and does not claim to
 --------------------------------------------
@@ -67,6 +83,7 @@ instruction it did not expect.
 """
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 from pathlib import Path
@@ -137,12 +154,27 @@ PIN = f"COPY --chmod=0644 docker/godot/godot_harness.py {TARGET}"
 EXPECTED = (PIN, MODE_BLOCK)
 
 
+def _split_keyword(instruction: str) -> tuple[str, str]:
+    """The KEYWORD of one instruction and the rest of its line.
+
+    Split on ANY whitespace, because a TAB is whitespace to Docker. A parser that split
+    on a space alone read `RUN\\tchmod 0700 /opt` as one unknown keyword, so the path it
+    named was never judged; the round-6 review measured that shape green.
+    """
+    parts = instruction.split(None, 1)
+    return (parts[0], parts[1].strip()) if len(parts) == 2 else (parts[0], "")
+
+
 def _directives(text: str) -> list[tuple[str, str]]:
     """Every instruction in file order, as (KEYWORD, arguments).
 
-    Continuations are joined with one space and whitespace inside an instruction is
-    collapsed, which is exactly the difference Docker itself ignores - and the one thing
-    this file does normalise. A blank line or a `#` comment is not an instruction.
+    A `\\` at the end of a line is REMOVED, not replaced by a space - Docker deletes the
+    backslash and the newline, so `/opt/aitelier-gate-im\\` followed by `ports/...` is one
+    word and not two. The round-6 non-author review measured the space-inserting version
+    green on exactly that instruction: it split the client's path into two operands that
+    each spelled half of the name. Whitespace inside an instruction is then collapsed,
+    which is the only other difference Docker itself ignores. A blank line or a `#`
+    comment is not an instruction.
     """
     instructions: list[tuple[str, str]] = []
     pending = ""
@@ -151,17 +183,15 @@ def _directives(text: str) -> list[tuple[str, str]]:
         if not pending and (not line.strip() or line.lstrip().startswith("#")):
             continue
         if line.endswith("\\"):
-            pending += line[:-1] + " "
+            pending += line[:-1]
             continue
         joined = (pending + line).strip()
         pending = ""
         if not joined:
             continue
-        keyword, _, arguments = joined.partition(" ")
-        instructions.append((keyword, arguments.strip()))
+        instructions.append(_split_keyword(joined))
     if pending.strip():
-        keyword, _, arguments = pending.strip().partition(" ")
-        instructions.append((keyword, arguments.strip()))
+        instructions.append(_split_keyword(pending.strip()))
     return instructions
 
 
@@ -175,8 +205,16 @@ def _instructions(text: str) -> list[str]:
 
 
 def _decides_reachability(path: str) -> bool:
-    """True when re-moding `path` decides whether the export tree can be reached."""
+    """True when re-moding `path` decides whether the export tree can be reached.
+
+    `//opt` is `/opt` on Linux but POSIX lets `normpath` keep a leading double slash, so
+    the leading slashes are collapsed before the comparison.
+    """
     normalised = posixpath.normpath(path) if path else ""
+    if not normalised:
+        return False
+    if normalised.startswith("//"):
+        normalised = "/" + normalised.lstrip("/")
     if normalised in ANCESTORS or normalised == EXPORT:
         return True
     return EXPORT.startswith(normalised.rstrip("/") + "/")
@@ -194,29 +232,75 @@ def _build_time_path(token: str) -> str | None:
     return token[:first.start()] if first else None
 
 
-def _refusal(token: str) -> str | None:
-    """Why this one token makes its instruction one this file cannot allow, or None.
+#: What separates one WORD from the next in shell text. Quoting is NOT here on purpose:
+#: `"/opt"` is one word, and what it names is decided after the quotes come off.
+_SHELL_BREAK = re.compile(r"[\s;|&()`<>]+")
 
-    Four questions, all about the TEXT of the token:
+#: What is taken off the EDGES of a word, where a shell's own syntax reaches into it:
+#: the quotes and backslashes it removes, and the brackets, comma and `=` of an exec-form
+#: array (`["chmod","0700","/opt"]` is three words, and `[` is no part of `chmod`).
+#: Braces are deliberately absent: `/opt/aitelier-gate-{imports,x}` is one word, whose
+#: literal head is what `_build_time_path` judges.
+_EDGE = "\"'\\[]{},="
+_UNQUOTED = {ord(character): None for character in "\"'\\"}
+
+
+def _words(arguments: str) -> list[str]:
+    """The words of one instruction, each still as WRITTEN (its quoting attached).
+
+    Docker has two forms and they split differently. The exec form IS a JSON array -
+    Docker reads it with a JSON reader, so this file does too, and
+    `RUN ["chmod","0700","/opt"]` is three words rather than one bracket-wrapped blob
+    that named nothing; the round-6 review measured that shape green. Everything else is
+    shell text, split on whitespace and on the separators above. An exec-form element may
+    itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`), so each
+    element is split again.
+    """
+    text = arguments.strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            return [word for item in parsed for word in _SHELL_BREAK.split(item) if word]
+    return [word for word in _SHELL_BREAK.split(text) if word]
+
+
+def _word(raw: str) -> str:
+    """The word a shell would pass on for this one: quoting and edge punctuation gone.
+
+    `/"opt"`, `/o'pt'`, `\\/opt`, `"/opt"` and `/opt;` are all `/opt` to a shell, and the
+    round-6 review measured three of those spellings GREEN while a chmod of them re-moded
+    the ancestor. A word this reduces to nothing is not judged at all.
+    """
+    return raw.translate(_UNQUOTED).strip(_EDGE)
+
+
+def _refusal(word: str) -> str | None:
+    """Why this one WORD makes its instruction one this file cannot allow, or None.
+
+    Four questions, all about the text of the word (`_word` has already taken the shell's
+    quoting and word separators off it):
       * does it spell the export tree or the client's file name?
       * does it build a path out of a shell variable (`$DIR/x`, `${D}/..`)?
       * does its literal head, before the expansion, already point at the tree or at an
         ancestor of it (`/opt/*`, `/opt/aitelier-gate-{imports,x}`, `/*/..`)?
       * is it, plainly, one of the two ancestors (`/opt`, `/`)?
     """
-    if NAME in token or CLIENT in token:
+    if NAME in word or CLIENT in word:
         return "names the export tree or the client this image pins"
-    head = _build_time_path(token)
+    head = _build_time_path(word)
     if head is None:
         return ("names an ancestor of the export tree, whose mode decides whether it can "
-                "be reached") if _decides_reachability(token) else None
+                "be reached") if _decides_reachability(word) else None
     if not head:
-        # A token that STARTS with the expansion: the whole path is supplied by the shell.
+        # A word that STARTS with the expansion: the whole path is supplied by the shell.
         # A bare `$CMD` with no slash is a command name, which is not this file's subject.
         return ("builds a path out of a shell variable, so the path is not in the text"
-                ) if ("$" in token or "`" in token) and "/" in token else None
-    if "$" in head or "`" in head or "/" in head:
-        if "$" in token or "`" in token:
+                ) if ("$" in word or "`" in word) and "/" in word else None
+    if "/" in head:
+        if "$" in word or "`" in word:
             return "builds a path out of a shell variable"
         # The head may be the tree's own beginning rather than one of its directories:
         # `/opt/aitelier-gate-import[[:alpha:]]` and `/opt/aitelier-gate-{imports,x}` both
@@ -235,17 +319,19 @@ def _problems(text: str) -> list[str]:
         if canonical in EXPECTED:
             found.append(canonical)
             continue
-        for token in [keyword, *arguments.split()]:
-            why = _refusal(token)
+        for raw in [keyword, *_words(arguments)]:
+            word = _word(raw)
+            why = _refusal(word)
             if why:
+                written = "" if word == raw else f" (a shell word: {word!r})"
                 shown = canonical if len(canonical) <= 160 else canonical[:157] + "..."
                 problems.append(
-                    f"{keyword.upper()} carries {token!r}, which {why}. This file reads "
+                    f"{keyword.upper()} carries {raw!r}{written}, which {why}. This file reads "
                     "exactly two instructions:\n  " + "\n  ".join(EXPECTED) + "\n"
                     f"and refuses every other instruction that names a pinned path. Got:\n  {shown}\n"
                     "If one of the two really changed, change EXPECTED here deliberately and "
                     "say why in the commit message - do not teach this file to read a shell: "
-                    "five review rounds each found the next spelling.")
+                    "six review rounds each found the next spelling.")
                 break
     for expected in EXPECTED:
         if expected not in found:
@@ -270,6 +356,18 @@ def _added_problems(shipped: str, extra: str) -> list[str]:
     before = _problems(shipped)
     return [problem for problem in _problems(f"{shipped}\n{extra}\n")
             if problem not in before]
+
+
+def _names(problems: list[str], word: str) -> bool:
+    """True when some refusal names `word` on its FIRST line.
+
+    Only the first line: every message then quotes the whole EXPECTED block, which
+    contains the pinned paths, so `word in problem` is true even for a refusal that named
+    a different word entirely. The round-6 review measured that vacuity in these very
+    assertions, and a case that cannot tell "refused for its own token" from "refused for
+    the pinned path printed underneath" is not a case about the shape it lists.
+    """
+    return any(word in problem.splitlines()[0] for problem in problems)
 
 
 def _mode_groups(instruction: str) -> dict[str, str]:
@@ -331,6 +429,11 @@ def test_nothing_but_the_pinned_copy_writes_into_the_export_tree():
     that COPY carries - `COPY --chmod=0600 ... /opt/aitelier-gate-imports/docker/` would
     re-mode the directory and everything under it, and `ADD` and `COPY --from` reach the
     same place from another stage.
+
+    Each row copies from a source that names nothing pinned, so the refusal has to name
+    the DESTINATION - the word that decides where the mode lands. A source that spells
+    `godot_harness.py` is refused on that word first, which is the same contract and a
+    different row (`test_a_command_that_is_not_chmod_and_names_the_tree_is_refused`).
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     writes = [instruction for instruction in _instructions(shipped)
@@ -341,17 +444,16 @@ def test_nothing_but_the_pinned_copy_writes_into_the_export_tree():
         + "\n  ".join(writes))
 
     for shape, named in (
-        ("COPY --chmod=0600 docker/godot/godot_harness.py "
-         "/opt/aitelier-gate-imports/docker/", "/opt/aitelier-gate-imports/docker/"),
+        ("COPY --chmod=0600 /tmp/tool /opt/aitelier-gate-imports/docker/",
+         "/opt/aitelier-gate-imports/docker/"),
         ("ADD docker/godot /opt/aitelier-gate-imports/docker/godot",
          "/opt/aitelier-gate-imports/docker/godot"),
-        ("COPY --from=builder /out/godot_harness.py "
-         "/opt/aitelier-gate-imports/docker/godot/godot_harness.py",
-         "/opt/aitelier-gate-imports/docker/godot/godot_harness.py"),
+        ("COPY --from=builder /out/tool /opt/aitelier-gate-imports/docker/godot/tool",
+         "/opt/aitelier-gate-imports/docker/godot/tool"),
     ):
         added = _added_problems(shipped, shape)
         assert added, f"this instruction writes into the export tree and is green:\n{shape}"
-        assert any(named in problem for problem in added), (
+        assert _names(added, named), (
             f"{shape} was refused, but not for the path it names ({named!r}):\n"
             + "\n".join(added))
 
@@ -388,7 +490,7 @@ THIRD_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("N5  a mode change carried by a SHELL instruction",
      'SHELL ["/bin/sh","-c",'
      '"chmod -R 0700 /opt/aitelier-gate-imports; eval \\"$1\\"","sh"]',
-     "/opt/aitelier-gate-imports;"),
+     "/opt/aitelier-gate-imports"),
     ("N6  a symlink alias, then a chmod of the alias",
      "RUN ln -s /opt/aitelier-gate-imports/docker/godot /tmp/g && chmod 0700 /tmp/g",
      "/opt/aitelier-gate-imports/docker/godot"),
@@ -411,7 +513,7 @@ def test_every_shape_the_third_review_measured_green_is_now_refused():
     for name, extra, expected in THIRD_REVIEW_SHAPES:
         added = _added_problems(shipped, extra)
         assert added, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
-        assert any(expected in problem for problem in added), (
+        assert _names(added, expected), (
             f"{name} was refused, but not for the token that closes it (expected "
             f"{expected!r}):\n" + "\n".join(added))
 
@@ -426,7 +528,7 @@ FOURTH_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("E5  a `chmod` glued inside a SHELL string with `;`",
      'SHELL ["/bin/sh","-c",'
      '"true;chmod -R 0700 /opt/aitelier-gate-imports;eval \\"$1\\"","sh"]',
-     "/opt/aitelier-gate-imports;"),
+     "/opt/aitelier-gate-imports"),
     ("E7  `--recurs`, the getopt_long abbreviation of `--recursive`",
      "RUN chmod --recurs 0755 /opt/aitelier-gate-imports",
      "/opt/aitelier-gate-imports"),
@@ -467,7 +569,7 @@ def test_every_shape_the_fourth_review_measured_green_is_now_refused():
     for name, extra, expected in FOURTH_REVIEW_SHAPES:
         added = _added_problems(shipped, extra)
         assert added, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
-        assert any(expected in problem for problem in added), (
+        assert _names(added, expected), (
             f"{name} was refused, but not for the token that closes it (expected "
             f"{expected!r}):\n" + "\n".join(added))
 
@@ -518,12 +620,83 @@ def test_the_fifth_review_shapes_are_refused_and_its_false_refusal_is_read():
     for name, extra, expected in FIFTH_REVIEW_ESCAPES:
         added = _added_problems(shipped, extra)
         assert added, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
-        assert any(expected in problem for problem in added), (
+        assert _names(added, expected), (
             f"{name} was refused, but not for the token that closes it (expected "
             f"{expected!r}):\n" + "\n".join(added))
     for line in FIFTH_REVIEW_FALSE_REFUSALS:
         assert not _added_problems(shipped, line), (
             f"this line names no pinned path and must not be refused: {line}")
+
+
+#: The escapes the SIXTH non-author reviews (round 6, two model families) measured GREEN
+#: against 3437a37b, with the word each must be refused by. G1-G5 were measured by those
+#: reviews; G6-G9 are not findings - they are the same word rule exercised on the next
+#: spellings its own examples imply, so the rule cannot be tightened for one of them and
+#: left open for its neighbour.
+SIXTH_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
+    ("G1  the ancestor quoted, as a shell word",
+     'RUN chmod 0700 "/opt"',
+     '"/opt"'),
+    ("G1b the ancestor with a `;` attached",
+     "RUN chmod 0700 /opt; true",
+     "/opt"),
+    ("G1c the literal head quoted, then a glob",
+     'RUN chmod -R 0700 "/opt/"*',
+     '"/opt/"*'),
+    ("G2  the client's path split by a line continuation",
+     "RUN chmod 0666 /opt/aitelier-gate-im\\\n"
+     "ports/docker/godot/godot_har\\\n"
+     "ness.py",
+     "aitelier-gate-im"),
+    ("G3  the ancestor in EXEC form, which Docker reads as a JSON array",
+     'RUN ["chmod","0700","/opt"]',
+     "/opt"),
+    ("G4  the ancestor as an earlier word of a `;`-joined list",
+     "RUN cd /opt;chmod -R 0700 a*",
+     "/opt"),
+    ("G5  a TAB after RUN, which a space-only keyword split read as one word",
+     "RUN\tchmod 0700 /opt",
+     "/opt"),
+    ("G6  the ancestor with its separator escaped",
+     "RUN chmod 0700 \\/opt",
+     "\\/opt"),
+    ("G7  the ancestor with a quote inside the word",
+     'RUN chmod 0700 /"opt"',
+     '/"opt"'),
+    ("G8  the ancestor with its second letter quoted",
+     "RUN chmod 0700 /o'pt'",
+     "/o'pt'"),
+    ("G9  the ancestor spelled with two leading slashes",
+     "RUN chmod 0700 //opt",
+     "//opt"),
+)
+
+
+def test_every_shape_the_sixth_review_measured_green_is_now_refused():
+    """The round-6 reviews' holes, and the neighbours of the rule that closes them.
+
+    G1 is quote removal: `"/opt"`, `/opt;` and `/o'pt'` are the same word to a shell as
+    `/opt`, and the guard judged the bytes between the spaces. G2 is the one that is not
+    about quotes at all: this file joined a continued line with a SPACE where Docker
+    deletes the backslash and the newline, so `.../aitelier-gate-im\\` + `ports/...`
+    became two words that each spelled half of the name and neither of the two names this
+    file refuses - both reviews found that one, independently. G3, G4 and G5 are the three
+    word BOUNDARIES the second review named: the exec form is a JSON array and not one
+    bracket-wrapped word, `;` ends a word, and a TAB separates the keyword.
+
+    G6-G9 are variants, not review findings: an escaped separator, a quote inside the
+    word, a quoted second letter and `//opt` are all the SAME word as `/opt`, and the row
+    exists so the rule cannot be taught one of them and left open on its neighbour. Each
+    is refused with the word in the first line of the message, which is the only line
+    `_names` reads.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for name, extra, expected in SIXTH_REVIEW_SHAPES:
+        added = _added_problems(shipped, extra)
+        assert added, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
+        assert _names(added, expected), (
+            f"{name} was refused, but not for the token that closes it (expected "
+            f"{expected!r}):\n" + "\n".join(added))
 
 
 def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
@@ -548,6 +721,9 @@ def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
         "RUN install -m 0755 scripts/tool /usr/local/bin/tool",
         "RUN rm -rf /var/lib/apt/lists/*",
         "RUN chmod -R 0755 /opt/aitelier-dsh",
+        'RUN chmod -R 0755 "/opt/aitelier-dsh"',
+        "RUN chmod 0755 /usr/local/bin:/opt/aitelier-dsh/bin",
+        "RUN chmod 0755 /srv//data",
         "RUN cp -p /usr/local/bin/tool /usr/local/bin/tool.bak",
         "RUN $BUILD_TOOL --version",
         "RUN rm -rf /tmp/build/*.log",
@@ -559,29 +735,38 @@ def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
 
 
 def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
-    """The three shapes the mention rule exists for, beyond the reviewer's `ln -s`.
+    """The shapes the mention rule exists for, beyond the reviewer's `ln -s`.
 
     `chmod` follows a symlink, `cp -p` carries the SOURCE's mode onto the destination,
-    a `python -c` one-liner names the tree inside a string, and `${GODOT_DIR}/..` is a
-    path the text does not contain at all - none of them is a `chmod` operand this file
-    reads, and every one re-modes or replaces a pinned path. The old rule needed a command
-    word for each of them; the mention rule needs none, which is why it holds for a command
-    this file has never seen.
+    a `python -c` one-liner names the tree inside a string, a write into the tree from a
+    source outside it, and `${GODOT_DIR}/..` is a path the text does not contain at all -
+    none of them is a `chmod` operand this file reads, and every one re-modes or replaces
+    a pinned path. The old rule needed a command word for each of them; the mention rule
+    needs none, which is why it holds for a command this file has never seen.
+
+    The first row is refused on `godot_harness.py`, its SOURCE word, and not on its
+    destination: naming the client is refused wherever the name appears, so the source is
+    the first word that closes it. That is the contract, and it is why this row expects
+    the file name rather than the path printed under it - before `_names` read only the
+    first line, this row was green for the pinned path quoted in the message tail, which
+    is exactly the vacuity the round-6 review measured.
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     for line, expected in (
         ("RUN cp -p docker/godot/godot_harness.py "
          "/opt/aitelier-gate-imports/docker/godot/godot_harness.py",
-         "/opt/aitelier-gate-imports/docker/godot/godot_harness.py"),
+         "godot_harness.py"),
+        ("RUN cp -p /usr/local/bin/tool /opt/aitelier-gate-imports/docker/godot/tool",
+         "/opt/aitelier-gate-imports/docker/godot/tool"),
         ("RUN mv /opt/aitelier-gate-imports/docker /tmp/d && mv /tmp/d "
          "/opt/aitelier-gate-imports/docker",
          "/opt/aitelier-gate-imports/docker"),
         ("RUN python -c \"import os; os.chmod('/opt/aitelier-gate-imports', 0o700)\"",
-         "/opt/aitelier-gate-imports',"),
+         "/opt/aitelier-gate-imports"),
         ("RUN chmod 0700 ${GODOT_DIR}/..", "${GODOT_DIR}/.."),
     ):
         added = _added_problems(shipped, line)
         assert added, f"this line re-modes a pinned path and must be refused: {line}"
-        assert any(expected in problem for problem in added), (
+        assert _names(added, expected), (
             f"{line} was refused, but not for the path it names (expected "
             f"{expected!r}):\n" + "\n".join(added))

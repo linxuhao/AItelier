@@ -9,10 +9,17 @@ import json
 from pathlib import Path
 import time
 
-from aitelier.gate_coverage import spec_digest, validate_coverage
+from aitelier.gate_coverage import (
+    PRODUCER_ROUND_FEEDBACK, PROVISIONAL_PRODUCER, PROVISIONAL_PURPOSE,
+    spec_digest, validate_coverage)
 from aitelier.scoped_gate import _git, _snapshot, _graph, _closure, _RESOURCE, _DECL
 
-PURPOSE = "provisional_round_feedback"
+# This producer's name for the marker, kept as-is because callers and tests use
+# it as the TOOL ARGUMENT that selects a feedback round (`godot_playtest`).
+# The marker itself now also names its producer beside it — see
+# `gate_coverage.PROVISIONAL_PRODUCER` — because `run_tests` stamps the same
+# purpose string on a report that means something else.
+PURPOSE = PROVISIONAL_PURPOSE
 
 
 def expand_feedback_spec(spec):
@@ -195,6 +202,11 @@ def run_feedback(repo, out_dir, scope, full_spec, owner, transport, verifier=ver
     target.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     report = {"purpose": PURPOSE, "passed": False, "full_test_passed": False,
+              # THIS producer's name beside the marker it invented: `run_tests`
+              # stamps the same purpose on a report whose `passed` is a real
+              # outcome, and a reader that cannot tell the two apart answers
+              # both `partial` (see `gate_evidence.report_state`).
+              PROVISIONAL_PRODUCER: PRODUCER_ROUND_FEEDBACK,
               "release_disposition": "unresolved", "evidence_state": "partial",
               "baseline_pruning_allowed": False, "state_acceptance_allowed": False,
               "gate_coverage": scope, "owner_identity": owner,

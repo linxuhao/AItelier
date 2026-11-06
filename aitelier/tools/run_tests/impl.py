@@ -898,6 +898,35 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
         results, [str(path.relative_to(repo)) for path in not_visited])
 
 
+def _ran_no_tests(checks: dict) -> bool:
+    """True when this project's only evidence is its install.
+
+    A project whose install FAILED is not "a project with no tests": its tests
+    never got a chance. Only an install that passed licenses the narrower claim.
+    """
+    names = {name.rsplit(":", 1)[-1] for name in checks}
+    if names & {"test", "spec"}:
+        return False
+    install = next((chk for name, chk in checks.items()
+                    if name.rsplit(":", 1)[-1] == "install"), None)
+    return bool(install and install.get("passed"))
+
+
+def _node_ran_checks(node: dict) -> set:
+    """The `<dir>:<check>` pairs that actually produced a result this run.
+
+    `_aggregate_node_projects` keys its checks `<dir>:<check>` already; the
+    single-project report keys them bare and carries `dir` beside them. Getting
+    this wrong is silent and total: the first version prefixed an
+    already-prefixed name, so no namespaced baseline key was ever pruned while
+    the suite stayed green.
+    """
+    ran = set()
+    for name in (node.get("checks") or {}):
+        ran.add(name if ":" in name or not node.get("dir") else f"{node['dir']}:{name}")
+    return ran
+
+
 def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dict:
     """ONE node section for a repository that holds more than one project.
 
@@ -948,12 +977,11 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
     # NOT an absence (`unmeasured`), because nothing was withheld: there is
     # nothing to run, and calling that "unmeasured" would park every run of this
     # repository behind a human.
-    no_tests = [r["dir"] for r in measured
-                if not any(name in ("test", "spec") for name in (r.get("checks") or {}))]
+    no_tests = [r["dir"] for r in measured if _ran_no_tests(r.get("checks") or {})]
     node: dict = {
         "dirs": [r["dir"] for r in results],
         "projects": results,
-        "checks": {f"{r['dir']}:{name}": dict(check, dir=r["dir"])
+        "checks": {f"{r['dir']}:{name}": check
                    for r in measured for name, check in (r.get("checks") or {}).items()},
         **({"no_tests": no_tests} if no_tests else {}),
         "measured_dirs": [r["dir"] for r in measured],
@@ -3073,13 +3101,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             unmeasured_projects = node.get("unmeasured") or []
             executed.node_gate_ran = (not node.get("skipped")
                                       and not unmeasured_projects)
-            ran_checks = set()
-            for name, chk in (node.get("checks") or {}).items():
-                entry = chk.get("dir")
-                ran_checks.add(f"{entry}:{name}" if entry else name)
-            if node.get("dir") and ":" not in next(iter(ran_checks), ":"):
-                ran_checks = {f"{node['dir']}:{name}" for name in ran_checks}
-            executed.node_ran = frozenset(ran_checks)
+            executed.node_ran = frozenset(_node_ran_checks(node))
             if node.get("skipped") and not node.get("measured_dirs"):
                 # NOTHING was measured anywhere: the single-project absence,
                 # unchanged — not a red either, and never a pass.

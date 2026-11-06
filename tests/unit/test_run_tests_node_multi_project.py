@@ -419,3 +419,21 @@ def test_a_project_with_no_test_script_is_named_not_counted_as_evidence():
     # not do is stand in for a test run it never had.
     assert set(node["checks"]) == {"web:install", "web:test",
                                    "integrations/dsh:install"}
+
+
+def test_ran_checks_name_the_pairs_the_entry_itself_wrote():
+    """The tokens `run_tests` hands the baseline must be the ones it can ask about.
+
+    The first version prefixed an already-prefixed name (`web:web:test`), so no
+    namespaced baseline key was ever pruned in a multi-project repository while
+    every file in the suite stayed green. Both shapes are pinned here because the
+    entry writes both.
+    """
+    multi = {"checks": {"web:install": {}, "web:test": {}}}
+    assert rt._node_ran_checks(multi) == {"web:install", "web:test"}
+    single = {"dir": "web", "checks": {"install": {}, "test": {}}}
+    assert rt._node_ran_checks(single) == {"web:install", "web:test"}
+    # And what the baseline is asked for is exactly what that set answers.
+    executed = rt.Executed(node_gate_ran=False, node_ran=rt._node_ran_checks(multi))
+    assert executed.ran("node:web:test") is True
+    assert executed.ran("node:web:build") is False

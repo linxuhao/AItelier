@@ -91,7 +91,10 @@ needs its own checkout; each run has one controller.
 External Claude and Codex subagents run on the host through the devmcp tools
 (search_tools(query="devmcp subagent")): subagent_start(agent "claude" or
 "codex", cwd, prompt, effort, model, mode), subagent_get, subagent_message and
-subagent_cancel. Use them for two things only: non-author review of a delivered
+subagent_cancel. If that search finds no devmcp tools, this host has no
+external subagents: skip this paragraph and keep the work native; do not
+install, configure or start one. Otherwise use them for two things only:
+non-author review of a delivered
 candidate, so the reviewer is a different model family from the writer
 (mode="read-only" unless the review must run tests; a read-only reviewer cannot
 run tests, so it cannot witness a criterion that needs a test run; give it the

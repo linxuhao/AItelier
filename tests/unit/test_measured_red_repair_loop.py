@@ -432,16 +432,24 @@ command, not the list, is the witness.
   `report_state(...) == "skipped"` that an absence answers, which several tests assert
   about an absence and not about this flag; and neighbours or prose (`skipped_because`,
   `gate_skipped`, `skipped_gates`, comment text). `grep -rl --include=*.py skipped tests/`
-  therefore answers 98 modules and is not a consumer census, and the narrower sweep for
-  the flag's syntax (`["skipped"]`, `.get("skipped")`, `node.skipped`,
-  `"skipped": true|false`) answers 22 - of which several only MENTION it. Which of those
-  22 read the flag cannot be decided by grep, so the readers named below are the
-  PRODUCTION ones plus this module, which reads the flag off the producer's own reports:
+  therefore answers 98 modules and is not a consumer census. A sweep for the flag's syntax
+  alone is no fix either: one expression of it answers 19 modules under the literal
+  lowercase, double-quoted spelling and 23 once both quote styles and `True`/`False` are
+  allowed (18 and 22 beside this module, which spells the syntax out below), and every
+  one of those sets mixes modules that READ the flag with modules that only MENTION it.
+  Which is which cannot be decided by grep, so the readers named below are the PRODUCTION
+  ones plus this module, which reads the flag off the producer's own reports:
 
-    aitelier/tools/run_tests/impl.py  `run_tests` WRITES it at its two
-        `report.update(passed=False, skipped=True, ...)` sites - the nothing-measured
-        branch and the Node-gate-unavailable path, beside `infrastructure_unavailable`
-        and `evidence_state` (:2819 and :3353 in this tree)
+    aitelier/tools/run_tests/impl.py  the producer WRITES the whole-report flag at every
+        absence exit. `grep -n 'skipped=True' aitelier/tools/run_tests/impl.py` answers
+        nine lines in this tree: six whole-report `report.update(...)` writes (a pytest
+        toolchain that could not be provisioned, `_mark_storage_unmeasured`, an
+        unavailable test workspace, an unavailable CPU executor, an invalid pytest wall,
+        and `run_tests`' own Node nothing-measured branch - only the invalid-wall one
+        omits `infrastructure_unavailable`), two `node.update(...)` writes that set the
+        NODE's copy, and one line of prose. The Node branch is the shape this config's
+        exceptional branch accepts, and it is the single-project absence:
+        `if node.get("skipped") and not node.get("measured_dirs")`
     configs/coding_impl.yaml  `test_evidence`'s inline schema REFUSES either form -
         the first `anyOf` branch's `skipped: { const: false }` (:628) and
         `node: { skipped: { const: false } }` (:632), with both of its failing

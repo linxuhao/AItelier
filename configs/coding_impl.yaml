@@ -381,8 +381,10 @@ steps:
       # BOTH TERMS, AND WHY THIS IS NOT THE ONE-TERM EDGE THE OTHER TWO USE.
       # In fix_tests/subagent the measured-red edge comes FIRST (it reads the
       # report's `passed: false`), so their partial edge cannot capture a red.
-      # HERE the red path is the FALL-THROUGH `written` edge below: red is a
-      # report that fails `test_outcome`'s `passed: const true` one step later.
+      # HERE the red path is the `{passed: false, written: ...}` edge below:
+      # red is a DELIVERED report that the evidence validators then decide
+      # (`test_evidence` owns the measured-red acceptance; `test_outcome`'s
+      # `passed: const true` is what stops it reaching `done` one step later).
       # An edge matching `node_gate_complete: false` alone would therefore sit in
       # FRONT of the repair path and send a measured red beside an unmeasured
       # project to a terminal — charging an absence for a red the implementer can
@@ -403,10 +405,12 @@ steps:
       # (`node.unmeasured` beside `skipped: false`), which does reach `done`
       # through `test_outcome`. What it does NOT do is rescue a partial RED:
       # that report is still refused by the same `node.skipped` const, and
-      # widening `test_evidence` for a measured red is the pending
-      # measured-red attempt's change (it keys on `returncode: 1`), not this
-      # card's — see the test module's control (b2). Adding a second branch here
-      # would collide with that attempt and is why this edge is a REFUSAL only.
+      # widening `test_evidence` for a measured red was the measured-red
+      # attempt's change (it keys on `returncode: 1`), not this card's — that
+      # widening has since LANDED as a second `anyOf` branch of `test_evidence`'s
+      # inline schema below; see the test module's control (b2). Adding a second
+      # branch here would have collided with that attempt and is why this edge
+      # is a REFUSAL only.
       #
       # BOTH TERMS ARE FLAGS, NEVER `from_file`. The verdict travels on
       # `run_tests`' RETURN (`_node_gate_verdict`, impl.py:2934-2971), which the
@@ -429,9 +433,14 @@ steps:
       #     a success; nothing about what it writes moves.
       #   * impl.py:2934-2971 `_node_gate_verdict` — the RETURN's copy, and `True`
       #     when the report carries no key at all (a Python-only repository).
-      #     GAINS its first routing reader in this config. The absent-key answer
-      #     stays `True`, so a repository with no node section does not match
-      #     this edge and routes exactly as before. LOSES nothing.
+      #     GAINS its first routing reader in this config. That absent-key answer
+      #     stays `True`, so a repository with no node section does not match the
+      #     `false` edge above — and it IS what the narrowed `written` edge below
+      #     requires: the return answers `true` for a repository with no node
+      #     section, so its green round still reaches `test_evidence` (measured,
+      #     control (c) in tests/unit/test_coding_impl_node_gate_partial.py). A
+      #     return that simply OMITTED the key would now route nowhere. LOSES
+      #     nothing else.
       #   * impl.py:3086 (upstream-blocked fail-fast return) and :3666 (main
       #     return) — the two paths that put the verdict on the flags. Unchanged;
       #     :3086's `passed: False` keeps that path off this edge.
@@ -457,8 +466,9 @@ steps:
       #     evidence. LOSES a case it used to be the only defence for (the
       #     partial green now stops here first); GAINS nothing. Left as it is on
       #     purpose: the whole-report `skipped` refusal next to it is a different
-      #     field, and widening THIS clause for a measured red is the pending
-      #     measured-red attempt's business.
+      #     field, and widening THIS clause for a measured red was that same
+      #     measured-red attempt's business — it has since landed as the second
+      #     `anyOf` branch below, leaving this clause as it was.
       #   * configs/gen_coop_shell_ui60_20260907.yaml:124-127 — the SAME
       #     `node: {skipped: {const: false}}` clause, in a shipped GENERATED
       #     config (its own header still says coding_impl). A second config-side
@@ -512,8 +522,112 @@ steps:
       # the real producer's return and pins the order below.
       - to: "node_gate_incomplete"
         match: { node_gate_complete: false, passed: true }
+      # ── DELIVERY IS NOT A VERDICT: THE SUCCESS PATH REQUIRES THE COMPLETENESS
+      #    STATEMENT POSITIVELY ────────────────────────────────────────────────
+      # `written` alone fired for ANY return that named the report — including
+      # one that carried no `node_gate_complete` at all (a stale producer, a run
+      # spanning a deploy, a hand-made report). Everything after this edge
+      # (`test_evidence` -> `test_outcome` -> `done`) concludes success on
+      # `passed: true` alone, so the ABSENT verdict still concluded DONE.
+      #
+      # `node_gate_complete: true` is a bare-key FLAG term, not a `field`/`value`
+      # pair, and the engine's direct form answers `key not in flags -> False`
+      # (`_flags_match`): absent, null and `false` all fail it. A GREEN return
+      # that does not state the verdict therefore falls through to the
+      # unconditional `test_evidence_missing` (below), an end condition with
+      # `result: failed` — the run ends naming the absence instead of reporting
+      # success. Nor can this narrow the loop's bound: success is
+      # `test_outcome`'s `passed: {const: true}`, and once the three repair laps
+      # are spent that edge is skipped, so a never-passing suite still fails on
+      # `No matching transition` rather than completing.
+      #
+      # WHY THE RED PATH IS A SEPARATE EDGE, and why it is not `written` alone.
+      # One AND-matched edge cannot say "green requires the verdict" AND "red
+      # keeps its route", because `_flags_match` has no disjunction. Routing a
+      # red on `passed: false` is what preserves the MEASURED-red repair loop:
+      # a pytest red beside a Node leg the producer could not provision carries
+      # `node_gate_complete: false` (the node gate really was incomplete) and is
+      # ACCEPTED by `test_evidence`'s second `anyOf` branch, which owns that
+      # acceptance and its `storage_diagnosis` vetoes. MEASURED: with the
+      # positive verdict as the ONLY `written` condition, that red stopped at
+      # the absence terminal at this step instead, and
+      # tests/unit/test_measured_red_repair_loop.py went red in three places
+      # (`_route` expected `['test', 'test_evidence', 'test_outcome',
+      # 'implement']`, observed `['test', 'test_evidence_missing']`). The red
+      # edge is still keyed on the report being DELIVERED (`written`), so a
+      # non-delivery red (`written: None`) does not reach the validators.
+      #
+      # WHY THE TWO OTHER CANDIDATE SITES CANNOT CARRY IT — both MEASURED on
+      # this tree (2026-11-06), not preferences:
+      #   1. THE INLINE SCHEMAS of `test_evidence` / `test_outcome` validate the
+      #      FILE `$CONFIG_DIR/test/test_report.json`, and the producer writes
+      #      `report["node_gate_complete"]` INSIDE `if node is not None:`
+      #      (aitelier/tools/run_tests/impl.py:3327-3338), whose own comment says
+      #      it is "Absent when there is no node section at all (a Python-only
+      #      repository)". `_run_node_checks` returns None before running
+      #      anything for such a repository (impl.py:1016-1018). Measured: the
+      #      real producer's report for a repo with no package.json has no `node`
+      #      key and no `node_gate_complete`
+      #      (tests/unit/test_partial_gate_cannot_reach_done.py::
+      #      test_python_only_repository_has_no_node_gate_complete). Requiring it
+      #      in either schema would refuse every Python-only GREEN round.
+      #   2. A TRANSITION SEES ONLY THE EVALUATING STEP'S OWN FLAGS. The engine
+      #      resolves a tool step's edges with `step_flags = tool_result` — that
+      #      step's return — and `test_evidence`/`test_outcome` are `json_schema`
+      #      steps whose return is `{all_passed, _error}` (skillflow core
+      #      `_complete_tool_step` -> `resolve_transition`). They never receive
+      #      `test`'s RETURN, so a positive `node_gate_complete` match there can
+      #      never fire: every green round would be sent to `implement` and burn
+      #      the three laps. A `from_file` match there is worse still — it is
+      #      resolved against the EVALUATING step's own output dir, and a
+      #      validator writes no file (the round-5 measurement above).
+      #
+      # A NON-DELIVERY RETURN (`written: None`, `passed: false`, no verdict)
+      # matches none of the decision edges and still ends on
+      # `test_evidence_missing`, unchanged. Its step-FAILURE path is pinned by
+      # tests/skillflow/test_coding_impl_gate.py::
+      # test_failed_tool_return_cannot_consume_existing_passing_artifact; its
+      # ROUTE by test_the_non_delivery_return_still_lands_on_test_evidence_missing
+      # in tests/unit/test_coding_impl_node_gate_partial.py.
+      # A DELIVERED RED: the evidence validators decide it (they own the
+      # measured-red acceptance, and a partial red is still refused there).
+      #
+      # THE LIMIT OF THAT DELEGATION, measured by this card's non-author review
+      # rather than implied by the sentence above: THIS edge decides on the
+      # RETURN (`passed: false, written: "test_report.json"`) while the
+      # validators decide on the FILE (`$CONFIG_DIR/test/test_report.json`). A
+      # hand-written PAIR whose carriers DISAGREE — a RETURN saying
+      # `passed: false` with no `node_gate_complete` at all, beside a FILE
+      # saying `passed: true` — therefore matches the red edge, is ACCEPTED by
+      # `test_evidence` (its first `anyOf` branch puts no const on `passed`,
+      # and `test_outcome`'s `passed: {const: true}` is then satisfied by the
+      # FILE), and the round continues `test_outcome` -> `done`: such a pair
+      # CONCLUDES SUCCESS. The real producer cannot write it, because it
+      # writes both carriers from the SAME RUN: it publishes the report with
+      # `os.replace(staged, report_path)` and then returns
+      # `"passed": report["passed"]` (aitelier/tools/run_tests/impl.py:3613 and
+      # :3617), and the verdict on that same return is computed from that same
+      # report (`_node_gate_verdict(report)`, :3666). Agreement of the two
+      # CARRIERS is pinned in this tree for `node_gate_complete`, in both
+      # directions: `assert report["node_gate_complete"] is
+      # ret["node_gate_complete"]` in
+      # tests/unit/test_node_gate_complete_return.py:121
+      # (test_return_and_file_both_say_incomplete_for_the_measured_partial_shape)
+      # and :137 (test_return_and_file_both_say_complete_for_the_green_control).
+      # NO test pins `passed` that way — the closest are per-shape value
+      # assertions on one measurement, report and return both false at
+      # tests/unit/test_run_tests_unmeasured_declaration.py:105 and both true at
+      # :443 — so for `passed` the guarantee is the producer line above, not a
+      # witness. What would close the gap if that ever changed is a SINGLE
+      # carrier (route on the file everywhere, or on the return everywhere) or
+      # a validator that COMPARES the two; this card deliberately does neither,
+      # because the producer makes the disagreeing pair impossible and a
+      # comment-only card adds no gate, no step and no producer change.
       - to: "test_evidence"
-        match: { written: "test_report.json" }
+        match: { passed: false, written: "test_report.json" }
+      # A DELIVERED GREEN ROUND MUST STATE THE COMPLETENESS VERDICT.
+      - to: "test_evidence"
+        match: { node_gate_complete: true, written: "test_report.json" }
       - to: "test_evidence_missing"
 
 

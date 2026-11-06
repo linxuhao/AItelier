@@ -33,6 +33,65 @@
 #        terminal: on this base it is still refused one step later as EVIDENCE
 #        MISSING (measured, see the docstring of that test).
 #
+# THE DELIVERY EDGE IS NOW A VERDICT, NOT A FILENAME (the fail-open card this
+# module used to describe as "a separate card for this config"). `test`'s
+# `{written: "test_report.json"} -> test_evidence` edge fired for ANY return
+# that named the report, INCLUDING one carrying no `node_gate_complete` at all —
+# a stale producer, a run spanning a deploy, a hand-made report. Everything
+# downstream (`test_evidence` -> `test_outcome` -> `done`) concludes success on
+# `passed: true` alone, so the ABSENT verdict still concluded DONE. The edge now
+# requires the verdict POSITIVELY (`{node_gate_complete: true, written: ...}`)
+# and an absent verdict on a GREEN round falls through to the step's
+# unconditional `test_evidence_missing` fallback, whose end condition is
+# `result: failed`.
+#
+# A RED is a SEPARATE edge to the same target (`{passed: false, written: ...}`),
+# and that is a measurement, not a convenience: one AND-matched edge cannot say
+# "green requires the verdict" AND "red keeps its route", and keying the red on
+# the verdict too moved a MEASURED pytest red beside an unprovisionable Node leg
+# (`node_gate_complete: false`, honestly) onto the absence terminal — measured,
+# tests/unit/test_measured_red_repair_loop.py went red in three places. A red
+# cannot conclude success in any case: `test_outcome` requires `passed: true`.
+#
+# THE FOUR CONTROLS on that narrowed edge, each driven by the shipped config's
+# own resolver through `_route` above (the names are the section below). These
+# are the CARD's (a)-(d) and number a DIFFERENT list from the (a)/(b1)/(b2)
+# inventory above, which numbers this file's earlier history:
+#   (a) test_control_a_a_real_partial_node_gate_still_ends_at_the_partial_terminal
+#   (b) test_control_b_a_plain_green_repo_still_reaches_done
+#   (c) test_control_c_a_python_only_repo_still_reaches_done
+#   (d) test_control_d_a_green_return_without_the_verdict_reaches_no_success
+# beside them, two pins that are not controls: the NON-DELIVERY return
+# (`written: None`, `passed: false`, no verdict) still lands
+# `test_evidence_missing` — no existing test pinned that TRANSITION, see its
+# docstring — and the edge TEXT itself
+# (test_the_delivery_edge_requires_the_verdict_positively).
+# (a) and (b) restate the two shapes already pinned further down this file, now
+# as controls on the NARROWED edge: a revert has to show up in both places, and
+# the two older tests keep their own history (the defect and its measurement).
+#
+# THE TWO OTHER CANDIDATE SITES ARE REJECTED BY MEASUREMENT, not preference —
+# both re-measured on this tree (2026-11-06), and recorded beside the edge in
+# `configs/coding_impl.yaml` as well:
+#   S1. THE INLINE SCHEMAS of `test_evidence` / `test_outcome` validate the FILE
+#       `$CONFIG_DIR/test/test_report.json`, and the producer writes
+#       `report["node_gate_complete"]` only INSIDE `if node is not None:`
+#       (aitelier/tools/run_tests/impl.py:3327-3338) — its own comment says it is
+#       "Absent when there is no node section at all (a Python-only repository)",
+#       and `_run_node_checks` returns None before running anything for such a
+#       repository (impl.py:1016-1018). MEASURED: the real producer's report for
+#       a repo with no package.json has no `node` key and no
+#       `node_gate_complete`, while its RETURN answers `True`. Requiring the key
+#       in either schema would refuse every Python-only GREEN round.
+#   S2. A TRANSITION IS EVALUATED AGAINST THE EVALUATING STEP'S OWN FLAGS. The
+#       engine routes a tool step with `step_flags = tool_result` — that step's
+#       return — and `test_evidence` / `test_outcome` are `json_schema` steps
+#       whose return is `{all_passed, results}` (skillflow core
+#       `_complete_tool_step` -> `resolve_transition`; the native tool's return
+#       is `skillflow/tools/json_schema/impl.py:47`). They never see `test`'s
+#       RETURN, so a positive `node_gate_complete` match there can never fire: it
+#       would send every green round to `implement` and burn the three laps.
+#
 # DEVIATIONS FOUND BY MEASURING THIS BASE (2026-11-06), not assumed:
 #   D1. The partial GREEN report the real producer writes has
 #       `node.skipped: true` (impl.py:1146 sets `skipped = bool(unmeasured)`),
@@ -62,7 +121,11 @@
 #     :2934-2971  `_node_gate_verdict` — the RETURN's copy; `True` when the report
 #                 carries no key (Python-only repository). Gains its first routing
 #                 reader here; the absent-key answer stays `True`, so a repo with
-#                 no node section does not match the new edge.
+#                 no node section does not match the `false` edge — and that
+#                 `True` IS what the narrowed delivery edge requires, which is
+#                 what keeps a Python-only green round reaching `done`
+#                 (control (c)). A return that OMITTED the key would route
+#                 nowhere (control (d)).
 #     :3086       the upstream-blocked fail-fast return carries the verdict and
 #                 `passed: false` — cannot match the new edge.
 #     :3666       the main return — the value that becomes `test`'s flags.
@@ -88,20 +151,26 @@
 #                                     passed: true}` -> `node_gate_incomplete`
 #                                     (same id as the other two, declared
 #                                     `failed`). NARROWER than theirs on purpose:
-#                                     here the red path is the fall-through
-#                                     `written` edge, so a one-term edge would
-#                                     capture a measured red (control (b1)).
-#                                     DIFFERENCE, named rather than papered over:
-#                                     `done` is NOT additionally conditioned on a
-#                                     positive verdict here — coding_impl's success
-#                                     is decided by a second validator step whose
-#                                     flags are its own (`all_passed`), so the
-#                                     positive form would have to go on `test`'s
-#                                     `written` edge and would fail-close a return
-#                                     that omits the key (the shape
-#                                     tests/skillflow/test_coding_impl_gate.py's
-#                                     scripted producer returns today). That is a
-#                                     separate fail-open card for this config.
+#                                     here the red path is the
+#                                     `{passed: false, written: ...}` edge, so a
+#                                     one-term edge would capture a measured red
+#                                     (control (b1)).
+#                                     DIFFERENCE, and it is now CLOSED: the
+#                                     refusal above is only the `false` half.
+#                                     `done` is reached through a second
+#                                     validator step whose flags are its own
+#                                     (`all_passed`), so the POSITIVE form
+#                                     belongs on `test`'s `written` edge — see
+#                                     the delivery-edge paragraph at the top of
+#                                     this docstring: `{written: ...}` fired for
+#                                     a return that named the report and carried
+#                                     no verdict at all, so the absent verdict
+#                                     still concluded DONE. It now requires
+#                                     `node_gate_complete: true` and an absent
+#                                     verdict lands `test_evidence_missing`
+#                                     (control (d)). The scripted producer in
+#                                     tests/skillflow/test_coding_impl_gate.py
+#                                     returns the verdict for the same reason.
 #     coding_impl.yaml:422-425 `test_evidence` `node: {skipped: {const: false}}`
 #                                     — a config-side reader of `node["skipped"]`:
 #                                     a node gate that skipped is refused as
@@ -155,6 +224,7 @@
 #     touch), dpe_default.yaml:906 `5_test` (one unconditional edge; its verdict
 #     is folded later) and addons/game_harness.yaml:475 `5_final_test` (routes on
 #     `release_evidence`). No `node_gate_complete` term is added to any of them.
+import errno
 import json
 from pathlib import Path
 
@@ -163,6 +233,7 @@ import yaml
 from skillflow.graph import GraphResolver, PipelineGraph
 from skillflow.tool_loader import ToolLoader
 
+import aitelier.tools.run_tests.impl as rt
 from tests.unit.test_partial_gate_cannot_reach_done import _nine, _run
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -387,3 +458,185 @@ def test_the_refusal_does_not_touch_the_success_or_evidence_paths():
     for other in ("fix_tests", "subagent"):
         other_graph = PipelineGraph.from_yaml(ROOT / "configs" / f"{other}.yaml")
         assert any(step.id == PARTIAL_TARGET for step in other_graph.steps), other
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# THE FOUR CONTROLS ON THE NARROWED DELIVERY EDGE
+#
+# `test`'s `{written: "test_report.json"} -> test_evidence` edge used to fire for
+# any RETURN that NAMED the report, including one carrying no
+# `node_gate_complete` at all. Everything downstream (`test_evidence` ->
+# `test_outcome` -> `done`) concludes success on `passed: true` alone, so the
+# absent verdict still concluded DONE. The edge now requires the verdict
+# positively; an absent verdict falls through to the unconditional
+# `test_evidence_missing`, declared `failed`.
+#
+# Every route below is the shipped config's own resolver over
+# `configs/coding_impl.yaml`, on a RETURN the REAL `run_tests` produced (only
+# the non-delivery pin below hands it a different payload, and that payload is
+# the producer's OWN function, not a hand-built dict).
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── control (a): a real partial Node gate still ends at the partial terminal ──
+def test_control_a_a_real_partial_node_gate_still_ends_at_the_partial_terminal(
+        tmp_path, monkeypatch):
+    """Nine node projects, no declaration, so the gate visits eight and the
+    ninth is a real `capped` absence. The narrowing must not disturb the
+    `false` edge: this round still stops at `node_gate_incomplete`, declared
+    `failed`, and `implement` is not reachable from it."""
+    repo = tmp_path / "repo"
+    order = _nine(repo)
+
+    report, ret, out = _run(tmp_path, monkeypatch, repo)
+
+    assert [e["dir"] for e in report["node_unmeasured"]] == [order[8]]
+    assert report["node_gate_complete"] is False
+    assert ret["node_gate_complete"] is False
+    assert ret["passed"] is True
+
+    path = _route(out, ret)
+
+    assert path == [PARTIAL_TARGET], path
+    assert "done" not in path, path
+    assert _terminal_declared(PipelineGraph.from_yaml(CONFIG), PARTIAL_TARGET) == "failed"
+
+
+# ── control (b): a plain green repo still reaches `done` ─────────────────────
+def test_control_b_a_plain_green_repo_still_reaches_done(tmp_path, monkeypatch):
+    """Every node project measured and green. It reaches `done` BECAUSE the
+    return states the completeness verdict — the term the narrowed edge added."""
+    repo = tmp_path / "repo"
+    order = _nine(repo)
+    (repo / "node_projects.json").write_text(json.dumps({"projects": order}))
+
+    report, ret, out = _run(tmp_path, monkeypatch, repo)
+
+    assert report["passed"] is True, report["failures"]
+    assert "node_unmeasured" not in report
+    assert ret["node_gate_complete"] is True
+    assert ret["written"] == "test_report.json"
+
+    assert _route(out, ret) == ["test_evidence", "test_outcome", "done"]
+
+
+# ── control (c): a Python-only repo still reaches `done` ────────────────────
+def test_control_c_a_python_only_repo_still_reaches_done(tmp_path, monkeypatch):
+    """No `package.json` anywhere: `_run_node_checks` returns None before
+    running anything (impl.py:1016-1018), so the report has NO `node` section
+    and NO `node_gate_complete` — the producer's own comment says the key is
+    "Absent when there is no node section at all (a Python-only repository)".
+
+    Requiring the verdict in the FILE would therefore refuse this green round
+    (rejected site S1). THIS CONTROL IS NOT SATISFIABLE BY AN ABSENCE: the
+    RETURN answers for the repository, as a real boolean `True`, and that is
+    what the narrowed edge matches. A return that omitted it would route nowhere
+    (control (d))."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_probe_ok.py").write_text(
+        "def test_probe_ok():\n    assert True\n")
+
+    report, ret, out = _run(tmp_path, monkeypatch, repo)
+
+    # The absence, asserted rather than assumed.
+    assert "node" not in report
+    assert "node_gate_complete" not in report
+    assert report["passed"] is True, report["failures"]
+    # And the producer's own answer on the payload the engine routes with.
+    assert ret["node_gate_complete"] is True, ret.get("node_gate_complete")
+    assert isinstance(ret["node_gate_complete"], bool)
+
+    assert _route(out, ret) == ["test_evidence", "test_outcome", "done"]
+
+
+# ── control (d): the green RETURN without the verdict reaches no success ────
+def test_control_d_a_green_return_without_the_verdict_reaches_no_success(
+        tmp_path, monkeypatch):
+    """The defect itself, driven: a fully measured GREEN round whose RETURN
+    carries no `node_gate_complete` — a stale producer, a run spanning a deploy,
+    a hand-made report.
+
+    The verdict is DELETED from the RETURN only; the FILE still has it, which is
+    the point: this config routes on the payload the engine hands the step, and
+    the file's copy is not read here (rejected site S2 is the same fact from the
+    other end). REVERT MEASUREMENT: with the old `{written: "test_report.json"}`
+    edge this walk is `['test_evidence', 'test_outcome', 'done']` — success — and
+    this test is the one that goes red."""
+    repo = tmp_path / "repo"
+    order = _nine(repo)
+    (repo / "node_projects.json").write_text(json.dumps({"projects": order}))
+
+    report, ret, out = _run(tmp_path, monkeypatch, repo)
+    assert report["node_gate_complete"] is True          # the file has it
+    assert ret["node_gate_complete"] is True             # the producer wrote it
+
+    del ret["node_gate_complete"]
+
+    path = _route(out, ret)
+
+    assert path == ["test_evidence_missing"], path
+    assert "done" not in path, path
+    assert "test_evidence" not in path, path
+    assert _terminal_declared(PipelineGraph.from_yaml(CONFIG),
+                              "test_evidence_missing") == "failed", (
+        "the fall-through must END the run as failed, not park it or conclude")
+
+
+# ── beside the controls: the non-delivery RETURN is still an absence ────────
+def test_the_non_delivery_return_still_lands_on_test_evidence_missing(
+        tmp_path, monkeypatch):
+    """A report that could not be STORED: `written: None`, `passed: false`, and
+    deliberately no `node_gate_complete` (impl.py `_report_write_failure`, whose
+    docstring says so and whose payload is used here — not hand-built).
+
+    No existing test pins the TRANSITION for this shape:
+    tests/skillflow/test_coding_impl_gate.py::
+    test_failed_tool_return_cannot_consume_existing_passing_artifact drives a
+    hand-built `written: None` return through the ENGINE and pins the step-
+    FAILURE path (the tool's `error` fails the step), not which edge the config
+    takes. So the route is pinned here."""
+    repo = tmp_path / "repo"
+    _nine(repo)
+    report, _, out = _run(tmp_path, monkeypatch, repo)
+
+    ret = rt._report_write_failure(
+        dict(report), out, "write",
+        OSError(errno.ENOSPC, "No space left on device"))
+
+    assert ret["written"] is None
+    assert ret["passed"] is False
+    assert "node_gate_complete" not in ret
+
+    assert _route(out, ret) == ["test_evidence_missing"]
+
+
+# ── the artifact half of the narrowing ─────────────────────────────────────
+def test_the_delivery_edge_requires_the_verdict_positively():
+    """The edge text itself, so a silently reverted match is a red test rather
+    than a behaviour nobody re-measured."""
+    data = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    steps = {s["id"]: s for s in data["steps"]}
+    edges = steps["test"]["transitions"]
+
+    delivery = [e for e in edges if (e.get("match") or {}).get("written")]
+    assert len(delivery) == 2, delivery
+    matches = [e["match"] for e in delivery]
+    assert {"node_gate_complete": True, "written": "test_report.json"} in matches, (
+        "a DELIVERED GREEN round must state the completeness verdict: without "
+        "this term a return that merely NAMED the report reached test_evidence "
+        "and concluded DONE on `passed: true` alone")
+    assert {"passed": False, "written": "test_report.json"} in matches, (
+        "a DELIVERED RED keeps its route to the evidence validators, which own "
+        "the measured-red acceptance: keying the red on the completeness verdict "
+        "instead moved a measured red beside an unmeasured Node leg onto the "
+        "absence terminal (measured: tests/unit/"
+        "test_measured_red_repair_loop.py went red in three places)")
+    for match in matches:
+        assert match["written"] == "test_report.json", match
+
+    # The fall-through it relies on is still UNCONDITIONAL and still last: that
+    # is the terminal an absent verdict reaches.
+    assert edges[-1].get("match") is None and edges[-1]["to"] == "test_evidence_missing"
+    assert _terminal_declared(PipelineGraph.from_yaml(CONFIG),
+                              "test_evidence_missing") == "failed"

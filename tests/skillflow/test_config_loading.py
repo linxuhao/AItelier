@@ -163,16 +163,29 @@ class TestV2ConfigLoading:
             # whose Node projects were not all measured (`passed: true` beside
             # `node_gate_complete: false`) goes to a terminal instead of being
             # validated and reaching `done` through `test_outcome`. BOTH terms:
-            # here the red path is the fall-through `written` edge, so a one-term
-            # edge would capture a measured red (configs/fix_tests.yaml:112-113
-            # can use one term because its red edge comes first). Order matters —
-            # this edge precedes `written`, or the report would be validated and
+            # here the red path is the `written` edges below, so a one-term edge
+            # would capture a measured red (configs/fix_tests.yaml:112-113 can use
+            # one term because its red edge comes first). Order matters — this
+            # edge precedes `written`, or the report would be validated and
             # routed past it. tests/unit/test_coding_impl_node_gate_partial.py
             # drives the routing cases and fails if either term, the position or
             # the terminal moves.
             ("node_gate_incomplete",
              {"node_gate_complete": False, "passed": True}),
-            ("test_evidence", {"written": "test_report.json"}),
+            # DELIVERY is not a verdict, and it takes TWO edges because one
+            # AND-matched match cannot say "a GREEN round must state the
+            # completeness verdict" AND "a RED keeps its route to the evidence
+            # validators" (there is no disjunction in `_flags_match`). Both stay
+            # keyed on `written`, so a non-delivery return (`written: None`)
+            # reaches neither. Without the positive term a return that merely
+            # NAMED the report concluded `done` on `passed: true` alone; routing
+            # the red on the verdict too instead moved a measured red beside an
+            # unprovisionable Node leg onto the absence terminal (measured:
+            # tests/unit/test_measured_red_repair_loop.py).
+            # tests/unit/test_coding_impl_node_gate_partial.py pins all four.
+            ("test_evidence", {"passed": False, "written": "test_report.json"}),
+            ("test_evidence",
+             {"node_gate_complete": True, "written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
 

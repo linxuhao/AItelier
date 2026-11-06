@@ -5,6 +5,53 @@ import json
 import re
 
 
+# ── the provisional marker, and the TWO producers that stamp it ────────────
+#
+# `purpose: provisional_round_feedback` says "this round's measurement was
+# provisional". Two producers write it, and they mean DIFFERENT things:
+#
+#   * `round_feedback.run_feedback` — the report IS the feedback round. Its
+#     `passed` is False BY CONSTRUCTION (a feedback round is not a gate result
+#     at all), and `tests/unit/test_round_feedback.py` pins that answer at
+#     `partial` in eleven parametrized verifier shapes plus two more tests.
+#   * `run_tests` — the report IS a test report whose repository-gate coverage
+#     was provisional (the stamp beside `_retained_coverage`'s refusal). Its
+#     `passed` is the real pytest outcome and can be False, and that red
+#     belongs to the implementer who has to repair it.
+#
+# The purpose VALUE cannot tell them apart — one reader that tried to classify
+# first softened every feedback report — so the marker ALSO carries the name of
+# the producer that stamped it, and a reader that must distinguish them reads
+# `provisional_producer` off the report itself rather than guessing from the
+# rest of the shape.
+#
+# A marker with NO producer name (every report written before the field
+# existed, and the unlabelled fixtures in the suites that predate it) keeps the
+# shipped, stricter reading of the first producer. That default is deliberate:
+# omitting the field can never make a report look more like a measurement than
+# it is.
+PROVISIONAL_PURPOSE = "provisional_round_feedback"
+PROVISIONAL_PRODUCER = "provisional_producer"
+PRODUCER_ROUND_FEEDBACK = "round_feedback"
+PRODUCER_RUN_TESTS = "run_tests"
+
+
+def provisional_producer(report) -> str:
+    """Which producer stamped a provisional marker, or "" when it names none.
+
+    "" is not a third meaning. It is the answer for a report that carries no
+    producer name — including a report that carries no such marker at all —
+    and every reader keeps the shipped strict reading (`round_feedback`'s) for
+    it. Reading the report is the only input here: nothing about the shape of
+    the failures, the coverage or the summary is consulted to decide who wrote
+    the marker.
+    """
+    if not isinstance(report, dict) or report.get("purpose") != PROVISIONAL_PURPOSE:
+        return ""
+    named = report.get(PROVISIONAL_PRODUCER)
+    return named if isinstance(named, str) else ""
+
+
 def spec_digest(spec: dict) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest()
@@ -75,7 +122,11 @@ def validate_coverage(scope) -> str | None:
 
 def publication_scope_refusal(scope) -> str | None:
     """Additional conjunct for a release path; does not authorize by itself."""
-    if isinstance(scope, dict) and scope.get("purpose") == "provisional_round_feedback":
+    if isinstance(scope, dict) and scope.get("purpose") == PROVISIONAL_PURPOSE:
+        # Both producers, and an unlabelled marker: whichever it is, a
+        # provisional round may not authorize publication. This refusal is
+        # read for a coverage SCOPE, whose purpose comes from the feedback
+        # plan (`feedback_plan`) or is relayed into it by `run_tests`.
         return "provisional feedback cannot authorize publication"
     error = validate_coverage(scope)
     if error:

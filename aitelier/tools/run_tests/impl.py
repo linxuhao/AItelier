@@ -42,7 +42,9 @@ from aitelier.gate_evidence import (
     ABSENCE_CAPPED, ABSENCE_DECLARATION, ABSENCE_ISOLATION, ABSENCE_RAISED,
     ABSENCE_TICKET, ABSENCE_UNDECLARED, ABSENCE_UNREADABLE,
     release_disposition, report_state)
-from aitelier.gate_coverage import validate_coverage
+from aitelier.gate_coverage import (
+    PRODUCER_RUN_TESTS, PROVISIONAL_PRODUCER, PROVISIONAL_PURPOSE,
+    validate_coverage)
 import sys
 import tempfile
 import time
@@ -1718,11 +1720,11 @@ def _retained_coverage(retained: _Retained) -> tuple[dict | None, str | None]:
     if error or not isinstance(manifest, dict):
         return None, error or "coverage unavailable: manifest is not an object"
     coverage = manifest.get("gate_coverage")
-    if manifest.get("purpose") == "provisional_round_feedback":
+    if manifest.get("purpose") == PROVISIONAL_PURPOSE:
         if isinstance(coverage, dict):
-            coverage = dict(coverage, purpose="provisional_round_feedback")
+            coverage = dict(coverage, purpose=PROVISIONAL_PURPOSE)
         return coverage, "provisional feedback is not full test evidence"
-    if isinstance(coverage, dict) and coverage.get("purpose") == "provisional_round_feedback":
+    if isinstance(coverage, dict) and coverage.get("purpose") == PROVISIONAL_PURPOSE:
         return coverage, "provisional feedback is not full test evidence"
     error = validate_coverage(coverage)
     return coverage if isinstance(coverage, dict) else None, error
@@ -3371,8 +3373,15 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         if gate is not None:
             report["repo_gate"] = gate
             report["gate_coverage"] = gate.get("gate_coverage")
-            if isinstance(report["gate_coverage"], dict) and report["gate_coverage"].get("purpose") == "provisional_round_feedback":
-                report["purpose"] = "provisional_round_feedback"
+            if (isinstance(report["gate_coverage"], dict)
+                    and report["gate_coverage"].get("purpose") == PROVISIONAL_PURPOSE):
+                # THIS report is a test report whose gate coverage was
+                # provisional — not a feedback round, which stamps the same
+                # purpose on a report that is not a gate result at all. Name
+                # this producer beside the marker so no reader has to guess
+                # from the shape (see `gate_coverage.provisional_producer`).
+                report["purpose"] = PROVISIONAL_PURPOSE
+                report[PROVISIONAL_PRODUCER] = PRODUCER_RUN_TESTS
                 report["full_test_passed"] = False
             if gate.get("gate_coverage_error"):
                 report["gate_coverage_error"] = gate["gate_coverage_error"]
@@ -3463,7 +3472,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 executed.repo_gate_cases = (set() if isinstance(coverage, dict)
                     and not validate_coverage(coverage)
                     and coverage["coverage"] == "full"
-                    and coverage.get("purpose") != "provisional_round_feedback" else None)
+                    and coverage.get("purpose") != PROVISIONAL_PURPOSE else None)
             else:
                 report["passed"] = False
                 cases, identity_error = _repo_gate_failure_cases(gate)
@@ -3493,7 +3502,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     executed.repo_gate_cases = ({c["case_id"] for c in cases}
                         if isinstance(coverage, dict) and not validate_coverage(coverage)
                         and coverage["coverage"] == "full"
-                        and coverage.get("purpose") != "provisional_round_feedback" else None)
+                        and coverage.get("purpose") != PROVISIONAL_PURPOSE else None)
 
 
     # Known-red baseline: `new_failures[]` + `passed_relative` + the
@@ -3611,7 +3620,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             "retained_red_candidate": retained_red_candidate,
             "release_evidence": release_disposition(report),
             "purpose": report.get("purpose"),
-            "full_test_passed": False if report.get("purpose") == "provisional_round_feedback" else report.get("full_test_passed"),
+            # The marker's producer travels wherever the marker does. The file
+            # is what `gate_evidence.report_state` reads, but a routing flag on
+            # this return that says `provisional_round_feedback` without saying
+            # WHICH producer would put the same ambiguity on the return.
+            PROVISIONAL_PRODUCER: report.get(PROVISIONAL_PRODUCER),
+            "full_test_passed": False if report.get("purpose") == PROVISIONAL_PURPOSE else report.get("full_test_passed"),
             "gate_coverage": report.get("gate_coverage"),
             "gate_coverage_error": report.get("gate_coverage_error"),
             # The routing flag ITSELF, on the RETURN and not only in the file.

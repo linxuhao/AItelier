@@ -33,6 +33,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from aitelier.gate_coverage import PROVISIONAL_PURPOSE
 from aitelier.gate_skip_log import log_gate_skip
 from core import external_deps
 
@@ -766,13 +767,14 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
         if (not isinstance(option, dict) or set(option) != {"version"}
                 or type(option["version"]) is not int or option["version"] != 1):
             raise ValueError("ui_text_snapshot must be exactly {'version': 1}")
-        if kwargs.get("purpose") == "provisional_round_feedback":
-            raise ValueError("ui_text_snapshot is not supported for provisional_round_feedback")
+        if kwargs.get("purpose") == PROVISIONAL_PURPOSE:
+            raise ValueError(f"ui_text_snapshot is not supported for {PROVISIONAL_PURPOSE}")
     repo = Path(project_root or workspace_root).resolve()
-    if kwargs.get("purpose") not in (None, "", "full_acceptance", "provisional_round_feedback"):
+    if kwargs.get("purpose") not in (None, "", "full_acceptance", PROVISIONAL_PURPOSE):
         raise ValueError("unknown playtest purpose")
-    if kwargs.get("purpose") == "provisional_round_feedback":
+    if kwargs.get("purpose") == PROVISIONAL_PURPOSE:
         from aitelier.round_feedback import expand_feedback_spec, feedback_plan, run_feedback, require_new_feedback_output, PURPOSE
+        from aitelier.gate_coverage import PRODUCER_ROUND_FEEDBACK, PROVISIONAL_PRODUCER
         target = Path(out_dir) if out_dir else repo.parent / (repo.name + "-feedback")
         require_new_feedback_output(target)
         try:
@@ -785,7 +787,13 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
                                   kwargs.get("feedback_scenarios", []))
         except Exception as exc:
             target.mkdir(parents=True, exist_ok=True)
+            # This is the feedback producer's own report (the planning or
+            # contract error path of `run_feedback`'s entry), so it names that
+            # producer beside the marker it writes — the marker alone no longer
+            # says whether a reader is looking at a feedback round or at a test
+            # report whose coverage was provisional.
             report = {"purpose": PURPOSE, "passed": False, "full_test_passed": False,
+                      PROVISIONAL_PRODUCER: PRODUCER_ROUND_FEEDBACK,
                       "release_disposition": "unresolved", "evidence_state": "partial",
                       "selected_state": "unavailable", "gate_coverage": None,
                       "errors": [type(exc).__name__ + ": " + str(exc)]}

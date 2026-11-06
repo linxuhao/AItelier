@@ -128,6 +128,95 @@ def test_create_refuses_an_unknown_predicate_name_and_writes_nothing(cli, repo, 
     assert not list(cli.store.glob("*.json")), "a refused plan must leave no file behind"
 
 
+def plan_directory(directory: Path) -> list[str]:
+    """Every entry in the plan directory, by name.
+
+    `*.json` cannot tell "the audit refused before anything was created" from "the lock
+    was taken and THEN the audit refused": `PlanStore.lock` opens a sidecar `.lock` next
+    to the plan and never unlinks it (it closes the fd, which releases the flock and
+    leaves the file), so an empty `<attempt>.lock` is the footprint of the lock having
+    been taken. A temp file from `PlanStore.write` (`.att-1.json.<pid>.tmp`) and the plan
+    file itself land here too, which is why this lists EVERY name and not a glob.
+    """
+    return sorted(p.name for p in directory.iterdir())
+
+
+def refused_by_the_path_audit(repo: Path, base: str, attempt_id: str) -> dict:
+    """A plan `check_declared_paths` refuses: one file declared twice, in two spellings.
+
+    This is the audit's own refusal (`impossible_path`), not the plan's: `["./app.py",
+    "app.py"]` validates fine and normalises to one path, which is exactly the defect
+    the audit exists to catch. It is decided by reading the PLAN, so it refuses whether
+    or not the workspace exists - and it is reached through `cmd_create` with
+    `--plan-json`, the same call the DSH todo_plan tool makes.
+    """
+    twice = item("edit", [{"predicate": "files_changed", "args": {"paths": ["app.py", "./app.py"]}}])
+    return plan(repo, base, [twice], attempt_id=attempt_id)
+
+
+def test_a_refused_create_does_not_even_bring_the_plan_directory_into_being(cli, repo, base):
+    """The audit refuses BEFORE the lock, so not even the directory the lock would create exists.
+
+    `PlanStore.lock` mkdirs the store root before it opens the sidecar, so a store root
+    that exists after a refusal is the lock's doing even when it holds nothing. The
+    shipped code raises from `_plan_from_args` (core/todo_cli.py:179, before
+    `with store.lock(...)` at :180).
+    """
+    assert not cli.store.exists(), "the fixture must start without a plan directory, or this proves nothing"
+    code, out = cli.create(refused_by_the_path_audit(repo, base, "att-audit"))
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert out["path"] == "app.py" and out["predicate"] == "files_changed", out
+    assert not cli.store.exists(), \
+        f"the refusal happened inside the lock: it left {plan_directory(cli.store)} behind"
+
+
+def test_a_refused_create_adds_nothing_to_a_live_plan_directory(cli, repo, base):
+    """A directory this CLI HAS written through must gain nothing - no `.lock`, no temp, no plan.
+
+    The directory is live on purpose: it already holds a frozen plan and its sidecar
+    (see `test_a_successful_create_leaves_the_plan_file_and_its_lock_sidecar_and_nothing_else`),
+    so "the exact same contents afterwards" cannot be satisfied by a directory that is
+    simply never written. A refusal for a DIFFERENT attempt must add no
+    `att-refused.lock`, no `att-refused.json` and no temp file.
+    """
+    code, accepted = cli.create(plan(repo, base, attempt_id="att-accepted"))
+    assert code == 0 and accepted["created"] is True, accepted
+    before = plan_directory(cli.store)
+    assert before == ["att-accepted.json", "att-accepted.lock"], before
+
+    code, out = cli.create(refused_by_the_path_audit(repo, base, "att-refused"))
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert plan_directory(cli.store) == before, (
+        "a refused create touched the plan directory: the audit ran after the lock was taken "
+        f"({plan_directory(cli.store)} instead of {before})")
+    assert not (cli.store / "att-refused.lock").exists(), "the audit refused with the plan lock already taken"
+    assert not (cli.store / "att-refused.json").exists(), "a refused plan must leave no plan file"
+    assert not [n for n in plan_directory(cli.store) if n.endswith(".tmp")], "a refused plan must leave no temp file"
+
+    # The refused attempt is still free: the refusal wrote nothing that would make a
+    # corrected plan look like a DIFFERENT plan for an attempt that already exists.
+    corrected = item("edit", [{"predicate": "files_changed", "args": {"paths": ["app.py"]}}])
+    code, fixed = cli.create(plan(repo, base, [corrected]))
+    assert code == 0 and fixed["created"] is True and fixed["attempt_id"] == "att-1", fixed
+    assert plan_directory(cli.store) == sorted(before + ["att-1.json", "att-1.lock"]), plan_directory(cli.store)
+
+
+def test_a_successful_create_leaves_the_plan_file_and_its_lock_sidecar_and_nothing_else(cli, repo, base):
+    """The control for the two refusals above: this directory IS written, and this is what that looks like.
+
+    Exactly two names are left - `att-1.json` and the EMPTY `att-1.lock` sidecar
+    `PlanStore.lock` opens next to it - and no temp file. The sidecar is the important
+    half: it is what the lock leaves whenever it is taken, so the absence of a `.lock`
+    after a refusal is a decision about ORDER, not a name that never appears here.
+    """
+    code, out = cli.create(plan(repo, base))
+    assert code == 0 and out["created"] is True, out
+    assert plan_directory(cli.store) == ["att-1.json", "att-1.lock"], plan_directory(cli.store)
+    assert (cli.store / "att-1.lock").stat().st_size == 0, "the sidecar is a lock, not a record: it stays empty"
+    assert json.loads((cli.store / "att-1.json").read_text())["plan_hash"] == out["plan_hash"]
+    assert cli.ok("status", "--attempt", "att-1")["next"] == "edit", "the directory really holds a readable plan"
+
+
 def test_create_refuses_more_than_twelve_items(cli, repo, base):
     def many(n):
         return [item(f"i{k}", [{"predicate": "files_present", "args": {"pattern": "*.py"}}]) for k in range(n)]

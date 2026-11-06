@@ -155,9 +155,10 @@ def test_fully_measured_green_report_writes_node_gate_complete_true(tmp_path, mo
 
 
 def test_python_only_repository_has_no_node_gate_complete(tmp_path, monkeypatch):
-    """No package.json anywhere: there is no node section, so the key is absent
-    from the FILE (gate_evidence and the older tests read it there) and the
-    repository routes exactly as it did before this change."""
+    """No package.json anywhere: there is no node section, so the report FILE
+    has no `node_gate_complete` key. The configs' `field: node_gate_complete`
+    matchers read the RETURN, which answers True here (`_node_gate_verdict` in
+    aitelier/tools/run_tests/impl.py), so the repository routes as it did before."""
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "tests").mkdir()

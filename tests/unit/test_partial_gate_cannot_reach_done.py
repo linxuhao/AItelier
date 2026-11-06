@@ -229,6 +229,23 @@ def test_return_answers_complete_for_a_repository_without_a_node_section(tmp_pat
     assert isinstance(ret["node_gate_complete"], bool)
 
 
+def test_return_carries_a_true_verdict_for_a_measured_red(tmp_path, monkeypatch):
+    """The fourth shape that returns a report: a fully measured RUN WITH A RED.
+    The verdict is about MEASUREMENT, not about the suite's colour, so it is
+    `True` — and `passed: false` is what routes the run to its repair loop. A
+    producer that conflated the two would send every red to the incomplete
+    terminal instead."""
+    repo = tmp_path / "repo"
+    order = _nine(repo)
+    (repo / "node_projects.json").write_text(json.dumps({"projects": order}))
+
+    _, ret, _ = _run(tmp_path, monkeypatch, repo, red=("web", "test"))
+
+    assert ret["node_gate_complete"] is True, ret.get("node_gate_complete")
+    assert ret["passed"] is False, ret.get("passed")
+    assert isinstance(ret["node_gate_complete"], bool)
+
+
 # ---------------------------------------------------------- the routing, per config
 @pytest.mark.parametrize("config_name", ["fix_tests", "subagent"])
 def test_partial_report_selects_the_terminal_not_success(config_name, tmp_path, monkeypatch):

@@ -173,6 +173,15 @@ steps:
   # (edge above). Not a success, and not a review: the reviewer has no way to
   # measure what the gate did not. Declared in end_conditions so the run ends
   # here, as `failed`.
+  #
+  # The other half of the contract, which no edge on this step can show: a `test`
+  # step that carries NO completeness verdict at all (absent from its return AND
+  # from `test_report.json`) reaches NEITHER this terminal NOR `done` — it
+  # matches no edge and the engine fails the run with "No matching transition
+  # from 'test'". That is deliberate: this terminal is for a gate that reported
+  # a gap, while an absent verdict is a gate that reported nothing, and neither
+  # is a success. Measured in tests/skillflow/test_gated_pipelines.py::
+  # test_fix_tests_green_with_no_verdict_anywhere_does_not_complete.
   - id: "node_gate_incomplete"
     step_type: "gate"
     transitions:

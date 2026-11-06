@@ -2870,6 +2870,13 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
     did -- a green result that could not be recorded is not a delivered verdict.
     The errno is kept; ENOSPC/EDQUOT here is the filesystem's own answer for the
     backend's output root.
+
+    This return deliberately does NOT carry `node_gate_complete` (see
+    `_node_gate_verdict`): it measured nothing, and `configs/fix_tests.yaml` /
+    `configs/subagent.yaml` reach their success terminal only on a POSITIVE
+    `node_gate_complete: true` with `passed: true`. A non-delivery must not be
+    able to satisfy that, and an absent key satisfies nothing -- the run stops
+    on the unmatched edge, naming the storage failure.
     """
     number = exc.errno
     exhausted = number in _STORAGE_FULL

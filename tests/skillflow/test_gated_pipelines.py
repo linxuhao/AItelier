@@ -269,6 +269,23 @@ def test_fix_tests_green_with_no_verdict_anywhere_does_not_complete(tmp_path):
     assert runs == 1, runs
 
 
+# The positive control for the case above, so the rule is not "no green run
+# completes": same producer, same graph, the ONE key present and true.
+_FULL_GREEN = {
+    "passed": True, "returncode": 0,
+    "summary": "9 of 9 node project(s) measured", "failures": [],
+    "node_gate_complete": True,
+}
+
+
+def test_fix_tests_full_green_with_the_verdict_still_reaches_done(tmp_path):
+    sf, run_id, calls = _wire_fix_tests_report(tmp_path, [_FULL_GREEN])
+    status, runs = _drive_worker(sf, run_id, "fix", max_ticks=10)
+
+    assert status == "completed", status
+    assert runs == 1 and calls["run_tests"] == 1
+
+
 # ── subagent: adversarial LLM-reviewer gate ─────────────────────────
 
 def _wire_subagent(tmp_path, verdicts, test_results=None):

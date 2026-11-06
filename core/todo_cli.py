@@ -145,9 +145,9 @@ def cmd_templates(args, store: None, now: float) -> dict:
 def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None, "templates.PathAudit"]:
     """The frozen plan, (for a template) where it came from, and the declared-path audit.
 
-    Both routes validate identically, the audit included: whichever way a plan is written, a
-    declared path that can never change makes one of its items impossible to pass - so it is
-    refused here, while planning, before `cmd_create` writes any plan file.
+    Both routes validate identically, the audit included: a declared path whose current state has
+    no file digest (an existing directory, FIFO, socket, device) cannot be SEEN to change unless
+    the step first replaces it with a regular file, so it is refused here before any plan exists.
     """
     if bool(args.plan_json) == bool(args.template):
         raise Refusal("usage", "give exactly one of --template NAME (with --params) or --plan-json FILE")

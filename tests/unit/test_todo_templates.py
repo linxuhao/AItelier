@@ -330,16 +330,19 @@ def test_a_template_plan_runs_end_to_end_to_a_candidate(cli, repo, base, tmp_pat
 # -- the paths a plan requires to change ------------------------------------------------------
 #
 # An item whose predicates say "every listed path must differ from its state at the start of the
-# step" cannot pass if one of those paths can never differ. That is caught here, at freeze time:
-# a frozen plan that cannot pass keeps its attempt running until someone abandons it, and the
-# director only hears about it at delivery.
+# step" compares a file's DIGEST with the one captured at `begin`. A declared path whose current
+# state has no digest - an existing directory, a FIFO, a socket, a device - gives that comparison
+# nothing to read, so the step cannot be SEEN to change it unless it first replaces it with a
+# regular file. That is caught here, at freeze time, and the refusal is a POLICY: it names the
+# regular file (or the files inside the directory) to declare instead. Without it the item is
+# written, run, and fails at `done`, and the director only hears about it at delivery.
 
 def test_a_declared_directory_is_refused_by_name_before_any_plan_file_exists(cli, repo, base):
     (repo / "out").mkdir()
     code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "out"]})
     assert code == 2 and out["refused"] == "impossible_path", out
     assert "'out'" in out["reason"] and "DIRECTORY" in out["reason"], out["reason"]
-    assert "could never pass" in out["reason"]
+    assert "The step cannot be seen to change this path unless it first replaces the directory" in out["reason"], out["reason"]
     assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "out")
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
 
@@ -376,7 +379,7 @@ def test_a_declared_path_under_an_existing_file_is_refused_not_announced_for_cre
     assert code == 2 and out["refused"] == "impossible_path", out
     assert "'app.py/x/y.txt'" in out["reason"] and "'app.py'" in out["reason"], out["reason"]
     assert "a regular file, where a directory is required" in out["reason"], out["reason"]
-    assert "could never pass" in out["reason"], out["reason"]
+    assert "The step cannot be seen to change it unless it first replaces 'app.py' with a directory" in out["reason"], out["reason"]
     assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "app.py/x/y.txt")
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
     # The audit runs BEFORE the plan's lock is taken, so a refusal does not even leave the sidecar
@@ -395,13 +398,14 @@ def test_a_declared_path_under_a_fifo_is_refused_the_same_way(cli, repo, base):
 
 
 def test_a_declared_fifo_is_refused_rather_than_announced_as_existing(cli, repo, base):
-    # `_digest` reads None for anything that is not a regular file, so `files_changed` would fail a
-    # FIFO forever; listing it under "existing" claimed the opposite.
+    # `_digest` reads None for anything that is not a regular file, so `files_changed` cannot see
+    # a FIFO change unless the step replaces it with a regular file; listing it under "existing"
+    # (as a path the step will change in place) claimed the opposite.
     os.mkfifo(repo / "pipe")
     code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "pipe"]})
     assert code == 2 and out["refused"] == "impossible_path", out
     assert "'pipe'" in out["reason"] and "exists and is a FIFO" in out["reason"], out["reason"]
-    assert "a path that is not a regular file has none" in out["reason"], out["reason"]
+    assert "The step cannot be seen to change it unless it first replaces it with a regular file" in out["reason"], out["reason"]
     assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "pipe")
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
 
@@ -433,6 +437,55 @@ def test_a_declared_symlink_to_a_regular_file_still_changes_with_its_target(cli,
     files = next(r for r in cli.ok("done", "--attempt", "att-1", "--item", "implement")["results"]
                  if r["predicate"] == "files_changed")
     assert files["outcome"] == "pass", files
+
+
+def test_a_fifo_replaced_by_a_regular_file_satisfies_files_changed(cli, repo, base):
+    # This is what makes the non-regular-file refusal a POLICY, not an impossibility. The refusal says
+    # a path that is not a regular file has no digest, so the step cannot be seen to change it unless
+    # it replaces it with a regular file. Measured here through the CLI: `begin` captures the FIFO's
+    # state as None (`_digest` answers None for anything that is not a regular file), the same FIFO
+    # left alone fails the item, and replacing it with a regular file passes it. `create` refuses an
+    # existing FIFO at freeze time, so the FIFO appears after the plan is frozen and before `begin`:
+    # that is the state `begin` captures and the item is judged from.
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "pipe"], "scope": ["app.py", "pipe"]})
+    assert code == 0, out
+    os.mkfifo(repo / "pipe")
+    began = cli.ok("begin", "--attempt", "att-1", "--item", "implement")
+    assert began["pre_state"]["pipe"] is None, began["pre_state"]
+    assert len(began["pre_state"]["app.py"]) == 64, "a regular file's captured state is a real sha256 digest"
+
+    (repo / "app.py").write_text("x = 1\n# changed\n")
+    files = next(r for r in cli.ok("done", "--attempt", "att-1", "--item", "implement")["results"]
+                 if r["predicate"] == "files_changed")
+    assert files["outcome"] == "fail" and "pipe" in files["detail"], files
+    assert "app.py" not in files["detail"], "the FIFO is the path that fails, not the file that was edited"
+
+    (repo / "pipe").unlink()
+    (repo / "pipe").write_text("# changed\n")
+    out = cli.ok("done", "--attempt", "att-1", "--item", "implement")
+    files = next(r for r in out["results"] if r["predicate"] == "files_changed")
+    assert files["outcome"] == "pass" and out["outcome"] == "pass", out
+
+
+def test_a_directory_symlink_replaced_by_a_regular_file_satisfies_files_changed(cli, repo, base):
+    # The same policy for the directory refusal. `_digest` follows a symlink, so a symlink to a
+    # directory has no digest (captured as None); replacing it with a regular file gives one, and
+    # the item passes. This is what makes the directory refusal a POLICY, not an impossibility: the
+    # refusal names "declare a regular file" as the way through, and this test measures that it works.
+    # The symlink appears after the plan is frozen, for the same reason as the FIFO above.
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "link"], "scope": ["app.py", "link"]})
+    assert code == 0, out
+    (repo / "real").mkdir()
+    (repo / "link").symlink_to("real", target_is_directory=True)
+    began = cli.ok("begin", "--attempt", "att-1", "--item", "implement")
+    assert began["pre_state"]["link"] is None, began["pre_state"]
+
+    (repo / "app.py").write_text("x = 1\n# changed\n")
+    (repo / "link").unlink()
+    (repo / "link").write_text("# changed\n")
+    out = cli.ok("done", "--attempt", "att-1", "--item", "implement")
+    files = next(r for r in out["results"] if r["predicate"] == "files_changed")
+    assert files["outcome"] == "pass" and out["outcome"] == "pass", out
 
 
 @pytest.mark.parametrize("bad", ["/etc/passwd", "../outside.py", "sub/../../escape.py"])
@@ -635,12 +688,13 @@ def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
     ("fifo", ["app.py", "pipe"], "exists and is a FIFO"),
     ("socket", ["app.py", "sock"], "exists and is a socket"),
 ])
-def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path, shape, paths, named):
+def test_every_no_digest_shape_is_refused_by_the_audit_function_itself(tmp_path, shape, paths, named):
     """The CLI cases above pin the route a director uses; this pins the FUNCTION that route calls.
 
-    Each case asserts the refusal CODE, the path it names (the impossible one, not the file that
-    precedes it in the list) and the KIND it says it found, so a refusal that fired for another
-    reason - or one narrowed to a single file kind - cannot pass here by accident.
+    Each case asserts the refusal CODE, the path it names (the one with no digest for
+    `files_changed` to compare, not the regular file that precedes it in the list) and the KIND it
+    says it found, so a refusal that fired for another reason - or one narrowed to a single file
+    kind - cannot pass here by accident.
     """
     from core.todo_plan import Refusal, TodoPlan
 
@@ -670,5 +724,5 @@ def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path
             listener.close()
     assert caught.value.code == "impossible_path", caught.value.reason
     assert (caught.value.extra["item"], caught.value.extra["predicate"]) == ("edit", "files_changed")
-    assert caught.value.extra["path"] == paths[-1], "the refusal names the impossible path, not the one before it"
+    assert caught.value.extra["path"] == paths[-1], "the refusal names the no-digest path, not the one before it"
     assert named in caught.value.reason, caught.value.reason

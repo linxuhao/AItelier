@@ -17,9 +17,10 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   a plan can always be traced to the exact template it came from.
 * A template binds paths into predicates that require them to CHANGE from their
   state at the start of the step. `check_declared_paths` judges those paths against
-  the real workspace while the plan is still being frozen: a path that can never
-  differ (an existing directory, an existing non-regular file, a path under an
-  existing non-directory, one outside the workspace, a repeat) is refused there,
+  the real workspace while the plan is still being frozen: a path whose change the
+  predicate cannot see as the plan is written (an existing directory, an existing
+  non-regular file, a path under an existing non-directory, one outside the
+  workspace, a repeat) is refused there, each refusal naming what to declare instead,
   and the ones that do not exist yet - legal, since creating a file is a change -
   are announced in the result the director reads.
 """
@@ -257,8 +258,9 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
 
 #: The predicates whose verdict is "this path differs from its state at the start of the step",
 #: with the argument that carries those paths. `core/todo_runtime.capture_pre_state` captures a
-#: pre-state for exactly these two, so a path bound here is one the item REQUIRES to change: if
-#: it can never change, the item can never pass, however good the work is.
+#: pre-state for exactly these two, so a path bound here is one the item REQUIRES to change: a
+#: path the predicate cannot see change (see `check_declared_paths`) leaves the item unable to
+#: pass as written, however good the work is.
 DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
 
 
@@ -311,9 +313,10 @@ def _existing_non_directory_parent(workspace: Path, rel: str) -> tuple[str, Path
     """The first existing component of `rel`'s parent chain that is NOT a directory, if any.
 
     A declared path is created by walking its directories; a component that already exists as a
-    file, a FIFO or a socket can never be walked through, so the path below it can never come into
-    being. The walk stops at the first component that does not exist: nothing deeper can exist
-    either, and creating below it is an ordinary change.
+    file, a FIFO or a socket cannot be walked through while it stands, so the path below it has no
+    digest until the step replaces that component with a directory. The walk stops at the first
+    component that does not exist: nothing deeper exists either, and creating below it is an
+    ordinary change.
     """
     parts = PurePosixPath(rel).parts
     for i in range(1, len(parts)):
@@ -353,17 +356,23 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
     The item's own predicate is "every listed path differs from its state at the start of the
-    step". A path for which that is impossible is refused HERE, while the plan is being frozen,
-    because a frozen plan whose item can never pass keeps its attempt running until someone
-    abandons it and the director only finds out at delivery:
+    step". A path whose change that predicate cannot see, as the plan is written, is refused HERE,
+    while the plan is being frozen, because a frozen plan whose item cannot pass as written keeps
+    its attempt running until someone abandons it and the director only finds out at delivery.
+    "Cannot be seen to change" describes the declared delta, not an impossibility: each refusal
+    names what the director should declare instead:
 
-    * an existing DIRECTORY - `_digest` digests files only, so a directory has no state to
-      differ from: `files_changed` would fail it forever with "does not exist after the step".
-      A symlink to a directory is a directory here: `_digest` follows the link;
+    * an existing DIRECTORY - `_digest` digests regular files only, and a directory has no digest,
+      so a step that edits inside it cannot be seen to change the path itself. The one change the
+      predicate can register for this path is the directory being replaced by a regular file (the
+      digest goes from None to a hash). A symlink to a directory is a directory here: `_digest`
+      follows the link;
     * a path whose existing PARENT is not a directory (`app.py/x/y.txt`, where `app.py` is a
-      file) - nothing can be created under it, so the path can never appear;
+      file) - the path has no digest while that parent stands, so the step cannot be seen to
+      change it unless it first replaces the parent with a directory;
     * an existing path that is neither a directory nor a regular file (a FIFO, a socket, a
-      device) - `_digest` returns None for it, so it is never "changed" either;
+      device) - `_digest` returns None for it, so a step cannot be seen to change it unless it
+      replaces it with a regular file;
     * a path outside the workspace (absolute, or holding a `..` component) - refused by the
       plan's own rule, `todo_plan._relative`, called here so there are never two rules;
     * the same path twice in one list, compared in normalised form so `./a` and `a` collide -
@@ -416,10 +425,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                     raise Refusal(
                         "impossible_path",
                         f"{where} declares {rel!r}, an existing DIRECTORY under workspace {plan.workspace}: the "
-                        f"item requires every declared path to differ from its state at the start of the step, and a "
-                        f"directory has no state to differ from - {binding.predicate} compares a file's digest, so "
-                        f"this item could never pass and the attempt would run until someone abandoned it; declare "
-                        f"the files inside it",
+                        f"item requires every declared path to differ from its state at the start of the step, and "
+                        f"{binding.predicate} compares a file's digest, which a directory does not have. The step "
+                        f"cannot be seen to change this path unless it first replaces the directory with a regular "
+                        f"file: declare that regular file, or declare the files inside the directory instead",
                         item=item.id, predicate=binding.predicate, path=rel)
                 parent = _existing_non_directory_parent(workspace, rel)
                 if parent is not None:
@@ -428,23 +437,23 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         "impossible_path",
                         f"{where} declares {rel!r}, whose parent {component!r} is {_what_it_is(found)}, where a "
                         f"directory is required, under workspace {plan.workspace}: the item requires every declared "
-                        f"path to differ from its state at the start of the step, and nothing can be created under a "
-                        f"path that is not a directory - the file can never appear, {binding.predicate} would fail "
-                        f"it forever, and this item could never pass; declare a path whose existing parents are all "
-                        f"directories",
+                        f"path to differ from its state at the start of the step, and {binding.predicate} compares a "
+                        f"file's digest, which this path does not have while its parent is not a directory. The step "
+                        f"cannot be seen to change it unless it first replaces {component!r} with a directory and "
+                        f"creates the file under that: declare a path whose existing parents are all directories",
                         item=item.id, predicate=binding.predicate, path=rel)
                 # What the directory refusal above does not own: a path that exists and is neither a
-                # directory nor a regular file has no digest, so it can never be "changed" either. The
-                # `is_dir` term keeps the two refusals disjoint - anything that resolves to a directory
-                # is the directory refusal's case, including a symlink to one.
+                # directory nor a regular file has no digest. The `is_dir` term keeps the two refusals
+                # disjoint - anything that resolves to a directory is the directory refusal's case,
+                # including a symlink to one.
                 if target.exists() and not target.is_file() and not target.is_dir():
                     raise Refusal(
                         "impossible_path",
                         f"{where} declares {rel!r}, which exists and is {_what_it_is(target)}, under workspace "
                         f"{plan.workspace}: the item requires every declared path to differ from its state at the "
-                        f"start of the step, and {binding.predicate} compares a file's digest - a path that is not "
-                        f"a regular file has none, so this item could never pass and the attempt would run until "
-                        f"someone abandoned it; declare a regular file",
+                        f"start of the step, and {binding.predicate} compares a file's digest, which this path does "
+                        f"not have. The step cannot be seen to change it unless it first replaces it with a regular "
+                        f"file: declare that regular file instead",
                         item=item.id, predicate=binding.predicate, path=rel)
                 (existing if target.exists() else created).append(rel)
     notes: list[str] = []

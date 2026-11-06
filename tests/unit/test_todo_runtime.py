@@ -535,6 +535,9 @@ def test_a_non_zero_exit_decides_the_verdict_when_no_absence_is_declared(tmp_pat
         stale = tmp_path / "out" / "test_report.json"
         stale.write_text(json.dumps(DECLARED_ABSENCE))
         os.utime(stale, (time.time() - 3600, time.time() - 3600))   # last run's declaration
+        # Not a clock comparison any more: the bound path is CLEARED before the command
+        # runs, so the leftover is simply gone and the exit code decides. Same verdict,
+        # a different reason - ownership is constructed rather than inferred from mtime.
         argv, args = _exits(2), {"report": named}
 
     result = builtin_library().evaluate(Binding("command_exit", {"argv": argv, "timeout": 120, **args}),
@@ -566,3 +569,79 @@ def test_the_report_may_be_named_by_an_absolute_path(tmp_path):
         workspace=tmp_path, pre_state={})
     assert result.outcome == "absent" and str(target) in result.detail
 
+
+
+def test_a_leftover_report_with_a_future_mtime_cannot_outvote_a_measured_failure(tmp_path):
+    """An untouched OLD declaration must not speak for a run that measured a red gate.
+
+    The clock rule (`written < started` -> not this run's report) is not an identity
+    test: a leftover whose mtime sits in the FUTURE passed it, so this case came back
+    `absent` - the worker charged nothing for a gate that never ran. Ownership is now
+    established by construction: the bound path is cleared before the command starts,
+    so the exit 2 the command really produced is the verdict.
+    """
+    named = "out/test_report.json"
+    (tmp_path / "out").mkdir()
+    leftover = tmp_path / "out" / "test_report.json"
+    leftover.write_text(json.dumps(DECLARED_ABSENCE))
+    now = time.time()
+    os.utime(leftover, (now + 3600, now + 3600))        # the clock rule was defeated by this
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(2), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "fail", \
+        f"a leftover declaring an absence is not this run's report: {result.detail}"
+    assert "exit 2, expected 0" in result.detail, result.detail
+    assert not leftover.exists(), \
+        "the bound path is cleared before the command runs: a report present after it is this run's"
+
+
+def test_a_report_this_run_wrote_is_its_own_even_with_a_backdated_mtime(tmp_path):
+    """A FRESH declaration must not be discarded because its mtime fell before the start.
+
+    Integer-second rounding can do that by itself; here the command forces it, which is
+    the same falsifier made deterministic. The report exists because THIS run wrote it -
+    it was absent when the run began - so the absence it declares still speaks. The old
+    clock rule (`written < started` -> not this run's report) answered `pass` here: an
+    absence becoming a release.
+    """
+    named = "test_report.json"
+    script = ("import json, os, pathlib, sys, time\n"
+              f"target = pathlib.Path({named!r})\n"
+              f"target.write_text({json.dumps(DECLARED_ABSENCE)!r})\n"
+              "now = time.time()\n"
+              "os.utime(target, (now - 3600, now - 3600))\n"
+              "sys.exit(0)\n")
+    began = time.time()
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": [sys.executable, "-c", script],
+                                 "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "absent", \
+        f"an exit 0 whose own report declares an absence is not a release: {result.detail}"
+    assert "repo_gate.sh" in result.detail and named in result.detail, \
+        f"the detail must still name the gate and the report: {result.detail!r}"
+    written = (tmp_path / named).stat().st_mtime
+    assert written < began - 1800, \
+        "the fixture must actually put the report's mtime behind the run, or it proves nothing"
+
+
+@pytest.mark.parametrize("code,outcome", [(2, "fail"), (0, "pass")])
+def test_a_report_path_that_cannot_be_cleared_lets_the_exit_code_decide(tmp_path, code, outcome):
+    """Falling back to an absence here would be the same laundering in the other direction.
+
+    A directory sits at the bound report path, so nothing can establish ownership of it.
+    No report may be read from a path this run does not own; the exit code decides, and
+    the fail detail says why the report could not be cleared.
+    """
+    named = "blocked/test_report.json"
+    (tmp_path / "blocked").mkdir()
+    (tmp_path / "blocked" / "test_report.json").mkdir()      # unlink() cannot remove this
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _exits(code), "report": named, "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == outcome, f"exit {code} must decide, not an absence: {result.detail}"
+    if outcome == "fail":
+        assert "could not be cleared" in result.detail and named in result.detail, \
+            f"the fail detail must say why no report was read: {result.detail!r}"
+        assert "exit 2, expected 0" in result.detail, result.detail

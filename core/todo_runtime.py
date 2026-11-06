@@ -27,7 +27,10 @@ state machine for it.
 A command that RAN and whose own report declares that it measured nothing is the
 SAME absence, whatever its exit code said: the failure such a gate prints is the
 one it could not measure, and an exit that happens to match cannot turn a gate
-that graded nothing into a release.
+that graded nothing into a release. "Its own" is established by CONSTRUCTION -
+the bound report path is cleared before the command starts - because a clock
+comparison is not an identity test: a leftover mtime in the future passed it, and
+a rounded one put a fresh report below the start.
 """
 from __future__ import annotations
 
@@ -301,27 +304,61 @@ def _file_delta(target: Path, rel: str, before: str | None, contains: str | None
     return ""
 
 
-def _report_absence(workspace: Path, report: str | None, started: float) -> dict | None:
-    """The absence this run's OWN report declares, or None when the exit code decides.
-
-    Only the report the command itself wrote counts, so it must exist and be no
-    older than the moment the command started: a file left behind by an earlier
-    run says nothing about this one. The declaration is then read exactly as the
-    gate pipeline reads it (`core.gate_deferral.read_absence`) - `repo_gate_absent`,
-    or `repo_gate_unmeasured` only from a report that has no `repo_gate_absent`
-    key. A flag that is false names a gate that measured nothing beside a failure
-    that WAS measured, which is a verdict, not an absence.
-    """
+def _report_path(workspace: Path, report: str | None) -> Path | None:
+    """The file `report` names: absolute stays absolute, anything else joins the workspace."""
     if not report:
         return None
-    target = Path(report) if Path(report).is_absolute() else Path(workspace) / report
+    return Path(report) if Path(report).is_absolute() else Path(workspace) / report
+
+
+def _clear_report(target: Path | None) -> str:
+    """Remove whatever sits at the bound report path, before the command runs.
+
+    This is what makes a report THIS run's: ownership is established by
+    CONSTRUCTION, not by comparing the file's mtime to the moment the command
+    started. A clock comparison is not an identity test - a leftover carrying a
+    future mtime passed it, so an untouched old declaration could override a
+    measured failure, and integer-second rounding could put a FRESH report below
+    the start, turning an exit-0 run that declared it measured nothing into a
+    release.
+
+    Returns "" when the path is clear, or the reason it could not be cleared. A
+    caller that gets a reason must NOT read a report at all: falling back to an
+    absence from a path somebody else owns would be the same laundering in the
+    other direction.
+    """
+    if target is None:
+        return ""
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return ""                        # nothing was there; nothing to establish
+    except OSError as exc:               # permission denied, a directory in the way, anything else
+        return f"{exc.strerror or exc.__class__.__name__}"
+    return ""
+
+
+def _report_absence(target: Path | None) -> dict | None:
+    """The absence the report THIS run wrote declares, or None when the exit code decides.
+
+    `target` was cleared before the command ran, so a file at that path now is one
+    this run wrote. The mtime is still READ, only to describe the evidence in the
+    detail - the verdict never depends on it. The declaration itself is read
+    exactly as the gate pipeline reads it (`core.gate_deferral.read_absence`) -
+    `repo_gate_absent`, or `repo_gate_unmeasured` only from a report that has no
+    `repo_gate_absent` key. A flag that is false names a gate that measured
+    nothing beside a failure that WAS measured, which is a verdict, not an absence.
+    """
+    if target is None:
+        return None
     try:
         written = target.stat().st_mtime
     except OSError:
         return None                      # the command named a report it did not write
-    if written < started:
-        return None                      # written before this run began: not its report
-    return read_absence(target)
+    declared = read_absence(target)
+    if declared is None:
+        return None
+    return {**declared, "written": written}
 
 
 def builtin_library() -> PredicateLibrary:
@@ -369,10 +406,19 @@ def builtin_library() -> PredicateLibrary:
         has not graded the work: that is the same absence as a gate that never
         started, not the failure it printed and not a release because the exit
         happened to match `expect`.
+
+        The bound path is CLEARED before the command starts, so a report present
+        when it returns was written by this run. Nothing is compared against a
+        clock: an old declaration carrying a future mtime cannot outvote a
+        measured failure, and a fresh one with a rounded or backdated mtime
+        cannot be discarded into a release. When the path cannot be cleared the
+        exit code decides and the fail detail says why - an absence inferred from
+        a file somebody else owns would be the same laundering in reverse.
         """
         if not Path(workspace).is_dir():
             return PredicateResult("command_exit", "absent", f"workspace {workspace} does not exist")
-        started = time.time()             # a report older than this was not written by this run
+        target = _report_path(workspace, report)
+        uncleared = _clear_report(target)   # anything left here after the run is this run's
         try:
             done = _run_in_own_group(list(argv), str(workspace), timeout)
         except FileNotFoundError:
@@ -381,16 +427,20 @@ def builtin_library() -> PredicateLibrary:
             return PredicateResult("command_exit", "absent", f"{' '.join(argv)} timed out after {timeout}s")
         except OSError as exc:
             return PredicateResult("command_exit", "absent", f"{argv[0]!r} could not be run: {exc}")
-        declared = _report_absence(workspace, report, started)
+        declared = None if uncleared else _report_absence(target)
         if declared is not None:
             return PredicateResult(
                 "command_exit", "absent",
                 f"{declared['gate']} declared in {report} that it measured nothing "
-                f"(exit {done.returncode}): an absence, not a verdict on the work")
+                f"(exit {done.returncode}; the report this run wrote at mtime "
+                f"{declared['written']:.3f}): an absence, not a verdict on the work")
         if done.returncode == expect:
             return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected")
         tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]
-        return PredicateResult("command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}")
+        why = (f"; {report} could not be cleared before the run ({uncleared}), so no report was "
+               f"read and the exit code decides") if uncleared else ""
+        return PredicateResult(
+            "command_exit", "fail", f"exit {done.returncode}, expected {expect}: {tail[0][:200]}{why}")
 
     @library.define("changes_within")
     def changes_within(*, workspace: Path, pre_state: Mapping[str, Any], base_sha: str,

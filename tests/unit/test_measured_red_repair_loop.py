@@ -48,9 +48,11 @@ review measured on the first version of the exceptional branch: an unmeasured
 thing read as a measured one.
 
 CONSUMER MAP — every PRODUCTION reader and writer of the fields this diff touches, grep'd
-in THIS tree, plus the TEST CONSUMERS section at the end: the tests whose assertions would
-break if one of these fields changed, which is the witness a later reader runs instead of
-re-deriving this map. CITATION CONVENTION: each one is named by its `path` plus the SYMBOL
+in THIS tree, plus the TEST CONSUMERS section at the end: the modules that NAME those
+keys, swept rather than remembered, with the sweep and its numbers beside them. That
+section is a census of NAMES, not of assertions: a mention is not a witness, and the
+command is what a later reader runs instead of re-deriving this map.
+CITATION CONVENTION: each one is named by its `path` plus the SYMBOL
 or the exact clause it holds — e.g. ``aitelier/tools/run_tests/impl.py
 `_aggregate_node_projects` (`"skipped": bool(unmeasured)`)``. A line number appears only
 where the number is part of the thing described, and never as the sole identifier: parallel
@@ -366,11 +368,96 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
           diagnosis is refused because it is the producer's own statement that storage cost
           the measurement.
 
-TEST CONSUMERS — the tests whose assertions would break if one of these fields changed.
-They are not production readers; they are the WITNESS a later reader runs instead of
-re-deriving this map, so each is named with the field it reads. Re-derive a wider set with
-`grep -rln '<field>' tests/` — that sweep returns more than this list, because most
-absence tests drive `run_tests` end to end instead of reading one field by name.
+TEST CONSUMERS — the modules that NAME one of these fields. They are not production
+readers, and naming a key is not the same as asserting on it: this section is a SWEEP, and
+its numbers are a snapshot of THIS tree rather than a standing claim. One sweep per
+unambiguous key, from the repository root:
+
+    grep -rl --include=*.py <key> tests/
+
+answers 42 modules here - repo_gate_absent 18 / evidence_state 17 / release_evidence 24 /
+node_gate_complete 7, overlapping. The list below is those 42 minus this module, which
+names all four because it IS this map: 41 rows, 17 / 16 / 23 / 6. If a merge moves the
+tree, re-run the sweep; the numbers are stated only so a later reader can see at a glance
+that they should. Two earlier editions of this paragraph were hand-written readings and
+both were wrong - the first named four modules, the second named 41 and still could not be
+reproduced, and it called `test_outcome` a reader of a `skipped` key it does not read. The
+command, not the list, is the witness.
+
+    tests/integration/test_full_pipeline_real_runner.py                 release_evidence
+    tests/integration/test_new_pipelines_mocked_agent.py                node_gate_complete
+    tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py  repo_gate_absent, evidence_state
+    tests/skillflow/test_coding_impl_gate.py                            repo_gate_absent
+    tests/skillflow/test_coding_impl_gate_absence.py                    repo_gate_absent
+    tests/skillflow/test_config_loading.py                              repo_gate_absent, node_gate_complete
+    tests/skillflow/test_gated_pipelines.py                             node_gate_complete
+    tests/unit/test_absence_survives_the_stamp.py                       repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_addon_registry.py                                   release_evidence
+    tests/unit/test_baseline_write_failure_keeps_absence.py             repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_coding_impl_node_gate_partial.py                    evidence_state, release_evidence, node_gate_complete
+    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py     release_evidence
+    tests/unit/test_dpe_test_caller_budget.py                           release_evidence
+    tests/unit/test_gate_consumer_composition.py                        repo_gate_absent, release_evidence
+    tests/unit/test_gate_deferral_execution_points.py                   repo_gate_absent
+    tests/unit/test_gate_deferral_is_accounted.py                       repo_gate_absent
+    tests/unit/test_gate_deferral_reads_the_run.py                      repo_gate_absent
+    tests/unit/test_godot_compile_phase_evidence.py                     evidence_state
+    tests/unit/test_harness_render_queue.py                             release_evidence
+    tests/unit/test_node_gate_complete_return.py                        node_gate_complete
+    tests/unit/test_normal_gate_binding_matches_engine.py               release_evidence
+    tests/unit/test_partial_gate_cannot_reach_done.py                   node_gate_complete
+    tests/unit/test_provisional_round_cannot_conclude_success.py        repo_gate_absent, release_evidence
+    tests/unit/test_release_fail_fast.py                                evidence_state, release_evidence
+    tests/unit/test_repo_gate_admission.py                              repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_repo_gate_early_contract_red.py                     repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_repo_gate_outcome_table.py                          repo_gate_absent, release_evidence
+    tests/unit/test_repo_gate_red_beats_absence.py                      repo_gate_absent, evidence_state
+    tests/unit/test_round_feedback.py                                   release_evidence
+    tests/unit/test_run_tests_delivery_truthfulness.py                  evidence_state, release_evidence
+    tests/unit/test_run_tests_gate.py                                   evidence_state
+    tests/unit/test_run_tests_node_multi_project.py                     evidence_state
+    tests/unit/test_run_tests_pytest_wall.py                            evidence_state, release_evidence
+    tests/unit/test_run_tests_required_async_plugin.py                  evidence_state
+    tests/unit/test_run_tests_storage_boundaries.py                     evidence_state, release_evidence
+    tests/unit/test_run_tests_storage_exhaustion.py                     evidence_state, release_evidence
+    tests/unit/test_run_tests_storage_namespace.py                      release_evidence
+    tests/unit/test_run_tests_unmeasured_declaration.py                 repo_gate_absent
+    tests/unit/test_scoped_gate.py                                      release_evidence
+    tests/unit/test_tree_level_accounting_witnesses.py                  repo_gate_absent
+    tests/unit/test_vision_handoff.py                                   release_evidence
+
+  `skipped` is deliberately NOT a column above, and it gets no list either. The word is
+  three different things in this tree: the WHOLE-REPORT absence flag this change is about
+  (`report["skipped"]`, `node["skipped"]`); the DERIVED evidence-state label
+  `report_state(...) == "skipped"` that an absence answers, which several tests assert
+  about an absence and not about this flag; and neighbours or prose (`skipped_because`,
+  `gate_skipped`, `skipped_gates`, comment text). `grep -rl --include=*.py skipped tests/`
+  therefore answers 98 modules and is not a consumer census. A sweep for the flag's syntax
+  alone is no fix either: one expression of it answers 19 modules under the literal
+  lowercase, double-quoted spelling and 23 once both quote styles and `True`/`False` are
+  allowed (18 and 22 beside this module, which spells the syntax out below), and every
+  one of those sets mixes modules that READ the flag with modules that only MENTION it.
+  Which is which cannot be decided by grep, so the readers named below are the PRODUCTION
+  ones plus this module, which reads the flag off the producer's own reports:
+
+    aitelier/tools/run_tests/impl.py  the producer WRITES the whole-report flag at every
+        absence exit. `grep -n 'skipped=True' aitelier/tools/run_tests/impl.py` answers
+        nine lines in this tree: six whole-report `report.update(...)` writes (a pytest
+        toolchain that could not be provisioned, `_mark_storage_unmeasured`, an
+        unavailable test workspace, an unavailable CPU executor, an invalid pytest wall,
+        and `run_tests`' own Node nothing-measured branch - only the invalid-wall one
+        omits `infrastructure_unavailable`), two `node.update(...)` writes that set the
+        NODE's copy, and one line of prose. The Node branch is the shape this config's
+        exceptional branch accepts, and it is the single-project absence:
+        `if node.get("skipped") and not node.get("measured_dirs")`
+    configs/coding_impl.yaml  `test_evidence`'s inline schema REFUSES either form -
+        the first `anyOf` branch's `skipped: { const: false }` (:628) and
+        `node: { skipped: { const: false } }` (:632), with both of its failing
+        transitions landing on `test_evidence_missing` (:736 and :740 here)
+    configs/coding_impl.yaml  `test_outcome` is NOT a reader of the flag: its inline
+        schema (:748-752 here) requires `passed: { const: true }` and reads nothing
+        else, which is why the whole-report flag alone cannot stop a green-looking
+        report - the `test_evidence` refusal above is the only place it bites
   * tests/unit/test_node_gate_complete_return.py
     `test_return_and_file_both_say_incomplete_for_the_measured_partial_shape` — reads
     `node_gate_complete` on BOTH carriers of ONE report: the `run_tests` RETURN
@@ -393,10 +480,10 @@ absence tests drive `run_tests` end to end instead of reading one field by name.
     False`: it fails if the nothing-measured path stops setting `node.skipped`, the key
     this diff's second branch requires.
   * tests/unit/test_baseline_write_failure_keeps_absence.py
-    `test_an_absence_whose_baseline_cannot_be_written_stays_an_absence` — reads three of
-    these fields off the report AND off the return: `repo_gate_absent` (`is True`),
-    `evidence_state` (`== "not_run"`: the producer's word survived the restatement) and
-    `release_evidence` (`== "unresolved"`, on `report` and on `result`), and then asks
+    `test_an_absence_whose_baseline_cannot_be_written_stays_an_absence` — reads two of
+    these fields off the REPORT only (`repo_gate_absent` `is True`; `evidence_state`
+    `== "not_run"`, the producer's word survived the restatement) and `release_evidence`
+    off BOTH carriers (`== "unresolved"`, on `report` and on `result`), and then asks
     `report_state` / `release_disposition` for their answer on the FILE and on a JSON
     round-trip of it. It fails if `_write_state` stops keeping the producer's absence
     word, or if `restate_classification` starts inventing a disposition the report never

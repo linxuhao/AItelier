@@ -23,6 +23,11 @@ that is not a failure. It is an absence, and it is handed to the existing
 `DeferralLedger`, which already knows that an absence is a bounded EPISODE that
 is retried cheaply and ends by naming itself. Nothing here invents a second
 state machine for it.
+
+A command that RAN and whose own report declares that it measured nothing is the
+SAME absence, whatever its exit code said: the failure such a gate prints is the
+one it could not measure, and an exit that happens to match cannot turn a gate
+that graded nothing into a release.
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ import subprocess
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
-from core.gate_deferral import DeferralLedger
+from core.gate_deferral import DeferralLedger, read_absence
 
 Outcome = Literal["pass", "fail", "absent"]
 
@@ -47,7 +52,7 @@ Outcome = Literal["pass", "fail", "absent"]
 #: broken binding (`argv` given as a string) is refused instead of measuring as
 #: an absence weeks later. Argument names mean the same thing in every predicate.
 _STR_LISTS = {"argv", "scope", "require_keys", "paths"}
-_STRINGS = {"path", "pattern", "contains", "base"}
+_STRINGS = {"path", "pattern", "contains", "base", "report"}
 
 
 @dataclass(frozen=True)
@@ -296,6 +301,29 @@ def _file_delta(target: Path, rel: str, before: str | None, contains: str | None
     return ""
 
 
+def _report_absence(workspace: Path, report: str | None, started: float) -> dict | None:
+    """The absence this run's OWN report declares, or None when the exit code decides.
+
+    Only the report the command itself wrote counts, so it must exist and be no
+    older than the moment the command started: a file left behind by an earlier
+    run says nothing about this one. The declaration is then read exactly as the
+    gate pipeline reads it (`core.gate_deferral.read_absence`) - `repo_gate_absent`,
+    or `repo_gate_unmeasured` only from a report that has no `repo_gate_absent`
+    key. A flag that is false names a gate that measured nothing beside a failure
+    that WAS measured, which is a verdict, not an absence.
+    """
+    if not report:
+        return None
+    target = Path(report) if Path(report).is_absolute() else Path(workspace) / report
+    try:
+        written = target.stat().st_mtime
+    except OSError:
+        return None                      # the command named a report it did not write
+    if written < started:
+        return None                      # written before this run began: not its report
+    return read_absence(target)
+
+
 def builtin_library() -> PredicateLibrary:
     library = PredicateLibrary(version="2")
 
@@ -332,9 +360,19 @@ def builtin_library() -> PredicateLibrary:
 
     @library.define("command_exit")
     def command_exit(*, workspace: Path, pre_state: Mapping[str, Any], argv: Sequence[str],
-                     expect: int = 0, timeout: float | None = None) -> PredicateResult:
+                     expect: int = 0, timeout: float | None = None,
+                     report: str | None = None) -> PredicateResult:
+        """The command's exit code, unless the run's own report declares no verdict.
+
+        `report` (workspace-relative or absolute) names the file this command
+        writes. A gate that RAN and said in that file that it measured nothing
+        has not graded the work: that is the same absence as a gate that never
+        started, not the failure it printed and not a release because the exit
+        happened to match `expect`.
+        """
         if not Path(workspace).is_dir():
             return PredicateResult("command_exit", "absent", f"workspace {workspace} does not exist")
+        started = time.time()             # a report older than this was not written by this run
         try:
             done = _run_in_own_group(list(argv), str(workspace), timeout)
         except FileNotFoundError:
@@ -343,6 +381,12 @@ def builtin_library() -> PredicateLibrary:
             return PredicateResult("command_exit", "absent", f"{' '.join(argv)} timed out after {timeout}s")
         except OSError as exc:
             return PredicateResult("command_exit", "absent", f"{argv[0]!r} could not be run: {exc}")
+        declared = _report_absence(workspace, report, started)
+        if declared is not None:
+            return PredicateResult(
+                "command_exit", "absent",
+                f"{declared['gate']} declared in {report} that it measured nothing "
+                f"(exit {done.returncode}): an absence, not a verdict on the work")
         if done.returncode == expect:
             return PredicateResult("command_exit", "pass", f"exit {done.returncode} as expected")
         tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or [""]

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -169,6 +170,7 @@ def test_the_library_checks_a_binding_before_any_work_starts():
     library = builtin_library()
     library.check(Binding("file_changed", {"path": "a.py"}))
     library.check(Binding("command_exit", {"argv": ["true"], "expect": 1, "timeout": 2.5}))
+    library.check(Binding("command_exit", {"argv": ["true"], "report": "out/test_report.json"}))
     library.check(Binding("report_json", {"path": "r.json", "require_keys": []}))
     with pytest.raises(ValueError):
         library.check(Binding("changes_within", {"scope": ["**"], "base_sha": "f" * 40}))   # the plan's base, not a binding's
@@ -221,6 +223,8 @@ def test_changes_within_cannot_be_measured_without_a_readable_base(repo):
     ("command_exit", {"argv": ["true", 1]}),
     ("command_exit", {"argv": ["true"], "timeout": True}),
     ("command_exit", {"argv": ["true"], "expect": "0"}),
+    ("command_exit", {"argv": ["true"], "report": 5}),
+    ("command_exit", {"argv": ["true"], "report": ""}),
     ("changes_within", {"scope": "src/**"}),
     ("changes_within", {"scope": []}),
     ("report_json", {"path": "r.json", "require_keys": "passed"}),
@@ -438,3 +442,127 @@ def test_a_command_that_times_out_takes_its_whole_process_group_with_it(tmp_path
         time.sleep(0.05)
     os.kill(grandchild, signal.SIGKILL)
     pytest.fail("the timed-out command's child is still running")
+
+
+# -- the wider absence channel: a run whose own report declares it measured nothing ---------
+
+DECLARED_ABSENCE = {"repo_gate_absent": True, "repo_gate": {"script": "scripts/repo_gate.sh"}}
+MEASURED_FAILURE = {"repo_gate_absent": False, "repo_gate": {"script": "scripts/repo_gate.sh"}, "passed": 0}
+
+
+def _writes(path: str, payload: dict | None, *, code: int) -> list[str]:
+    """A command that writes `path` (JSON, or a deliberately unreadable string) and exits `code`."""
+    text = json.dumps(payload) if payload is not None else "{not json"
+    script = ("import pathlib, sys\n"
+              "target = pathlib.Path(sys.argv[1])\n"
+              "target.parent.mkdir(parents=True, exist_ok=True)\n"
+              f"target.write_text({text!r})\n"
+              f"sys.exit({code})\n")
+    return [sys.executable, "-c", script, path]
+
+
+def _exits(code: int) -> list[str]:
+    return [sys.executable, "-c", f"import sys; sys.exit({code})"]
+
+
+def test_a_gate_that_declares_it_measured_nothing_is_an_absence_not_its_exit_code(tmp_path):
+    """A run that RAN and said so in its own report is the missing-gate absence.
+
+    The failure such a gate prints is the one it could not measure, so charging it
+    to the implementer is exactly what the ledger exists to prevent - and the
+    episode it opens must be the ledger's, not a second mechanism.
+    """
+    item = Item(id="gate", title="", predicates=(
+        Binding("command_exit", {"argv": _writes("out/test_report.json", DECLARED_ABSENCE, code=2),
+                                 "report": "out/test_report.json", "timeout": 120}),))
+    run = _run(tmp_path, item, clock=lambda: 0.0)
+    run.begin("gate")
+    report = run.observe("gate")
+    assert report.outcome == "absent", "a non-zero exit that declares an absence is not the implementer's failure"
+    assert report.unmeasurable is False, "the first look is inside the ledger's wait"
+    episode = run.ledger.episodes["fixture-plan/gate"]
+    assert episode.gate == "command_exit", "the absence must reach the existing DeferralLedger episode"
+    assert run.report()["deferred"] == ["gate"] and run.report()["done"] == []
+    detail = report.results[0].detail
+    assert "repo_gate.sh" in detail and "out/test_report.json" in detail, \
+        f"the detail must name the gate AND the report it was read from: {detail!r}"
+
+
+def test_a_declared_absence_is_never_a_release_even_at_the_expected_exit(tmp_path):
+    """An exit that happens to match `expect` cannot turn "nothing was measured" into a pass."""
+    item = Item(id="gate", title="", predicates=(
+        Binding("command_exit", {"argv": _writes("test_report.json", DECLARED_ABSENCE, code=0),
+                                 "report": "test_report.json", "timeout": 120}),))
+    run = _run(tmp_path, item)
+    run.begin("gate")
+    report = run.observe("gate")
+    assert report.outcome == "absent", "an exit 0 that declares an absence is not a release"
+    assert not report.complete and run.report()["done"] == [] and run.next_item().id == "gate"
+
+
+def test_the_report_is_read_exactly_as_the_gate_pipeline_reads_it(tmp_path):
+    """`repo_gate_unmeasured` counts only from a report that has no `repo_gate_absent` key."""
+    def verdict(payload):
+        return builtin_library().evaluate(
+            Binding("command_exit", {"argv": _writes("test_report.json", payload, code=1),
+                                     "report": "test_report.json", "timeout": 120}),
+            workspace=tmp_path, pre_state={})
+
+    assert verdict({"repo_gate_unmeasured": True}).outcome == "absent", "the fallback flag is an absence"
+    assert verdict({"repo_gate_unmeasured": True, "repo_gate_absent": False}).outcome == "fail", \
+        "with the primary key present it is the only one read: a measured red goes back to the worker"
+    assert verdict({"repo_gate_absent": False, "passed": 0}).outcome == "fail"
+    assert verdict({"repo_gate_absent": True, "repo_gate": {"script": "g.sh"}}).outcome == "absent"
+    assert verdict({"repo_gate": {"script": "g.sh"}}).outcome == "fail", "a report stating nothing is no absence"
+
+
+@pytest.mark.parametrize("case", ["no report named", "named but never written",
+                                  "flag false", "older than the run"])
+def test_a_non_zero_exit_decides_the_verdict_when_no_absence_is_declared(tmp_path, case):
+    """Only a report THIS run wrote and declared an absence in may widen the channel."""
+    named = "out/test_report.json"
+    args: dict
+    if case == "no report named":                      # the old binding, untouched
+        (tmp_path / "out").mkdir()
+        (tmp_path / "out" / "test_report.json").write_text(json.dumps(DECLARED_ABSENCE))  # nobody named it
+        argv, args = _exits(2), {}
+    elif case == "named but never written":
+        argv, args = _exits(2), {"report": named}
+    elif case == "flag false":
+        argv, args = _writes(named, MEASURED_FAILURE, code=2), {"report": named}
+    else:
+        (tmp_path / "out").mkdir()
+        stale = tmp_path / "out" / "test_report.json"
+        stale.write_text(json.dumps(DECLARED_ABSENCE))
+        os.utime(stale, (time.time() - 3600, time.time() - 3600))   # last run's declaration
+        argv, args = _exits(2), {"report": named}
+
+    result = builtin_library().evaluate(Binding("command_exit", {"argv": argv, "timeout": 120, **args}),
+                                        workspace=tmp_path, pre_state={})
+    assert result.outcome == "fail", f"{case}: the exit code decides when no absence is declared"
+    assert "exit 2, expected 0" in result.detail, result.detail
+
+
+def test_a_binding_with_no_report_is_judged_by_its_exit_code_exactly_as_before(tmp_path):
+    library = builtin_library()
+
+    def verdict(code, expect=0):
+        return library.evaluate(Binding("command_exit", {"argv": _exits(code), "expect": expect,
+                                                         "timeout": 120}),
+                                workspace=tmp_path, pre_state={})
+
+    assert verdict(0).outcome == "pass"
+    assert verdict(3, expect=3).outcome == "pass"
+    failed = verdict(3)
+    assert failed.outcome == "fail" and "exit 3, expected 0" in failed.detail
+
+
+def test_the_report_may_be_named_by_an_absolute_path(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    target = elsewhere / "test_report.json"
+    result = builtin_library().evaluate(
+        Binding("command_exit", {"argv": _writes(str(target), DECLARED_ABSENCE, code=1),
+                                 "report": str(target), "timeout": 120}),
+        workspace=tmp_path, pre_state={})
+    assert result.outcome == "absent" and str(target) in result.detail
+

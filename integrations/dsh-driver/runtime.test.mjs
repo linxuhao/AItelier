@@ -365,6 +365,16 @@ test('prompts ask for concrete candidates and a NOTHING_LEFT line, and name the 
   const guide = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
   for (const word of ['continuation check', 'NOTHING_LEFT:', 'watch_process', 'idle_dormant']) assert.ok(guide.includes(word), word);
 });
+test('driver guide: external Claude/Codex subagents are for review and hard items, through devmcp, never raw bash', async () => {
+  const guide = (await readFile(new URL('./driver.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  for (const phrase of ['search_tools(query="devmcp subagent")', 'subagent_start', 'subagent_get', 'subagent_message',
+    'subagent_cancel', 'non-author review', 'different model family', 'mode="read-only"', 'hard item',
+    'Everything else stays native', 'record the result in State', 'Never start claude or codex from bash',
+    '`codex exec`', '`claude -p`', '`pkill`', 'watch_process cannot watch it', 'do not pass wait_s',
+    'cannot witness a criterion that needs a test run', '15-minute idle review',
+    'Do not call idle_dormant while one is running', 'dormancy stops that idle review'])
+    assert.ok(guide.includes(phrase), phrase);
+});
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
   t.mock.timers.enable({apis:['setTimeout']});
   const errors=[],agent={status:'idle'},goal={id:'g',phase:'active',activation:'disarmed'};

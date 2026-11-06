@@ -206,7 +206,8 @@ def _provisional_coverage():
     return coverage
 
 
-def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=False):
+def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=False,
+                       node_project=False):
     """`run_tests` over a repository whose gate coverage was PROVISIONAL.
 
     The pytest leg is real: `install_entry_executor` runs the same subprocess
@@ -220,13 +221,24 @@ def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=
     absence. The stub isolates the one shape that otherwise stays untested — a
     MEASURED green carrying the marker — so the red half has a control that
     differs from it in nothing but the pytest outcome.
+
+    `node_project` adds a `package.json`, which makes the REAL node gate run and
+    — through the same test seam — be refused an executor, exactly as an
+    unavailable Node leg does in a deployment. That is the shape where the whole
+    report is marked `skipped` / `infrastructure_unavailable` while the pytest
+    failure stays in `failures`.
     """
-    repo = tmp_path / ("repo-" + ("red" if pytest_red else
-                                  "measured-green" if gate_measured_pass else "green"))
+    suffix = ("red-node" if node_project else "red") if pytest_red else (
+        "measured-green" if gate_measured_pass else "green")
+    repo = tmp_path / ("repo-" + suffix)
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_contract.py").write_text(
         "def test_contract():\n"
         + ("    assert 1 + 1 == 3\n" if pytest_red else "    assert 1 + 1 == 2\n"))
+    if node_project:
+        (repo / "package.json").write_text(
+            json.dumps({"name": "web", "version": "1.0.0",
+                        "scripts": {"build": "echo build", "test": "echo test"}}))
     coverage = _provisional_coverage()
     if gate_measured_pass:
         monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _repo, **_kwargs: {
@@ -241,8 +253,7 @@ def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=
         script.chmod(0o755)
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "data"))
     install_entry_executor(monkeypatch)
-    out = tmp_path / ("graph-" + ("red" if pytest_red else
-                                      "measured-green" if gate_measured_pass else "green")) / "test"
+    out = tmp_path / ("graph-" + suffix) / "test"
     result = rt.run_tests(project_root=str(repo), out_dir=str(out),
                           run_id="provisional-round", evidence_cycle_start=True)
     report = json.loads((out / "test_report.json").read_text())
@@ -253,6 +264,9 @@ def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=
                       "release_evidence": report.get("release_evidence"),
                       "repo_gate_absent": report.get("repo_gate_absent"),
                       "repo_gate_unmeasured": report.get("repo_gate_unmeasured"),
+                      "returncode": report.get("returncode"),
+                      "skipped": report.get("skipped"),
+                      "infrastructure_unavailable": report.get("infrastructure_unavailable"),
                       "failures": report["failures"]}, sort_keys=True))
     return result, report, out
 
@@ -399,3 +413,137 @@ def test_the_two_provisional_producers_are_distinguishable(tmp_path, monkeypatch
     assert ge.release_disposition(
         dict(red, **{PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS})) == "known_failure"
 
+
+
+# ── the two holes the review of b765f570 found ─────────────────────────────
+#
+# Both came from the predicate asking "is any ABSENCE present?" instead of "was
+# a RED measured?", and both are answered here on the producer, not on a shape
+# invented to suit the classifier.
+#
+#   1. An absence became a FAILURE once the report had been stamped: the
+#      predicate read `evidence_state`, `stamp_report` WRITES `evidence_state`,
+#      so an unattributable ticket was charged to the implementer after the
+#      stamp renamed it.
+#   2. A measured RED stayed softened when another leg was unavailable:
+#      `run_tests` marks the whole report `skipped` /
+#      `infrastructure_unavailable` when the Node gate could not be measured,
+#      which made the vocabulary answer "absence" over a pytest session that
+#      really failed.
+#
+# The evidence is the producer's own `returncode: 1` — a fact about ITS pytest
+# leg that survives every later branch and the stamp — so neither hole can come
+# back without reddening a probe below.
+
+
+def _stamp_and_audit(tmp_path, name, report):
+    """The real `stamp_report`, then the real `audit_evidence`, on a temp graph."""
+    graph = tmp_path / f"graph-{name}"
+    step = graph / "test_evidence"
+    step.mkdir(parents=True)
+    report = dict(report)
+    ge.stamp_report(report, run_id="provisional-round", out_dir=str(step),
+                    start_cycle=True)
+    (step / "test_report.json").write_text(json.dumps(report))
+    audit = ge.audit_evidence(graph, "provisional-round",
+                              [["test_evidence", "test_report.json"]])
+    return report, audit
+
+
+def test_a_pytest_red_survives_an_unavailable_node_leg(tmp_path, monkeypatch):
+    """HOLE 2 — the report's own pytest failure is not softened by a dead leg.
+
+    Driven through the real producer: a repository with a `package.json` whose
+    Node gate is refused an executor (the same test seam refuses every node
+    profile), beside a pytest leg that really fails. `run_tests` reports exactly
+    that shape — `passed: false`, `skipped: true`,
+    `infrastructure_unavailable: true` — and keeps the pytest failure and its
+    own `returncode`. The old predicate read the absence vocabulary, so this
+    report answered `partial` over a red that had been measured.
+    """
+    result, report, out = _provisional_round(
+        tmp_path, monkeypatch, pytest_red=True, node_project=True)
+
+    # The producer's own facts, all of them written by `run_tests`:
+    assert report["returncode"] == 1, report.get("returncode")
+    assert any(f.startswith("FAILED") for f in report["failures"]), report["failures"]
+    assert report["passed"] is False
+    assert report["infrastructure_unavailable"] is True and report["skipped"] is True
+    # The Node gate could not be measured at all: the refused install is retained
+    # as the reason, and the project itself is an ABSENCE (`skipped`, not failed).
+    assert report["node"]["skipped"] is True and report["node"]["passed"] is True
+    assert report["node"]["checks"]["install"]["isolation_unavailable"] is True
+    # …and the vocabulary the old predicate consulted still says "absence",
+    # which is precisely why it answered `partial` here.
+    assert ge._absence_state(report, False) == "infrastructure_unavailable"
+
+    assert ge.report_state(report) == "failed"
+    assert ge.release_disposition(report) == "known_failure"
+    assert report["release_evidence"] == "known_failure" == result["release_evidence"]
+
+    audit = ge.audit_evidence(out.parent, "provisional-round",
+                              [["test", "test_report.json"]])
+    assert audit["passed"] is False
+    assert audit["failed_gates"][0]["state"] == "failed"
+    assert audit["incomplete_coverage_gates"] == [] and audit["skipped_gates"] == []
+
+
+# Each of these reports has an ABSENCE as its only defect: the pytest leg
+# measured nothing red, and the producer said so in its own words. `returncode`
+# is what the producer wrote for that kind of run — absent where pytest never
+# ran, `None` where the harness killed it, and `1` only for the storage case,
+# where the producer ALSO says the results may not be trusted either way.
+ABSENCE_SHAPES = {
+    "unattributable": {
+        "repo_gate_unattributable": True, "evidence_state": "unattributable",
+        "failures": ["repo_gate: the report under the ticket is not provably "
+                     "the gate's"]},
+    "not_run": {
+        "evidence_state": "not_run", "repo_gate_absent": True,
+        "repo_gate_unmeasured": True,
+        "failures": ["repo_gate:run_tests.sh was NOT measured"]},
+    "timeout": {
+        "skipped": True, "skipped_because": "pytest_timeout",
+        "measurement_not_taken": True, "returncode": None,
+        "failures": ["pytest:timed out after 3600s - no results collected"]},
+    "storage_during_run": {
+        "skipped": True, "skipped_because": "storage_exhausted",
+        "storage_unmeasured": True, "infrastructure_unavailable": True,
+        "evidence_state": "infrastructure_unavailable", "returncode": 1,
+        "failures": ["pytest:storage exhausted - no trustworthy measurement"]},
+    "pending": {"pending": True},
+    "blind": {"blind": True},
+    "gate_absent_green": {"repo_gate_absent": True, "evidence_state": "not_run",
+                          "returncode": 0},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(ABSENCE_SHAPES))
+def test_an_absence_under_the_marker_stays_partial_through_the_stamp(tmp_path, shape):
+    """HOLE 1 — an absence is never charged as a failure, stamped or not.
+
+    Asserted on the RAW report and then through the real `stamp_report` +
+    `audit_evidence` round trip, because that round trip is where the hole was:
+    the stamp overwrites `evidence_state` with `report_state`'s own answer, so a
+    predicate that re-read the state vocabulary of the FILE lost the producer's
+    `unattributable` / `not_run` / `infrastructure_unavailable` and called the
+    report a measured failure — which the audit then filed under
+    `failed_gates`, i.e. charged to the implementer.
+    """
+    report = dict(ABSENCE_SHAPES[shape], purpose=PROVISIONAL_PURPOSE,
+                  **{PROVISIONAL_PRODUCER: PRODUCER_RUN_TESTS},
+                  passed=False, gate_coverage=_provisional_coverage())
+
+    # The RAW report: an absence parks, and it never reads as a red.
+    assert ge.report_state(report) == "partial"
+    assert ge.release_disposition(report) == "unresolved"
+
+    # The SAME report after the real stamp and through the real audit.
+    stamped, audit = _stamp_and_audit(tmp_path, shape, report)
+    assert stamped["evidence_state"] == "partial"
+    assert stamped["release_evidence"] == "unresolved"
+    assert ge.report_state(stamped) == "partial"
+    assert ge.release_disposition(stamped) == "unresolved"
+    assert audit["passed"] is False
+    assert [entry["state"] for entry in audit["incomplete_coverage_gates"]] == ["partial"]
+    assert audit["failed_gates"] == []

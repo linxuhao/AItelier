@@ -103,17 +103,27 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
 
     def stamp() -> None:
         # BOTH answers are read from the report AS THE PRODUCER WROTE IT, and
-        # only then written back. `report_state`/`release_disposition` read
-        # `evidence_state` (it is how a producer says "not_run", "unattributable",
-        # "infrastructure_unavailable"), so annotating the report with the first
-        # answer before asking the second question made the second answer read
-        # the annotation instead of the evidence: measured on a provisional
-        # report whose gate measured nothing, `report_state` said `partial`,
-        # that overwrote `not_run`, and `release_disposition` then read `partial`
-        # as a measured red and released it as `known_failure` — an ABSENCE
-        # reading as a FAILURE, which is the opposite error to the one this
-        # module exists to prevent, and worse for a release than the `unresolved`
-        # it replaced.
+        # only then written back. `evidence_state` is an INPUT to both readers
+        # (it is how a producer says `not_run`, `unattributable`,
+        # `infrastructure_unavailable`) and also an OUTPUT of this stamp, so
+        # writing the first answer before asking the second question made the
+        # second answer read the annotation instead of the evidence. That is
+        # wrong in principle wherever the two can disagree — a report whose
+        # producer wrote an absence state that `report_state` RENAMES
+        # (`not_run` -> `skipped`) is such a shape — and the reordering costs
+        # nothing, so the hazard is removed rather than reasoned about.
+        #
+        # This is a latent ordering defect, NOT a measured release: no report
+        # was observed being released on it, and for the shapes this node is
+        # about it was masked entirely, because `release_disposition` used to
+        # answer `unresolved` on the provisional marker alone.
+        #
+        # It does NOT close the other half of the hazard, and nothing here
+        # should claim to: whoever reads the stamped FILE later (the audit)
+        # still sees this annotation rather than the producer's own word. That
+        # is exactly why the provisional classification asks the producer's own
+        # red witness (`_provisional_red_is_measured`) and never re-derives
+        # "was this red measured?" from the state vocabulary of the file.
         state = report_state(report)
         disposition = release_disposition(report)
         report["evidence_state"] = state
@@ -159,12 +169,15 @@ def stamp_file(path: Path, *, run_id: str, out_dir: str,
 def _absence_state(report: dict, raw_passed) -> str | None:
     """The state of a report that measured nothing, or None when it measured.
 
-    Split out of `report_state` so that the provisional marker's branch can ask
-    the SAME question — "is this red a measurement, or an absence wearing
-    `passed: false`?" — with the same predicates, instead of a second copy of
-    them that could drift from the classifier. Every branch below is the one
-    `report_state` had inline; the order is load-bearing (a report that is both
-    pending and red is pending, not failed).
+    Split out of `report_state` so the absence vocabulary that used to be inline
+    has a name, and so `report_state` can skip it for the one shape that must
+    not be read through it. (`_provisional_red_is_measured` deliberately does
+    NOT use this function: it asks whether a red was measured, and this
+    vocabulary answers whether an absence is present — reading the second as the
+    first softened a real red beside an absent side leg, and turned a renamed
+    absence into a failure.) Every branch below is the one `report_state` had
+    inline; the order is load-bearing (a report that is both pending and red is
+    pending, not failed).
     """
     status = str(report.get("evidence_state") or report.get("status") or "").strip().lower()
     if report.get("pending") is True or status in _PENDING_STATUSES:
@@ -191,6 +204,21 @@ def _absence_state(report: dict, raw_passed) -> str | None:
     return None
 
 
+# `returncode` is pytest's OWN verdict on this report's pytest leg. `run_tests`
+# writes it from the session it ran, before any other leg is folded in, and no
+# later branch of that tool overwrites it: 0 = every collected test passed,
+# 1 = the session ran to the end and failed, 5 = nothing was collected, and the
+# harness's own non-measurements write `None` (a session it killed at its wall)
+# or -1 (no isolated executor). Only 1 is a red this report MEASURED.
+_PYTEST_FAILED = 1
+# The producer's explicit statements that its pytest session may not be read as
+# a measurement at all. They outrank the witness, because `run_tests` keeps the
+# raw returncode and the raw failure lines alongside them: a session killed at
+# its wall or refused storage still prints whatever it printed before it died,
+# and nobody may be charged for that.
+_NOT_A_MEASUREMENT_FLAGS = ("measurement_not_taken", "storage_unmeasured")
+
+
 def _provisional_red_is_measured(report: dict) -> bool:
     """Is this provisional report's `passed: false` a RED that must be repaired?
 
@@ -207,46 +235,63 @@ def _provisional_red_is_measured(report: dict) -> bool:
         alone, i.e. softened into "not a red", and never reached the repair
         path that a red is for.
 
-    So three conditions, and all three are needed: the marker names
-    `run_tests`, the report says `passed: false`, and that false is a
-    MEASUREMENT (`_absence_state` finds no absence behind it). A gate that
-    measured nothing is not a red — it parks exactly as it did before, and the
-    green control beside a red keeps its `partial` too.
+    THE QUESTION IS "WAS A RED MEASURED?", NOT "IS ANY ABSENCE PRESENT?".
+    Answering the second question was wrong in both directions, and both were
+    measured:
+
+      * an ABSENCE became a FAILURE: the predicate read the state vocabulary,
+        and `stamp_report` writes that vocabulary, so a report whose only
+        defect was an absence (an unattributable ticket, say) read as a
+        confirmed failure once the stamp had renamed its evidence;
+      * a MEASURED RED became an absence: another leg being unavailable
+        (`run_tests` marks a whole-report `skipped: true` when the Node gate
+        could not be measured) made the vocabulary answer
+        `infrastructure_unavailable`, and the pytest failure the report still
+        carries was answered `partial` — the exact softening this node is
+        about.
+
+    So the evidence is a POSITIVE WITNESS the producer wrote about ITS OWN
+    pytest leg and never rewrites — `returncode: 1` — not an inference from the
+    rest of the shape. It survives every later branch, and it survives
+    `stamp_report`, which is why the classification no longer cares what
+    `evidence_state` says.
     """
     if (report.get("passed", report.get("all_passed")) is not False
             or report.get("purpose") != PROVISIONAL_PURPOSE
             or provisional_producer(report) != PRODUCER_RUN_TESTS):
         return False
-    # `repo_gate_absent` is the producer's OWN verdict on its own gate: the
-    # gate measured nothing and nothing else in this report measured red
-    # either. It is read here — in a branch that exists only for this producer
-    # — because `stamp_report` annotates `evidence_state` with THIS function's
-    # answer, so a test that looked only at the state vocabulary would re-read
-    # its own annotation on the second pass and charge an absence as a
-    # failure. The vocabulary still decides the pytest-side absences
-    # (`infrastructure_unavailable`, `skipped_because`, `no_tests_collected`…),
-    # which this flag knows nothing about.
-    if report.get("repo_gate_absent") is True:
+    if any(report.get(flag) is True for flag in _NOT_A_MEASUREMENT_FLAGS):
         return False
-    return _absence_state(report, False) is None
+    returncode = report.get("returncode")
+    # `type(...) is int` on purpose: JSON `true` is a bool, and `True == 1`
+    # would otherwise read as a failed pytest session.
+    return type(returncode) is int and returncode == _PYTEST_FAILED
 
 
 def report_state(report: dict) -> str:
     """Return one release state without collapsing distinct non-pass outcomes."""
     raw_passed = report.get("passed", report.get("all_passed"))
+    measured_red = _provisional_red_is_measured(report)
     # The provisional marker is answered `partial` BEFORE any classification,
     # because a feedback round has no gate verdict to classify — with ONE
     # exception, the reason this branch is not a bare string compare: a
     # `run_tests` report whose own pytest leg failed is a red, and `passed` is
     # the real outcome there. See `_provisional_red_is_measured`.
-    if (report.get("purpose") == PROVISIONAL_PURPOSE
-            and not _provisional_red_is_measured(report)):
+    if report.get("purpose") == PROVISIONAL_PURPOSE and not measured_red:
         return "partial"
     if raw_passed is not True and raw_passed is not False:
         return "unreadable"
-    absent = _absence_state(report, raw_passed)
-    if absent:
-        return absent
+    # A red this report MEASURED is classified as a red, so the absence
+    # vocabulary is not consulted for it: an absent SIDE leg (a Node gate with
+    # no executor, a repository gate that measured nothing) is a reason to
+    # park the run, never a reason to stop calling a failing pytest session a
+    # failure. This changes the order for exactly one shape — the provisional
+    # report whose own pytest leg failed — and every other report keeps the
+    # order below unchanged.
+    if not measured_red:
+        absent = _absence_state(report, raw_passed)
+        if absent:
+            return absent
     if raw_passed is False:
         if report.get("passed_relative") is True:
             # THIS is the line that reads the distinction. `known_failure`
@@ -325,6 +370,12 @@ def release_disposition(report: dict) -> str:
     `run_tests` is classified as the red it is — `failed` above, therefore
     `known_failure` below. An unlabelled marker keeps the older, stricter
     answer.
+
+    "Measured" is the producer's own witness (`returncode: 1` from a pytest
+    session that ran to the end), not the absence of a doubt: neither another
+    leg being unavailable nor an absence the stamp renamed may soften it, and
+    a report whose only defect IS an absence keeps `unresolved` here exactly as
+    it did before. See `_provisional_red_is_measured`.
 
     Rejected, and why:
     * (a) "a distinct bounded state that lets the release proceed and records

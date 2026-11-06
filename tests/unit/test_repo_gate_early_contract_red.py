@@ -456,8 +456,12 @@ def test_a_provisional_round_and_a_partial_node_gate_do_not_share_a_word(
     order = _nine(node_repo)          # nine projects, no coverage declaration
     node_gate, _ret, _node_out = _run(tmp_path, monkeypatch, node_repo)
 
-    # The two shapes are the two facts, and they are not one word.
+    # The two shapes are the two facts, and they are not one word. Both spellings
+    # are pinned as LITERALS here: every other expectation in the suite compares
+    # against the constants, so a commit that set `PROVISIONAL_ROUND = "partial"`
+    # again would leave those green and only this probe red.
     assert ge.NODE_GATE_PARTIAL == "partial"
+    assert ge.PROVISIONAL_ROUND == "provisional"
     assert ge.PROVISIONAL_ROUND != ge.NODE_GATE_PARTIAL, (
         "a provisional round and an unmeasured node gate must not answer the "
         "same state word: that is the defect this vocabulary was split for")

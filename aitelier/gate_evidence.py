@@ -82,18 +82,20 @@ ABSENCE_RAISED = "raised"                     # the project's own run raised
 # producers of the marker import `PROVISIONAL_ROUND` from this module instead
 # of spelling the string again.
 #
-# ONE PRODUCER STILL SPELLS THE OLD WORD, and it is named rather than implied:
-# the playtest fallback in `aitelier/tools/godot_playtest/impl.py` (the
-# planning/contract error path of `run_feedback`'s entry) writes
-# `"evidence_state": "partial"` on the report it authors. That file is outside
-# this card's declared write scope, so the label was left alone. It cannot
-# mislead a reader, and the reason is the rule this module already holds: the
-# word is DERIVED from the marker, never read off the label, so `report_state`
-# answers `provisional` for that report anyway; `_write_state` renames the label
-# the first time the report is stamped; and nothing in this vocabulary matches
-# `partial` as a status word (`_absence_state` compares `evidence_state` against
-# its own sets, and `partial` is in none of them). Whoever next edits that file
-# should import `PROVISIONAL_ROUND` as `round_feedback` now does.
+# THREE WRITE SITES author a report that carries the provisional marker:
+# `aitelier/round_feedback.py` (the feedback round; the marker at `:210`, the
+# state word at `:221`), the planning/contract-error fallback in
+# `aitelier/tools/godot_playtest/impl.py` (the marker at `:803`, the state word
+# at `:805`), and the stamp in `aitelier/tools/run_tests/impl.py` (`:3393`). The
+# first two write `PROVISIONAL_ROUND` as the state word, imported from this
+# module rather than spelled. The third writes the marker and its producer name
+# but no state word: the coverage it checks comes from a gate manifest (around
+# `:1723-1727`), and `stamp_report` DERIVES its word, which is
+# `PROVISIONAL_ROUND` unless the report's own pytest leg measured a red. The
+# state word is always DERIVED from the marker, never read off the label, which
+# is why `_write_state` can rename an older producer's `partial` label without
+# losing information. `partial` remains the NODE GATE's word for a project it
+# could not measure; that is the reason the two answers were split.
 NODE_GATE_PARTIAL = "partial"
 PROVISIONAL_ROUND = "provisional"
 

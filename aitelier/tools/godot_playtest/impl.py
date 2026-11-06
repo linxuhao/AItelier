@@ -34,6 +34,14 @@ import uuid
 from pathlib import Path
 
 from aitelier.gate_coverage import PROVISIONAL_PURPOSE
+# The word `gate_evidence.report_state` answers for a report under the
+# provisional marker. Imported, not spelled — the same import, from the same
+# module, that `aitelier/round_feedback.py` makes — so the report this tool
+# authors on the planning/contract-error fallback names the round its reader
+# derives, and the label cannot drift back onto `partial`, which is now the
+# NODE GATE's word for a different fact. (`gate_evidence` imports only
+# `gate_coverage`, so this is not a cycle.)
+from aitelier.gate_evidence import PROVISIONAL_ROUND
 from aitelier.gate_skip_log import log_gate_skip
 from core import external_deps
 
@@ -794,7 +802,7 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
             # report whose coverage was provisional.
             report = {"purpose": PURPOSE, "passed": False, "full_test_passed": False,
                       PROVISIONAL_PRODUCER: PRODUCER_ROUND_FEEDBACK,
-                      "release_disposition": "unresolved", "evidence_state": "partial",
+                      "release_disposition": "unresolved", "evidence_state": PROVISIONAL_ROUND,
                       "selected_state": "unavailable", "gate_coverage": None,
                       "errors": [type(exc).__name__ + ": " + str(exc)]}
             path = target / "playtest_report.json"

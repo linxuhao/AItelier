@@ -244,3 +244,168 @@ async def test_note_after_revision_is_refused_loudly_and_plain_idle_stays_fast(s
             "return_when_idle": True, "timeout_seconds": 900}), 2)
     assert str(typed.value) == NOTE_AFTER_REVISION_RETIRED
     assert "no longer advances" in NOTE_AFTER_REVISION_RETIRED
+
+
+# --- the mutation answer drops the catalogue; the read keeps all of it --------
+#
+# Owner authorization 2026-11-06: a mutating note action answers with the entry it
+# touched plus the counts. The catalogue is the READ's answer and it did not
+# shrink. Measured on the real payload, same call, before and after this change
+# (one 1,211-character rule written with 185 catalogue entries present):
+#
+#   before: write answer 53,456 bytes of JSON, 51,539 of them (96.4%) the `index`
+#           array; get_driver_note 51,696 bytes, 186 lines
+#   after:  write answer  1,906 bytes, no `index` key; get_driver_note 51,696
+#           bytes, 186 lines - byte-identical
+#
+# (The live project measured 53,188 / 51,238 on 2026-11-06; these are the same
+# shape, reproduced from this suite's own payload.)
+
+CATALOGUE_RULES = 185
+CATALOGUE_LINE = "catalogue rule {n:03d}: " + "the delivery gate stays as it is stated here. " * 4
+LONG_RULE_ASSERTION = "every delivery run names its verifier before the candidate snapshot"
+LONG_RULE_BODY = ("The owner ruling of 2026-11-06 says a mutation answer reports the entry "
+                  "it touched and the counts, never the catalogue. " * 14)[:1211]
+
+# Every field of an entry's own detail (`_detail`: address, identity, assertion,
+# status, both reasons, its index line, timestamps, body length, body).
+ENTRY_DETAIL_KEYS = {
+    "address", "entry_id", "assertion", "force", "landed", "listing", "lifecycle",
+    "superseded_by", "supersede_reason", "delist_reason", "index_line", "created_at",
+    "updated_at", "body_chars", "project_id", "body", "director_identity"}
+# What a mutation reports about the catalogue instead of the catalogue.
+MUTATION_COUNTS = ("entry_count", "listed_count", "delisted_count", "superseded_count",
+                   "index_count")
+
+
+def test_the_write_answer_drops_the_catalogue_and_the_read_keeps_it(services):
+    """AC the-write-answer-drops-the-catalogue.
+
+    Red the moment a mutation answer spreads `index` again: the size assertions
+    below hold the answer to the entry plus the counts, and the positive control
+    holds the read to the whole catalogue at its own address.
+    """
+    service, _ = services
+    notes = service.driver_notes
+    assert len(LONG_RULE_BODY) == 1211
+    for n in range(CATALOGUE_RULES):
+        notes.write_entry("aitelier", CATALOGUE_LINE.format(n=n)[:126],
+                          f"body of catalogue rule {n:03d}", "lead")
+
+    written = execute(service, "write_driver_note_entry", {
+        "project_id": "aitelier", "assertion": LONG_RULE_ASSERTION,
+        "body": LONG_RULE_BODY, "director_identity": "lead"}, allow_write=True)
+    note = execute(service, "get_driver_note", {"project_id": "aitelier"})
+    page = execute(service, "driver_note_index",
+                   {"project_id": "aitelier", "limit": 500})
+
+    # The shape: the entry's own identity plus the five counts, and no catalogue.
+    assert "index" not in written
+    assert set(written) == ENTRY_DETAIL_KEYS | set(MUTATION_COUNTS)
+    assert written["body_chars"] == 1211 and written["body"] == LONG_RULE_BODY
+    assert (written["entry_count"], written["listed_count"], written["delisted_count"],
+            written["superseded_count"], written["index_count"]) == (186, 186, 0, 0, 186)
+
+    # The size, before and after, reported and held to: the old answer is this
+    # answer plus the catalogue the write used to spread, so the two numbers are
+    # measured from the same call's payload, not remembered.
+    after_bytes = len(json.dumps(written).encode())
+    catalogue_bytes = len(json.dumps(note["index"]).encode())
+    before_bytes = len(json.dumps({**written, "index": note["index"]}).encode())
+    print(f"write answer: {before_bytes} bytes before, {after_bytes} bytes after; "
+          f"the dropped catalogue is {catalogue_bytes} bytes "
+          f"({100.0 * catalogue_bytes / before_bytes:.1f}% of the old answer)")
+    assert catalogue_bytes > 50_000
+    assert after_bytes <= 2_600
+    assert after_bytes < before_bytes // 20
+    # The write answer is also an order of magnitude smaller than the read that
+    # still carries the catalogue: the cost moved, it was not duplicated.
+    assert after_bytes * 20 < len(json.dumps(note).encode())
+
+    # Positive control: the catalogue did not shrink, it moved - the read returns
+    # every one of the 186 lines, in full, at its own address.
+    assert len(note["index"]) == CATALOGUE_RULES + 1
+    assert note["index_count"] == 186 == written["index_count"]
+    assert len(json.dumps(note).encode()) > 50_000
+    assert page["index_count"] == 186 == len(page["entries"]) and not page["truncated"]
+    assert [item["address"] for item in page["entries"]] == [
+        item["address"] for item in note["index"]]
+    assert "index" not in page and "entries" in page  # the read's own key, unmoved
+
+    # The other two mutations answer the same way: the entries they touched and
+    # the counts, never the catalogue.
+    moved = execute(service, "supersede_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": written["entry_id"],
+        "assertion": "every delivery run names its verifier twice", "body": "raised",
+        "reason": "owner raised the bar", "director_identity": "lead"}, allow_write=True)
+    assert "index" not in moved
+    assert set(moved) == {"superseded", "successor"} | set(MUTATION_COUNTS)
+    assert moved["superseded"]["address"] == written["address"]
+    assert moved["superseded"]["lifecycle"] == "superseded"
+    assert (moved["entry_count"], moved["superseded_count"], moved["index_count"]) == (187, 1, 186)
+
+    delisted = execute(service, "delist_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": moved["successor"]["entry_id"],
+        "reason": "no longer a rule", "director_identity": "lead"}, allow_write=True)
+    assert "index" not in delisted
+    assert set(delisted) == ENTRY_DETAIL_KEYS | set(MUTATION_COUNTS)
+    assert delisted["listing"] == "delisted" and delisted["lifecycle"] == "current"
+    assert (delisted["entry_count"], delisted["delisted_count"], delisted["index_count"]) == (
+        187, 1, 185)
+    # And the lines are exactly where a caller now reads them.
+    assert delisted["address"] not in {
+        item["address"] for item in execute(
+            service, "get_driver_note", {"project_id": "aitelier"})["index"]}
+
+
+def test_nothing_the_old_write_answer_carried_becomes_unreachable(services):
+    """AC nothing-becomes-unreachable, driven through the real actions only.
+
+    Dropping the address or the index_line from the write answer reddens this
+    test: both are read straight off the mutation answer and then re-fetched.
+    """
+    service, _ = services
+    written = execute(service, "write_driver_note_entry", {
+        "project_id": "aitelier",
+        "assertion": "the delivery gate names its verifier before the candidate snapshot",
+        "body": "Owner ruling 2026-11-06: the answer names the entry, not the catalogue.",
+        "director_identity": "lead", "landed": "candidate snapshot"}, allow_write=True)
+    address, entry_id = written["address"], written["entry_id"]
+    assert address.startswith("note://aitelier/") and written["index_line"].startswith(
+        "the delivery gate names its verifier")
+
+    # 1. The body AND the assertion come back from the address the write returned.
+    fetched = execute(service, "get_driver_note_entry",
+                      {"project_id": "aitelier", "entry_id": entry_id})
+    assert fetched["address"] == address
+    assert fetched["assertion"] == written["assertion"]
+    assert fetched["body"] == written["body"] and fetched["body_chars"] == written["body_chars"]
+    assert fetched["index_line"] == written["index_line"]
+
+    # 2. A phrase from the assertion finds it through the search action.
+    found = execute(service, "search_driver_note_entries",
+                    {"project_id": "aitelier", "query": "names its verifier"})
+    assert [hit["address"] for hit in found["entries"]] == [address]
+
+    # 3. The read action's index lists it with exactly the line the write returned.
+    note = execute(service, "get_driver_note", {"project_id": "aitelier"})
+    line = {item["address"]: item for item in note["index"]}[address]
+    assert line["index_line"] == written["index_line"]
+    assert (line["force"], line["lifecycle"]) == (written["force"], written["lifecycle"])
+    assert execute(service, "get_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": entry_id})["listing"] == written["listing"]
+    # Every count the write reported is the read's own count, still.
+    assert all(note[key] == written[key] for key in MUTATION_COUNTS)
+
+    # 4. The same holds for a supersede answer: the successor's line is the read's.
+    moved = execute(service, "supersede_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": entry_id,
+        "assertion": "the delivery gate names its verifier before AND after the snapshot",
+        "body": "successor body", "reason": "tightened", "director_identity": "lead"},
+        allow_write=True)
+    successor = moved["successor"]
+    assert successor["address"] == execute(service, "get_driver_note_entry", {
+        "project_id": "aitelier", "entry_id": successor["entry_id"]})["address"]
+    successor_line = {item["address"]: item for item in execute(
+        service, "get_driver_note", {"project_id": "aitelier"})["index"]}[successor["address"]]
+    assert successor_line["index_line"] == successor["index_line"]

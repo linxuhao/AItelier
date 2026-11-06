@@ -466,7 +466,11 @@ class StateDriverNotes:
 
     def _index_projection(self, conn, project_id: str, include_superseded: bool = False,
                           include_delisted: bool = False) -> dict:
-        """The part of the notebook that is cheap enough to inject everywhere.
+        """The READ answer: the counts and the whole catalogue, line by line.
+
+        ``get`` (get_driver_note) and ``entry_index`` (driver_note_index) return
+        this, unchanged and uncapped - the catalogue moved to the reads, it did
+        not shrink. A mutation returns ``_catalogue_counts`` instead.
 
         Bodies are NOT here; each line carries the address that fetches its body.
         By default only current, listed entries are here; delisted_count and
@@ -486,6 +490,25 @@ class StateDriverNotes:
                            "superseded_by": (self._address(project_id, row["superseded_by"])
                                              if row["superseded_by"] else None)}
                           for i, row in enumerate(rows)]}
+
+    def _catalogue_counts(self, conn, project_id: str) -> dict:
+        """The MUTATION answer: how big the catalogue is, never the catalogue.
+
+        A write, a supersede and a delist report the entry they touched plus these
+        five counts. The lines are the READ's answer (``get``/``entry_index``), so
+        a caller that wants them asks for them where they live. Spreading the
+        catalogue into every mutation answer was measured on 2026-11-06: one
+        1,211-character rule written against 185 entries answered 53,188 bytes of
+        JSON, 51,238 of them (96.3%) that list. ``index_count`` is the number of
+        lines the DEFAULT index holds (current and listed, the filter every
+        mutation answer has always reported on) - the same value the same read
+        reports - so a writer still learns how much catalogue it just changed.
+        """
+        row = self._execute(conn,
+            "SELECT COUNT(*) AS visible FROM state_driver_note_entries WHERE project_id=?"
+            + self._visible(include_superseded=False, include_delisted=False),
+            (project_id,)).fetchone()
+        return {**self._counts(conn, project_id), "index_count": row["visible"] or 0}
 
     def _write_entry(self, conn, project_id, assertion, body, director_identity,
                      force, landed, timestamp) -> str:
@@ -508,7 +531,14 @@ class StateDriverNotes:
     @untrusted_owner_refused("write_driver_note_entry")
     def write_entry(self, project_id: str, assertion: str, body: str, director_identity: str,
                     force=_DEFAULT_FORCE, landed: str = "") -> dict:
-        """Write one assertion plus its body and return the address of both."""
+        """Write one assertion plus its body and return the address of both.
+
+        The answer is the new entry (identity, ``index_line``, body and its
+        length) plus the notebook's five counts. It deliberately does NOT carry
+        the catalogue: the lines are ``get_driver_note``/``driver_note_index``'s
+        answer, and ``index_line`` here is the same line the read will show, so a
+        caller can re-fetch everything this answer used to hand over.
+        """
         project_id = key(project_id, "project_id")
         assertion = assertion_text(assertion)
         body = body_text(body)
@@ -521,18 +551,23 @@ class StateDriverNotes:
             entry_id = self._write_entry(conn, project_id, assertion, body,
                                          director_identity, force, landed, timestamp)
             row = self._entry(conn, project_id, entry_id)
-            projection = self._index_projection(conn, project_id)
+            counts = self._catalogue_counts(conn, project_id)
             self._event(conn, project_id, None, "driver_note_updated", {
                 "operation": "write_entry", "entry_id": entry_id,
                 "address": self._address(project_id, entry_id), "actor": self.actor,
                 "director_identity": director_identity})
-            return {**self._detail(row), **projection}
+            return {**self._detail(row), **counts}
 
     @untrusted_owner_refused("supersede_driver_note_entry")
     def supersede_entry(self, project_id: str, entry_id: str, assertion: str, body: str,
                         reason: str, director_identity: str, force=_DEFAULT_FORCE,
                         landed: str = "") -> dict:
-        """Retire an assertion IN PLACE: the old address keeps a tombstone, the old body stays."""
+        """Retire an assertion IN PLACE: the old address keeps a tombstone, the old body stays.
+
+        Answers ``superseded`` and ``successor`` (each a full entry detail, so both
+        addresses and index lines are here) plus the notebook's five counts - not
+        the catalogue, which is the read's answer.
+        """
         project_id = key(project_id, "project_id")
         entry_id = entry_id_value(entry_id)
         assertion = assertion_text(assertion)
@@ -557,14 +592,14 @@ class StateDriverNotes:
                 (successor_id, reason, timestamp, project_id, entry_id))
             retired = self._entry(conn, project_id, entry_id)
             successor = self._entry(conn, project_id, successor_id)
-            projection = self._index_projection(conn, project_id)
+            counts = self._catalogue_counts(conn, project_id)
             self._event(conn, project_id, None, "driver_note_updated", {
                 "operation": "supersede_entry", "entry_id": entry_id,
                 "successor_entry_id": successor_id,
                 "address": self._address(project_id, successor_id), "actor": self.actor,
                 "director_identity": director_identity})
             return {"superseded": self._detail(retired), "successor": self._detail(successor),
-                    **projection}
+                    **counts}
 
     @untrusted_owner_refused("delist_driver_note_entry")
     def delist_entry(self, project_id: str, entry_id: str, reason: str,
@@ -574,7 +609,8 @@ class StateDriverNotes:
         Every entry is a rule, so this is how an obsolete rule with no successor
         leaves the index (owner ruling 2026-10-06, node driver.note-rules-pruned):
         the reason is stored, the body still resolves at its address and
-        delisted_count reports the eviction.
+        delisted_count reports the eviction. The answer is the delisted entry's
+        detail plus the five counts; the catalogue stays at the read.
         """
         project_id = key(project_id, "project_id")
         entry_id = entry_id_value(entry_id)
@@ -593,13 +629,13 @@ class StateDriverNotes:
                 "updated_at=? WHERE project_id=? AND entry_id=?",
                 (reason, timestamp, project_id, entry_id))
             delisted = self._entry(conn, project_id, entry_id)
-            projection = self._index_projection(conn, project_id)
+            counts = self._catalogue_counts(conn, project_id)
             self._event(conn, project_id, None, "driver_note_updated", {
                 "operation": "delist_entry", "entry_id": entry_id,
                 "address": self._address(project_id, entry_id),
-                "delisted_count": projection["delisted_count"], "actor": self.actor,
+                "delisted_count": counts["delisted_count"], "actor": self.actor,
                 "director_identity": director_identity})
-            return {**self._detail(delisted), **projection}
+            return {**self._detail(delisted), **counts}
 
     @writer_only_read("get_driver_note_entry")
     def get_entry(self, project_id: str, entry_id: str) -> dict:

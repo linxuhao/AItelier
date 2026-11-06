@@ -92,8 +92,13 @@ steps:
       # EVALUATING step's own output dir (so it only ever worked on this step),
       # and a report that parses to a list raises AttributeError inside the
       # engine's `_flags_match` instead of routing. `run_tests` puts
-      # `node_gate_complete` on its return for every report it writes; the FILE
-      # keeps it too, for `aitelier/gate_evidence.py` and the tests.
+      # `node_gate_complete` on its return for every report it writes, and THAT
+      # return is what the two edges below match. The report FILE does carry the
+      # same boolean beside it — `run_tests` sets the key on the report dict in
+      # its node block and writes that dict out — but no product code reads it
+      # there: `gate_evidence.report_state` consults the sibling
+      # `node_unmeasured`, not this key, and the file's copy has no other reader
+      # than the tests, which read it to prove deleting it changes no route.
       #
       # The red edge still reads the file, and it stays on the file on purpose:
       # a non-delivery return (`written: None`, a storage failure) carries

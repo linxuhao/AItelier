@@ -2944,8 +2944,17 @@ def _node_gate_verdict(report: dict) -> bool:
         parses to, so a report parsing to a LIST raises `AttributeError:
         'list' object has no attribute 'get'` and takes the resolver down
         instead of routing.
-    The FILE keeps the key regardless (`aitelier/gate_evidence.py` and the tests
-    read it there); this is the routing copy, beside — never instead of — it.
+    The FILE carries the same boolean beside it whenever the node block ran:
+    `run_tests` sets the key on `report` in that block and the `stage()` /
+    `os.replace` pair at the end of this function serialises that same dict to
+    `test_report.json`. No product code reads the key out of the file's copy —
+    the sibling `node_unmeasured` is what `gate_evidence.report_state` consults —
+    and the configs' `field: node_gate_complete` matchers read it HERE, off this
+    return. The file's copy has one other reader, the tests, and they read it
+    only to prove that deleting it moves no route. Both copies are written: this
+    is the routing one, beside — never instead of — the file's. (The one report
+    written before the node block — the fail-fast upstream-blocked report —
+    carries no key in the file; there the default below is the whole answer.)
 
     Absent means "there was nothing that could be incomplete": the report is
     given `node_gate_complete` on every path out of the node-gate block and

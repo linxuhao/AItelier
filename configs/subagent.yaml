@@ -107,7 +107,12 @@ steps:
       # See `configs/fix_tests.yaml` for the same change and the two measured
       # reasons `from_file` is not used for this field (`coding_impl.yaml:
       # 205-235`: the reader is step-bound, and a report parsing to a list raises
-      # AttributeError inside the engine's `_flags_match`).
+      # AttributeError inside the engine's `_flags_match`). The report FILE does
+      # carry the same boolean beside the return — `run_tests` sets it on the
+      # report dict in its node block and writes that dict out — but the verdict
+      # has no product reader there (`gate_evidence.report_state` consults the
+      # sibling `node_unmeasured`); the tests read the file's copy only to prove
+      # that deleting it moves no route.
       #
       # The red edge stays on the file deliberately: a non-delivery return
       # (`written: None`, a storage failure) carries `passed: false` with no

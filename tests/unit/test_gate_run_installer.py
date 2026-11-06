@@ -20,6 +20,10 @@ import unittest
 
 ROOT = Path(os.environ.get("GATE_INSTALLER_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
 BASE = "f5472a378a4b965a76db138fd2713c96807722c9"
+# tools/install_gate_run.sh as committed at BASE, kept byte-for-byte so the
+# test needs no Git history (shallow clones, tarballs, worktrees in containers).
+PRIOR_INSTALLER = ROOT / "tests" / "fixtures" / "prior_install_gate_run.sh"
+PRIOR_INSTALLER_BLOB = "94e082e5ec00fabda9ef469a5e1a4fe182467123"   # git rev-parse BASE:tools/install_gate_run.sh
 
 
 def digest(raw):
@@ -226,11 +230,11 @@ class GateRunInstallerTests(unittest.TestCase):
     def test_actual_prior_installer_counterexample_overwrites_helper(self):
         # Retain the actual frozen parent script, rather than a rewritten model
         # of its behavior. This is a measured limitation of ordinary old install.
-        result = subprocess.run(["git", "--no-optional-locks", "-C", str(ROOT), "show",
-                                 BASE + ":tools/install_gate_run.sh"], capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        frozen = PRIOR_INSTALLER.read_bytes()
+        blob = hashlib.sha1(b"blob %d\0" % len(frozen) + frozen).hexdigest()
+        self.assertEqual(blob, PRIOR_INSTALLER_BLOB, "fixture is not the script committed at BASE")
         prior = self.source / "prior-install.sh"
-        prior.write_bytes(result.stdout)
+        prior.write_bytes(frozen)
         before_helper = self.helper.read_bytes()
         result = subprocess.run(["sh", str(prior), str(self.dest)], cwd=self.root,
                                 capture_output=True, timeout=10)

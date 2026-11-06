@@ -5,7 +5,11 @@ makes "once" mean something:
 
 * `TodoPlan.from_json` validates the plan against the predicate library and
   refuses the WHOLE plan on any defect - an unknown predicate is a broken
-  binding, never an absent measurement.
+  binding, never an absent measurement. The appended `deliver` item's bindings go
+  through the same check as every item the director wrote: it is appended by the
+  harness, but its predicates are bound by name like any other, so a library that
+  cannot evaluate them cannot judge the plan (and a template that expands to a plan
+  is proven against the whole plan, deliver included).
 * `require_library_version` refuses a stored document that records no predicate
   library version, or one this build does not run, and it does so before a
   `TodoRun` exists to evaluate anything: the library was frozen with the plan.
@@ -89,6 +93,13 @@ def require_library_version(document: Mapping[str, Any], library: PredicateLibra
 
     No `library_version` is NOT "probably the running one": nothing recorded which
     library froze the document, so there is nothing to compare and no honest default.
+
+    Bumping `PredicateLibrary.version` therefore refuses EVERY plan already in flight,
+    and that is deliberate: there is no migration path, because re-judging a plan frozen
+    under one library with another library's predicates would change what the plan meant
+    without anybody deciding it. The stop is visible (a `library_mismatch` naming both
+    versions and the plan), and the way forward is to re-create the plan at the new
+    version, on purpose - never to widen this comparison into "close enough".
     """
     plan, _items = _stored_parts(document)
     attempt_id, node_key = plan.get("attempt_id"), plan.get("node_key")
@@ -156,8 +167,8 @@ class TodoPlan:
         items.append(Item(
             id=DELIVER, title="Deliver: commit the work, inside the declared scope",
             needs=tuple(i.id for i in items),
-            predicates=(Binding("git_delivered", {"base": base_sha}),
-                        Binding("changes_within", {"scope": list(scope)}))))
+            predicates=(cls._binding({"predicate": "git_delivered", "args": {"base": base_sha}}, DELIVER, library),
+                        cls._binding({"predicate": "changes_within", "args": {"scope": list(scope)}}, DELIVER, library))))
         return cls(attempt_id, node_key, context_hash, base_sha, workspace, tuple(scope), goal, tuple(items))
 
     @classmethod
@@ -165,6 +176,35 @@ class TodoPlan:
         """Rebuild a plan from `as_json()`: the appended `deliver` is regenerated, not trusted."""
         items = [i for i in data.get("items", []) if isinstance(i, dict) and i.get("id") != DELIVER]
         return cls.from_json({**data, "items": items}, library)
+
+    @staticmethod
+    def _binding(entry: Any, item_id: str, library: PredicateLibrary) -> Binding:
+        """One binding an item declares, refused unless the library can evaluate it as written.
+
+        Every binding goes through here - the director's items and the appended `deliver`
+        alike - because a binding the library cannot evaluate is a broken plan, and which
+        item declared it makes no difference to that. `item {DELIVER}: ...` in a refusal is
+        how a harness-appended binding names itself.
+        """
+        if not isinstance(entry, dict) or set(entry) - {"predicate", "args"} or "predicate" not in entry:
+            raise Refusal("invalid_plan", f"item {item_id}: a predicate is {{predicate, args}}: {str(entry)[:120]}")
+        args = entry.get("args", {})
+        if not isinstance(args, dict):
+            raise Refusal("invalid_plan", f"item {item_id}: args must be an object")
+        binding = Binding(str(entry["predicate"]), args)
+        try:
+            library.check(binding)
+        except KeyError as exc:
+            raise Refusal("unknown_predicate",
+                          f"item {item_id}: {binding.predicate!r} is not in the predicate library "
+                          f"v{library.version} {library.names()}; a plan binds predicates, it cannot define one") from exc
+        except ValueError as exc:
+            raise Refusal("invalid_plan", f"item {item_id}: {exc}") from exc
+        for key in ("path", "pattern", "paths"):
+            if key in args:
+                for value in (args[key] if isinstance(args[key], list) else [args[key]]):
+                    _relative(value, f"item {item_id}: {binding.predicate}.{key}")
+        return binding
 
     @staticmethod
     def _item(raw: Any, earlier: list[str], library: PredicateLibrary) -> Item:
@@ -182,28 +222,7 @@ class TodoPlan:
             raise Refusal("invalid_plan", f"item {item_id}: an item needs at least one predicate; completion is observed")
         if len(preds) > MAX_PREDICATES:
             raise Refusal("too_many_predicates", f"item {item_id}: {len(preds)} predicates; the limit is {MAX_PREDICATES}")
-        bindings = []
-        for entry in preds:
-            if not isinstance(entry, dict) or set(entry) - {"predicate", "args"} or "predicate" not in entry:
-                raise Refusal("invalid_plan", f"item {item_id}: a predicate is {{predicate, args}}: {str(entry)[:120]}")
-            args = entry.get("args", {})
-            if not isinstance(args, dict):
-                raise Refusal("invalid_plan", f"item {item_id}: args must be an object")
-            binding = Binding(str(entry["predicate"]), args)
-            try:
-                library.check(binding)
-            except KeyError as exc:
-                raise Refusal("unknown_predicate",
-                              f"item {item_id}: {binding.predicate!r} is not in the predicate library "
-                              f"v{library.version} {library.names()}; a plan binds predicates, it cannot define one") from exc
-            except ValueError as exc:
-                raise Refusal("invalid_plan", f"item {item_id}: {exc}") from exc
-            for key in ("path", "pattern", "paths"):
-                if key in args:
-                    for value in (args[key] if isinstance(args[key], list) else [args[key]]):
-                        _relative(value, f"item {item_id}: {binding.predicate}.{key}")
-            bindings.append(binding)
-        return Item(item_id, title, tuple(bindings), tuple(needs))
+        return Item(item_id, title, tuple(TodoPlan._binding(entry, item_id, library) for entry in preds), tuple(needs))
 
     def as_json(self) -> dict:
         return {

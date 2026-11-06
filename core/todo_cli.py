@@ -5,6 +5,12 @@ and exits 0, or - when the harness refuses - prints {"refused": code, "reason": 
 and exits 2. A failing item is NOT a refusal: `done` reports `outcome: fail` and
 exits 0, because the verdict is the product.
 
+`list` is the one sweep: it prints one row per plan and exits 0 whatever it finds,
+so a plan it could not open cannot be answered as a refusal on that plan's behalf.
+Its row carries the same finding as fields instead - `code` (and both library
+versions when the refusal compared them) beside the human `error` - so a caller
+reads a code rather than parsing prose that any later wording change would break.
+
 Every state-changing command takes the plan's flock, rehydrates a TodoRun from
 `<store>/<attempt_id>.json` (ledger episodes included, so `started_at` never
 moves), acts, and replaces the file atomically. `--now` fixes the clock so tests can
@@ -272,16 +278,39 @@ def cmd_report(args, store: PlanStore, now: float) -> dict:
         return {"item": item.id, "recorded": True, "notes": len(notes), **_tail(p)}
 
 
+_LIST_KEYS = ("attempt_id", "node_key", "plan_hash", "next", "done", "remaining", "unmeasurable", "child_session")
+#: The identity of the two libraries a refusal compared, when the refusal compared any.
+_LIBRARY_FIELDS = ("plan_library_version", "running_library_version")
+
+
+def _list_row(attempt_id: str, exc: Exception) -> dict:
+    """A plan a sweep could not open, as a row carrying the same refusal a single command answers.
+
+    `status`/`begin`/`done`/... answer a refusal as {"refused": code, ...} at exit 2; `list`
+    answers one row per plan at exit 0, so the row has to carry that code as a FIELD.
+    `error` stays the human string it always was - a sweep that parses prose to find out
+    why a plan refuses is a sweep that breaks the next time the wording is improved.
+
+    `plan_library_version` / `running_library_version` are copied only when the refusal
+    named them: a damaged plan records no comparable version, and filling those fields
+    with a placeholder would make "damaged" read like "frozen under no library".
+    """
+    row = {"attempt_id": attempt_id, "error": str(exc)[:200],
+           "code": exc.code if isinstance(exc, Refusal) else "corrupt_plan"}
+    if isinstance(exc, Refusal):
+        row.update({k: exc.extra[k] for k in _LIBRARY_FIELDS if k in exc.extra})
+    return row
+
+
 def cmd_list(args, store: PlanStore, now: float) -> dict:
     plans = []
     for attempt_id in store.attempts():
         try:
             with _plan(store, attempt_id, now, locked=False) as p:
                 v = p.view()
-            plans.append({k: v[k] for k in ("attempt_id", "node_key", "plan_hash", "next", "done",
-                                            "remaining", "unmeasurable", "child_session")})
+            plans.append({k: v[k] for k in _LIST_KEYS})
         except (Refusal, OSError, ValueError, KeyError) as exc:
-            plans.append({"attempt_id": attempt_id, "error": str(exc)[:200]})
+            plans.append(_list_row(attempt_id, exc))
     return {"plans": plans}
 
 

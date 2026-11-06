@@ -422,9 +422,11 @@ steps:
       #   inventory; the clause or symbol beside it is what the citation claims,
       #   so search for THAT — this file is edited by parallel branches and a
       #   merge moves every number below it.
-      #   * impl.py:3337-3338 — the report's copy, computed from
-      #     `node["skipped"]` / `node["unmeasured"]`. GAINS: its `false` can no
-      #     longer be carried into a success; nothing about what it writes moves.
+      #   * impl.py `run_tests`, its Node block — the report's copy,
+      #     `report["node_gate_complete"] = not (node.get("skipped") or
+      #     node.get("unmeasured"))`, computed from `node["skipped"]` /
+      #     `node["unmeasured"]`. GAINS: its `false` can no longer be carried into
+      #     a success; nothing about what it writes moves.
       #   * impl.py:2934-2971 `_node_gate_verdict` — the RETURN's copy, and `True`
       #     when the report carries no key at all (a Python-only repository).
       #     GAINS its first routing reader in this config. The absent-key answer
@@ -525,6 +527,93 @@ steps:
       # collected tests are not code defects for the implementer to repair.
       # jsonschema is a direct runtime dependency: the native tool fallback
       # cannot enforce these constraints when that package is absent.
+      #
+      # THIS GATE REFUSED A MEASURED RED, AND THAT IS THE DEFECT IT NOW FIXES.
+      # `run_tests` marks the WHOLE report `skipped: true` +
+      # `infrastructure_unavailable: true` whenever its Node leg could not be
+      # measured (`aitelier/tools/run_tests/impl.py`, the node block: "NOTHING
+      # was measured anywhere: the single-project absence"), while keeping the
+      # pytest leg's own outcome beside it — `returncode: 1`, the `FAILED ...`
+      # lines and the failure count. The old `skipped: { const: false }` +
+      # `node.skipped: { const: false }` read that report as an ABSENCE, so a
+      # genuine pytest red beside an unavailable Node leg died on
+      # `test_evidence_missing` instead of reaching this pipeline's own repair
+      # loop (`test_outcome -> implement`, max_loop 3).
+      #
+      # THE ABSENCE IS STILL AN ABSENCE. A leg that was not measured may not
+      # charge the implementer: `measurement_not_taken` and `storage_unmeasured`
+      # are the producer's own statements that its pytest session is not a
+      # measurement at all (killed at its wall, no isolated executor, storage
+      # exhausted mid-run), and they veto the second branch below even when the
+      # raw returncode is 1. `no_tests_collected` stays refused at the top: a
+      # suite that collected nothing has verified nothing.
+      #
+      # WHY THE SECOND BRANCH READS `returncode`: it is the one POSITIVE WITNESS
+      # `run_tests` writes about ITS OWN pytest leg and never rewrites — 0 = the
+      # session ran to the end and passed, 1 = it ran to the end and failed,
+      # 5/None/-1 = nothing was collected / the harness killed it / no executor.
+      # Only 1 is a red this report MEASURED. That is a fact the producer states,
+      # not a predicate this file re-derives: no provisional-marker, baseline or
+      # `passed_relative` reasoning is copied here (compare
+      # `aitelier/gate_evidence.py:_provisional_red_is_measured`, which answers
+      # the release question, not this one). `type: integer` is explicit because
+      # JSON `true` compares equal to 1 in Python; a boolean is not a returncode.
+      #
+      # THE PRODUCER'S REPORT SHAPE WAS NOT CHANGED, deliberately. `skipped`,
+      # `infrastructure_unavailable` and `node.skipped` are the whole-report
+      # absence vocabulary that OTHER consumers read (the consumer map is the
+      # module docstring of `tests/unit/test_measured_red_repair_loop.py`, and it
+      # cites each reader by SYMBOL rather than by line number, because a merge
+      # moves every number in this file): `gate_evidence` (`report_state`,
+      # `release_disposition`, `audit_evidence`), `core/coding_impl_outcome`
+      # (`measurement()` and `load_coding_outcome` refuse such a report), this
+      # file's own `failed_candidate_evidence` step — reached by the `test`
+      # step's `retained_red_candidate` transition and validating
+      # `skipped: {const: false}` — and
+      # `configs/gen_coop_shell_ui60_20260907.yaml`; and the three EXECUTABLE
+      # `node.skipped` consumers inside `run_tests` ITSELF — the function, in the
+      # Node block that follows `_run_node_checks`, NOT `_aggregate_node_projects`,
+      # which only BUILDS the node dict (`"skipped": bool(unmeasured)`,
+      # `"passed": all(r["passed"] for r in measured)`, `"unmeasured": ...`) and
+      # writes no `node_gate_complete` key at all:
+      #   - `report["node_gate_complete"] = not (node.get("skipped") or
+      #     node.get("unmeasured"))` — the completeness flag, the key this step
+      #     routes on;
+      #   - `executed.node_gate_ran = (not node.get("skipped") and not
+      #     unmeasured_projects)` — execution bookkeeping (the line above it,
+      #     `unmeasured_projects = node.get("unmeasured") or []`, only reads that
+      #     list);
+      #   - `if node.get("skipped") and not node.get("measured_dirs")` — the
+      #     nothing-measured branch, which sets `skipped` /
+      #     `infrastructure_unavailable` / `evidence_state` on the report;
+      # `run_tests._node_gate_verdict`, a DIFFERENT reader: it reads
+      # `node_gate_complete`, not `node.skipped`; the `release_evidence`
+      # consumers in `core/release_gate_migration.py` and
+      # `configs/addons/game_harness.yaml`, and `run_tests._apply_baseline`
+      # (reads `storage_unmeasured`). Dropping the flag there would silently
+      # redefine an absence for every one of them to fix one route; widening this
+      # gate touches exactly one consumer, and leaves every other reader of an
+      # absence with the input it already has.
+      #
+      # PROTECTED BOUNDARIES — all four checked, none weakened by this widening:
+      #   (a) ACCEPTANCE CRITERIA: only the ROUTE an absence-beside-a-measured-red
+      #       takes changes. No report that was not an acceptance becomes one:
+      #       `test_outcome`'s `passed: {const: true}` still gates `done`, the
+      #       first `anyOf` branch is the shipped predicate verbatim, and no end
+      #       condition or `max_loop` in this file changed.
+      #   (b) THE EVIDENCE FORMAT: no producer byte moved. `run_tests` writes the
+      #       same keys with the same values; the schema admits a second SHAPE,
+      #       and adds no field, so every consumer's input above is unchanged.
+      #   (c) THE NON-AUTHOR REVIEW CONTROL: neither this file nor the test module
+      #       removes or relaxes a review or verification step; the change is a
+      #       comment-only map plus a test fixture that now deep-copies (it can
+      #       only catch more), and no assertion was loosened. Acceptance still
+      #       comes from a non-author review of the delivered commit.
+      #   (d) THE PRIVACY / PUBLICATION BOUNDARY: nothing is published by this
+      #       change and the publication gate is untouched — the
+      #       `publication_scope_refusal` branch of `release_disposition`, the
+      #       `provisional_round_feedback` handling and
+      #       `configs/addons/game_harness.yaml`'s release edges are as they were.
       inline_schema:
         type: object
         required: [passed, summary, failures]
@@ -532,12 +621,117 @@ steps:
           passed: { type: boolean }
           summary: { type: string, minLength: 1 }
           failures: { type: array, items: { type: string } }
-          skipped: { const: false }
           no_tests_collected: { const: false }
-          node:
-            type: object
-            properties:
+        anyOf:
+          # A report with no unmeasured leg at all: unchanged, the shipped shape.
+          - properties:
               skipped: { const: false }
+              node:
+                type: object
+                properties:
+                  skipped: { const: false }
+          # The EXCEPTIONAL shape, and nothing broader: a MEASURED pytest red
+          # beside a Node leg the producer could not measure. Every key in
+          # `required` is one `run_tests` writes on that path
+          # (aitelier/tools/run_tests/impl.py: the pytest verdict where
+          # `report["returncode"] = done.returncode` is set, and the
+          # single-project whole-report absence in the node block, where
+          # `skipped`, `infrastructure_unavailable` and `evidence_state` are set
+          # beside `node.skipped: true`). `required` is also what makes the
+          # branch ASK for the witness at all: `properties` constrains only a
+          # key that is PRESENT, so a `passed: false` report stating no verdict
+          # would otherwise satisfy it (measured on
+          # `tests/skillflow/test_coding_impl_gate.py`, which requires that report
+          # to stay an absence).
+          #
+          # The `not` clause forbids the producer's own "this session measured
+          # nothing" statements by their PRESENCE: `measurement_not_taken` is
+          # written only as `true` and never as `false`, and `storage_unmeasured`
+          # is written only when storage was proved exhausted, as `true`. A
+          # `storage_diagnosis` that reports exhaustion is refused whatever its
+          # flags say, and the node section must be present and must carry
+          # `skipped: true`: an absence with no node section is not this shape.
+          #
+          # `type: string` AND `minLength: 1` ON `state` ARE NOT DECORATION: they
+          # are what close the defect a non-author review measured on the first
+          # version of this branch. `not: {enum: [...]}` alone is satisfied by a
+          # value that says NOTHING — null, false, 0, "", [] and {} all
+          # validated — so a report that never diagnosed storage was read as
+          # "storage was measured and is fine", which is the very class of
+          # defect this branch exists to refuse (an unmeasured thing must not be
+          # read as a measured one). The type closes null / false / 0 / [] / {},
+          # and `minLength: 1` closes the empty STRING, which a type constraint
+          # alone still admits (measured on the controls in
+          # `tests/unit/test_measured_red_repair_loop.py`: `state: ""` passed
+          # with `type: string` alone). The producer writes `state` as one of
+          # five non-empty strings (`diagnose_storage`: exhausted_preflight,
+          # exhausted_during_run, ambiguous, clean, unknown).
+          #
+          # THE TOLERANCE THAT REMAINS, stated so no reader has to infer it: a
+          # non-empty STRING state this config does not know — `ambiguous`,
+          # `unknown`, or one a later producer adds — is still ACCEPTED. Only
+          # the two exhausted states mean storage cost the measurement, so only
+          # those are excluded; a state must not be refused merely because a
+          # vocabulary nobody updated has not heard of it.
+          #
+          # `node.passed` is pinned to a boolean because the REAL producer
+          # always writes one there: `_aggregate_node_projects` /
+          # `_run_node_project` set it to `True` / `False` / `all(...)` on every
+          # path out, and the report reaching this branch carries the
+          # aggregate's boolean. A non-boolean is a hand-made section, not a
+          # measurement (a review measured `node: {skipped: true, passed:
+          # "banana"}` being accepted here).
+          #
+          # `passed` IS ALSO REQUIRED, and that is a measurement, not a guess: a
+          # non-author review measured that DELETING `node.passed` from this
+          # report still validated, because only `skipped` was required inside
+          # `node` - i.e. a section that states no verdict was read as a verdict.
+          # Every producer path that writes a node section writes the boolean:
+          # `_aggregate_node_projects`'s dict literal (`"passed": all(r["passed"]
+          # for r in measured)`, plus `passed=True` in the `node.update` on its
+          # nothing-measured path) and `_run_node_project`'s initial
+          # `{"passed": True, ...}`, which is overwritten with `all(...)` over its
+          # checks (and with `False` when the `node_fetch` install fails). TWO
+          # paths write NO node section, not one: the storage-preflight refusal
+          # (`node = None if storage_preflight_refused else ...`) AND a repository
+          # that declares no node project at all — `_run_node_checks` returns
+          # `None` before running anything when `_find_node_projects` finds
+          # neither a project nor an absence (`if not projects and not absent:
+          # return None`), which is a Python-only repository. Both are absences;
+          # neither carries a `node`, so neither can match this branch either way.
+          # A control in `tests/unit/test_measured_red_repair_loop.py` deletes the
+          # key from the real report and requires `test_evidence_missing`, and
+          # another asserts the plain-green absence of a report with no node
+          # section reaches `done`.
+          - required: [passed, returncode, skipped, infrastructure_unavailable,
+                       evidence_state, node, storage_diagnosis]
+            properties:
+              passed: { const: false }
+              returncode: { type: integer, const: 1 }
+              skipped: { const: true }
+              infrastructure_unavailable: { const: true }
+              evidence_state: { const: infrastructure_unavailable }
+              node:
+                type: object
+                required: [skipped, passed]
+                properties:
+                  skipped: { const: true }
+                  passed: { type: boolean }
+              storage_diagnosis:
+                type: object
+                required: [state]
+                properties:
+                  # `type` closes null/false/0/[]/{}; `minLength` closes the
+                  # empty string (a string that states nothing); the enum
+                  # exclusion closes the two states that mean storage cost the
+                  # measurement. Any other NON-EMPTY string is accepted on
+                  # purpose — see the tolerance above.
+                  state: { type: string, minLength: 1,
+                           not: { enum: [exhausted_preflight, exhausted_during_run] } }
+            not:
+              anyOf:
+                - required: [measurement_not_taken]
+                - required: [storage_unmeasured]
     transitions:
       - to: "test_evidence_missing"
         match: { _error: true }

@@ -30,11 +30,36 @@ import { fileURLToPath } from 'node:url';
 //   - it accepted "a glob in the script means discovery", which with one asterisk
 //     silenced both observers and left another test file never running.
 // Each of those is now a witness below. Do not simplify them back.
+//
+// STATED LIMITS, from the third review, none of them closed:
+//   - a REGEX LITERAL is not modelled by scan(), so `/^[/*]/` or `/[//]/` opens a
+//     phantom comment and can hide a resolution. Teaching the scanner regex from
+//     division is a parser, not a guard; the trade is stated instead.
+//   - the rule is PER FILE: a resolution whose path is assembled across two modules
+//     is invisible to it.
+//   - a SYMLINKED test file is walked as a Dirent that isFile() is false for, so it
+//     reports as "named but missing" rather than running.
+//   - the python observer's gutted-guard check looks for `test.skip(`; the option
+//     form `test(name, { skip: true }, fn)` is not matched.
+// If one of these grows teeth, fix it here and say which one stopped being a limit.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ALLOWED = new Set(['dsh-entry.mjs', 'dsh-entry.test.mjs', 'suite-composition.test.mjs']);
-const TEST_FILE = /\.(test|spec)\.(mjs|cjs|js)$/i;
 const HELPER = /\.(mjs|cjs|js)$/i;
+
+// Node's own discovery is wider than *.test.* and *.spec.*: it also runs
+// `*-test.mjs`, `*_test.mjs`, `test-*.mjs` and anything named test.*. The previous
+// version matched only the first two, so a failing `extra-test.mjs` was a file
+// nobody ran and nobody noticed - the 2026-11-05 incident class, still open. This
+// predicate is deliberately over-inclusive: flagging a helper costs a line in the
+// script, missing a test file costs the rule.
+const isTestFile = name => {
+  const base = name.toLowerCase();
+  if (!/\.(mjs|cjs|js)$/.test(base)) return false;
+  return base.includes('.test.') || base.includes('.spec.') || base.includes('-test.')
+    || base.includes('_test.') || base.startsWith('test-') || base === 'test.js'
+    || base === 'test.mjs' || base === 'test.cjs';
+};
 
 // Walk the source once and return two views: `code` with comments removed and every
 // string literal replaced by a hole, and `strings` with the text of those literals.
@@ -91,16 +116,20 @@ const scan = source => {
 // this directory that is a file worth reading anyway.
 const entryParts = text => {
   const { code, strings } = scan(text);
-  const whole = `${code}\n${strings}`;
-  return whole.includes('node_modules') && whole.includes('.bin') && /(^|[^\w-])dsh([^\w-]|$)/m.test(whole);
+  // Both the plain stream and the string literals with their newlines removed: a
+  // path split inside one token (`'node_' + 'modules/.bin/dsh'`) is the same
+  // resolution as one written whole, and it was green until a reviewer wrote it.
+  const views = [`${code}\n${strings}`, code + strings.replace(/\n/g, '')];
+  return views.some(whole => whole.includes('node_modules') && whole.includes('.bin')
+    && /(^|[^\w-])dsh([^\w-]|$)/m.test(whole));
 };
 
-const walk = async (dir, pattern, out = []) => {
+const walk = async (dir, accept, out = []) => {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name !== 'node_modules') await walk(full, pattern, out);
-    } else if (entry.isFile() && pattern.test(entry.name)) {
+      if (entry.name !== 'node_modules') await walk(full, accept, out);
+    } else if (entry.isFile() && accept(entry.name)) {
       out.push(full);
     }
   }
@@ -129,7 +158,7 @@ const checkScriptShape = script => {
 test('every test file the runner would find is run by npm test', async () => {
   const script = await scriptOf();
   const args = checkScriptShape(script);
-  const present = (await walk(here, TEST_FILE)).map(file => relative(here, file)).sort();
+  const present = (await walk(here, isTestFile)).map(file => relative(here, file)).sort();
   assert.ok(present.length > 0, 'found no test files at all - the discovery is broken, not the suite');
   if (args.length === 0) return; // bare discovery runs whatever exists
   const listed = new Set(args.map(arg => relative(here, join(here, arg))));
@@ -144,11 +173,10 @@ test('only the resolver and its unit test resolve the DSH entry', async () => {
   // scanned the top directory only and only .mjs, so the exact remediation its own
   // message prescribes - a new test file, maybe one level down, maybe .js - landed in
   // a blind spot.
-  const files = (await walk(here, HELPER)).map(file => relative(here, file));
+  const files = (await walk(here, name => HELPER.test(name))).map(file => relative(here, file));
   const offenders = [];
   for (const rel of files) {
-    const base = rel.split('/').pop();
-    if (ALLOWED.has(base)) continue;
+    if (ALLOWED.has(rel)) continue;
     if (entryParts(await readFile(join(here, rel), 'utf8'))) offenders.push(rel);
   }
   assert.deepEqual(offenders, [], `${offenders.join(', ')} resolve the DSH entry themselves. Call measuredEntryForTest(t) from dsh-entry.mjs instead - a test that picks its own install measures whatever shell invoked it.`);

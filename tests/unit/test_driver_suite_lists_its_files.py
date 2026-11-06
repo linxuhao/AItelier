@@ -27,12 +27,48 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "integrations" / "dsh-driver"
-TEST_FILE = re.compile(r"\.(test|spec)\.(mjs|cjs|js)$", re.IGNORECASE)
+# Node's discovery is wider than *.test.* / *.spec.*: it also runs `*-test.mjs`,
+# `*_test.mjs`, `test-*.mjs` and test.*. Written from the rules here rather than
+# copied from the javascript, so the two can disagree - they already have.
+SUFFIX = re.compile(r"\.(mjs|cjs|js)$", re.IGNORECASE)
+
+
+def _is_test_file(name: str) -> bool:
+    base = name.lower()
+    if not SUFFIX.search(base):
+        return False
+    return (
+        ".test." in base
+        or ".spec." in base
+        or "-test." in base
+        or "_test." in base
+        or base.startswith("test-")
+        or base in {"test.js", "test.mjs", "test.cjs"}
+    )
 GUARD = "suite-composition.test.mjs"
 # The guard's own rules, by the names of the tests it declares. A file gutted to
 # `test.skip(...)` stays listed and would otherwise be green in both observers.
 GUARD_RULES = ("every test file the runner would find is run by npm test",
                "only the resolver and its unit test resolve the DSH entry")
+
+
+def _code_only(body: str) -> str:
+    """Drop comment lines: this file's own prose names the tokens it looks for."""
+    kept, in_block = [], False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if in_block:
+            if "*/" in stripped:
+                in_block = False
+            continue
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block = True
+            continue
+        if stripped.startswith("//"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _script() -> str:
@@ -45,7 +81,7 @@ def _test_files() -> list[str]:
         path.relative_to(DRIVER).as_posix()
         for path in DRIVER.rglob("*")
         if path.is_file()
-        and TEST_FILE.search(path.name)
+        and _is_test_file(path.name)
         and "node_modules" not in path.parts
     )
 
@@ -57,7 +93,7 @@ def test_the_guard_that_cannot_see_its_own_removal_is_listed_and_not_gutted() ->
         "the hand-rolled DSH-entry expression and the unlisted-test-file rule from decaying, and it "
         "cannot report its own absence - which is why this test exists."
     )
-    body = (DRIVER / GUARD).read_text(encoding="utf-8")
+    body = _code_only((DRIVER / GUARD).read_text(encoding="utf-8"))
     missing = [rule for rule in GUARD_RULES if rule not in body]
     assert not missing, (
         f"{GUARD} no longer declares: {missing}. A guard that is still listed but gutted to "

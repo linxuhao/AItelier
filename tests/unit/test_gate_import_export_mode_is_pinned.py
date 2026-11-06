@@ -708,6 +708,11 @@ def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
     an install. A guard that refuses them is not stricter, it is wrong about a build that
     touches nothing pinned, and the cheapest way to silence a wrong guard is to weaken it.
 
+    The last three rows are the round-7 word rule measured in the direction it is NEW in:
+    the exec form is now read as a JSON array, so it must not become a refusal of every
+    exec-form instruction, and a `SHELL` that names no path must stay readable. A rule
+    that refuses those would be a widening of the refusal, not a tightening of the guard.
+
     The client's own file name is NOT in this list. Naming `godot_harness.py` in a RUN is
     refused by contract even when the line only copies it somewhere harmless, because this
     file does not read what a RUN does with it: the refusal names the token, and a build
@@ -729,9 +734,37 @@ def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
         "RUN rm -rf /tmp/build/*.log",
         "RUN chmod 0755 /srv/*",
         'LABEL description="pip install"',
+        'RUN ["chmod","+x","scripts/entrypoint.sh"]',
+        'SHELL ["/bin/bash","-c"]',
+        'RUN ["/usr/local/bin/tool","--version"]',
     ):
         assert not _added_problems(shipped, line), (
             f"this line names no pinned path and must not be refused: {line}")
+
+
+def test_the_documented_false_refusal_is_refused_on_purpose():
+    """The one cost the docstring states, pinned so that it stays a decision.
+
+    A word that STARTS with an expansion has an empty literal head: the text says
+    nothing about where the shell will point it, so this file refuses it. `cp ${SRC}/tool
+    /tmp/tool` is harmless in a real build and is still refused - that is the price of not
+    modelling the shell, and the module docstring says so. Pinning it here means the cost
+    is a stated decision with a test rather than an accident, and the last two rows are
+    the other side of the same line: a bare expansion with no path in it names a command
+    or an operand and IS read, so the rule is about paths and not about `$`.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for line in ("RUN cp ${SRC}/tool /tmp/tool",
+                 "RUN chmod 0755 ${DIR}/sub"):
+        added = _added_problems(shipped, line)
+        assert added, (
+            f"the documented false refusal is gone, and the docstring still states it: {line}")
+        assert _names(added, "builds a path out of a shell variable"), (
+            f"{line} was refused for another reason than the docstring states:\n"
+            + "\n".join(added))
+    for line in ("RUN ${BUILD_TOOL} --version", "RUN chmod 0755 ${MODE}"):
+        assert not _added_problems(shipped, line), (
+            f"a bare expansion names no path and must not be refused: {line}")
 
 
 def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():

@@ -158,6 +158,20 @@ class TestV2ConfigLoading:
             # the real producer, the real validator and this order.
             ("test_evidence_provisional",
              {"full_test_passed": False, "passed": True}),
+            # The partial node gate is refused on the step that owns the verdict:
+            # `run_tests`' RETURN carries `node_gate_complete`, and a GREEN report
+            # whose Node projects were not all measured (`passed: true` beside
+            # `node_gate_complete: false`) goes to a terminal instead of being
+            # validated and reaching `done` through `test_outcome`. BOTH terms:
+            # here the red path is the fall-through `written` edge, so a one-term
+            # edge would capture a measured red (configs/fix_tests.yaml:112-113
+            # can use one term because its red edge comes first). Order matters —
+            # this edge precedes `written`, or the report would be validated and
+            # routed past it. tests/unit/test_coding_impl_node_gate_partial.py
+            # drives the routing cases and fails if either term, the position or
+            # the terminal moves.
+            ("node_gate_incomplete",
+             {"node_gate_complete": False, "passed": True}),
             ("test_evidence", {"written": "test_report.json"}),
             ("test_evidence_missing", None),
         ]
@@ -198,12 +212,17 @@ class TestV2ConfigLoading:
         # `test_evidence_provisional` is the third evidence terminal: `run_tests`
         # said its own report is not full test evidence (a provisional round), so
         # a green pytest leg over it fails the run instead of completing it.
+        # `node_gate_incomplete` is the fourth: a GREEN round whose Node projects
+        # were not all measured. Its name and its `failed` result are the same as
+        # `configs/fix_tests.yaml:38-40` and `configs/subagent.yaml:53-55`, so all
+        # three configs answer a partial node gate identically.
         assert [(c.type, c.node, c.result) for c in conditions] == [
             ("node_reached", "done", "completed"),
             ("node_reached", "done_candidate_tests_failed", "completed"),
             ("node_reached", "test_evidence_missing", "failed"),
             ("node_reached", "test_gate_report_unattributable", "failed"),
             ("node_reached", "test_evidence_provisional", "failed"),
+            ("node_reached", "node_gate_incomplete", "failed"),
         ]
         # `implement` is NOT a terminal: the loop it sits in is bounded by
         # `test_outcome -> implement max_loop: 3`, so reaching it never ends a run.
@@ -211,7 +230,7 @@ class TestV2ConfigLoading:
         for terminal in ("done", "test_evidence_missing",
                          "test_gate_report_unattributable",
                          "test_evidence_provisional",
-                         "done_candidate_tests_failed"):
+                         "done_candidate_tests_failed", "node_gate_incomplete"):
             node = next(s for s in graph.steps if s.id == terminal)
             assert node.step_type == "gate"
             assert [t.to for t in node.transitions] == [None]

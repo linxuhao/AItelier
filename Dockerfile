@@ -59,7 +59,16 @@ COPY . /app
 # working tree with umask 077 bakes this 0600 root:root while the backend runs as
 # uid 1000 - every authored gate then died on PermissionError before measuring.
 COPY --chmod=0644 docker/godot/godot_harness.py /opt/aitelier-gate-imports/docker/godot/godot_harness.py
+# ...but --chmod also lands on the directories BuildKit creates for that copy,
+# and a 0644 directory cannot be traversed: measured on an image built from
+# 82bb9718f7 (/opt/aitelier-gate-imports{,/docker,/docker/godot} came out 644
+# root:root, and `ls` as uid 1000 answered Permission denied). The file stays
+# 0644; the tree has to be searchable or the client cannot be imported at all.
 RUN touch /opt/aitelier-gate-imports/docker/__init__.py \
+    /opt/aitelier-gate-imports/docker/godot/__init__.py \
+ && chmod 0755 /opt/aitelier-gate-imports /opt/aitelier-gate-imports/docker \
+    /opt/aitelier-gate-imports/docker/godot \
+ && chmod 0644 /opt/aitelier-gate-imports/docker/__init__.py \
     /opt/aitelier-gate-imports/docker/godot/__init__.py
 # Copy the compiled SPA bundle from the frontend-build stage — OUTSIDE /app,
 # so the .:/app live-source mount (docker-compose) can't shadow it. api/main.py

@@ -617,7 +617,17 @@ def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
 
 
 @pytest.mark.parametrize("shape, paths, named", [
-    ("empty_directory", ["app.py", "out"], "DIRECTORY"),
+    # Each case earns its place by being reddened by a named mutant, measured against the
+    # candidate's `core/todo_templates.py` (mutant A: `is_dir() and not is_symlink()`; mutant B:
+    # `is_dir() and not any(iterdir())`; mutant C: the no-digest refusal narrowed to `is_fifo()`):
+    #   full_directory      - reddened by B (a non-empty directory is not refused)
+    #   symlinked_directory - reddened by A (a symlink to a directory is not refused)
+    #   socket              - reddened by C (a socket is not refused)
+    # The other three (file_parent, fifo_parent, fifo) are not reddened by A, B or C: they are refusals
+    # that were already on main at c2f2a51c2b, and they are reddened by that commit's pre-image
+    # (c2f2a51c2b^), which lacks them. An empty directory is NOT a case here: no named mutant changes its refusal, so
+    # it pinned nothing; the CLI test `test_a_declared_directory_is_refused_by_name_before_any_plan_file_exists`
+    # still pins it through the route.
     ("full_directory", ["app.py", "out"], "DIRECTORY"),
     ("symlinked_directory", ["app.py", "link"], "DIRECTORY"),
     ("file_parent", ["app.py", "app.py/x/y.txt"], "a regular file, where a directory is required"),
@@ -638,9 +648,7 @@ def test_every_impossible_shape_is_refused_by_the_audit_function_itself(tmp_path
     workspace.mkdir()
     (workspace / "app.py").write_text("x = 1\n")
     listener = None
-    if shape == "empty_directory":
-        (workspace / "out").mkdir()
-    elif shape == "full_directory":
+    if shape == "full_directory":
         (workspace / "out").mkdir()
         (workspace / "out" / "keep.md").write_text("# not empty\n")
     elif shape == "symlinked_directory":

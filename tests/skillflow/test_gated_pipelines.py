@@ -135,6 +135,88 @@ def test_fix_tests_never_passing_fails_bounded(tmp_path):
     assert calls["run_tests"] == 4      # initial + 3 bounded retries
 
 
+# ── fix_tests: a partial node gate must not conclude success ────────
+#
+# The unit test `test_partial_gate_cannot_reach_done.py` asserts which edge the
+# resolver picks for a partial report. It cannot show that the run ENDS where
+# that edge points: the terminal only fails the run if the engine honours its
+# `end_conditions` entry, and a mutant that declared the terminal
+# `result: completed` was caught by nothing but a YAML-shape assertion. These
+# two drive the REAL graph so the claim is measured where it matters.
+
+_PARTIAL_GREEN = {
+    "passed": True, "returncode": 0, "summary": "8 of 9 node project(s) measured",
+    "failures": [], "node_gate_complete": False,
+    "node_unmeasured": [{"dir": "packages/p7", "kind": "capped",
+                         "reason": "not visited: more than 8 node projects"}],
+}
+_PARTIAL_RED = dict(_PARTIAL_GREEN, passed=False, returncode=1,
+                    summary="1 of 9 node project(s) measured",
+                    failures=["node:web:test failed (rc=1)"])
+
+
+def _wire_fix_tests_report(tmp_path, reports):
+    """Like `_wire_fix_tests`, but each call serves a whole caller-supplied
+    report, so a report shape the unit tests can construct by hand can also be
+    driven through the engine."""
+    sf, loader = _sf(tmp_path)
+    calls = {"run_tests": 0, "repo_apply": 0}
+    seq = list(reports)
+
+    def _run_tests(*args, out_dir="", **kwargs):
+        report = dict(seq[min(calls["run_tests"], len(seq) - 1)])
+        calls["run_tests"] += 1
+        if out_dir:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            (Path(out_dir) / "test_report.json").write_text(
+                json.dumps(report), encoding="utf-8")
+        return {"written": "test_report.json", "passed": report["passed"]}
+
+    def _repo_apply(*args, **kwargs):
+        calls["repo_apply"] += 1
+        return {"passed": True, "applied": True, "committed": True}
+
+    loader.register_dynamic_tool("run_tests", {}, _run_tests)
+    loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
+    _, run_id = _register(sf, "fix_tests")
+    return sf, run_id, calls
+
+
+def test_fix_tests_ends_failed_on_a_partial_node_gate(tmp_path):
+    """The same shape that reached `done` before the change: green on the
+    projects it measured, one project never visited. It must end the run, and
+    it must not charge a worker lap to something no edit can fix."""
+    full = dict(_PARTIAL_GREEN, node_gate_complete=True, node_unmeasured=[],
+                summary="9 of 9 node project(s) measured")
+    green = _wire_fix_tests_report(tmp_path / "green", [full])
+    green_status, green_runs = _drive_worker(*green[:2], "fix", max_ticks=10)
+
+    sf, run_id, calls = _wire_fix_tests_report(tmp_path / "partial", [_PARTIAL_GREEN])
+    status, runs = _drive_worker(sf, run_id, "fix", max_ticks=10)
+
+    # The pipeline opens at `fix` (that lap is its first move, not a charge for
+    # the absence), then tests once and stops. Same number of laps as the fully
+    # measured green run, one fewer step to reach a verdict — and that verdict is
+    # a failure, not a success.
+    assert green_status == "completed" and green_runs == 1, (green_status, green_runs)
+    assert status == "failed", status
+    assert runs == green_runs, f"the absence cost {runs} lap(s), green took {green_runs}"
+    assert calls["run_tests"] == 1, calls
+    run = sf.get_run(run_id)
+    assert "node_gate_incomplete" in json.dumps(run), run
+
+
+def test_fix_tests_keeps_the_fix_loop_when_a_partial_report_also_has_a_red(tmp_path):
+    """The case the first version of this change broke: a measured red beside
+    an unmeasured project belongs to the repair loop, not to the terminal."""
+    sf, run_id, calls = _wire_fix_tests_report(tmp_path, [_PARTIAL_RED])
+    status, runs = _drive_worker(sf, run_id, "fix", max_ticks=40)
+
+    assert status == "failed"          # never green, bounded
+    assert runs == 4, runs             # initial + three bounded laps, as before
+    assert calls["run_tests"] == 4, calls
+
+
 # ── subagent: adversarial LLM-reviewer gate ─────────────────────────
 
 def _wire_subagent(tmp_path, verdicts, test_results=None):

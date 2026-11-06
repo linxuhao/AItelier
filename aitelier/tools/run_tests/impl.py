@@ -1053,9 +1053,10 @@ def unmeasured_entry(directory: str, reason: str, *,
     """A project entry that says, plainly, that nothing was measured for it.
 
     Same shape `_run_node_project` returns from its own `unmeasured()` closure: an
-    absence is not a red, and an absence must never be read as a pass. `kind` is
-    what `release_disposition` routes on — the prose in `reason` is for people,
-    and a disposition that parsed it would change when someone rewrote it.
+    absence is not a red, and an absence must never be read as a pass. `kind`
+    says WHY, so no reader has to parse the prose beside it and so the report
+    can name the one edit that removes the absence; it deliberately does not
+    change the disposition (see `aitelier.gate_evidence.release_disposition`).
     """
     return {"dir": directory, "passed": True, "skipped": True,
             "checks": {}, "unmeasured_reason": reason, "kind": kind,
@@ -3267,6 +3268,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = None if storage_preflight_refused else _run_node_checks(repo, run_id=run_id)
         if node is not None:
             report["node"] = node
+            # The routing flag the configs read: did every node project get
+            # measured? It is written here, on every path out of this block, so
+            # no exit can carry `node_unmeasured` without it. False when any
+            # project was not measured. That includes the nothing-measured path,
+            # which writes no `node_unmeasured`: `skipped` is the signal there.
+            # Same rule as `executed.node_gate_ran` below. Absent when there is
+            # no node section at all (a Python-only repository), which keeps its
+            # routing exactly as it was.
+            report["node_gate_complete"] = not (node.get("skipped")
+                                                or node.get("unmeasured"))
             # Three states, kept apart. A project that could not be measured is
             # NEITHER a pass NOR a block: it is named plainly (`node_unmeasured`
             # and `node["unmeasured"]`), it cannot turn a green run red (the

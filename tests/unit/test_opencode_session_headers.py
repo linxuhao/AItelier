@@ -11,6 +11,7 @@ from core.ai_router import AIGateway
 def gateway(tmp_path):
     config = tmp_path / 'providers.json'
     config.write_text(json.dumps({'opencodego': {'base_url': 'https://opencode.ai/zen/go/v1'},
+                                  'opencodego2': {'base_url': 'https://opencode.ai/zen/go/v1/'},
                                   'other': {'base_url': 'https://example.test/v1'}}))
     routes = tmp_path / 'routes.json'
     routes.write_text('{}')
@@ -52,3 +53,14 @@ def test_rebinding_scopes_managed_headers_and_preserves_callers(gateway):
     g._apply_binding(kwargs)
     assert kwargs['extra_headers']['x-opencode-session'] == session
     assert kwargs['extra_headers']['X-Correlation-ID'] == 'test'
+
+
+def test_a_second_opencode_go_account_gets_the_same_session_routing(gateway):
+    g = gateway()
+    session = g._build_kwargs([])['extra_headers']['x-opencode-session']
+    g._bind('opencodego2/omen-alpha')
+    headers = g._build_kwargs([])['extra_headers']
+    assert headers['x-opencode-session'] == session
+    assert headers['User-Agent'].startswith('AItelier/')
+    g._bind('other/model')
+    assert 'extra_headers' not in g._build_kwargs([])

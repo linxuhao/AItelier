@@ -925,6 +925,13 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
       measured project actually failed. One project's red cannot be masked by
       another's green, and an unmeasured project is never counted as a pass.
     """
+    # A measured project ALWAYS carries at least its `install` check: the runner
+    # sets that key unconditionally before it looks at the manifests, and only
+    # adds build/test when the project declares them. So an empty `checks` map
+    # here means the entry was built by hand, not produced by `_run_node_project`
+    # - a review measured "a measured project with no checks is a silent pass"
+    # on such a fixture, and it is not reachable through the real entry. If that
+    # ever stops being true, this comment is the thing to delete.
     measured = [r for r in results if not r.get("skipped")]
     unmeasured = [{"dir": r["dir"],
                    "reason": (r.get("unmeasured_reason") or r.get("summary")

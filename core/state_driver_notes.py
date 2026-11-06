@@ -468,9 +468,13 @@ class StateDriverNotes:
                           include_delisted: bool = False) -> dict:
         """The READ answer: the counts and the whole catalogue, line by line.
 
-        ``get`` (get_driver_note) and ``entry_index`` (driver_note_index) return
-        this, unchanged and uncapped - the catalogue moved to the reads, it did
-        not shrink. A mutation returns ``_catalogue_counts`` instead.
+        ``get`` (get_driver_note) is the UNCAPPED reader of this and is what
+        makes the catalogue exactly as reachable as it was before the mutations
+        stopped carrying it. ``entry_index`` (driver_note_index) is a PAGED
+        reader of the same lines: its own query, a default limit of 100, a
+        refusal above MAX_INDEX_LIMIT, and it answers ``entries`` plus
+        ``truncated`` rather than ``index``. A mutation returns
+        ``_catalogue_counts`` instead.
 
         Bodies are NOT here; each line carries the address that fetches its body.
         By default only current, listed entries are here; delisted_count and

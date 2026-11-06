@@ -90,6 +90,73 @@ def _current_cycle(graph_dir: Path, run_id: str) -> str:
     return cycle
 
 
+def _classify(report: dict) -> tuple[str, str]:
+    """Both release answers, read from the report as the PRODUCER wrote it.
+
+    WHY BOTH ARE READ BEFORE EITHER IS WRITTEN. `evidence_state` is an INPUT to
+    both readers — it is how a producer says `not_run`, `unattributable`,
+    `infrastructure_unavailable` — and also an OUTPUT of this stamp. Writing the
+    state before asking for the disposition made the disposition read the
+    stamp's own annotation instead of the evidence, so the value a pipeline
+    routes on (this call's return) and the value an audit computes from the file
+    could answer differently for the SAME report. Reading both first removes the
+    order dependence instead of reasoning about where it is harmless.
+    """
+    return report_state(report), release_disposition(report)
+
+
+def _write_state(report: dict, state: str) -> None:
+    """Write the state label only when the report still reads as that label.
+
+    `report_state` DERIVES its answer; it is not the producer's word. Writing
+    the derivation back over the producer's own state is a RENAME, and one
+    rename in this vocabulary loses the absence outright: `skipped` — the label
+    an unrun report is classified into — is not one of the module's absence
+    statuses (`_UNRUN_STATUSES`/`_INFRA_STATUSES`/…), so a report whose producer
+    said `evidence_state: "not_run"` (green pytest leg, repository gate
+    unmeasured) carried the absence OUT of the file by being stamped. Every
+    later reader of that file answered `failed` / `known_failure` — and a
+    failure RELEASES the run past the hold, the exact error this module exists
+    to prevent (`iss-b161216de6a14a81`).
+
+    So the rule is the FIXPOINT, stated once for the whole vocabulary rather
+    than for the one word that was measured: a label may be written when the
+    report still reads as that label afterwards. Every state whose producer also
+    wrote a fact the reader consults (`pending: true`, `blind: true`,
+    `node_unmeasured` beside a green `passed`, `infrastructure_unavailable`, the
+    provisional marker) passes that test and is written exactly as before, and
+    so does every measured one (`passed`, `failed`, `known_failure`,
+    `unattributed`, `unreadable`). `skipped` fails it exactly when the producer
+    carried the absence in the state word itself — `evidence_state: "not_run"`
+    or a `status` word — and there the producer's own word is KEPT: the file
+    says what the producer said, and the reader derives the same absence from it
+    that it derived before the stamp.
+
+    The test is asked of `report_state` itself rather than a list of statuses,
+    so it cannot drift away from the reader it protects: teaching the absence
+    vocabulary a new word, or a new producer a new way to say one, moves both
+    sides together. This is a deliberate consequence and not a side effect —
+    a label that reads back differently is a label that lost information, and
+    no consumer has to know which labels those are.
+    """
+    had_label = "evidence_state" in report
+    prior = report.get("evidence_state")
+    report["evidence_state"] = state
+    if report_state(report) == state:
+        return
+    if had_label:
+        report["evidence_state"] = prior
+    else:
+        report.pop("evidence_state", None)
+
+
+def _stamp_classification(report: dict) -> None:
+    """Write this stamp's answers, in an order that cannot change them."""
+    state, disposition = _classify(report)
+    _write_state(report, state)
+    report["release_evidence"] = disposition
+
+
 def stamp_report(report: dict, *, run_id: str, out_dir: str,
                  start_cycle: bool = False, cycle_from: str = "5_test",
                  cycle_file: str = "test_report.json") -> dict:
@@ -103,8 +170,7 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
     if start_cycle:
         cycle = f"{run_id}:{uuid4().hex}"
         report[CYCLE_FIELD] = cycle
-        report["evidence_state"] = report_state(report)
-        report["release_evidence"] = release_disposition(report)
+        _stamp_classification(report)
         _write_cycle_manifest(graph_dir, run_id=run_id, cycle=cycle,
                               generated_at=generated_at)
         return report
@@ -120,8 +186,7 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
         report["passed"] = False
         report["skipped_because"] = "evidence_cycle_missing"
         report["evidence_stamp_error"] = f"{_manifest_path(graph_dir)}: {exc}"
-    report["evidence_state"] = report_state(report)
-    report["release_evidence"] = release_disposition(report)
+    _stamp_classification(report)
     return report
 
 
@@ -229,23 +294,16 @@ def _provisional_red_is_measured(report: dict) -> bool:
     `stamp_report`, which is why the classification no longer cares what
     `evidence_state` says.
 
-    WHAT THIS DOES AND DOES NOT CLOSE. It closes the ABSENCE-CHARGED-AS-A-
-    FAILURE hole for this marker, and it does so without touching the stamp:
-    this function reads no state vocabulary at all, so whether `stamp_report`
-    writes `partial` over a producer's `not_run`, `unattributable` or
-    `infrastructure_unavailable` cannot change the answer it gives. Nothing
-    else about the stamp moved with this change.
-
-    The stamp's own pre-existing hazard is therefore STILL THERE and is
-    deliberately NOT fixed here: it renames a producer's `not_run` to `skipped`,
-    after which a LATER READER OF THE FILE (`audit_evidence`) calls the report
-    `failed` and a release reads `known_failure` for an absence. Measured on a
-    NON-provisional report `run_tests` really produces (pytest green, repository
-    gate unmeasured): stamped `skipped`/`known_failure`, then re-read
-    `failed`/`known_failure`. That is recorded as issue
-    `iss-b161216de6a14a81` and belongs to whoever takes the stamp's ordering;
-    fixing it here would change a stored release answer for a shape that has
-    nothing to do with the provisional marker.
+    WHAT THE CLASSIFICATION DOES NOT DEPEND ON, and must not be made to. This
+    function reads no state vocabulary at all, so what `stamp_report` annotates
+    a report with — `partial` over a producer's `not_run`, `unattributable` or
+    `infrastructure_unavailable` — cannot change the answer it gives. That
+    independence is load-bearing twice over: the same rename used to turn an
+    absence into a failure for a LATER READER of the file (`audit_evidence`
+    called the stamped `not_run`/`skipped` report `failed` and a release read
+    `known_failure`, issue `iss-b161216de6a14a81`), and the fix for it lives in
+    the stamp's own writer (`_write_state`: no label is written that does not
+    read back as itself), not here.
     """
     if (report.get("passed", report.get("all_passed")) is not False
             or report.get("purpose") != PROVISIONAL_PURPOSE

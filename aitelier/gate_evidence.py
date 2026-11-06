@@ -150,11 +150,31 @@ def _write_state(report: dict, state: str) -> None:
         report.pop("evidence_state", None)
 
 
+def restate_classification(report: dict, *, create: bool) -> None:
+    """Write the derived answers back into `report`, by the one rule.
+
+    Every writer that derives `evidence_state` or `release_evidence` goes
+    through here, so they cannot disagree about an absence: both answers are
+    read first (`_classify`), and the label goes through `_write_state`, which
+    keeps the producer's own absence word when replacing it would change
+    `report_state`.
+
+    `create` says whether a field the report does not already carry may be
+    added. The stamp passes `create=True` and writes both. A writer that only
+    restates answers the producer already wrote passes `create=False`, so it
+    rewrites a field only where one exists and never adds a label or a
+    disposition the report did not have.
+    """
+    state, disposition = _classify(report)
+    if create or "evidence_state" in report:
+        _write_state(report, state)
+    if create or "release_evidence" in report:
+        report["release_evidence"] = disposition
+
+
 def _stamp_classification(report: dict) -> None:
     """Write this stamp's answers, in an order that cannot change them."""
-    state, disposition = _classify(report)
-    _write_state(report, state)
-    report["release_evidence"] = disposition
+    restate_classification(report, create=True)
 
 
 def stamp_report(report: dict, *, run_id: str, out_dir: str,

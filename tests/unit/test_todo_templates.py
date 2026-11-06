@@ -6,6 +6,7 @@ into a temporary directory selected by AITELIER_TODO_TEMPLATES.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -342,6 +343,84 @@ def test_a_declared_directory_is_refused_by_name_before_any_plan_file_exists(cli
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
 
 
+def test_a_declared_directory_is_refused_even_when_it_has_files_in_it(cli, repo, base):
+    # A directory WITH content is no more digestible than an empty one: `_digest` asks `is_file`,
+    # and a refusal that only fired for empty directories would announce this one as "existing".
+    (repo / "out").mkdir()
+    (repo / "out" / "keep.md").write_text("# not empty\n")
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "out"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'out'" in out["reason"] and "DIRECTORY" in out["reason"], out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "out")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_declared_symlink_to_a_directory_is_refused_as_a_directory(cli, repo, base):
+    # `_digest` follows the link, so a symlink to a directory has no digest either; a refusal that
+    # skipped symlinks would announce it as a satisfiable path.
+    (repo / "real").mkdir()
+    (repo / "link").symlink_to("real", target_is_directory=True)
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "link"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'link'" in out["reason"] and "DIRECTORY" in out["reason"], out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "link")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_declared_path_under_an_existing_file_is_refused_not_announced_for_creation(cli, repo, base):
+    # `app.py/x/y.txt` cannot be created while app.py is a file, so announcing it as "the step will
+    # have to CREATE it" promises a change the item can never deliver.
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "app.py/x/y.txt"],
+                                                     "scope": ["app.py"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'app.py/x/y.txt'" in out["reason"] and "'app.py'" in out["reason"], out["reason"]
+    assert "a regular file, where a directory is required" in out["reason"], out["reason"]
+    assert "could never pass" in out["reason"], out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "app.py/x/y.txt")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+    # The audit runs BEFORE the plan's lock is taken, so a refusal does not even leave the sidecar
+    # file: an audit that ran inside the lock would refuse with an empty `<attempt>.lock` behind.
+    assert not list(cli.store.glob("*.lock")), "a refused create leaves no lock file either"
+
+
+def test_a_declared_path_under_a_fifo_is_refused_the_same_way(cli, repo, base):
+    os.mkfifo(repo / "pipe")
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "pipe/x.txt"],
+                                                     "scope": ["app.py"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'pipe'" in out["reason"] and "a FIFO, where a directory is required" in out["reason"], out["reason"]
+    assert out["path"] == "pipe/x.txt" and out["predicate"] == "files_changed"
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_declared_fifo_is_refused_rather_than_announced_as_existing(cli, repo, base):
+    # `_digest` reads None for anything that is not a regular file, so `files_changed` would fail a
+    # FIFO forever; listing it under "existing" claimed the opposite.
+    os.mkfifo(repo / "pipe")
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "pipe"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "'pipe'" in out["reason"] and "exists and is a FIFO" in out["reason"], out["reason"]
+    assert "a path that is not a regular file has none" in out["reason"], out["reason"]
+    assert (out["item"], out["predicate"], out["path"]) == ("implement", "files_changed", "pipe")
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_declared_symlink_to_a_regular_file_still_changes_with_its_target(cli, repo, base):
+    # The other side of the two checks above: `_digest` follows a link, so this path has a digest and
+    # the item can pass. Refusing symlinks outright would be a regression, not a stricter audit.
+    (repo / "link.py").symlink_to("app.py")
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "link.py"],
+                                                     "scope": ["app.py", "link.py"]})
+    assert code == 0, out
+    audit = out["paths"]
+    assert (audit["existing"], audit["not_yet_existing"], audit["notes"]) == (["app.py", "link.py"], [], []), audit
+    cli.ok("begin", "--attempt", "att-1", "--item", "implement")
+    (repo / "app.py").write_text("x = 1  # changed\n")
+    files = next(r for r in cli.ok("done", "--attempt", "att-1", "--item", "implement")["results"]
+                 if r["predicate"] == "files_changed")
+    assert files["outcome"] == "pass", files
+
+
 @pytest.mark.parametrize("bad", ["/etc/passwd", "../outside.py", "sub/../../escape.py"])
 def test_a_declared_path_outside_the_workspace_is_refused_before_any_plan_file_exists(cli, repo, base, bad):
     code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", bad]})
@@ -413,6 +492,29 @@ def test_a_workspace_that_is_not_a_directory_is_said_out_loud_not_silently_skipp
         "nothing was invented about paths the audit could not look up"
     note = audit["notes"][0]
     assert str(ghost) in note and "could not be looked up" in note and "nothing was assumed" in note, note
+
+
+def test_a_missing_workspace_still_refuses_a_duplicate_and_the_note_does_not_claim_otherwise(cli, repo, base, tmp_path):
+    # The duplicate-spelling refusal reads the PLAN, so it fires with or without a workspace; a note
+    # that listed it among the checks it had skipped claimed the opposite of what the code did.
+    ghost = tmp_path / "not-a-workspace"
+
+    def create(params):
+        return cli.run("create", "--template", "code_change", "--params", json.dumps(params),
+                       "--attempt", "att-1", "--node-key", "execution.demo", "--context-hash", "c" * 64,
+                       "--base-sha", base, "--workspace", str(ghost), "--goal", "make the change")
+
+    code, out = create({**CODE, "paths": ["out", "out"], "scope": ["out"]})
+    assert code == 2 and out["refused"] == "impossible_path", out
+    assert "twice" in out["reason"] and "not declared at all" in out["reason"], out["reason"]
+    assert out["path"] == "out" and not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+    code, out = create(CODE)
+    assert code == 0, out
+    note = out["paths"]["notes"][0]
+    assert "could not be looked up" in note and "nothing was assumed" in note, note
+    assert "duplicate" in note and "still refused" in note, note
+    assert "duplicate-spelling or existence check was made" not in note, note
 
 
 def test_the_free_plan_route_refuses_the_same_paths(cli, repo, base):

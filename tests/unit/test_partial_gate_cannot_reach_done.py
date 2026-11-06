@@ -200,6 +200,19 @@ def test_red_measured_report_still_selects_fix_loop(config_name, tmp_path, monke
 
 
 @pytest.mark.parametrize("config_name", ["fix_tests", "subagent"])
+def test_partial_report_with_a_measured_red_still_selects_fix_loop(config_name, tmp_path, monkeypatch):
+    """A red in a measured project keeps its fix loop even when another project
+    was not measured. This is the case the partial edge must NOT capture: its
+    `node_gate_complete` is also false, and only the failing edge (ordered first)
+    keeps it on the fix loop instead of the terminal."""
+    repo = tmp_path / "repo"
+    _nine(repo)  # ninth project is capped out → node_gate_complete False
+    _, out = _run(tmp_path, monkeypatch, repo, red=("web", "test"))
+
+    assert _select(config_name, out) == RED_TARGET[config_name]
+
+
+@pytest.mark.parametrize("config_name", ["fix_tests", "subagent"])
 def test_python_only_green_report_still_selects_success(config_name, tmp_path, monkeypatch):
     """No node section: the new edge is inert and green still reaches success."""
     repo = tmp_path / "repo"
@@ -214,12 +227,15 @@ def test_python_only_green_report_still_selects_success(config_name, tmp_path, m
 
 # ----------------------------------------------------------- the config shape
 @pytest.mark.parametrize("config_name", ["fix_tests", "subagent"])
-def test_new_edge_is_ordered_before_the_passed_edge(config_name):
-    """Order is load-bearing: the engine takes the first match. A partial report
-    also has `passed: true`, so the new edge must come before it."""
+def test_edge_order_red_then_partial_then_green(config_name):
+    """Order is load-bearing (the engine takes the first match). The red edge comes
+    first, so a partial report with a measured red keeps its fix loop. The partial
+    edge comes before the green edge, so a green partial report cannot reach a
+    success terminal. Reversing either silently misroutes a real case."""
     graph = PipelineGraph.from_yaml(CONFIGS[config_name])
     test_step = next(s for s in graph.steps if s.id == "test")
     targets = [t.to for t in test_step.transitions]
+    assert targets.index(RED_TARGET[config_name]) < targets.index(PARTIAL_TARGET)
     assert targets.index(PARTIAL_TARGET) < targets.index(GREEN_TARGET[config_name])
 
 

@@ -89,16 +89,18 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
-      # Ordered FIRST: the engine takes the first match. A node project the gate
-      # did not measure leaves `passed` honestly true (the measured ones passed),
-      # so without this edge a partial report would go on to the reviewer as green.
-      - to: "node_gate_incomplete"         # a node project was not measured → not a success
-        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
-      - to: "review"                       # tests green → adversarial review
-        match: { from_file: "test_report.json", field: "passed", value: true }
+      # Order is load-bearing (the engine takes the first match). A measured red
+      # keeps its fix loop even when a project was not measured, so the failing
+      # edge comes first. Only then does an unmeasured project stop a green from
+      # reaching the reviewer: a partial report with `passed: true` has no measured
+      # red, and without the partial edge it would go on to review as green.
       - to: "work"                         # tests red → fix, with the report
         match: { from_file: "test_report.json", field: "passed", value: false }
         max_loop: 3
+      - to: "node_gate_incomplete"         # green, but a node project was not measured → not a success
+        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
+      - to: "review"                       # tests green → adversarial review
+        match: { from_file: "test_report.json", field: "passed", value: true }
 
   - id: "review"
     step_type: "agent"

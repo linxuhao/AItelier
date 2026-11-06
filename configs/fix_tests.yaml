@@ -68,16 +68,19 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
-      # Ordered FIRST: the engine takes the first match. A node project the gate
-      # did not measure leaves `passed` honestly true (the measured ones passed),
-      # so without this edge a partial report reaches `done` as a success.
-      - to: "node_gate_incomplete"        # a node project was not measured → not a success
-        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
-      - to: "done"                        # tests pass → loop-external terminal
-        match: { from_file: "test_report.json", field: "passed", value: true }
+      # Order is load-bearing (the engine takes the first match). A measured red
+      # keeps its fix loop even when a project was not measured, so the failing
+      # edge comes first. Only then does an unmeasured project stop a green from
+      # reaching `done`: a partial report with `passed: true` has no measured red,
+      # and without the partial edge it would conclude success while a project
+      # never ran.
       - to: "fix"                         # tests fail → fix, with the report
         match: { from_file: "test_report.json", field: "passed", value: false }
         max_loop: 3
+      - to: "node_gate_incomplete"        # green, but a node project was not measured → not a success
+        match: { from_file: "test_report.json", field: "node_gate_complete", value: false }
+      - to: "done"                        # tests pass → loop-external terminal
+        match: { from_file: "test_report.json", field: "passed", value: true }
 
   # Loop-external terminal — reached only after tests pass; the node the
   # end-condition fires on (see the comment on end_conditions). Gate = no

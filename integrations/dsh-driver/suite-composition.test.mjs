@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,16 +31,16 @@ import { fileURLToPath } from 'node:url';
 //     silenced both observers and left another test file never running.
 // Each of those is now a witness below. Do not simplify them back.
 //
-// STATED LIMITS, from the third review, none of them closed:
-//   - a REGEX LITERAL is not modelled by scan(), so `/^[/*]/` or `/[//]/` opens a
-//     phantom comment and can hide a resolution. Teaching the scanner regex from
-//     division is a parser, not a guard; the trade is stated instead.
+// STATED LIMITS, after three adversarial reviews. These are the ones that remain;
+// the earlier editions of this paragraph named a regex literal, the `test/`
+// directory and a symlinked test file, and all three are now closed - do not put
+// them back as excuses.
 //   - the rule is PER FILE: a resolution whose path is assembled across two modules
 //     is invisible to it.
-//   - a SYMLINKED test file is walked as a Dirent that isFile() is false for, so it
-//     reports as "named but missing" rather than running.
-//   - the python observer's gutted-guard check looks for `test.skip(`; the option
-//     form `test(name, { skip: true }, fn)` is not matched.
+//   - the skipped-test check matches the `test.skip(` spelling; the option form
+//     `test(name, { skip: true }, fn)` and a test gutted to an empty body are green.
+//   - the python observer strips whole-line comments only, so a trailing comment
+//     that names the skipped-test token false-reddens it. That errs towards red.
 // If one of these grows teeth, fix it here and say which one stopped being a limit.
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -53,8 +53,10 @@ const HELPER = /\.(mjs|cjs|js)$/i;
 // nobody ran and nobody noticed - the 2026-11-05 incident class, still open. This
 // predicate is deliberately over-inclusive: flagging a helper costs a line in the
 // script, missing a test file costs the rule.
-const isTestFile = name => {
+const isTestFile = (name, full) => {
   const base = name.toLowerCase();
+  const dirs = relative(here, full ?? join(here, name)).split(/[/\\]/).slice(0, -1).map(seg => seg.toLowerCase());
+  if (dirs.includes('test') && HELPER.test(base)) return true; // node runs test/**/*.js
   if (!/\.(mjs|cjs|js)$/.test(base)) return false;
   return base.includes('.test.') || base.includes('.spec.') || base.includes('-test.')
     || base.includes('_test.') || base.startsWith('test-') || base === 'test.js'
@@ -67,13 +69,36 @@ const isTestFile = name => {
 // quote inside a comment is not a string, and `'**/*'` is not the start of a block
 // comment. Both views matter: the path is spelled in strings, and the call that uses
 // it is spelled in code.
+// A regex literal is not a comment. Telling `/` from `/*` by the PREVIOUS
+// significant character is a heuristic, not a parser, but the two cases that matter
+// here - `/^[/*]/` and `/[//]/` - are exactly the ones it gets right, and getting
+// them wrong was a declared limit until a reviewer said it was a few lines.
+const REGEX_PRECEDERS = new Set(['', '(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '+', '-', '*', '%', '~', '^', '<', '>']);
+
 const scan = source => {
   let code = '';
   let strings = '';
+  let lastSignificant = '';
   let i = 0;
   while (i < source.length) {
     const ch = source[i];
     const next = source[i + 1];
+    if (ch === '/' && REGEX_PRECEDERS.has(lastSignificant)) {
+      i += 1;
+      let inClass = false;
+      while (i < source.length) {
+        const c = source[i];
+        if (c === '\\') { i += 2; continue; }
+        if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        else if (c === '/' && !inClass) { i += 1; break; }
+        else if (c === '\n') break;
+        i += 1;
+      }
+      code += ' /re/ ';
+      lastSignificant = '/';
+      continue;
+    }
     if (ch === '/' && next === '/') {
       while (i < source.length && source[i] !== '\n') i += 1;
       continue;
@@ -103,6 +128,7 @@ const scan = source => {
       continue;
     }
     code += ch;
+    if (ch.trim()) lastSignificant = ch;
     i += 1;
   }
   return { code, strings };
@@ -129,7 +155,10 @@ const walk = async (dir, accept, out = []) => {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name !== 'node_modules') await walk(full, accept, out);
-    } else if (entry.isFile() && accept(entry.name)) {
+    } else if (entry.isSymbolicLink()) {
+      const target = await stat(full).catch(() => null);
+      if (target?.isFile() && accept(entry.name, full)) out.push(full);
+    } else if (entry.isFile() && accept(entry.name, full)) {
       out.push(full);
     }
   }

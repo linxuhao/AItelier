@@ -77,13 +77,16 @@ def _script() -> str:
 
 
 def _test_files() -> list[str]:
-    return sorted(
-        path.relative_to(DRIVER).as_posix()
-        for path in DRIVER.rglob("*")
-        if path.is_file()
-        and _is_test_file(path.name)
-        and "node_modules" not in path.parts
-    )
+    out = []
+    for path in DRIVER.rglob("*"):
+        if "node_modules" in path.parts or not path.is_file():
+            continue
+        parts = path.relative_to(DRIVER).parts
+        # node also runs anything under a directory named test/ - the sixth discovery
+        # pattern, and the one the third reviewer found still unguarded.
+        if "test" in [part.lower() for part in parts[:-1]] or _is_test_file(path.name):
+            out.append(path.relative_to(DRIVER).as_posix())
+    return sorted(out)
 
 
 def test_the_guard_that_cannot_see_its_own_removal_is_listed_and_not_gutted() -> None:

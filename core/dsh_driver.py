@@ -193,19 +193,28 @@ class DshDrivers:
                 "serverName": server, "transport": "streamable-http", "url": url,
                 "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
         # Auto-compact fires at `min(W * thresholdRatio, W - O - B)`; the shipped
-        # ratio is 0.8. This driver's work does not depend on a large window - the
-        # State snapshot is re-injected once after every successful compaction -
-        # so paying for a smaller window and compacting earlier is a fair trade.
-        # It is a RATIO of the model's own window, not a token count: 0.5 is 500k
-        # on a 1M window and 100k on a 200k one.
-        ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", "0.5").strip()
+        # ratio is 0.8. It is a RATIO of the model's own window, not a token
+        # count: 0.25 is 250k on a 1M window and 50k on a 200k one.
+        #
+        # The director's own route compacts near-clear (retainTokens 0 keeps only
+        # the last balanced step): its work survives compaction by design - the
+        # State snapshot is re-injected after every successful compaction - and
+        # the verbatim tail was most of what a compaction left behind (measured
+        # 2026-11-06: 245-316k left at a 500k trigger with the shipped 16% tail,
+        # ~50k after idle compaction, which retains nothing). Workers have no such
+        # snapshot: every other route keeps the previous policy (half the window,
+        # DSH's default 16% verbatim tail).
+        ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", "0.25").strip()
         try:
             ratio = min(0.8, max(0.2, float(ratio)))
         except ValueError:
-            ratio = 0.5
+            ratio = 0.25
         patches = [
             {"id": "hmr", "disabled": True},
-            {"id": "compaction-basic", "config": {"thresholdRatio": ratio}},
+            {"id": "compaction-basic", "config": {
+                "thresholdRatio": 0.5,
+                "modelPolicies": [{"provider": row["provider"], "model": row["model"],
+                                   "thresholdRatio": ratio, "retainTokens": 0}]}},
             *[{"id": tool, "config": {"provider": provider, "toolName": name,
                 "agentOptions": {"provider": "aitelier", "model": "worker"}}}
               for tool, provider, name in (("tool-subagent", "spawn", "subagent"),

@@ -215,9 +215,22 @@ def release_disposition(report: dict) -> str:
     against discovery, so a repository that states its node projects is
     measured in full up to the declaration ceiling, and a project that the
     declaration omits — or a declaration the gate will not honour — is reported
-    as an absence that NAMES the one edit which removes it. The disposition is unchanged on purpose: every consumer that
-    exists reads `partial` as not-passed today, and none of them had to be
-    taught a new way to say yes.
+    as an absence that NAMES the one edit which removes it.
+
+    The disposition is unchanged here on purpose — but "unchanged here" is not
+    "unchanged everywhere", and an earlier version of this paragraph claimed the
+    stronger thing and was measured false. Two of this repository's own
+    pipelines (`configs/fix_tests.yaml`, `configs/subagent.yaml`) WERE reading a
+    partial report as success through its raw `passed: true`, and had to be
+    taught a new way: `run_tests` now writes `node_gate_complete`, and both
+    route it to a terminal that fails the run. `configs/coding_impl.yaml`'s
+    `test_evidence` was already refusing such a report on `node.skipped`. So the
+    honest scope of the claim is: this release layer (`report_state`,
+    `audit_evidence`, `release_disposition`) plus every pipeline this
+    repository ships as a config. What stays outside that scope is named rather
+    than implied — generated pipeline records in the live deployment that branch
+    on the raw `passed`, and the separate `provisional_round_feedback` shape,
+    which also answers `partial` here while meaning something else entirely.
 
     Rejected, and why:
     * (a) "a distinct bounded state that lets the release proceed and records

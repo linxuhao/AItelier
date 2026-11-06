@@ -70,6 +70,12 @@
 #                 at :2877-2882, its payload at :2916-2930), so a non-delivery
 #                 return cannot match; it still ends on `test_evidence_missing`.
 #     :3371       the flattened `node_unmeasured` (read by gate_evidence below).
+#     :3346       `unmeasured_projects = node.get("unmeasured") or []`: the list that
+#                 makes `executed.node_gate_ran` false (:3348) and, outside the
+#                 nothing-measured branch, becomes `node_unmeasured` (:3371).
+#     :3350       `if node.get("skipped") and not node.get("measured_dirs")`: the
+#                 nothing-measured branch, which sets the whole-report `skipped`,
+#                 `infrastructure_unavailable` and `evidence_state`.
 #     :3347       the same two node keys decide `executed.node_gate_ran`.
 #     :1146       `_aggregate_node_projects`: `skipped = bool(unmeasured)` — the
 #                 invariant behind D1.
@@ -116,8 +122,13 @@
 #   aitelier/gate_evidence.py:323 — `report_state` answers `partial` when a GREEN
 #     report carries `node_unmeasured` (the FLATTENED key, not `node[...]`, and
 #     not `node_gate_complete`: that name occurs once in the module, as prose in
-#     its own docstring at :488). Gains: the graph now agrees with the state the
-#     hold/deferral layer already derived for the same report. Loses nothing.
+#     its own docstring at :488). Gains, for the REAL producer's partial green:
+#     the graph now refuses it at the step that owns the verdict and names the
+#     partial gate (`node_gate_incomplete`), where before this edge it was parked
+#     one step later as evidence-missing (the `node.skipped` const; see D1). The
+#     shape that DID reach `done` before (hand-built or older producer:
+#     `node.unmeasured` beside `node.skipped: false`) is closed too. The real
+#     producer's report never reached `done`. Loses nothing.
 #   core/coding_impl_outcome.py:147-153 — `measurement` reads the NODE leg's
 #     `skipped` (and `passed`) through a loop variable, which is why a literal
 #     `node["skipped"]` grep does not find it: `for key in ("node", "repo_gate")`

@@ -324,6 +324,12 @@ steps:
       #     edge and still ends on `test_evidence_missing` (`written: None`).
       #   * impl.py:3371 — writes the flattened `node_unmeasured` read by the
       #     state vocabulary below. Unchanged.
+      #   * impl.py:3346 — `unmeasured_projects = node.get("unmeasured") or []`:
+      #     the list that makes `executed.node_gate_ran` false (:3348) and, outside
+      #     the nothing-measured branch, becomes `node_unmeasured` (:3371). Unchanged.
+      #   * impl.py:3350 — `if node.get("skipped") and not node.get("measured_dirs")`:
+      #     the nothing-measured branch, which sets the whole-report `skipped`,
+      #     `infrastructure_unavailable` and `evidence_state`. Unchanged.
       #   * impl.py:3347 — the same two node keys decide
       #     `executed.node_gate_ran`. Unchanged.
       #   * configs/fix_tests.yaml:113 / :129 and configs/subagent.yaml:125 /
@@ -348,9 +354,14 @@ steps:
       #     `node_unmeasured` and answers `partial` when a GREEN report carries
       #     one. It does not READ `node_gate_complete`: that name occurs once in
       #     the module, as prose in its own docstring (:488) describing this very
-      #     refusal. GAINS: the graph now agrees with the state the hold layer
-      #     already derived for the same report — before this edge one layer said
-      #     `partial` and the graph said `done`. LOSES nothing.
+      #     refusal. GAINS, for the REAL producer's partial green: the graph now
+      #     refuses it at the step that owns the verdict and names the partial
+      #     gate (`node_gate_incomplete`), where before this edge it was parked
+      #     one step later as evidence-missing (the `node.skipped` const; see D1
+      #     in the test module). The shape that DID reach `done` before
+      #     (hand-built or older producer: `node.unmeasured` beside
+      #     `node.skipped: false`) is closed too. The real producer's report
+      #     never reached `done`. LOSES nothing.
       #   * core/coding_impl_outcome.py:147-153 `measurement` — a reader of the
       #     NODE leg's `skipped` (and `passed`) that no literal `node["skipped"]`
       #     grep finds: it loops `for key in ("node", "repo_gate")`, takes

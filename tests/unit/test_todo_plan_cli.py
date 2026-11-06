@@ -147,8 +147,12 @@ def refused_by_the_path_audit(repo: Path, base: str, attempt_id: str) -> dict:
     This is the audit's own refusal (`impossible_path`), not the plan's: `["./app.py",
     "app.py"]` validates fine and normalises to one path, which is exactly the defect
     the audit exists to catch. It is decided by reading the PLAN, so it refuses whether
-    or not the workspace exists - and it is reached through `cmd_create` with
-    `--plan-json`, the same call the DSH todo_plan tool makes.
+    or not the workspace exists. Both spellings of a create - `--plan-json FILE` and
+    `--template NAME` - are parsed in `_plan_from_args` (core/todo_cli.py:145, which runs
+    the audit at :174) and every create goes through `cmd_create` (:177), so what this
+    test drives is the entry point both callers share: this file passes `--plan-json`,
+    and DSH reaches the same place with `--template`
+    (integrations/dsh-driver/runtime.mjs:1022-1024).
     """
     twice = item("edit", [{"predicate": "files_changed", "args": {"paths": ["app.py", "./app.py"]}}])
     return plan(repo, base, [twice], attempt_id=attempt_id)
@@ -177,7 +181,9 @@ def test_a_refused_create_adds_nothing_to_a_live_plan_directory(cli, repo, base)
     (see `test_a_successful_create_leaves_the_plan_file_and_its_lock_sidecar_and_nothing_else`),
     so "the exact same contents afterwards" cannot be satisfied by a directory that is
     simply never written. A refusal for a DIFFERENT attempt must add no
-    `att-refused.lock`, no `att-refused.json` and no temp file.
+    `att-refused.lock`, no `att-refused.json` and no temp file - and because the refusal
+    wrote nothing, the very SAME attempt id is still creatable afterwards (the retry at
+    the end), which produces a NEW plan rather than a rewrite of a refused one.
     """
     code, accepted = cli.create(plan(repo, base, attempt_id="att-accepted"))
     assert code == 0 and accepted["created"] is True, accepted
@@ -193,12 +199,18 @@ def test_a_refused_create_adds_nothing_to_a_live_plan_directory(cli, repo, base)
     assert not (cli.store / "att-refused.json").exists(), "a refused plan must leave no plan file"
     assert not [n for n in plan_directory(cli.store) if n.endswith(".tmp")], "a refused plan must leave no temp file"
 
-    # The refused attempt is still free: the refusal wrote nothing that would make a
-    # corrected plan look like a DIFFERENT plan for an attempt that already exists.
+    # Same attempt id, now with a plan the audit accepts: a refusal wrote nothing, so
+    # the id is still free - and what lands is a NEW plan, not a rewrite of one the
+    # refused call might have left behind.
     corrected = item("edit", [{"predicate": "files_changed", "args": {"paths": ["app.py"]}}])
-    code, fixed = cli.create(plan(repo, base, [corrected]))
-    assert code == 0 and fixed["created"] is True and fixed["attempt_id"] == "att-1", fixed
-    assert plan_directory(cli.store) == sorted(before + ["att-1.json", "att-1.lock"]), plan_directory(cli.store)
+    code, fixed = cli.create(plan(repo, base, [corrected], attempt_id="att-refused"))
+    assert code == 0 and fixed["created"] is True and fixed["attempt_id"] == "att-refused", fixed
+    stored = json.loads((cli.store / "att-refused.json").read_text())
+    assert stored["plan_hash"] == fixed["plan_hash"], "the plan on disk is the one this create returned"
+    assert stored["plan"]["items"][0]["predicates"] == corrected["predicates"], \
+        "the stored plan is the corrected one, not the refused spelling"
+    assert plan_directory(cli.store) == sorted(before + ["att-refused.json", "att-refused.lock"]), \
+        plan_directory(cli.store)
 
 
 def test_a_successful_create_leaves_the_plan_file_and_its_lock_sidecar_and_nothing_else(cli, repo, base):

@@ -1,6 +1,5 @@
-# tests/unit/test_review_probe_gate_measured_20261106.py
-# NON-AUTHOR REVIEW PROBE (transient, deleted before the report is committed).
-#
+# tests/unit/test_node_gate_measured_semantics.py
+# NON-AUTHOR REVIEW PROBE, adopted into the suite (#
 # Every claim below is driven through `run_tests` -> `_run_node_checks` ->
 # `_run_node_project` -> `_apply_baseline`, i.e. the real entry. The ONLY seam
 # is `repository_executor.execute` (the process boundary where npm/pytest
@@ -136,6 +135,10 @@ def test_PROBE_no_tests_is_named_through_the_real_entry(tmp_path, monkeypatch):
     node = report["node"]
     assert {c["dir"] for c in calls} == {"web", "integrations/dsh"}
     assert node["no_tests"] == ["integrations/dsh"], node.get("no_tests")
+    # And said where a reader looks: a claim that it is "named in the summary" was
+    # once made in a commit message while the summary did not name it.
+    assert "integrations/dsh" in node["summary"] and "no test" in node["summary"], \
+        node["summary"]
     assert node["unmeasured"] == []
     assert node["skipped"] is False
     assert node["passed"] is True

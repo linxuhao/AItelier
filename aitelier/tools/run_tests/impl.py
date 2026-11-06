@@ -1000,7 +1000,13 @@ def _aggregate_node_projects(results: list[dict], not_visited: list[str]) -> dic
     node["summary"] = (f"{len(measured)} of {total} node project(s) measured"
                        + (f"; {len(unmeasured)} not measured: "
                           + "; ".join(f"{e['dir']}: {e['reason']}" for e in unmeasured)
-                          if unmeasured else ""))
+                          if unmeasured else "")
+                       # Said here as well as in the key: the previous version of
+                       # this change claimed the summary named these projects and
+                       # did not, which a reviewer caught by reading the report.
+                       + (f"; no test or spec script, so its install is not "
+                          "evidence its tests passed: " + ", ".join(no_tests)
+                          if no_tests else ""))
     return node
 
 

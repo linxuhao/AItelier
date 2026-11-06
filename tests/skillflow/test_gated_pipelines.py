@@ -71,9 +71,14 @@ def _wire_fix_tests(tmp_path, test_results):
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             (Path(out_dir) / "test_report.json").write_text(json.dumps({
                 "passed": passed, "returncode": 0 if passed else 1,
-                "summary": "ok" if passed else "FAILED", "failures": []}),
+                "summary": "ok" if passed else "FAILED", "failures": [],
+                "node_gate_complete": True}),
                 encoding="utf-8")
-        return {"written": "test_report.json", "passed": passed}
+        # The RETURN carries the verdict, as the real `run_tests` does: both
+        # configs route on it now, and a fake producer that omitted it would be
+        # modelling the fail-open shape rather than a working executor.
+        return {"written": "test_report.json", "passed": passed,
+                "node_gate_complete": True}
 
     def _repo_apply(*args, **kwargs):
         calls["repo_apply"] += 1
@@ -142,7 +147,9 @@ def test_fix_tests_never_passing_fails_bounded(tmp_path):
 # that edge points: the terminal only fails the run if the engine honours its
 # `end_conditions` entry, and a mutant that declared the terminal
 # `result: completed` was caught by nothing but a YAML-shape assertion. These
-# two drive the REAL graph so the claim is measured where it matters.
+# drive the REAL graph so the claim is measured where it matters — including
+# the fail-open case, a green report that carries NO completeness verdict at
+# all (`test_fix_tests_green_with_no_verdict_anywhere_does_not_complete`).
 
 _PARTIAL_GREEN = {
     "passed": True, "returncode": 0, "summary": "8 of 9 node project(s) measured",
@@ -158,7 +165,13 @@ _PARTIAL_RED = dict(_PARTIAL_GREEN, passed=False, returncode=1,
 def _wire_fix_tests_report(tmp_path, reports):
     """Like `_wire_fix_tests`, but each call serves a whole caller-supplied
     report, so a report shape the unit tests can construct by hand can also be
-    driven through the engine."""
+    driven through the engine.
+
+    The fake producer copies the report's own verdict onto the RETURN, exactly
+    as the real `run_tests` does — including its absence: a report with no
+    `node_gate_complete` key produces a return with no key either, which is the
+    shape `test_fix_tests_green_with_no_verdict_anywhere_does_not_complete`
+    exists to route."""
     sf, loader = _sf(tmp_path)
     calls = {"run_tests": 0, "repo_apply": 0}
     seq = list(reports)
@@ -170,7 +183,10 @@ def _wire_fix_tests_report(tmp_path, reports):
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             (Path(out_dir) / "test_report.json").write_text(
                 json.dumps(report), encoding="utf-8")
-        return {"written": "test_report.json", "passed": report["passed"]}
+        ret = {"written": "test_report.json", "passed": report["passed"]}
+        if "node_gate_complete" in report:
+            ret["node_gate_complete"] = bool(report["node_gate_complete"])
+        return ret
 
     def _repo_apply(*args, **kwargs):
         calls["repo_apply"] += 1
@@ -217,6 +233,59 @@ def test_fix_tests_keeps_the_fix_loop_when_a_partial_report_also_has_a_red(tmp_p
     assert calls["run_tests"] == 4, calls
 
 
+# ── fix_tests: an ABSENT completeness verdict must not conclude success ──
+#
+# The fail-open the change exists for, driven through the real graph: a fully
+# green report whose `node_gate_complete` is in NEITHER carrier — absent from
+# `test_report.json` and absent from the tool's return. That is the shape an
+# executor image older than the config leaves, or a report written by a
+# different producer. Until this change it matched the raw `passed: true`
+# success edge and the run ended `completed` with the node gate unmeasured.
+_ABSENT_VERDICT_GREEN = {
+    "passed": True, "returncode": 0,
+    "summary": "green; nothing said whether node projects were measured",
+    "failures": [],
+}
+
+
+def test_fix_tests_green_with_no_verdict_anywhere_does_not_complete(tmp_path):
+    sf, run_id, calls = _wire_fix_tests_report(tmp_path, [_ABSENT_VERDICT_GREEN])
+    status, runs = _drive_worker(sf, run_id, "fix", max_ticks=10)
+    run = sf.get_run(run_id)
+
+    assert status != "completed", (status, run)
+    # MEASURED, not assumed: the engine's tool-step router finds no matching
+    # edge, fails the run in the same transaction and records the reason — it
+    # does not park, retry or time out. Observed run row:
+    #   status="failed", current_node="test",
+    #   error_reason="No matching transition from 'test' with flags
+    #    {'written': 'test_report.json', 'passed': True} — test_report.json
+    #    summary: green; nothing said whether node projects were measured"
+    # (one `fix` lap, one `run_tests` call — the absence costs nothing extra).
+    assert status == "failed", status
+    assert "No matching transition" in json.dumps(run), run
+    assert "node_gate_incomplete" not in json.dumps(run), run
+    assert calls["run_tests"] == 1, calls
+    assert runs == 1, runs
+
+
+# The positive control for the case above, so the rule is not "no green run
+# completes": same producer, same graph, the ONE key present and true.
+_FULL_GREEN = {
+    "passed": True, "returncode": 0,
+    "summary": "9 of 9 node project(s) measured", "failures": [],
+    "node_gate_complete": True,
+}
+
+
+def test_fix_tests_full_green_with_the_verdict_still_reaches_done(tmp_path):
+    sf, run_id, calls = _wire_fix_tests_report(tmp_path, [_FULL_GREEN])
+    status, runs = _drive_worker(sf, run_id, "fix", max_ticks=10)
+
+    assert status == "completed", status
+    assert runs == 1 and calls["run_tests"] == 1
+
+
 # ── subagent: adversarial LLM-reviewer gate ─────────────────────────
 
 def _wire_subagent(tmp_path, verdicts, test_results=None):
@@ -240,9 +309,12 @@ def _wire_subagent(tmp_path, verdicts, test_results=None):
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             (Path(out_dir) / "test_report.json").write_text(json.dumps({
                 "passed": passed, "returncode": 0 if passed else 1,
-                "summary": "ok" if passed else "FAILED", "failures": []}),
+                "summary": "ok" if passed else "FAILED", "failures": [],
+                "node_gate_complete": True}),
                 encoding="utf-8")
-        return {"written": "test_report.json", "passed": passed}
+        # As the real tool does — and as `subagent`'s success edge requires.
+        return {"written": "test_report.json", "passed": passed,
+                "node_gate_complete": True}
 
     loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
     loader.register_dynamic_tool("run_tests", {}, _run_tests)

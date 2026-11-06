@@ -2870,6 +2870,13 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
     did -- a green result that could not be recorded is not a delivered verdict.
     The errno is kept; ENOSPC/EDQUOT here is the filesystem's own answer for the
     backend's output root.
+
+    This return deliberately does NOT carry `node_gate_complete` (see
+    `_node_gate_verdict`): it measured nothing, and `configs/fix_tests.yaml` /
+    `configs/subagent.yaml` reach their success terminal only on a POSITIVE
+    `node_gate_complete: true` with `passed: true`. A non-delivery must not be
+    able to satisfy that, and an absent key satisfies nothing -- the run stops
+    on the unmatched edge, naming the storage failure.
     """
     number = exc.errno
     exhausted = number in _STORAGE_FULL
@@ -2918,6 +2925,38 @@ def _report_write_failure(report: dict, target_dir: Path, what: str, exc: OSErro
             "returncode_observed": report.get("returncode"),
             "raw_retained": retained, **retained,
             "host_statvfs": _host_statvfs(target_dir)}
+
+
+
+def _node_gate_verdict(report: dict) -> bool:
+    """The node gate's completeness verdict, as a real boolean, for the RETURN.
+
+    `configs/fix_tests.yaml` and `configs/subagent.yaml` route on this value, so
+    it has to be present on the payload the engine merges into the step's flags
+    — not only in `test_report.json`. The reasons are the ones `repo_gate_absent`
+    already travels for, both measured:
+      * a `from_file` match is resolved by the engine against the EVALUATING
+        step's own output dir, so the edge can only work on the step that wrote
+        the file at all;
+      * the engine's `_flags_match` does `data.get(field)` on whatever the file
+        parses to, so a report parsing to a LIST raises `AttributeError:
+        'list' object has no attribute 'get'` and takes the resolver down
+        instead of routing.
+    The FILE keeps the key regardless (`aitelier/gate_evidence.py` and the tests
+    read it there); this is the routing copy, beside — never instead of — it.
+
+    Absent means "there was nothing that could be incomplete": the report is
+    given `node_gate_complete` on every path out of the node-gate block and
+    omits it only when the repository has no node section at all (a Python-only
+    repository), which must keep routing exactly as it did. So absent answers
+    True here.
+
+    That default is this TOOL's statement about a report it produced. It is NOT
+    a default the configs apply: a return that lacks the key altogether came
+    from some other producer, states nothing, and the success edge requires the
+    statement — see the transitions in `configs/fix_tests.yaml`.
+    """
+    return bool(report.get("node_gate_complete", True))
 
 
 
@@ -3026,6 +3065,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 return _report_write_failure(report, target_dir, stage, exc)
 
             return {"written": "test_report.json", "passed": False,
+                    # This path returns a report, so it answers the routing
+                    # question too. The node gate never ran here (an upstream
+                    # gate blocked the suite), which is the same shape as a
+                    # Python-only repository from the flag's point of view —
+                    # and this return's `passed: False` is what keeps such a
+                    # run out of a success terminal regardless.
+                    "node_gate_complete": _node_gate_verdict(report),
                     "passed_relative": False, "new_failures": [],
                     "baseline_state": "unavailable", "baseline_known": 0,
                     "failure_count": len(report.get("failures") or []),
@@ -3580,6 +3626,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # malformed one. `configs/coding_impl.yaml` routes on this flag;
             # core/gate_deferral.py reads the FILE for the reason.
             "repo_gate_absent": bool(report.get("repo_gate_absent")),
+            # The node gate's completeness verdict travels exactly the same way,
+            # and for the same two reasons: `configs/fix_tests.yaml` and
+            # `configs/subagent.yaml` route on it, and a `from_file` reader for
+            # it is both step-bound and crash-prone (see `_node_gate_verdict`,
+            # and the `repo_gate_absent` comment above). Present as a real
+            # boolean on every path that returns a report; absent from the
+            # non-delivery returns (`written: None`), because those measured
+            # nothing and a positive success edge must not be satisfiable by
+            # them. Both configs require `node_gate_complete: true` for success,
+            # so a return WITHOUT the key matches neither their incomplete edge
+            # nor their success edge — it dies on "No matching transition",
+            # which is the intended answer to "nobody said the gate was
+            # complete".
+            "node_gate_complete": _node_gate_verdict(report),
             # The same, for a ticket whose reds belong to no identified report.
             "repo_gate_unattributable": bool(
                 report.get("repo_gate_unattributable")),

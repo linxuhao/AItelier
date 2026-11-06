@@ -45,14 +45,24 @@ def _stub_pass(*a, **k):
 
 
 def _stub_run_tests(*a, out_dir="", **k):
-    # Write test_report.json so the tool-fed gate transition (from_file) can
-    # read the result — the real run_tests does this too.
+    # A CURRENT producer, both carriers. `configs/fix_tests.yaml` and
+    # `configs/subagent.yaml` reach their success terminal only on a POSITIVE
+    # `node_gate_complete: true` (plus `passed: true`) taken off this RETURN,
+    # and an absent key matches no edge at all — the run then fails with "No
+    # matching transition" instead of completing. So a stub that omits the
+    # verdict is not a neutral fixture: it is the old failing-open producer, and
+    # it makes `test_fix_tests` / `test_subagent` assert a completion the graph
+    # no longer performs. The real run_tests carries it on both carriers too
+    # (`_node_gate_verdict`); `test_report.json` is still written because other
+    # readers and the red-edge `from_file` match want the file.
     if out_dir:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         (Path(out_dir) / "test_report.json").write_text(
             json.dumps({"passed": True, "returncode": 0, "summary": "ok",
+                        "node_gate_complete": True,
                         "failures": []}), encoding="utf-8")
-    return {"written": "test_report.json", "passed": True}
+    return {"written": "test_report.json", "passed": True,
+            "node_gate_complete": True}
 
 
 def _stub_repo_apply(*a, **k):

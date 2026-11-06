@@ -342,3 +342,48 @@ def test_the_gate_itself_fails_when_only_the_driver_project_is_red(tmp_path, mon
                if f.startswith("node:")), red_report["failures"]
     assert {p["dir"]: p["passed"] for p in red_report["node"]["projects"]} == {
         "web": True, "integrations/dsh-driver": False}
+
+
+# ---------------------------------------------------------------- third state
+# Three defects a non-author review measured in the first multi-project
+# version, all of which made the gate look GREENER than it was: an absence no
+# consumer rendered, baseline keys that stopped being pruned for projects that
+# DID run, and a project counted as measured while running nothing.
+
+def test_an_unmeasured_project_keeps_the_run_from_reading_as_passed():
+    """The absence has to reach a consumer, not just a report key.
+
+    `report_state` routes on passed/skipped/failures and never looked at the
+    node section, so a run where one project's suite never ran came back
+    "passed" to anything that asked.
+    """
+    from aitelier.gate_evidence import report_state
+
+    green = {"passed": True, "failures": []}
+    assert report_state(green) == "passed"
+    with_absence = {"passed": True, "failures": [],
+                    "node_unmeasured": [{"dir": "integrations/dsh-driver",
+                                         "reason": "offline install refused"}]}
+    assert report_state(with_absence) == "partial", (
+        "a run that measured some projects and skipped others must not read "
+        "as a pass to a consumer that never opens report['node']")
+    # A measured red is still a red, presence or absence beside it.
+    red_with_absence = {"passed": False, "failures": ["node:web:test failed"]}
+    assert report_state(red_with_absence) != "passed"
+
+
+def test_baseline_pruning_follows_the_project_that_ran():
+    """One unmeasurable project must not stop pruning the measured ones.
+
+    `node_gate_ran` is all-or-nothing. With it false, every `node:` baseline key
+    was kept, so a node test that was fixed and then regressed again stayed
+    forgiven for as long as any project in the tree could not install.
+    """
+    subjects = rt.Executed(node_gate_ran=False, node_dirs=["web"])
+    assert subjects.ran("node:web:test") is True, (
+        "web ran, so its known-red key must be pruned when it goes green")
+    assert subjects.ran("node:integrations/dsh-driver:test") is False, (
+        "the driver project did not run; keeping its key is the whole point")
+    # Without the per-project information the old all-or-nothing answer stands.
+    assert rt.Executed(node_gate_ran=True).ran("node:test") is True
+    assert rt.Executed(node_gate_ran=False).ran("node:test") is False

@@ -134,6 +134,13 @@ def report_state(report: dict) -> str:
         return "blind"
     if status in _UNATTRIBUTABLE_STATUSES:
         return "unattributable"
+    # A node gate that measured SOME projects and could not measure others is
+    # not a pass: for every consumer that exists, an absence nobody renders is
+    # no absence at all. `passed` is honestly true there (the measured projects
+    # passed), so the report needs a state of its own rather than the word
+    # "passed". Anything that DID fail is handled below, unchanged.
+    if report.get("node_unmeasured") and raw_passed is True:
+        return "partial"
     markers = [name for name in _SKIP_MARKERS if report.get(name)]
     unrun = (report.get("unrun") is True or report.get("ran") is False
              or report.get("executed") is False or status in _UNRUN_STATUSES)

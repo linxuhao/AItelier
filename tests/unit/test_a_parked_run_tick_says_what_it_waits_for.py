@@ -25,6 +25,23 @@ pin both halves of the intended change:
 * NOT parked → the isolation failure is still reported on the tick surface, and
   no path is substituted for the run.
 
+WHAT A PARK IS, AND WHAT IT IS NOT, is pinned here because the second round of
+this investigation confused two stores. The pause is judged from THE SKILLFLOW
+RUN ROW alone — `sf.get_run(...)["status"] == "paused"`, `skillflow_runs` in
+`~/.AItelier/skillflow.db` — which is the only status the engine writes for a
+run parked at a checkpoint. `"checkpoint:<label>"` is a DIFFERENT fact in a
+DIFFERENT store: AItelier's project mirror, `runs.status` in aitelier.db, keyed
+by project id and written by `_sync_project_status_to_db`
+(`status = f"checkpoint:{label}"`) so the UI can say which checkpoint a project
+waits on. Nothing writes it into a run row (measured 2026-11-06:
+`SELECT count(*) FROM skillflow_runs WHERE status LIKE 'checkpoint:%'` = 0, and
+the two live parked runs read literally `paused`). So
+`TestTheRunRowAloneDecidesWhetherARunIsParked` pins that a project-mirror string
+— in the project row, or even in a run row — does NOT make a park: a future
+reader who "fixes" the helper by consulting the mirror store is fixing a store
+this tick never reads, and only succeeds in reporting a pause for a run whose
+own row says something else.
+
 They drive the REAL tick entry through the real poller dispatch
 (`_dispatch_detached_ticks`, which attaches `_on_detached_tick_done` — the one
 place `tick_error` is written), and the fixture's `advance_run` asks the REAL
@@ -47,6 +64,21 @@ PROJECT = "proj-parked-tick"
 RUN_ID = "parked-run-0001"
 PAUSED_SINCE = "2026-10-31 09:12:44"
 CHECKPOINT_LABEL = "Approve the task plan"
+
+# What a park is: the engine's own run status. This, and nothing else, is what
+# `_parked_checkpoint` may answer from.
+PARKED = "paused"
+
+# What a park is NOT: AItelier's project-mirror status (`_sync_project_status_to_db`
+# writes it into aitelier.db `runs`, keyed by project id). It names the same
+# checkpoint, in another store, and must not be consulted by the helper.
+PROJECT_MIRROR = f"checkpoint:{CHECKPOINT_LABEL}"
+
+# Statuses that are NOT a park either, including the derived `running:<step>`
+# form the same function writes. An unparked run must keep reaching Phase A (and
+# the isolation refusal) whatever else its status says.
+RUNNING = "running"
+RUNNING_DERIVED = "running:t_impl"
 
 
 # ── the world behind the real tick ──────────────────────────────────────────
@@ -262,12 +294,92 @@ def _matching(lines, *, outcome=None, status=None):
             and (status is None or f"status={status}" in line)]
 
 
-# ── criterion 1: a parked run is told, not raised ───────────────────────────
+# ── criterion 1a: the RUN ROW alone decides, not the project mirror ─────────
+#
+# The trap this pins: `checkpoint:<label>` names the same checkpoint as the run's
+# `paused`, but in aitelier.db's project mirror, which this helper never reads.
+# Answering from the mirror would report a pause for a run that is not parked
+# and, worse, stop reporting the missing-tree failure for one that is. Every
+# test here therefore ALSO states the mirror value it is surrounded by, so the
+# two stores cannot be quietly swapped again.
+
+class TestTheRunRowAloneDecidesWhetherARunIsParked:
+    def test_a_paused_run_row_is_a_park(self, vanish_worktree, monkeypatch):
+        """The control: the one status that is a park, asked directly."""
+        _, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED)
+
+        waiter = scheduler._parked_checkpoint(sf, RUN_ID)
+
+        assert waiter == {"step": "t_plan", "label": CHECKPOINT_LABEL,
+                          "since": PAUSED_SINCE}, waiter
+
+    async def test_the_project_mirror_status_does_not_park_the_run(
+            self, vanish_worktree, lines, clock, monkeypatch):
+        """A project at `checkpoint:<label>` with a RUNNING run is not parked.
+
+        The project row really carries the mirror string (asserted, so this test
+        fails loudly if the fixture stops writing it), and the run row really
+        says `running`. The helper must answer None, and the tick must take the
+        ordinary path — isolation failure on the tick surface, no pause line.
+        """
+        db = vanish_worktree.db
+        db.ensure_project(PROJECT, name=PROJECT)
+        db.update_project(PROJECT, status=PROJECT_MIRROR)
+        assert db.get_project(PROJECT)["status"] == PROJECT_MIRROR, (
+            "the project mirror must hold the `checkpoint:<label>` spelling for "
+            "this test to mean anything")
+
+        drive, sf = _ticks(db, monkeypatch, status=RUNNING)
+        assert scheduler._parked_checkpoint(sf, RUN_ID) is None, (
+            "the project mirror's `checkpoint:<label>` is not a run status: "
+            "answering from it reports a park for a run whose row says running")
+        assert sf.advance_calls == 0
+
+        await drive(1)
+
+        assert sf.advance_calls == 1, (
+            "an unparked run must still reach Phase A")
+        assert not _matching(lines, status="paused"), (
+            f"a run that is not parked must not be reported as a pause: {lines!r}")
+        errors = _matching(lines, outcome="tick_error")
+        assert len(errors) == 1, lines
+        assert "recorded as worktree" in errors[0], errors[0]
+
+    async def test_a_project_mirror_string_in_the_run_row_is_not_a_park(
+            self, vanish_worktree, lines, clock, monkeypatch):
+        """Even handed that string as the run's status, the helper answers None.
+
+        No producer writes `checkpoint:<label>` into a skillflow run row
+        (measured: zero such rows in the live store), so accepting it here would
+        invent one — and would silently swallow a run whose real status is
+        something else. An unknown status keeps the fail-closed default: Phase A
+        runs, the resolver refuses, and the refusal is reported.
+        """
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch,
+                           status=PROJECT_MIRROR)
+
+        assert scheduler._parked_checkpoint(sf, RUN_ID) is None
+
+        await drive(1)
+
+        assert sf.advance_calls == 1
+        assert not _matching(lines, status="paused"), lines
+        assert len(_matching(lines, outcome="tick_error")) == 1, lines
+        assert "recorded as worktree" in _matching(
+            lines, outcome="tick_error")[0]
+
+
+# ── criterion 1b: the paused row, end to end through the real tick ──────────
+#
+# Criterion 1a asks the helper directly; this class drives the same status
+# through the real dispatch/done-callback so the line production reads is pinned
+# too. Neither half may be dropped from view: `paused` must be a park, and the
+# project mirror's `checkpoint:<label>` must not be.
 
 class TestAParkedTickSaysWhatItWaitsFor:
     async def test_the_tick_returns_normally_and_names_the_pause(
             self, vanish_worktree, lines, clock, monkeypatch):
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="paused")
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED)
 
         results = await drive(1)
 
@@ -297,7 +409,7 @@ class TestAParkedTickSaysWhatItWaitsFor:
         resolutions. The direct call afterwards proves the fixture really is
         one that refuses to serve a path — nothing here made it agreeable.
         """
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="paused")
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED)
 
         await drive(1)
 
@@ -314,7 +426,7 @@ class TestAParkedTickSaysWhatItWaitsFor:
         `_parked_checkpoint`'s label scan is best-effort on purpose: an engine
         hiccup while reading the graph must not restore the raising tick.
         """
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="paused",
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED,
                            skillflow_cls=_UnreadableLabel)
 
         results = await drive(1)
@@ -331,9 +443,18 @@ class TestAParkedTickSaysWhatItWaitsFor:
 # ── criterion 2: an unparked run still fails closed ─────────────────────────
 
 class TestAnUnparkedTickStillFailsClosed:
+    """Neither a plain `running` nor the derived `running:<step>` is a park.
+
+    The derived spelling matters as much as the plain one: `_sync_project_status_to_db`
+    writes `running:<step>` for the same reason it writes `checkpoint:<label>`, so
+    a helper widened to "any derived status is a park" would swallow a live run
+    here and hide the missing-tree failure instead of reporting it.
+    """
+
+    @pytest.mark.parametrize("status", [RUNNING, RUNNING_DERIVED])
     async def test_the_isolation_failure_is_still_reported(
-            self, vanish_worktree, lines, clock, monkeypatch):
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="running")
+            self, vanish_worktree, lines, clock, monkeypatch, status):
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=status)
 
         await drive(1)
 
@@ -345,15 +466,16 @@ class TestAnUnparkedTickStillFailsClosed:
         assert not _matching(lines, status="paused"), (
             "the pause line belongs to parked runs only")
 
+    @pytest.mark.parametrize("status", [RUNNING, RUNNING_DERIVED])
     async def test_no_path_is_substituted_for_the_run(
-            self, vanish_worktree, lines, clock, monkeypatch):
+            self, vanish_worktree, lines, clock, monkeypatch, status):
         """The tick does not invent a tree for a run that owns none.
 
         The failure is reported, and nothing downstream saw a usable path: the
         resolver raised, `resolved` stayed None, and the only line written is
         the refusal itself (no `executed`, no path-bearing outcome).
         """
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="running")
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=status)
 
         await drive(1)
 
@@ -375,7 +497,7 @@ class TestAnUnparkedTickStillFailsClosed:
 class TestRepeatedParkedTicksAreBounded:
     async def test_five_parked_ticks_write_at_most_one_pause_line(
             self, vanish_worktree, lines, clock, monkeypatch):
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="paused")
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED)
 
         results = await drive(5)
 
@@ -389,7 +511,7 @@ class TestRepeatedParkedTicksAreBounded:
     async def test_a_changed_pause_is_reported_at_once(
             self, vanish_worktree, lines, clock, monkeypatch):
         """Coalescing must not hide a resume-and-re-pause behind its window."""
-        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status="paused")
+        drive, sf = _ticks(vanish_worktree.db, monkeypatch, status=PARKED)
         await drive(1)
         assert len(_matching(lines, status="paused")) == 1
 

@@ -100,39 +100,11 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
     report[RUN_FIELD] = run_id
     report["evidence_generated_at"] = generated_at
     graph_dir = Path(out_dir).parent
-
-    def stamp() -> None:
-        # BOTH answers are read from the report AS THE PRODUCER WROTE IT, and
-        # only then written back. `evidence_state` is an INPUT to both readers
-        # (it is how a producer says `not_run`, `unattributable`,
-        # `infrastructure_unavailable`) and also an OUTPUT of this stamp, so
-        # writing the first answer before asking the second question made the
-        # second answer read the annotation instead of the evidence. That is
-        # wrong in principle wherever the two can disagree — a report whose
-        # producer wrote an absence state that `report_state` RENAMES
-        # (`not_run` -> `skipped`) is such a shape — and the reordering costs
-        # nothing, so the hazard is removed rather than reasoned about.
-        #
-        # This is a latent ordering defect, NOT a measured release: no report
-        # was observed being released on it, and for the shapes this node is
-        # about it was masked entirely, because `release_disposition` used to
-        # answer `unresolved` on the provisional marker alone.
-        #
-        # It does NOT close the other half of the hazard, and nothing here
-        # should claim to: whoever reads the stamped FILE later (the audit)
-        # still sees this annotation rather than the producer's own word. That
-        # is exactly why the provisional classification asks the producer's own
-        # red witness (`_provisional_red_is_measured`) and never re-derives
-        # "was this red measured?" from the state vocabulary of the file.
-        state = report_state(report)
-        disposition = release_disposition(report)
-        report["evidence_state"] = state
-        report["release_evidence"] = disposition
-
     if start_cycle:
         cycle = f"{run_id}:{uuid4().hex}"
         report[CYCLE_FIELD] = cycle
-        stamp()
+        report["evidence_state"] = report_state(report)
+        report["release_evidence"] = release_disposition(report)
         _write_cycle_manifest(graph_dir, run_id=run_id, cycle=cycle,
                               generated_at=generated_at)
         return report
@@ -148,7 +120,8 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
         report["passed"] = False
         report["skipped_because"] = "evidence_cycle_missing"
         report["evidence_stamp_error"] = f"{_manifest_path(graph_dir)}: {exc}"
-    stamp()
+    report["evidence_state"] = report_state(report)
+    report["release_evidence"] = release_disposition(report)
     return report
 
 
@@ -255,6 +228,24 @@ def _provisional_red_is_measured(report: dict) -> bool:
     rest of the shape. It survives every later branch, and it survives
     `stamp_report`, which is why the classification no longer cares what
     `evidence_state` says.
+
+    WHAT THIS DOES AND DOES NOT CLOSE. It closes the ABSENCE-CHARGED-AS-A-
+    FAILURE hole for this marker, and it does so without touching the stamp:
+    this function reads no state vocabulary at all, so whether `stamp_report`
+    writes `partial` over a producer's `not_run`, `unattributable` or
+    `infrastructure_unavailable` cannot change the answer it gives. Nothing
+    else about the stamp moved with this change.
+
+    The stamp's own pre-existing hazard is therefore STILL THERE and is
+    deliberately NOT fixed here: it renames a producer's `not_run` to `skipped`,
+    after which a LATER READER OF THE FILE (`audit_evidence`) calls the report
+    `failed` and a release reads `known_failure` for an absence. Measured on a
+    NON-provisional report `run_tests` really produces (pytest green, repository
+    gate unmeasured): stamped `skipped`/`known_failure`, then re-read
+    `failed`/`known_failure`. That is recorded as issue
+    `iss-b161216de6a14a81` and belongs to whoever takes the stamp's ordering;
+    fixing it here would change a stored release answer for a shape that has
+    nothing to do with the provisional marker.
     """
     if (report.get("passed", report.get("all_passed")) is not False
             or report.get("purpose") != PROVISIONAL_PURPOSE

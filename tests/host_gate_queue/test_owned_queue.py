@@ -1,6 +1,8 @@
 """Twenty-two finite accepted vectors, actual CLI/client/HTTP and owned children.
 
-UNRUN by the Source author. No skip, in-process client stub, engine or live State.
+UNRUN by the Source author. No skip when the CLI venv capability is present (an absent
+GATE_QUEUE_TEST_VENV_PYTHON skips with its named requirement); no in-process client stub,
+engine or live State.
 The only function wrapper is the pipe barrier around the real daemon admission.
 """
 from __future__ import annotations

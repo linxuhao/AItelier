@@ -335,7 +335,7 @@ steps:
       #   * configs/fix_tests.yaml:113 / :129 and configs/subagent.yaml:125 /
       #     :139 — the same refusal and a POSITIVE success edge. Unchanged.
       #   * configs/coding_impl.yaml `test_evidence` inline_schema
-      #     (:411-414) `node: {skipped: {const: false}}` — a config-side reader of
+      #     (:422-425) `node: {skipped: {const: false}}` — a config-side reader of
       #     `node["skipped"]`: a report whose node gate was skipped is refused as
       #     evidence. LOSES a case it used to be the only defence for (the
       #     partial green now stops here first); GAINS nothing. Left as it is on

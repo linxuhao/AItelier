@@ -102,7 +102,7 @@
 #                                     tests/skillflow/test_coding_impl_gate.py's
 #                                     scripted producer returns today). That is a
 #                                     separate fail-open card for this config.
-#     coding_impl.yaml:411-414 `test_evidence` `node: {skipped: {const: false}}`
+#     coding_impl.yaml:422-425 `test_evidence` `node: {skipped: {const: false}}`
 #                                     — a config-side reader of `node["skipped"]`:
 #                                     a node gate that skipped is refused as
 #                                     evidence. Left untouched (see D2); it loses

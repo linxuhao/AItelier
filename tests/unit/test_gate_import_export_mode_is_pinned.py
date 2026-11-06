@@ -97,6 +97,56 @@ def _simple_commands(command: str) -> list[list[str]]:
     return commands
 
 
+def _is_recursive(flags: list[str]) -> bool:
+    """True for `-R`, `--recursive`, and every combined short flag that carries R.
+
+    `chmod -Rf 0755 <dir>` is as recursive as `chmod -R 0755 <dir>`: GNU chmod reads
+    a short-flag cluster letter by letter. Matching the literal word `-R` read the
+    combined spelling as NON-recursive, which left `chmod -Rf 0755
+    /opt/aitelier-gate-imports` green while it took godot_harness.py to 0755 (found
+    by the non-author review of the first version of this test, and reproduced).
+    `-r` is kept as recursive even though GNU reads it as "remove read": the guard
+    fails closed where it is unsure.
+    """
+    for flag in flags:
+        if flag == "--recursive":
+            return True
+        if flag == "-r":
+            return True
+        if flag.startswith("-") and not flag.startswith("--") and "R" in flag[1:]:
+            return True
+    return False
+
+
+def _unparsed_mode_instructions(text: str) -> list[str]:
+    """RUN commands that set a mode in a shape this file cannot read.
+
+    A guard that only checks the spellings it happens to recognise is a list, not
+    an invariant: `sh -c 'chmod -R 0755 ...'`, `find ... -exec chmod 0777 ... {} +`,
+    `xargs chmod`, and a heredoc RUN body all widen the export tree while every
+    assertion above stays quiet. So an instruction that names `chmod` but is not a
+    plain `chmod` simple command is refused instead of skipped - fail closed, and
+    say which instruction it was.
+    """
+    offenders: list[str] = []
+    for command in _run_commands(text):
+        if "<<" in command:             # a heredoc body is not in the collected text
+            offenders.append(f"a RUN opens a heredoc, whose body this file never reads: {command}")
+            continue
+        for words in _simple_commands(command):
+            while words and words[0].startswith("--"):
+                words = words[1:]
+            if not words:
+                continue
+            if words[0].rsplit("/", 1)[-1] == "chmod":
+                continue
+            if "chmod" in " ".join(words):
+                offenders.append(
+                    "a RUN changes a mode in a shape this file cannot read, so it cannot "
+                    f"be shown to leave the pinned paths alone: {' '.join(words)}")
+    return offenders
+
+
 def _canonical_mode(token: str) -> str | None:
     """`0755`, `755`, `00755` -> `0755`; a symbolic mode (`u+rwx`) -> None."""
     if not token or not set(token) <= set("01234567"):
@@ -119,16 +169,20 @@ def _mode_changes(text: str) -> list[_ModeChange]:
     changes: list[_ModeChange] = []
     for command in _run_commands(text):
         for words in _simple_commands(command):
+            while words and words[0].startswith("--"):
+                # `RUN --mount=... chmod ...`: RUN options are not part of the shell
+                # command, so the head word of the instruction is behind them.
+                words = words[1:]
             if not words:
                 continue
-            if words[0] == "chmod":
+            if words[0].rsplit("/", 1)[-1] == "chmod":   # `/bin/chmod` sets a mode too
                 flags = [word for word in words[1:] if word.startswith("-")]
                 operands = [word for word in words[1:] if not word.startswith("-")]
                 if len(operands) < 2:       # a mode with no path sets nothing
                     continue
                 changes.append(_ModeChange(
                     "chmod", _canonical_mode(operands[0]), tuple(operands[1:]),
-                    any(flag in ("-R", "--recursive", "-r") for flag in flags)))
+                    _is_recursive(flags)))
             elif words[0] == "install":
                 mode = None
                 paths: list[str] = []
@@ -228,6 +282,8 @@ def test_the_import_tree_is_searchable_and_not_only_the_file():
                         f"`{change.command}` names {named} under {EXPORT}, which is not one of the "
                         "pinned paths: a parent directory or a glob there can change the client's "
                         "mode without naming it. Pin the five paths themselves.")
+
+    problems.extend(_unparsed_mode_instructions(text))
 
     for command in _run_commands(text):
         if "godot_harness.py" in command:

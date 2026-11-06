@@ -1,4 +1,11 @@
-"""A long tool operation survives controller loss without concurrent replay."""
+"""A long tool operation survives controller loss without concurrent replay.
+
+The two launcher-dependent vectors need an owned normal host CPU launcher and a
+fixture State DB. An absent capability skips with its exact requirement (shown by
+``-rs``) before the fixture creates anything on disk. A skip is not a pass: it
+records that nothing ran. There is still no fallback to a fake launcher or a stub
+State DB, and a supplied capability that then fails still fails.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +29,19 @@ from core.skillflow_host import AItelierSkillFlow
 
 _ROOT = Path(__file__).resolve().parents[2]
 
+# The facility these two vectors need, in this file's own words, followed by the
+# exact variables that supply it. A missing capability skips with this message
+# (visible under -rs) instead of failing, and skips before anything is created.
+LAUNCHER_VARIABLES = (
+    "AITELIER_HOST_LAUNCHER_SOCKET",
+    "AITELIER_TEST_LAUNCHER_STATE_DB",
+    "AITELIER_TEST_LAUNCHER_HOME",
+    "AITELIER_TEST_LAUNCHER_PROJECT_ID",
+)
+LAUNCHER_REQUIREMENT = (
+    "owned normal host CPU launcher and fixture State DB required: set "
+    + ", ".join(LAUNCHER_VARIABLES))
+
 
 @pytest.fixture
 def owned_cpu_binding(monkeypatch):
@@ -29,16 +49,23 @@ def owned_cpu_binding(monkeypatch):
 
     The evaluator provides a dedicated State DB and host launcher socket, and
     mounts fixture paths identically in the host and disposable pytest caller.
-    Missing infrastructure stays an explicit failure; there is no fallback.
+    When they are absent the capability is absent, so the vector skips with
+    LAUNCHER_REQUIREMENT before this fixture touches the disk; a skip is not a
+    pass. When they are supplied the binding is real, and there is still no
+    fallback to a fake launcher or a stub State DB: a supplied-but-broken
+    fixture fails rather than skipping.
     """
-    from core import datadir
-    socket_path = os.environ.get("AITELIER_HOST_LAUNCHER_SOCKET")
-    state_db = os.environ.get("AITELIER_TEST_LAUNCHER_STATE_DB")
-    test_home = os.environ.get("AITELIER_TEST_LAUNCHER_HOME")
-    project_id = os.environ.get("AITELIER_TEST_LAUNCHER_PROJECT_ID")
-    if not socket_path or not state_db or not test_home or not project_id:
-        pytest.fail("owned normal host CPU launcher and fixture State DB required")
+    missing = [name for name in LAUNCHER_VARIABLES if not os.environ.get(name)]
+    if missing:
+        pytest.skip(f"{LAUNCHER_REQUIREMENT} (missing: {', '.join(missing)})")
 
+    from core import datadir
+    # The launcher socket is consumed by the real run_tests transport below, not
+    # by this fixture; reading it here keeps all four preconditions in one place.
+    socket_path = os.environ["AITELIER_HOST_LAUNCHER_SOCKET"]
+    state_db = os.environ["AITELIER_TEST_LAUNCHER_STATE_DB"]
+    test_home = os.environ["AITELIER_TEST_LAUNCHER_HOME"]
+    project_id = os.environ["AITELIER_TEST_LAUNCHER_PROJECT_ID"]
     monkeypatch.setenv("AITELIER_HOME", test_home)
 
     def bind(run_id, repo):

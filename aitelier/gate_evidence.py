@@ -41,6 +41,11 @@ ABSENCE_CAPPED = "capped"                      # past NODE_PROJECT_CAP, no decla
 ABSENCE_UNDECLARED = "undeclared"             # the repo declared a set; this was not in it
 ABSENCE_DECLARATION = "declaration"           # the repo's own declaration is unusable
 ABSENCE_UNREADABLE = "unreadable"             # package.json/lockfile not a plain file
+# Reserved: nothing emits this today. An install or fetch that fails is a
+# MEASURED red today (`_run_node_project` returns it as a failed check), so this
+# word exists for the producer that learns to tell "this cache cannot satisfy
+# this lockfile" from "this project is broken" — that difference should park a
+# run, not charge the implementer.
 ABSENCE_UNPROVISIONABLE = "unprovisionable"   # install/fetch cannot be satisfied here
 ABSENCE_ISOLATION = "isolation"               # the executor refused (or lost) isolation
 ABSENCE_TICKET = "ticket"                     # run-owned ticket/snapshot not prepared
@@ -188,9 +193,9 @@ def release_disposition(report: dict) -> str:
     2026-11-06, `design.gate-absence-has-a-disposition-20261106`).
 
     Three states exist and stay apart: every project measured and green
-    (`passed`), a measured project failed (`failed`, which wins below and always
-    did), and some project not measured (`partial` — `report_state` refuses to
-    call that "passed" for exactly this reason).
+    (`passed`), a measured project failed (`failed`, decided below), and some
+    project not measured (`partial` — `report_state` refuses to call that
+    "passed" for exactly this reason).
 
     THE DECISION: a partial gate stays `unresolved`. It parks, and it parks at
     the human checkpoint. That is not a compromise forced by caution; releasing
@@ -231,9 +236,18 @@ def release_disposition(report: dict) -> str:
     Two properties are restated here because both are load-bearing and both are
     preserved by this decision: an absence never reads as a pass to any
     consumer (this function returns "unresolved", never "passed"), and a
-    measured red still fails beside it (`partial` is reachable only when
-    `passed` is honestly True, so a failed project routes as `failed` before
-    this branch is consulted).
+    measured red is not softened beside it (`partial` is reachable only when
+    `passed` is honestly True, so a failed project arrives here as `failed`).
+
+    What "not softened" means exactly, because an earlier version of this
+    paragraph overstated it and a reviewer measured the difference: `failed`
+    and `known_failure` are both in `_KNOWN_FAILURE_STATES`, so a red leaves
+    this function as `known_failure`, which is the value the pipelines route to
+    their repair/replanning steps. It never becomes `passed`, and it never
+    becomes `unresolved` on the strength of an absence beside it. The naming
+    conflates "a failure we know about" with "a failure that was already
+    there" — a separate, inherited defect, recorded rather than renamed here,
+    because renaming a release value is a contract change of its own.
     """
     if report.get("purpose") == "provisional_round_feedback":
         return "unresolved"

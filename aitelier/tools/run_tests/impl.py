@@ -1053,9 +1053,10 @@ def unmeasured_entry(directory: str, reason: str, *,
     """A project entry that says, plainly, that nothing was measured for it.
 
     Same shape `_run_node_project` returns from its own `unmeasured()` closure: an
-    absence is not a red, and an absence must never be read as a pass. `kind` is
-    what `release_disposition` routes on — the prose in `reason` is for people,
-    and a disposition that parsed it would change when someone rewrote it.
+    absence is not a red, and an absence must never be read as a pass. `kind`
+    says WHY, so no reader has to parse the prose beside it and so the report
+    can name the one edit that removes the absence; it deliberately does not
+    change the disposition (see `aitelier.gate_evidence.release_disposition`).
     """
     return {"dir": directory, "passed": True, "skipped": True,
             "checks": {}, "unmeasured_reason": reason, "kind": kind,

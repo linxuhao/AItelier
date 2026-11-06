@@ -221,3 +221,19 @@ def test_a_measured_red_still_fails_beside_an_absence(tmp_path, monkeypatch):
     assert report_state(report) != "passed", report_state(report)
     assert release_disposition(report) != "partial", release_disposition(report)
     assert [e["dir"] for e in report["node_unmeasured"]] == [order[8]]
+
+
+def test_a_declaration_that_is_not_json_is_reported_not_obeyed(tmp_path, monkeypatch):
+    """A file that cannot be parsed is refused like any other unusable
+    declaration, and the run still measures what inference finds. The
+    parametrized cases above cover shape; this one covers bytes."""
+    repo = tmp_path / "repo"
+    order = _nine(repo)
+    (repo / "node_projects.json").write_text('{"projects": ["web",')
+
+    result, report = _run(tmp_path, monkeypatch, repo)
+
+    assert report["node"]["measured_dirs"] == order[:8]
+    entry = next(e for e in report["node_unmeasured"] if e["kind"] == "declaration")
+    assert "not readable JSON" in entry["reason"], entry["reason"]
+    assert report_state(report) == "partial", report_state(report)

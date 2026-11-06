@@ -182,8 +182,9 @@ def restate_classification(report: dict, *, create: bool) -> None:
       `"evidence_state": "infrastructure_unavailable"` on the return payload
       for a report that could not be written at all;
     * `upstream_failed_report` in this module — it asks
-      `release_disposition` of a fresh one-key dict (`passed: False` plus the
-      upstream's state) in order to build a NEW producer report;
+      `release_disposition` of a dict it builds fresh, carrying `passed: False`
+      and the upstream's state (two keys), in order to build a NEW producer
+      report;
     * `aitelier/tools/godot_compile/impl.py:382` and `:401` — the
       upstream-blocked return carries `release_disposition(compile_report)`,
       and the stamped path folds the two per-report dispositions (`:399`)
@@ -193,8 +194,9 @@ def restate_classification(report: dict, *, create: bool) -> None:
     * `round_feedback` (`aitelier/round_feedback.py:210`) and the playtest
       fallback (`aitelier/tools/godot_playtest/impl.py:797`) write constant
       producer labels — `"release_disposition": "unresolved"`,
-      `"evidence_state": "partial"` — on a report they are CREATING, before
-      anything stamps it.
+      `"evidence_state": "partial"` — on a report they AUTHOR: they are its
+      producer, so those words are a first answer and never a restatement of
+      an earlier producer's.
 
     None of those is the defect this function exists for, and the reason is
     one reason: they put a disposition on a RETURNED result, or a constant
@@ -203,15 +205,27 @@ def restate_classification(report: dict, *, create: bool) -> None:
     producer said `not_run` (green pytest leg, repository gate unmeasured),
     the stamp replaced that with `skipped`, and every later reader answered
     `failed` / `known_failure`. Such a report never passes through any writer
-    above: they either return a dict without writing a report, or write a
-    report whose every label they authored themselves, which is stamped
-    afterwards. The audited evidence is the FILE (`_audit_one` and
+    above: they either return a dict without writing a report, or they AUTHOR
+    the report they write — every label on it is one they supplied — so
+    nothing there is an earlier producer's word to preserve or overwrite.
+    (`round_feedback` stamps the report it built before writing it; the
+    playtest fallback writes and returns with no stamp at all. Neither
+    restates.) The audited evidence is the FILE (`_audit_one` and
     `first_upstream_blocker` read files), so a returned disposition is never
     re-derived as evidence and cannot disagree with a file it never came from.
     Producers that write their own `evidence_state` —
     `run_tests/impl.py:3407` (`unattributable`) and `:3442` (`not_run`),
     `docker/godot/godot_harness.py:1209` (`infrastructure_unavailable`) — are
-    writing the word this rule PRESERVES, not deriving one.
+    writing the word this rule PRESERVES, not deriving one. Also outside this
+    inventory's subject: the constant
+    `evidence_state: "infrastructure_unavailable"` written by
+    `run_tests/impl.py`'s toolchain (`:529`), storage (`:2820`), executor
+    (`:3271`) and node-infrastructure (`:3346`) branches and by
+    `godot_compile/impl.py`'s `_refuse_incomplete_pass` (`:223`) and its
+    builder-unreachable branch (`:275`), plus the copy of the report's own
+    `evidence_state` that `run_tests`'s main return (`:3614`) puts on the
+    returned flags. None of them classifies a report, so none is a
+    derived-answer writer and none is in this inventory.
 
     `create` says whether a field the report does not already carry may be
     added. The stamp passes `create=True` and writes both. A writer that only

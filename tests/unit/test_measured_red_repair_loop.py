@@ -368,9 +368,81 @@ PROTECTED BOUNDARIES — all four were checked against this diff and NONE is wea
 
 TEST CONSUMERS — the tests whose assertions would break if one of these fields changed.
 They are not production readers; they are the WITNESS a later reader runs instead of
-re-deriving this map, so each is named with the field it reads. Re-derive a wider set with
-`grep -rln '<field>' tests/` — that sweep returns more than this list, because most
-absence tests drive `run_tests` end to end instead of reading one field by name.
+re-deriving this map, so each is named with the field it reads. Below is the map
+GENERATED from the tree, one sweep per unambiguous key (`grep -rl --include=*.py <key>
+tests/`, from the repository root), each module tagged with the keys it names: 41 modules,
+repo_gate_absent 17 / evidence_state 16 / release_evidence 23 /
+node_gate_complete 6, overlapping. The counts are here so a later reader can
+tell whether the tree has moved under this list. A module that drives `run_tests` end to
+end and never names a key is not here by construction - that class is what the earlier
+four-module edition of this paragraph missed, and why this list is now the output of a
+command instead of a reading.
+
+    tests/integration/test_full_pipeline_real_runner.py                 release_evidence
+    tests/integration/test_new_pipelines_mocked_agent.py                node_gate_complete
+    tests/skillflow/test_coding_impl_absence_needs_nothing_else_red.py  repo_gate_absent, evidence_state
+    tests/skillflow/test_coding_impl_gate.py                            repo_gate_absent, skipped x4
+    tests/skillflow/test_coding_impl_gate_absence.py                    repo_gate_absent
+    tests/skillflow/test_config_loading.py                              repo_gate_absent, node_gate_complete
+    tests/skillflow/test_gated_pipelines.py                             node_gate_complete
+    tests/unit/test_absence_survives_the_stamp.py                       repo_gate_absent, evidence_state, release_evidence, skipped x2
+    tests/unit/test_addon_registry.py                                   release_evidence, skipped x1
+    tests/unit/test_baseline_write_failure_keeps_absence.py             repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_coding_impl_node_gate_partial.py                    evidence_state, release_evidence, node_gate_complete, skipped x18
+    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py     release_evidence, skipped x1
+    tests/unit/test_dpe_test_caller_budget.py                           release_evidence
+    tests/unit/test_gate_consumer_composition.py                        repo_gate_absent, release_evidence
+    tests/unit/test_gate_deferral_execution_points.py                   repo_gate_absent
+    tests/unit/test_gate_deferral_is_accounted.py                       repo_gate_absent
+    tests/unit/test_gate_deferral_reads_the_run.py                      repo_gate_absent
+    tests/unit/test_godot_compile_phase_evidence.py                     evidence_state
+    tests/unit/test_harness_render_queue.py                             release_evidence
+    tests/unit/test_node_gate_complete_return.py                        node_gate_complete
+    tests/unit/test_normal_gate_binding_matches_engine.py               release_evidence
+    tests/unit/test_partial_gate_cannot_reach_done.py                   node_gate_complete, skipped x1
+    tests/unit/test_provisional_round_cannot_conclude_success.py        repo_gate_absent, release_evidence, skipped x2
+    tests/unit/test_release_fail_fast.py                                evidence_state, release_evidence, skipped x2
+    tests/unit/test_repo_gate_admission.py                              repo_gate_absent, evidence_state, release_evidence
+    tests/unit/test_repo_gate_early_contract_red.py                     repo_gate_absent, evidence_state, release_evidence, skipped x6
+    tests/unit/test_repo_gate_outcome_table.py                          repo_gate_absent, release_evidence, skipped x2
+    tests/unit/test_repo_gate_red_beats_absence.py                      repo_gate_absent, evidence_state
+    tests/unit/test_round_feedback.py                                   release_evidence
+    tests/unit/test_run_tests_delivery_truthfulness.py                  evidence_state, release_evidence
+    tests/unit/test_run_tests_gate.py                                   evidence_state, skipped x4
+    tests/unit/test_run_tests_node_multi_project.py                     evidence_state, skipped x9
+    tests/unit/test_run_tests_pytest_wall.py                            evidence_state, release_evidence
+    tests/unit/test_run_tests_required_async_plugin.py                  evidence_state
+    tests/unit/test_run_tests_storage_boundaries.py                     evidence_state, release_evidence, skipped x1
+    tests/unit/test_run_tests_storage_exhaustion.py                     evidence_state, release_evidence, skipped x3
+    tests/unit/test_run_tests_storage_namespace.py                      release_evidence, skipped x1
+    tests/unit/test_run_tests_unmeasured_declaration.py                 repo_gate_absent
+    tests/unit/test_scoped_gate.py                                      release_evidence
+    tests/unit/test_tree_level_accounting_witnesses.py                  repo_gate_absent
+    tests/unit/test_vision_handoff.py                                   release_evidence
+
+  `skipped` is deliberately NOT a column above: the word is overloaded (pytest's own skip
+  outcome, other tables' keys), so `grep -rl skipped tests/` answers 50 modules and not
+  "who reads this report's `skipped`". The modules above that ALSO carry the word are
+  the ones where it sits in a `run_tests` report context: 15 of the 41 -
+    tests/skillflow/test_coding_impl_gate.py
+    tests/unit/test_absence_survives_the_stamp.py
+    tests/unit/test_addon_registry.py
+    tests/unit/test_coding_impl_node_gate_partial.py
+    tests/unit/test_dpe_refusal_boundaries/test_measured_failure.py
+    tests/unit/test_partial_gate_cannot_reach_done.py
+    tests/unit/test_provisional_round_cannot_conclude_success.py
+    tests/unit/test_release_fail_fast.py
+    tests/unit/test_repo_gate_early_contract_red.py
+    tests/unit/test_repo_gate_outcome_table.py
+    tests/unit/test_run_tests_gate.py
+    tests/unit/test_run_tests_node_multi_project.py
+    tests/unit/test_run_tests_storage_boundaries.py
+    tests/unit/test_run_tests_storage_exhaustion.py
+    tests/unit/test_run_tests_storage_namespace.py
+  Beside them the production readers are the ones named in the block above (impl.py's
+  absence path writes `skipped: true`; the `test_evidence` and `test_outcome` inline
+  schemas pin `skipped: {const: false}`), and this module itself, which reads it off the
+  producer's own reports.
   * tests/unit/test_node_gate_complete_return.py
     `test_return_and_file_both_say_incomplete_for_the_measured_partial_shape` — reads
     `node_gate_complete` on BOTH carriers of ONE report: the `run_tests` RETURN
@@ -393,10 +465,10 @@ absence tests drive `run_tests` end to end instead of reading one field by name.
     False`: it fails if the nothing-measured path stops setting `node.skipped`, the key
     this diff's second branch requires.
   * tests/unit/test_baseline_write_failure_keeps_absence.py
-    `test_an_absence_whose_baseline_cannot_be_written_stays_an_absence` — reads three of
-    these fields off the report AND off the return: `repo_gate_absent` (`is True`),
-    `evidence_state` (`== "not_run"`: the producer's word survived the restatement) and
-    `release_evidence` (`== "unresolved"`, on `report` and on `result`), and then asks
+    `test_an_absence_whose_baseline_cannot_be_written_stays_an_absence` — reads two of
+    these fields off the REPORT only (`repo_gate_absent` `is True`; `evidence_state`
+    `== "not_run"`, the producer's word survived the restatement) and `release_evidence`
+    off BOTH carriers (`== "unresolved"`, on `report` and on `result`), and then asks
     `report_state` / `release_disposition` for their answer on the FILE and on a JSON
     round-trip of it. It fails if `_write_state` stops keeping the producer's absence
     word, or if `restate_classification` starts inventing a disposition the report never

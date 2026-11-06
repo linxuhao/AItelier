@@ -80,8 +80,21 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None,
                 encoding="utf-8")
         # Deliberately optimistic return: artifact validation must be decisive.
         passed = outcome if isinstance(outcome, bool) else True
+        # The RETURN carries the completeness verdict, as the real `run_tests`
+        # does (`_node_gate_verdict`): `configs/coding_impl.yaml`'s success
+        # `written` edge requires `node_gate_complete: true`, and a fake producer
+        # that omitted it would be modelling the fail-open shape (a stale
+        # producer's return) rather than a working executor — every green case
+        # here would then land on `test_evidence_missing`. It is a CONSTANT
+        # because these reports are hand-made SHAPE fixtures for the validators
+        # below: the node verdict is not what this file exercises (that is
+        # tests/unit/test_coding_impl_node_gate_partial.py and
+        # tests/unit/test_partial_gate_cannot_reach_done.py, both on the real
+        # tool), and computing it here would route the `node.skipped: true` shape
+        # past the schema this table exists to drive.
         return tool_result if tool_result is not None else {
-            "written": "test_report.json", "passed": passed}
+            "written": "test_report.json", "passed": passed,
+            "node_gate_complete": True}
 
     def _repo_apply(*args, **kwargs):
         calls["repo_apply"] += 1

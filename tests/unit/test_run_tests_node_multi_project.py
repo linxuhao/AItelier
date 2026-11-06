@@ -379,7 +379,7 @@ def test_baseline_pruning_follows_the_project_that_ran():
     was kept, so a node test that was fixed and then regressed again stayed
     forgiven for as long as any project in the tree could not install.
     """
-    subjects = rt.Executed(node_gate_ran=False, node_dirs=["web"])
+    subjects = rt.Executed(node_gate_ran=False, node_ran=["web:install", "web:test"])
     assert subjects.ran("node:web:test") is True, (
         "web ran, so its known-red key must be pruned when it goes green")
     assert subjects.ran("node:integrations/dsh-driver:test") is False, (
@@ -387,3 +387,35 @@ def test_baseline_pruning_follows_the_project_that_ran():
     # Without the per-project information the old all-or-nothing answer stands.
     assert rt.Executed(node_gate_ran=True).ran("node:test") is True
     assert rt.Executed(node_gate_ran=False).ran("node:test") is False
+    # Directory granularity was not enough: an install failure means build and
+    # test never ran, so their known-red keys must be KEPT.
+    install_only = rt.Executed(node_gate_ran=False, node_ran=["web:install"])
+    assert install_only.ran("node:web:install") is True
+    assert install_only.ran("node:web:test") is False, (
+        "pruning a key for a check that never ran blames the next round for a "
+        "red it did not cause")
+
+
+def test_a_project_with_no_test_script_is_named_not_counted_as_evidence():
+    """`integrations/dsh` has a package.json and no scripts.
+
+    It is measured and green with nothing but its install check, which is not
+    evidence that its tests passed. It must not be silent, and it must not be
+    called unmeasured either - nothing was withheld, there is nothing to run,
+    and an absence parks every run of this repository behind a human.
+    """
+    results = [
+        {"dir": "web", "passed": True,
+         "checks": {"install": {"passed": True}, "test": {"passed": True}}},
+        {"dir": "integrations/dsh", "passed": True,
+         "checks": {"install": {"passed": True}}},
+    ]
+    node = rt._aggregate_node_projects(results, [])
+    assert node["no_tests"] == ["integrations/dsh"], (
+        "a project measured with no test-like check must be named")
+    assert node["unmeasured"] == [], (
+        "nothing was withheld from a project that declares no tests")
+    # Its install IS a real measurement and belongs in checks; what it must
+    # not do is stand in for a test run it never had.
+    assert set(node["checks"]) == {"web:install", "web:test",
+                                   "integrations/dsh:install"}

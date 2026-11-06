@@ -1359,7 +1359,11 @@ class AIGateway:
                 headers[ua_key] = ua
             else:
                 headers.pop(ua_key, None)
-        if self.provider == "opencodego":
+        # Also matched on the endpoint: a second OpenCode Go account is
+        # registered under its own name (opencodego2, ...) and needs the same
+        # session routing.
+        if (self.provider == "opencodego"
+                or (self.api_base or "").startswith("https://opencode.ai/zen/go/")):
             headers["x-opencode-session"] = self._opencode_session_id
             headers[ua_key] = agent + (" " + ua if ua else "")
         if headers:

@@ -1,0 +1,7 @@
+{
+  "projects": [
+    "web",
+    "integrations/dsh",
+    "integrations/dsh-driver"
+  ]
+}

@@ -17,6 +17,8 @@ import time
 
 import pytest
 
+import conftest
+
 
 SOURCE = Path(os.environ.get(
     "GATE_QUEUE_SOURCE", Path(__file__).resolve().parents[2] / "scripts/gate_queue.py"
@@ -362,3 +364,27 @@ def test_corrupt_cancelled_preimage_is_refused_without_replacing_history(queue, 
     original = path.read_bytes()
     queue.cancel(ticket, rc=5)
     assert path.read_bytes() == original
+
+
+def test_client_probe_rejects_a_namespace_package_named_httpx(tmp_path):
+    """An empty directory named httpx imports as a namespace package (__file__ None).
+
+    The probe must refuse it. Both sides run with -S, so site-packages is not on
+    sys.path and the cwd entry is the only candidate: that is the carrier of the
+    defect. (Without -S, this image's real httpx in site-packages shadows the
+    directory and the probe would pass for the wrong reason.) cwd matters because
+    `-c` puts the working directory first on sys.path. The positive control is a
+    regular package with __init__.py, run with the same flags, which must pass.
+    """
+    env = conftest._probe_environment()
+    (tmp_path / "httpx").mkdir()
+    negative = subprocess.run([sys.executable, "-S", "-c", conftest.PROBE],
+                              cwd=tmp_path, env=env, capture_output=True, timeout=TIMEOUT)
+    assert negative.returncode != 0, negative
+
+    positive_dir = tmp_path / "control"
+    (positive_dir / "httpx").mkdir(parents=True)
+    (positive_dir / "httpx" / "__init__.py").write_text("")
+    positive = subprocess.run([sys.executable, "-S", "-c", conftest.PROBE],
+                              cwd=positive_dir, env=env, capture_output=True, timeout=TIMEOUT)
+    assert positive.returncode == 0, positive

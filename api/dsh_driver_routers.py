@@ -1,4 +1,5 @@
 """Managed DSH drivers: existing State reader/writer authentication applies."""
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -292,7 +293,19 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         # Persisted here, where the endpoint was chosen, and with the concrete
         # model that answered (`active_model` is the same value returned as
         # `served_by`): the child's own session file only keeps the route alias.
-        runtime.record_model_call(project_id, body.session_id, route=route,
-                                  served_by=gateway.active_model)
+        # BEST-EFFORT: the model has already answered and the turn is already
+        # paid for, so a bookkeeping write that fails (a locked SQLite file past
+        # the busy timeout, a read-only or full disk) must not turn an answer
+        # the driver is owed into a 500. `Exception`, not `BaseException`: a
+        # cancellation still propagates. The failure is reported, not swallowed
+        # - an unrecorded turn has to be visible to an operator.
+        try:
+            runtime.record_model_call(project_id, body.session_id, route=route,
+                                      served_by=gateway.active_model)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "dsh driver: could not record the answering model for project %s "
+                "session %s (%s: %s) - the turn is served unrecorded",
+                project_id, body.session_id, type(exc).__name__, exc)
         return {"text": turn.text, "tool_calls": turn.tool_calls, "reasoning_content": turn.reasoning_content,
                 "truncated": turn.truncated, "usage": gateway.last_usage, "served_by": gateway.active_model}

@@ -27,6 +27,25 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+-- Which model actually answered each driver session. The completion endpoint
+-- chose the endpoint (gateway.active_model) and then kept nothing: the child's
+-- own session file only ever recorded the route alias, so a review criterion
+-- keyed on the writer's model family had no measured value to cite.
+-- `served_by` is NULL when the gateway could not name a concrete model; it is
+-- deliberately never filled with `route`, which would read as if the alias had
+-- answered. One row per (project, session): a later call moves `last_seen` and
+-- `calls`, `first_seen` stays.
+CREATE TABLE IF NOT EXISTS dsh_driver_session_models (
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    route TEXT NOT NULL,
+    served_by TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, session_id)
+);
 """
 
 
@@ -377,6 +396,37 @@ class DshDrivers:
         if result.returncode:
             raise ValueError("DSH history unavailable: " + result.stderr[-1000:])
         return {"driver_id": row["driver_id"], **json.loads(result.stdout)}
+
+    def record_model_call(self, project_id, session_id, *, route, served_by):
+        """Keep WHICH model answered this session, durably, per project.
+
+        Called by the completion endpoint for every answered turn, with the
+        endpoint the gateway was actually bound to (after any failover) and the
+        route the session asked for. `served_by` empty/None means the gateway
+        could not name a concrete model; it is stored as NULL rather than as
+        `route`, because a route alias in that column would claim the alias
+        answered.
+        """
+        stamp = now()
+        with self.db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO dsh_driver_session_models"
+                "(project_id,session_id,route,served_by,first_seen,last_seen,calls) "
+                "VALUES(?,?,?,?,?,?,1) "
+                "ON CONFLICT(project_id,session_id) DO UPDATE SET "
+                "route=excluded.route, served_by=excluded.served_by, "
+                "last_seen=excluded.last_seen, "
+                "calls=dsh_driver_session_models.calls+1",
+                (project_id, session_id, route, served_by or None, stamp, stamp))
+            conn.commit()
+
+    def session_models(self, project_id):
+        """This project's recorded sessions, oldest first. Never another project's."""
+        with self.db.get_connection() as conn:
+            rows = conn.execute("SELECT session_id,route,served_by,first_seen,last_seen,calls "
+                                "FROM dsh_driver_session_models WHERE project_id=? "
+                                "ORDER BY first_seen,session_id", (project_id,))
+            return [dict(r) for r in rows]
 
     @staticmethod
     def public(row):

@@ -16,11 +16,17 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+// `?raw` is resolved by Vite relative to THIS module, not to the process cwd, so
+// the scan below measures web/src/views/PipelineGraph.svelte whatever directory
+// vitest was started from. A cwd-relative read only works while vitest happens
+// to be started in web/ -- started anywhere else it threw during collection, so
+// the file contributed no tests at all and the suite silently reported one file
+// fewer -- and jsdom's module-level `import.meta.url` is not a `file:` URL, so it
+// cannot locate the subject either. The last test pins that these bytes really
+// are that file.
+import RAW_SOURCE from '../../views/PipelineGraph.svelte?raw';
 
-// vitest runs from the web/ root (vitest.config.js), and jsdom's import.meta.url
-// is not a file: URL, so resolve from cwd rather than from this module.
-const SOURCE = readFileSync(
-  resolve(process.cwd(), 'src/views/PipelineGraph.svelte'), 'utf-8');
+const SOURCE: string = RAW_SOURCE;
 const STYLE = SOURCE.slice(SOURCE.lastIndexOf('<style>'));
 
 /** Every `var(--x)` in a paint declaration, with whether it has a fallback. */
@@ -62,7 +68,16 @@ describe('PipelineGraph paint declarations', () => {
     expect([...used].filter((n) => !defined.has(n))).toEqual([]);
   });
 
-  it('scopes the palette to a wrapper the whole component lives inside', () => {
+  it('scans that very component, whose palette lives on a wrapper it sits inside', () => {
+    // The scan above is only evidence about the shipped component if the bytes
+    // it read ARE that file. Derive the path from THIS module's location (inside
+    // a test body vitest gives a real `file:` location, unlike at module scope)
+    // rather than from cwd, then compare the bytes: a decoy copy of the
+    // component reached through some other path makes this red instead of
+    // satisfying the paint assertions silently.
+    const subject = resolve(import.meta.dirname, '../../views/PipelineGraph.svelte');
+    expect(subject.endsWith('/web/src/views/PipelineGraph.svelte')).toBe(true);
+    expect(readFileSync(subject, 'utf-8')).toBe(SOURCE);
     // Tokens defined on `.pg` only reach the SVG if `.pg` actually wraps it.
     expect(STYLE).toMatch(/\.pg\s*\{/);
     expect(SOURCE).toContain('<div class="pg">');

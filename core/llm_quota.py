@@ -31,7 +31,9 @@ _QUOTA_RESET_RE = re.compile(
 # window alone says nothing about exhaustion: a burst response can also mention
 # a daily allowance or say that a five-hour limit has NOT been reached.
 _SPENT_WINDOW_RE = re.compile(
-    r"\byou (?:have )?(?:reached|exceeded) your (?:\w+ )?"
+    # Ollama names the account: "you (linxuhao84) have reached your weekly
+    # usage limit" (observed 2026-11-07), hence the optional parenthetical.
+    r"\byou (?:\([^)]{1,64}\) )?(?:have )?(?:reached|exceeded) your (?:\w+ )?"
     r"(?:\d+[- ]?hours?|hourly|daily|weekly|monthly)\s+(?:usage\s+)?limit\b")
 
 # Observed Anthropic HTTP 400 wording (see `is_spend_limit_refusal`).

@@ -21,6 +21,9 @@ OLLAMA = ("You reached your Pro 5-hour limit. Max is $100/month for $300 of "
           "usage, with no 5-hour or weekly caps: https://ollama.com/settings/billing "
           "(ref: cd6d7215-241b-4c9a-a0c7-3483e253599d)")
 WEEKLY_SYNTHETIC = "You reached your Pro weekly limit."
+OLLAMA_WEEKLY = ("you (linxuhao84) have reached your weekly usage limit, upgrade for "
+                 "higher limits: https://ollama.com/upgrade or add usage credits: "
+                 "https://ollama.com/settings (ref: 397328aa-d140-408e-bca6-854b7130719d)")
 OPENAI_TPM = ("Rate limit reached for gpt-4o in organization org-abc on tokens per "
               "min (TPM): Limit 30000, Used 29000, Requested 2000.")
 ANTHROPIC_ITPM = ("This request would exceed the rate limit for your organization "
@@ -45,7 +48,8 @@ def clear_hold(monkeypatch):
     monkeypatch.setattr(sched, "_QUOTA_HOLD_REASON", "")
 
 
-@pytest.mark.parametrize("message", [OLLAMA, WEEKLY_SYNTHETIC], ids=["observed-ollama", "synthetic-weekly"])
+@pytest.mark.parametrize("message", [OLLAMA, WEEKLY_SYNTHETIC, OLLAMA_WEEKLY],
+                         ids=["observed-ollama", "synthetic-weekly", "observed-ollama-weekly"])
 def test_first_window_error_fails_over_and_next_gateway_skips(wiring, monkeypatch, message):
     calls = []
 

@@ -289,6 +289,9 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         gateway.max_output_tokens = body.max_tokens
         gateway.thinking_effort = body.reasoning_effort
         gateway.enable_thinking = body.reasoning_effort != "off"
+        # A session's gateway lives as long as the session; without this a
+        # failover onto the paid fallback would stick until a restart.
+        gateway.return_to_earlier()
         turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)
         # Persisted here, where the endpoint was chosen, and with the concrete
         # model that answered (`active_model` is the same value returned as

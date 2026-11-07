@@ -43,7 +43,12 @@ export async function setLang(lang: string): Promise<void> {
     localStorage.setItem(LS_KEY, lang);
   }
   authStore.update(s => ({ ...s, lang }));
-  // Sync to backend (fire-and-forget — no-op if offline/unauthenticated)
+  // Sync to backend only when there is an identity to store it for. A per-user
+  // preference needs a user: the backend answers 403
+  // write_denied_not_authenticated to an anonymous reader, so sending it made
+  // every anonymous visit one refused mutating request. A read-only session
+  // DOES have an identity and still syncs (see lib/api.ts setUserLang).
+  if (!get(authStore).email) return;
   try {
     await setUserLang(lang);
   } catch {
@@ -58,6 +63,11 @@ export async function syncInitialLang(): Promise<void> {
   // If we already have a stored lang or backend lang, skip
   if (typeof localStorage !== 'undefined' && localStorage.getItem(LS_KEY)) return;
   if ($auth.lang) return;
+  // First visit by a reader with no identity: the language already applied
+  // above IS the browser's, and there is nobody to store a preference for.
+  // Do not POST, and do not persist either — persisting here would make the
+  // later sign-in skip its one chance to record the preference.
+  if (!$auth.email) return;
   // First visit: persist browser lang
   await setLang(lang);
 }

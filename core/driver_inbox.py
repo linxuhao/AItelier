@@ -174,10 +174,29 @@ class DriverInbox:
                      (self.actor, operation, request_key, payload, json.dumps(result)))
         return result
 
+    def _cited_inbox_message(self, conn, reply_to_delivery_id):
+        """The message behind a delivery addressed to THE CALLING driver, or None.
+
+        Only the caller's own deliveries resolve: an id addressed to another
+        driver, an id in no driver inbox, and a project-inbox delivery
+        (state_director_deliveries) all come back None, so the caller refuses
+        with unknown_delivery and never reaches the project reply path.
+        """
+        if type(reply_to_delivery_id) is not str or not reply_to_delivery_id or len(reply_to_delivery_id) > 200:
+            return None
+        row = conn.execute(
+            "SELECT d.message_id FROM driver_inbox_deliveries d "
+            "WHERE d.delivery_id=? AND d.target_driver_id=?",
+            (reply_to_delivery_id, self.driver_id)).fetchone()
+        return None if row is None else row["message_id"]
+
     def send_driver_message(self, request_key, subject, body, target_driver_id=None,
                             project_members=None, project_id=None, kind="note",
                             delivery_mode="transient", refs=None, reply_to_message_id=None,
-                            _system=False):
+                            reply_to_delivery_id=None, _system=False):
+        if reply_to_delivery_id is not None and reply_to_message_id is not None:
+            raise StateGraphError("invalid_request: reply_to_delivery_id and reply_to_message_id are mutually "
+                                  "exclusive; cite the delivery you hold or the message id, not both")
         if type(request_key) is not str or not request_key or len(request_key)>320:
             raise StateGraphError("invalid_request: request_key must be a non-empty string of at most 320 characters")
         if type(subject) is not str or not 1 <= len(subject) <= 200:
@@ -198,7 +217,12 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs: refs must be an object mapping allowed keys to ids")
-        payload = json.dumps([subject, body, target_driver_id, project_members, project_id, kind, delivery_mode, refs, reply_to_message_id, None if _system else self.driver_id], sort_keys=True)
+        payload = [subject, body, target_driver_id, project_members, project_id, kind, delivery_mode, refs, reply_to_message_id, None if _system else self.driver_id]
+        # The delivery selector is appended only when it is set, so the payload of
+        # every request written before it existed still replays byte-identically.
+        if reply_to_delivery_id is not None:
+            payload.append(reply_to_delivery_id)
+        payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send", request_key, payload)
             if replay is not None:
@@ -223,6 +247,16 @@ class DriverInbox:
             if project_id:
                 self.store._project(conn, project_id)
             self._refs(conn, refs, project_id)
+            if reply_to_delivery_id is not None:
+                # Resolve the caller's own delivery to its message, then take the
+                # existing reply_to_message_id path unchanged (same validation, same
+                # thread copy). A delivery that is not the caller's refuses here and
+                # never falls back to the project reply path.
+                cited_message = self._cited_inbox_message(conn, reply_to_delivery_id)
+                if cited_message is None:
+                    raise StateGraphError("unknown_delivery: reply_to_delivery_id must name a delivery addressed "
+                                          "to this driver")
+                reply_to_message_id = cited_message
             thread = None
             if reply_to_message_id:
                 prior = conn.execute("SELECT m.thread_id FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE m.message_id=? AND d.target_driver_id=?",

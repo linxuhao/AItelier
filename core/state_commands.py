@@ -298,6 +298,10 @@ class SendDriverMessage(Request):
         "Optional: node_key (requires project_id), attempt_id, issue_id, claim_id, "
         "subagent_id, each a nonempty string naming an existing record."))
     reply_to_message_id: str | None = None
+    reply_to_delivery_id: str | None = Field(default=None, max_length=200, description=(
+        "A delivery addressed to THIS driver, from list_driver_messages or "
+        "wait_for_driver_inbox (its delivery_id). The reply threads onto that message's "
+        "thread. Name exactly one of reply_to_delivery_id or reply_to_message_id, not both."))
 
     @field_serializer("refs")
     def _set_refs_only(self, refs: MessageRefs) -> dict:

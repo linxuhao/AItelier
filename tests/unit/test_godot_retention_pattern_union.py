@@ -142,7 +142,7 @@ if mode == 'fail':
 
 def _subprocess_engine(gh, monkeypatch, mode='pass'):
     homes, full = [], []
-    def run(args, timeout, extra_env=None, render=False):
+    def run(args, timeout, extra_env=None, render=False, idle_window=None):
         env = os.environ.copy()
         env.update(extra_env or {})
         homes.append(Path(env['HOME']))

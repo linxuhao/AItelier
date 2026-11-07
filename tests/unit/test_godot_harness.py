@@ -689,6 +689,14 @@ def _record_homes(monkeypatch, seen, behaviour=None):
     Each fake invocation writes the save file a suite that saves would leave in
     user://, and records what it found there on entry: the sentinel is how a
     later invocation would betray that it inherited an earlier one's HOME.
+
+    The fake offers what a REAL `Popen(stdout=PIPE, stderr=PIPE)` offers, not
+    only `communicate()`: the script gate streams an entry point's output while
+    it runs (that stream is what bounds the pass — see SCRIPT_IDLE_WINDOW_SEC in
+    the harness), so the pipes, `poll()` and `wait()` are the surface it talks
+    to. `communicate()` is still recorded, and is expected to stay UNUSED for an
+    entry: blocking on the whole run is the wall-clock-only behavior this gate
+    no longer relies on.
     """
     import signal
     import subprocess
@@ -704,28 +712,50 @@ def _record_homes(monkeypatch, seen, behaviour=None):
                            "token": env.get("AITELIER_HARNESS_TOKEN"),
                            "existed": home.is_dir(),
                            "start_new_session": kw["start_new_session"],
-                           "communicate_timeouts": [], "signals": []}
+                           "communicate_timeouts": [], "signals": [],
+                           "polls": 0, "wedged": False}
             seen.append(self.record)
             (home / "save_1.json").write_text('{"gold": 1}')
             # An opaque token cannot accidentally identify a real process group.
             self.pid = object()
             self.returncode = None
-            self._timeout = None
             try:
                 self._result = (behaviour(cmd) if behaviour is not None else
                                 subprocess.CompletedProcess(cmd, 0, "PASS all\n", ""))
             except subprocess.TimeoutExpired as exc:
-                # A Popen timeout occurs in communicate, after construction.
-                self._timeout = exc
+                # A pass that never ends by itself: the wall clock has to end
+                # it, exactly like a wedged suite.
+                self.record["wedged"] = True
                 self._result = subprocess.CompletedProcess(
                     cmd, -signal.SIGKILL, exc.output, exc.stderr)
+            self.stdout = os.fdopen(self._pipe(self._result.stdout), "rb", buffering=0)
+            self.stderr = os.fdopen(self._pipe(self._result.stderr), "rb", buffering=0)
             processes[self.pid] = self
+
+        @staticmethod
+        def _pipe(text):
+            """A pipe already holding what this pass printed, then EOF."""
+            read_fd, write_fd = os.pipe()
+            data = text or ""
+            data = data.encode() if isinstance(data, str) else data
+            if data:
+                os.write(write_fd, data)
+            os.close(write_fd)
+            return read_fd
+
+        def poll(self):
+            self.record["polls"] += 1
+            if self.record["wedged"] and self.returncode is None:
+                return None
+            if self.returncode is None:
+                self.returncode = self._result.returncode
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.poll()
 
         def communicate(self, timeout=None):
             self.record["communicate_timeouts"].append(timeout)
-            if self._timeout is not None:
-                exc, self._timeout = self._timeout, None
-                raise exc
             self.returncode = self._result.returncode
             return self._result.stdout, self._result.stderr
 
@@ -754,8 +784,9 @@ def test_each_script_entry_point_runs_in_its_own_home(monkeypatch, tmp_path):
     assert len(seen) == 2
     first, second = seen
     assert all(x["start_new_session"] is True for x in seen)
-    assert all(x["communicate_timeouts"] == [30] for x in seen)
-    assert all(x["signals"] == [] for x in seen)
+    # The pass is streamed and watched, not blocked on until it ends.
+    assert all(x["communicate_timeouts"] == [] for x in seen)
+    assert all(x["signals"] == [] and x["polls"] for x in seen)
     # Distinct homes, neither of them the container's.
     assert first["home"] != second["home"]
     assert container_home not in (first["home"], second["home"])
@@ -788,21 +819,30 @@ def test_a_second_request_does_not_inherit_the_first_requests_home(monkeypatch, 
 @pytest.mark.parametrize("outcome", ["failed", "timeout"])
 def test_a_red_script_still_reports_and_still_cleans_its_home(monkeypatch, tmp_path, outcome):
     """Cleanup must not cost the gate its evidence: a red run keeps its own
-    account of the failure, and its home goes anyway."""
+    account of the failure, and its home goes anyway.
+
+    The timeout case is the REAL wall-clock kill: a wedged pass (open pipes, no
+    exit of its own) is ended by that pass's own `timeout` — 0.4 s here — so the
+    clock is still an absolute cap, still kills the entry's own session, and the
+    output printed before it is still kept. What the gate added is a SECOND,
+    separate bound (silence), which is why the report now says which one fired:
+    `idle_killed` is false here.
+    """
     import subprocess
     _script_project(tmp_path, monkeypatch, entries=("t_red.gd",))
     stdout = "PASS test_a\nFAILED: test_b\n"
     stderr = ('SCRIPT ERROR: Invalid access to property "hp"\n'
               "          at: _run (res://tests/t_red.gd:12)\n")
+    budget = 0.4 if outcome == "timeout" else 30
 
     def behaviour(cmd):
         if outcome == "timeout":
-            raise subprocess.TimeoutExpired(cmd, 30, output=stdout, stderr=stderr)
+            raise subprocess.TimeoutExpired(cmd, budget, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(cmd, 1, stdout, stderr)
 
     seen = _record_homes(monkeypatch, [], behaviour)
 
-    r = gh.run_script(str(tmp_path), [], timeout=30)
+    r = gh.run_script(str(tmp_path), [], timeout=budget)
 
     res = r["results"][0]
     assert r["passed"] is False and res["passed"] is False
@@ -810,11 +850,12 @@ def test_a_red_script_still_reports_and_still_cleans_its_home(monkeypatch, tmp_p
     assert "FAILED: test_b" in res["stdout"]            # the run's own account
     assert "t_red.gd:12" in res["stderr"]               # ...and where it died
     assert any(e["file"] == "res://tests/t_red.gd" for e in res["errors"])
+    assert res["idle_killed"] is False                  # the CLOCK ended it, not silence
     if outcome == "timeout":
-        assert res["stderr"].endswith("timed out after 30s")
+        assert res["stderr"].endswith("timed out after 0.4s")
     assert len(seen) == 1 and not seen[0]["home"].exists()
     assert seen[0]["start_new_session"] is True
-    assert seen[0]["communicate_timeouts"] == ([30, 5] if outcome == "timeout" else [30])
+    assert seen[0]["communicate_timeouts"] == []
     assert seen[0]["signals"] == ([gh.signal.SIGKILL] if outcome == "timeout" else [])
 
 

@@ -197,7 +197,7 @@ def _stub_engine(gh, monkeypatch, artifact_rel, body='{"gate": 1}'):
     HOME it was handed, exactly as a real GDScript suite would."""
     import subprocess
 
-    def engine(args, timeout, extra_env=None, render=False):
+    def engine(args, timeout, extra_env=None, render=False, idle_window=None):
         if "--import" not in args and extra_env and "HOME" in extra_env:
             target = Path(extra_env["HOME"]) / artifact_rel
             target.parent.mkdir(parents=True, exist_ok=True)

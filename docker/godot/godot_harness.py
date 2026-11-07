@@ -68,11 +68,13 @@ from __future__ import annotations
 
 import base64
 import ast
+import codecs
 import hashlib
 import fcntl
 import json
 import os
 import math
+import resource
 import signal
 import re
 import select
@@ -748,8 +750,259 @@ def _valid_process_timeout(value) -> bool:
         return False
 
 
+# ── bounded by the PROGRESS a script reports, not only by the wall clock ────
+#
+# THE DEFECT (measured 2026-11-07, one unchanged tree, same sidecar):
+# `unit_test_runner.gd` exited rc=124 purely because the HOST was loaded, while
+# `run_cultivation_visual_sample.gd` produced a genuine runtime error at
+# scripts/presentation/monthly_journey_view.gd:222. Both arrived in the stage
+# report as the same red, so a reader could not tell "slow host" from "broken
+# script" — the wall clock was the only bound, and it cannot distinguish "still
+# working" from "gone".
+#
+# WHAT BOUNDS A SCRIPT NOW. `run_script` streams each entry point's own
+# stdout/stderr while it runs and remembers when the last line arrived. A script
+# that keeps printing is LEFT ALONE however slow the host is: the idle window
+# only fires over silence, never over a slow engine. Silence is killed (that
+# entry's OWN session, the one `start_new_session=True` created for it) and
+# reported as a distinct failure carrying the window, the seconds it ran and the
+# last line it printed. A script that never printed at all is named separately
+# (`no output since start`), which is a different observation from "it printed
+# and then wedged".
+#
+# The absolute wall-clock cap is UNCHANGED and is not raised by any of this: it
+# is still `timeout`, still enforced by the same kill, and `timed out after Ns`
+# still means exactly what it meant. The idle window sits strictly below it for
+# a normal entry point (120 s vs the 600 s default), so a silent script is
+# named in minutes instead of ten.
+SCRIPT_IDLE_WINDOW_SEC = 120.0
+# How often the silence watch looks at the buffers. Small enough that the kill
+# lands ON the window rather than one poll interval later; cheap enough that a
+# ten-minute entry point costs nothing.
+_IDLE_POLL_SEC = 0.05
+# How long the reader threads are given to reach EOF once the process is gone
+# (or killed). Their output is collected as it arrives, so this bounds only the
+# tail — and a grandchild that survived the group kill can never hold the gate.
+_IDLE_DRAIN_SEC = 1.0
+
+
+def _seconds(value: float) -> str:
+    """A duration for prose: `120`, `0.5`, `1.25` — never `120.0`."""
+    return "%g" % round(float(value), 3)
+
+
+class ScriptIdleSilence(subprocess.TimeoutExpired):
+    """An engine pass killed because it stopped reporting progress.
+
+    Subclasses `subprocess.TimeoutExpired` on purpose: every existing
+    `except subprocess.TimeoutExpired` (and every caller that has not been
+    taught about this class) then still treats it as an INCOMPLETE run — never
+    as a finished one. What it adds is the evidence that tells the two reds
+    apart: the window that expired, how long the script actually ran, and the
+    last line it printed before the gap.
+    """
+
+    def __init__(self, cmd, idle_window, *, elapsed_sec, last_line, last_stream,
+                 started_at, never_printed, stdout="", stderr=""):
+        super().__init__(cmd, idle_window, output=stdout, stderr=stderr)
+        self.idle_window_sec = float(idle_window)
+        self.elapsed_sec = float(elapsed_sec)
+        self.last_line = last_line
+        self.last_stream = last_stream
+        self.started_at = started_at
+        self.never_printed = bool(never_printed)
+        # The stable token a reader (or a dashboard) can key on; `describe()`
+        # is the sentence a human reads next to the suite's own output.
+        self.reason = "no output since start" if self.never_printed else "idle after output"
+
+    def describe(self) -> str:
+        """The one sentence the report shows for this kill.
+
+        A quoted last line keeps its own label on the line (`last output
+        [stream]: ...`): engine diagnostics are recognised by an anchor at the
+        START of a line, so quoting one here can never be re-counted as a fresh
+        engine error of this run.
+        """
+        if self.never_printed:
+            return ("no output since start (started %s): the script printed "
+                    "nothing for its %ss idle window, so it was killed after "
+                    "%.1fs and is FAILED."
+                    % (self.started_at, _seconds(self.idle_window_sec),
+                       self.elapsed_sec))
+        return ("no output for %ss (idle window) after %.1fs: the script went "
+                "silent, so its own process group was killed and it is FAILED. "
+                "last output [%s]: %s"
+                % (_seconds(self.idle_window_sec), self.elapsed_sec,
+                   self.last_stream or "stdout", self.last_line or "<none>"))
+
+
+def _kill_own_session(proc: subprocess.Popen) -> None:
+    """SIGKILL only the session THIS call created (`start_new_session=True`).
+
+    `proc.pid` is that session's leader, so this can never reach the harness's
+    own group or a foreign one — the reason `_run` refuses to start a child
+    without a session of its own.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _child_cpu_seconds() -> float:
+    """CPU seconds consumed by REAPED children so far, in this process.
+
+    RUSAGE_CHILDREN is cumulative, so the caller differences two reads around
+    the pass it wants to charge. Only children already waited on are counted,
+    which is exactly why this is read after `_run` has reaped its child.
+    """
+    try:
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (OSError, ValueError):        # pragma: no cover - platform guard
+        return 0.0
+    return float(usage.ru_utime + usage.ru_stime)
+
+
+def _host_load_average() -> list | None:
+    """The host's 1/5/15-minute load average, or None where it is unreadable.
+
+    Recorded per script entry because a red cannot be read back later without
+    knowing what else the host was doing: the 2026-11-07 pair differed only in
+    that.
+    """
+    try:
+        return [round(value, 2) for value in os.getloadavg()]
+    except (OSError, AttributeError):    # pragma: no cover - platform guard
+        return None
+
+
+def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
+                           idle_window):
+    """Wait for `proc` while its OUTPUT keeps it alive; kill it on silence.
+
+    Returns the same `CompletedProcess` the pipe-and-communicate path returns.
+    Raises `ScriptIdleSilence` when the idle window expired over silence, and
+    `subprocess.TimeoutExpired` when the unchanged wall-clock cap did — those
+    are different facts and the report says which.
+    """
+    started_monotonic = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    guard = threading.Lock()
+    streams = {"stdout": [], "stderr": []}
+    progress = {"last_at": None, "last_line": None, "last_stream": None,
+                "pending": None}
+
+    def pump(stream, name: str) -> None:
+        """Record every chunk the moment it arrives; keep the last full line."""
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        partial = ""
+        try:
+            fd = stream.fileno()
+        except (AttributeError, ValueError, OSError):     # already closed
+            return
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:                               # closed under us
+                break
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+            partial += text
+            lines = partial.split("\n")
+            partial = lines.pop()
+            complete = [line.rstrip("\r").strip() for line in lines]
+            with guard:
+                streams[name].append(text)
+                progress["last_at"] = time.monotonic()
+                done = [line for line in complete if line]
+                if done:
+                    progress["last_line"] = done[-1]
+                    progress["last_stream"] = name
+                progress["pending"] = partial.strip() or None
+        # EOF: a trailing fragment without a newline is still a printed line.
+        tail = (partial + decoder.decode(b"", True)).strip()
+        with guard:
+            if tail:
+                progress["last_line"] = tail
+                progress["last_stream"] = name
+            progress["pending"] = None
+
+    def collect() -> tuple[str, str]:
+        for reader in readers:
+            reader.join(timeout=_IDLE_DRAIN_SEC)
+        with guard:
+            out = "".join(streams["stdout"])
+            err = "".join(streams["stderr"])
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        return out, err
+
+    readers = [threading.Thread(target=pump, args=(proc.stdout, "stdout"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "stderr"), daemon=True)]
+    for reader in readers:
+        reader.start()
+    wall_deadline = started_monotonic + float(timeout)
+    kill_reason = None
+    elapsed = 0.0
+    try:
+        while True:
+            if proc.poll() is not None:
+                break
+            now = time.monotonic()
+            if now >= wall_deadline:
+                kill_reason = "wall"
+                elapsed = now - started_monotonic
+                break
+            with guard:
+                last_at = progress["last_at"]
+            silent_since = started_monotonic if last_at is None else last_at
+            if now - silent_since >= float(idle_window):
+                kill_reason = "idle"
+                elapsed = now - started_monotonic
+                break
+            time.sleep(_IDLE_POLL_SEC)
+    except BaseException:
+        _kill_own_session(proc)
+        collect()
+        raise
+    if kill_reason == "wall":
+        _kill_own_session(proc)
+        out, err = collect()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    if kill_reason == "idle":
+        with guard:
+            last_line = progress["pending"] or progress["last_line"]
+            last_stream = progress["last_stream"]
+            printed = progress["last_at"] is not None or last_line is not None
+        _kill_own_session(proc)
+        out, err = collect()
+        raise ScriptIdleSilence(
+            cmd, idle_window, elapsed_sec=elapsed, last_line=last_line,
+            last_stream=last_stream, started_at=started_at,
+            never_printed=not printed, stdout=out, stderr=err)
+    try:
+        proc.wait(timeout=_IDLE_DRAIN_SEC)
+    except subprocess.TimeoutExpired:       # pragma: no cover - poll saw it exit
+        pass
+    out, err = collect()
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,
-         render: bool = False) -> subprocess.CompletedProcess:
+         render: bool = False,
+         idle_window: float | None = None) -> subprocess.CompletedProcess:
+    """Run one engine invocation, bounded by `timeout` and, when asked, by
+    `idle_window` seconds of SILENCE (see SCRIPT_IDLE_WINDOW_SEC).
+
+    `idle_window=None` (every caller except `run_script`'s per-entry pass) is
+    the plain pipe-and-communicate behavior, byte for byte.
+    """
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
@@ -768,16 +1021,19 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
         raise ValueError("owned process-group execution requires POSIX sessions")
     if not _valid_process_timeout(timeout):
         raise ValueError("timeout must be finite, positive and fit native poll milliseconds")
+    if idle_window is not None and not _valid_process_timeout(idle_window):
+        raise ValueError("idle_window must be finite, positive and fit native poll milliseconds")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env, start_new_session=True)
+    if idle_window is not None:
+        # Bounded by the progress it reports; the wall clock stays the absolute
+        # cap inside the same wait. See SCRIPT_IDLE_WINDOW_SEC.
+        return _wait_with_idle_window(proc, cmd, timeout, idle_window)
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except BaseException as exc:
         # The session was created by THIS call; never target a foreign group.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_own_session(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
             if isinstance(exc, subprocess.TimeoutExpired):
@@ -5981,6 +6237,46 @@ def _script_log_excerpt(text: str) -> str:
     return text[:head] + marker + text[-(remaining - head):]
 
 
+def _stream_text(value) -> str:
+    """A captured stream as text, whether the pipe handed back bytes or str."""
+    return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+
+def _script_idle_verdict(rc, stdout: str, stderr: str, blocking,
+                         idle_killed: bool = False) -> bool:
+    """Is this entry point FAILED? (`True` = failed, i.e. never a pass.)
+
+    Silence is never a pass. A script the harness killed for going quiet is red
+    even when its return code says 0 and it printed no FAIL marker — `rc == 0`
+    is the ENGINE's opinion of an interrupted run, not evidence that the suite
+    finished, and a killed run that reports success would turn "this script
+    wedged" into "this script passed".
+
+    Everything the gate already decided is unchanged and still decides: a
+    non-zero return code, a FAIL marker / SCRIPT ERROR record of the suite's
+    own, and a blocking native engine error each make this red on their own,
+    however short the run and whatever the idle window did.
+    """
+    return bool(rc != 0 or blocking or idle_killed
+                or _has_failure_marker(stdout, stderr))
+
+
+def _last_output_line(stdout: str, stderr: str):
+    """The last non-empty line either stream printed, and which stream it was.
+
+    Falls back to the captured streams when a run was NOT killed for silence —
+    the same fact is useful about a run that finished, and it is the only thing
+    that says "it got this far". stderr wins on a tie because that is where a
+    suite's last words usually are.
+    """
+    for name, text in (("stderr", stderr), ("stdout", stdout)):
+        lines = [line.strip() for line in (text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if lines:
+            return lines[-1], name
+    return None, None
+
+
 def _validate_script_selection(project_dir: str, scripts: list,
                                render: bool) -> list:
     """Refuse an unsupported /script selection BEFORE anything happens.
@@ -6038,7 +6334,8 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                retain_errors: list | None = None,
                retain_patterns: list | None = None,
                retain_requested: bool = False,
-               corr: dict | None = None) -> dict:
+               corr: dict | None = None,
+               idle_window: float | None = None) -> dict:
     """Run ``godot --path <proj> -s <res://...>`` for each script.
 
     The GDScript unit suite is the project's fastest, most targeted feedback,
@@ -6048,6 +6345,18 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
     on it, and the PM planned a repair the implementer could not possibly make:
     no amount of PATH resolution finds a binary that is not in the filesystem.
     Give the suite the same HTTP route /compile and /playtest already use.
+
+    Each entry point is bounded by the PROGRESS it reports, with ``timeout``
+    kept as the absolute wall-clock cap (see SCRIPT_IDLE_WINDOW_SEC). A script
+    that keeps printing runs as long as the cap allows, however slow the host
+    is; a script that goes silent for ``idle_window`` seconds (default
+    SCRIPT_IDLE_WINDOW_SEC) is killed in its OWN session and reported FAILED
+    with the window, the seconds it ran and the last line it printed; a script
+    that never printed at all is named ``no output since start``. The two reds
+    are therefore distinguishable in the report, which the wall clock alone
+    never made possible (measured 2026-11-07: a loaded host made
+    unit_test_runner.gd rc=124 while a genuine runtime error surfaced in
+    another entry, and both read as the same red).
 
     ``render=True`` (the caller's validated opt-in) runs each admitted entry
     point through ``_run(render=True)`` — Xvfb plus software GL — so a suite
@@ -6077,6 +6386,14 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
     manifest; the original error is never replaced by a green.
     """
     proj = Path(project_dir)
+    # The silence budget for ONE entry point. Named per call so a test (and an
+    # operator) can shorten it through the real parameter; the production value
+    # is SCRIPT_IDLE_WINDOW_SEC. The wall-clock cap (`timeout`) is never
+    # derived from it and never raised by it.
+    idle_window = (SCRIPT_IDLE_WINDOW_SEC if idle_window is None
+                   else float(idle_window))
+    if not _valid_process_timeout(idle_window):
+        raise ValueError("idle_window must be finite, positive and fit native poll milliseconds")
     retain = list(retain or [])
     retain_patterns = list(retain_patterns or [])
     corr = dict(corr or {})
@@ -6092,6 +6409,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         # an opt-in render with no project must never read as a green render.
         return {"passed": not render, "no_project": True, "results": [],
                 "render_mode": render_mode, "render_requested": bool(render),
+                "idle_window_sec": idle_window,
                 "summary": ("render=true requires a real Godot project — no "
                             "project.godot here." if render else
                             "No project.godot -- not a Godot project; script gate skipped.")}
@@ -6100,6 +6418,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
     except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
         return {"passed": False, "results": [], "discovered": [],
                 "render_mode": render_mode, "render_requested": bool(render),
+                "idle_window_sec": idle_window,
                 "summary": "script entrypoint discovery failed: %s" % exc}
     if not scripts:
         # A valid Godot project whose discovery found NO executable suite is a
@@ -6146,6 +6465,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         report = {"passed": False, "results": [], "discovered": [],
                   "executed_suites": 0,
                   "render_mode": render_mode, "render_requested": bool(render),
+                  "idle_window_sec": idle_window,
                   "summary": summary}
         if retention is not None:
             report["retention"] = retention
@@ -6191,10 +6511,33 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
             # Registered the moment it exists; the label carries the pass
             # identity the manifest rows and raw logs report.
             pass_labels.append({"script": rel})
+            # ── what this entry point costs and what the host was doing ────
+            # Wall seconds alone cannot be read back: a 300 s entry is healthy
+            # on an idle box and pathological on a loaded one, and the
+            # 2026-11-07 pair differed only in that. CPU seconds are the
+            # script's OWN (this process's reaped-children account, differenced
+            # around the pass), so wait time is excluded by construction.
+            cpu_before = _child_cpu_seconds()
+            load_start = _host_load_average()
+            started_monotonic = time.monotonic()
+            idle_kill = None
             try:
                 cp = _run(["--path", str(dst), "-s", rel], timeout=timeout,
-                          extra_env=_home_env(sc_home), render=render)
+                          extra_env=_home_env(sc_home), render=render,
+                          idle_window=idle_window)
                 rc, out, err = cp.returncode, cp.stdout, cp.stderr
+            except ScriptIdleSilence as e:
+                # SILENCE, not the clock. The script is killed in its own
+                # session and this is a FAILED entry: it says which window
+                # expired, how long the script actually ran and the last line
+                # it managed to print — three facts the wall-clock branch below
+                # can never produce, which is why the two reds used to be
+                # indistinguishable. `e.stdout`/`e.stderr` carry everything the
+                # run printed before the gap, exactly like the timeout branch.
+                rc = 124
+                out = _stream_text(e.stdout)
+                err = (_stream_text(e.stderr) + "\n" + e.describe()).lstrip()
+                idle_kill = e
             except subprocess.TimeoutExpired as e:
                 # TimeoutExpired CARRIES the output produced before the kill —
                 # discarding it blinded the gate at the one moment its output
@@ -6206,11 +6549,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 # test_game_manager_fsm.gd reported rc=124 with an EMPTY stdout,
                 # so the report said only "it hung" about a run that had already
                 # said where and why.
-                def _s(v):
-                    return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
                 rc = 124
-                out = _s(e.stdout)
-                err = (_s(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
+                out = _stream_text(e.stdout)
+                err = (_stream_text(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
             except Exception as exc:
                 # An error nobody predicted (a missing Xvfb, a harness bug)
                 # must not take the pass's evidence down with it: the pass is
@@ -6222,6 +6563,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                                            % exc,
                                  "returncode": None, "timed_out": False})
                 raise
+            wall_sec = time.monotonic() - started_monotonic
+            cpu_sec = max(0.0, _child_cpu_seconds() - cpu_before)
+            load_end = _host_load_average()
             # The home is NOT removed here: retention copies its declared
             # artifacts below, and only then are all the homes cleaned up. The
             # full streams are kept for the manifest regardless of truncation.
@@ -6236,7 +6580,12 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
             # as a finding that the input was meant to be malformed.
             natives = _native_errors(err)
             blocking = [e for e in natives if e["blocking"]]
-            failed = rc != 0 or _has_failure_marker(out, err) or bool(blocking)
+            failed = _script_idle_verdict(rc, out, err, blocking,
+                                          idle_killed=idle_kill is not None)
+            if idle_kill is not None:
+                last_line, last_stream = idle_kill.last_line, idle_kill.last_stream
+            else:
+                last_line, last_stream = _last_output_line(out, err)
             results.append({"script": rel, "returncode": rc, "passed": not failed,
                             "stdout": _script_log_excerpt(out),
                             "stderr": _script_log_excerpt(err),
@@ -6244,7 +6593,22 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                             "stderr_truncated": len(err) > 4000,
                             "errors": _parse_errors(err),
                             "native_errors": natives,
-                            "native_blocking": sorted({e["native_class"] for e in blocking})})
+                            "native_blocking": sorted({e["native_class"] for e in blocking}),
+                            # ── cost and host conditions of THIS entry ──────
+                            "wall_sec": round(wall_sec, 3),
+                            "cpu_sec": round(cpu_sec, 3),
+                            "load_avg_start": load_start,
+                            "load_avg_end": load_end,
+                            # ── how it was bounded, and why it is red ───────
+                            "idle_window_sec": idle_window,
+                            "idle_killed": idle_kill is not None,
+                            "idle_reason": idle_kill.reason if idle_kill else None,
+                            "idle_elapsed_sec": (round(idle_kill.elapsed_sec, 3)
+                                                 if idle_kill else None),
+                            "idle_started_at": (idle_kill.started_at
+                                                if idle_kill else None),
+                            "last_output": last_line,
+                            "last_output_stream": last_stream})
         # Retention runs while the entry points' homes are still on disk: a
         # declared relative path is taken from whichever owned user-data root
         # holds it, and the full raw streams recorded above go into the
@@ -6281,6 +6645,19 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         if blocked:
             summary += ("  Native engine error(s) the game caused: %s."
                         % "; ".join(blocked))
+        idle_bad = [r for r in results if r.get("idle_killed")]
+        if idle_bad:
+            # Named separately, and never as "timed out": this is the ONE thing
+            # the wall clock could not say. A silent script is a broken or wedged
+            # script, not a slow host, and the reader gets the window, the
+            # seconds it ran and the last line it printed.
+            summary += ("  Bounded by progress, not the wall clock: %d script(s) "
+                        "went silent for the %ss idle window and were killed: %s."
+                        % (len(idle_bad), _seconds(idle_window),
+                           "; ".join("%s (ran %.1fs, %s, last output: %s)"
+                                     % (r["script"], r["wall_sec"], r["idle_reason"],
+                                        r["last_output"] or "<none>")
+                                     for r in idle_bad)))
         debt = sorted({e["native_class"] for r in results
                        for e in r["native_errors"] if not e["blocking"]})
         if debt:
@@ -6299,6 +6676,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                         % (" | ".join(why), retention["manifest"]))
         report = {"passed": ok, "results": results, "discovered": scripts,
                   "render_mode": render_mode, "render_requested": bool(render),
+                  # How each entry point was bounded, on the report itself, so a
+                  # reader never has to infer it from a missing wall-clock kill.
+                  "idle_window_sec": idle_window,
                   "summary": summary}
         if abandoned:
             # The count and the list are the SAME fact — exactly the entries that

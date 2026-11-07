@@ -4444,7 +4444,15 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
             "spec has unknown top-level key(s) %s - allowed: %s. No scenario was run."
             % (", ".join(unknown_spec), ", ".join(sorted(_SPEC_KEYS))))
     header_bad = bool(spec_errors) or bool(admission_errors)
+    # The SELECTION (every scenario of this spec) has no bound of its own: the
+    # per-scenario timeout bounds one pass, never the sweep. So the request's
+    # own peer observation is consulted before each scenario starts, and the
+    # sweep stops at that boundary once the caller is gone.
+    abandoned = False
     for i, sc in enumerate(scenarios):
+        if _request_client_abandoned():
+            abandoned = True
+            break
         refused = header_bad
         if not isinstance(sc, dict):
             spec_errors.append("scenario %d is a %s - it must be a mapping. The "
@@ -4646,7 +4654,10 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     # 172 on the wuxia tree) was compared against a different node tree --
     # digests that can never be equal, so input_dead could never fire for them.
     controls: dict[tuple[str, int, float], dict | None] = {}
-    if driven and not crashed and not spec_errors:
+    if driven and not crashed and not spec_errors and not abandoned:
+        # A sweep the caller abandoned starts NO further engine pass, controls
+        # included: the comparison is unobserved, and the verdict is already a
+        # FAIL below.
         # A refused/invalid scenario already hard-fails. Preserve its original
         # diagnostic instead of spending a comparison on unusable evidence.
         for i in driven:
@@ -4720,9 +4731,15 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
 
     dead = [r["name"] for r in scen_results if r["input_dead"]]
     behavior_passed = bool(scen_results) and all(s["passed"] for s in scen_results)
-    hard_passed = ran_any and not crashed and not spec_errors and not dead
+    hard_passed = ran_any and not crashed and not spec_errors and not dead and not abandoned
     n_fail = sum(1 for s in scen_results if not s["passed"])
-    if spec_errors:
+    if abandoned:
+        # A FAIL over a shorter list, never a pass: the caller asked for the
+        # whole selection. The words match the queue wait's own observation.
+        summary = ("Playtest stopped after %d of %d scenario(s) ran: the caller "
+                   "disconnected, so no further scenario was started."
+                   % (len(scen_results), len(scenarios)))
+    elif spec_errors:
         # `spec_errors` used to hold exactly one kind of thing, so the
         # summary named it. It now also holds determined-game-time findings,
         # and a summary that calls those "malformed timeline entries" would
@@ -4783,6 +4800,11 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
               "captures": captures, "render_mode": render_mode,
               "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
               "summary": summary}
+    if abandoned:
+        # The count and the list are the same fact: exactly the scenarios that
+        # ran, named as the abandonment rather than left for a reader to infer.
+        report["abandoned"] = True
+        report["executed_scenarios"] = len(scen_results)
     if retention is not None:
         report["retention"] = retention
     return report
@@ -6144,7 +6166,18 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         results = []
         # A rendered run names the SAME admitted entries as the headless one; the
         # mode is reported per invocation, never inferred from the output.
+        #
+        # The SELECTION has no bound: `scripts` is every discovered entry point
+        # for a default request, and `timeout` bounds each one. So the request's
+        # own transport observation is consulted at every entry boundary and the
+        # sweep stops BEFORE starting the next engine pass once the caller is
+        # gone — otherwise an abandoned request keeps the shared render lock for
+        # the whole selection (measured 2026-11-07: >1400 s past its client).
+        abandoned = False
         for rel in scripts:
+            if _request_client_abandoned():
+                abandoned = True
+                break
             # ── EVERY ENTRY POINT GETS ITS OWN user:// ────────────────────
             # Godot derives user:// from $HOME, and $HOME was the container's,
             # so every entry point in every request wrote its saves and
@@ -6228,13 +6261,21 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                                      requested=bool(retain or retain_patterns
                                                    or retain_errors or retain_requested))
         retention_cell["value"] = retention
-        ok = all(r["passed"] for r in results)
+        ok = all(r["passed"] for r in results) and not abandoned
         if retention is not None and not retention["ok"]:
             ok = False
         bad = [r["script"] for r in results if not r["passed"]]
-        summary = ("%d script(s) ran, all passed." % len(results) if ok
-                   else "%d/%d script(s) failed: %s"
-                        % (len(bad), len(results), ", ".join(bad)))
+        if abandoned:
+            # The verdict is a FAIL, not a pass over a shorter list: the caller
+            # asked for the WHOLE selection and did not get it. The words are
+            # the ones the queue wait already prints for the same observation.
+            summary = ("Render sweep stopped after %d of %d script(s) ran: the "
+                       "caller disconnected, so no further entry point was "
+                       "started." % (len(results), len(scripts)))
+        else:
+            summary = ("%d script(s) ran, all passed." % len(results) if ok
+                       else "%d/%d script(s) failed: %s"
+                            % (len(bad), len(results), ", ".join(bad)))
         blocked = ["%s (%s)" % (r["script"], ", ".join(r["native_blocking"]))
                    for r in results if r["native_blocking"]]
         if blocked:
@@ -6259,6 +6300,11 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         report = {"passed": ok, "results": results, "discovered": scripts,
                   "render_mode": render_mode, "render_requested": bool(render),
                   "summary": summary}
+        if abandoned:
+            # The count and the list are the SAME fact — exactly the entries that
+            # ran — so a reader never has to difference the selection against it.
+            report["abandoned"] = True
+            report["executed_suites"] = len(results)
         if retention is not None:
             report["retention"] = retention
         return report
@@ -6516,6 +6562,58 @@ class _RenderLockWait:
         with _RENDER_WAITERS_GUARD:
             _RENDER_WAITERS -= 1
         return False
+
+
+# ── the caller's OWN abandonment, for the sweeps ──────────────────────────
+# A render route's `timeout` bounds EACH engine pass, never the SELECTION:
+# `/script` with no explicit `scripts` runs every discovered entry point and
+# `/playtest` runs every selected scenario. The render-owner queue wait already
+# stops for a caller that is gone (`_Handler._render_client_abandoned`, polled
+# every RENDER_OWNER_WAIT_POLL_SEC), but that predicate had exactly ONE
+# consumer: once a request OWNS the render, nothing looked at its peer again.
+# Measured 2026-11-07: a `/script render=true` over a 374-entry tree kept
+# rendering for more than 1400 s after its client was gone, holding the ONE
+# process render lock for every project on this host, and the only way out was
+# killing the engine from inside the sidecar.
+#
+# So the transport publishes ITS OWN observation for the request it is serving,
+# and the sweep bodies (`run_script`, `_playtest_spec`) consult it at every
+# entry/scenario boundary: they stop BEFORE starting the next engine pass for a
+# client that is gone. It is a per-request channel and NOT a keyword argument
+# on purpose — a plain request must keep reaching the existing render-body call
+# shapes (`run_script(proj, scripts, timeout=...)`) unchanged — and a sweep
+# invoked outside a request (the CLI `--playtest`) finds no channel and runs to
+# the end exactly as before.
+_REQUEST_ABANDON = threading.local()
+
+
+def _publish_request_abandon(predicate) -> None:
+    """Hand the transport's observation to the sweep this request runs.
+
+    Called by the handler thread for the request it owns, before any render
+    body; the sweep bodies run in that same thread, so the channel is per
+    request and never visible to another client's request.
+    """
+    _REQUEST_ABANDON.predicate = predicate
+
+
+def _clear_request_abandon() -> None:
+    """Forget it when the request ends, so no later one inherits a dead peer."""
+    try:
+        del _REQUEST_ABANDON.predicate
+    except AttributeError:
+        pass
+
+
+def _request_client_abandon():
+    """The transport predicate THIS request published, or None outside one."""
+    return getattr(_REQUEST_ABANDON, "predicate", None)
+
+
+def _request_client_abandoned() -> bool:
+    """True only when this request's own client is observed to be gone."""
+    predicate = _request_client_abandon()
+    return bool(predicate()) if predicate is not None else False
 
 
 def _render_lock_waiting() -> int:
@@ -6786,6 +6884,11 @@ class _Handler(BaseHTTPRequestHandler):
             if delay > 1.0:
                 print(f"[harness] {self.path} waited {delay:.0f}s for the render lock",
                       flush=True)
+        # The sweeps (/script, /playtest) consult THIS request's own peer
+        # observation at every entry/scenario boundary: the same predicate the
+        # queue wait polls above. Cleared in the finally below, so no later
+        # request on this thread can inherit a dead peer.
+        _publish_request_abandon(self._render_client_abandoned)
         try:
             if held:
                 elapsed = time.monotonic() - admission_started
@@ -6869,6 +6972,7 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:  # never crash the service on one bad project
             self._send(500, {"error": str(e)})
         finally:
+            _clear_request_abandon()
             if held:
                 _stop_owner_heartbeat(heartbeat)
                 _release_render_effect_lock(effect_lock)

@@ -7,7 +7,7 @@
   import ``httpx`` (the stdlib-only surface).
 
 Neither role is asserted here. Each is *observed*: a candidate is executed with
-``-c "import httpx"`` and the role is filled only from that result. When a role
+``-c PROBE`` and the role is filled only from that result. When a role
 cannot be observed, neither role is filled, so the suite keeps its documented
 behaviour: ``Harness`` skips with ``VENV_REQUIREMENT``, naming the variable. A
 half-supplied pair would make the fixture raise instead of skipping, which is
@@ -39,7 +39,11 @@ import sys
 CLIENT_ROLE = "GATE_QUEUE_TEST_VENV_PYTHON"
 ORDINARY_ROLE = "GATE_QUEUE_TEST_ORDINARY_PYTHON"
 
-PROBE = "import httpx"
+# Exit 0 only when the client module resolves to a real file. A bare `import httpx`
+# also succeeds on an empty directory named httpx (a namespace package, whose
+# __file__ is None), so that alone must not be taken as a usable client.
+PROBE = ('import httpx, pathlib, sys; sys.exit(0 if getattr(httpx, "__file__", None) '
+         'and pathlib.Path(httpx.__file__).is_file() else 1)')
 PROBE_TIMEOUT = 20
 
 # Hypotheses only. The running interpreter comes first (the gate's pytest leg runs

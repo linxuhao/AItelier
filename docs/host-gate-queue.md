@@ -174,8 +174,8 @@ The owned vectors spawn real children under two interpreters:
 
 | variable | role | supplied only when observed to |
 |---|---|---|
-| `GATE_QUEUE_TEST_VENV_PYTHON` | real owning CLI/client surface | run and `import httpx` succeed |
-| `GATE_QUEUE_TEST_ORDINARY_PYTHON` | stdlib-only surface | run and `import httpx` fail |
+| `GATE_QUEUE_TEST_VENV_PYTHON` | real owning CLI/client surface | run, and `httpx` resolves to an existing file |
+| `GATE_QUEUE_TEST_ORDINARY_PYTHON` | stdlib-only surface | run, and that file does not resolve |
 
 `tests/host_gate_queue/conftest.py` supplies both from the environment the suite
 actually runs in, and both invocation shapes load it — the gate's pytest leg
@@ -193,18 +193,25 @@ python3 -m pytest -c tests/host_gate_queue/pytest.ini \
 ```
 
 Nothing about either role is assumed from a path. Each candidate is executed
-(`subprocess.run([candidate, "-c", "import httpx"], …)`, with `PYTHONPATH`
-removed because the fixture strips it from every child it builds) and only that
-observed result fills the variable; the running interpreter is the first
-candidate, and when it lacks the client it serves the stdlib-only role instead.
+(`subprocess.run([candidate, "-c", PROBE], …)`, with `PYTHONPATH` removed
+because the fixture strips it from every child it builds) and only that observed
+result fills the variable; the running interpreter is the first candidate, and
+when it lacks the client it serves the stdlib-only role instead. `PROBE`
+(`tests/host_gate_queue/conftest.py`) exits 0 only when `httpx` resolves to an
+existing file: a bare `import httpx` also succeeds on an empty directory named
+`httpx` — a namespace package, whose `__file__` is None — and that is not a
+usable client, so the name alone is not the observation.
+`test_client_probe_rejects_a_namespace_package_named_httpx` pins both sides,
+running the probe with `-S` so site-packages cannot shadow the directory under
+test, and the positive control is a regular package in a second directory.
 A pair that is already set is never probed. In the ordinary case this costs two
 short subprocess probes, writes no file, installs nothing, re-execs nothing and
 mounts no venv. Measured in the disposable container of this image
 (2026-11-07): `/usr/local/bin/python` → `python3.12` (3.12.15, the binary the
 image's `python3` resolves to) imports `httpx` 0.28.1, and `/usr/bin/python3`
 (3.13.5) fails `import httpx`. With no `GATE_QUEUE_TEST_*` set the gate shape is
-63 passed / 0 skipped and the review shape is 63 passed / 0 skipped; with
-`GATE_QUEUE_TEST_VENV_PYTHON=` (present but empty) it is 17 passed / 46 skipped.
+64 passed / 0 skipped and the review shape is 64 passed / 0 skipped; with
+`GATE_QUEUE_TEST_VENV_PYTHON=` (present but empty) it is 18 passed / 46 skipped.
 The supply itself was observed case by case in that same container: two probes
 and both roles when nothing is set, zero probes and both values kept when the
 caller set the pair, and neither variable set when a role could not be observed.

@@ -596,3 +596,347 @@ def test_director_compacts_near_clear_and_workers_keep_the_previous_policy(runti
         "every other route (the aitelier/worker subagents) compacts at half the window")
     assert "retainTokens" not in config and "retainRatio" not in config, (
         "workers keep DSH's default verbatim tail (16%)")
+
+
+# ── The model identity the endpoint resolved ────────────────────────────────
+# The completion endpoint already picked a concrete endpoint per session
+# (`gateway.active_model`, returned as `served_by`) and then kept nothing: the
+# child's own session file only recorded the route alias `worker`, so a review
+# criterion keyed on the writer's model family had no measured value to cite.
+# These tests drive the REAL handler and read the stored row back, then measure
+# the read surface's refusals through the app's own authz verdicts.
+
+DRIVER_ENDPOINTS = ['deepseek/deepseek-flash']
+WORKER_ENDPOINTS = ['opencodego/deepseek-v4.1-flash']
+
+
+def _driver_token(runtime, project_id):
+    """The managed driver's own credential, as it sits on disk."""
+    row = runtime.get(project_id)
+    return (runtime.root / row['driver_id'] / 'token').read_text().strip()
+
+
+def _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=None, *,
+                worker_endpoints=None, worker_rotate=True, transport=None):
+    """The real router, the real authz verdicts, a stubbed transport.
+
+    Nothing here overrides `require_reader`, `require_writer` or
+    `request_identity`: the gate is switched ON and the fixture's own registered
+    tokens are presented, so a 403 measured through this app is the app's
+    decision rather than something the test declared.
+
+    `worker_endpoints` / `worker_rotate` shape the worker route (a rotation pool
+    by default, a plain ordered list when a test needs a deterministic first
+    endpoint), and `transport` replaces the one canned answer, so a test can make
+    an ENDPOINT fail the way the real transport fails one.
+    """
+    from fastapi import FastAPI
+    from api import authz
+    from api.dsh_driver_routers import manager, router
+    from core import cf_access
+    import core.ai_router as ai
+    import litellm
+
+    worker_endpoints = list(worker_endpoints or WORKER_ENDPOINTS)
+    providers = tmp_path / 'providers.json'
+    routes = tmp_path / 'routes.json'
+    # Every provider the routes name must be registered, or litellm cannot place
+    # the endpoint: derive them from the endpoints so a test's own pool works.
+    named = {endpoint.split('/', 1)[0] for endpoint in DRIVER_ENDPOINTS + worker_endpoints}
+    providers.write_text(json.dumps({p: {'base_url': 'https://example.invalid/v1',
+                                        'api_key_env': 'FIXTURE'}
+                                     for p in sorted(named)}))
+    routes.write_text(json.dumps({
+        'driver': DRIVER_ENDPOINTS,
+        'worker': {'rotate': worker_endpoints} if worker_rotate else worker_endpoints}))
+    monkeypatch.setattr(ai, '_read_secret', lambda _: 'fixture-key')
+    monkeypatch.setattr(ai, '_ENDPOINT_COOLDOWN', {})
+
+    def answer(gateway, kwargs, **unused):
+        if transport is not None:
+            return transport(gateway, kwargs)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': 'ok'},
+                                               'finish_reason': 'stop'}],
+                                     usage={'prompt_tokens': 10, 'completion_tokens': 2,
+                                            'total_tokens': 12})
+
+    gateway_class = ai.AIGateway
+    monkeypatch.setattr(gateway_class, '_call_llm', answer)
+
+    class Unnameable(gateway_class):
+        """A turn whose endpoint the gateway cannot attribute to one model."""
+        def generate_native(self, messages, **kwargs):
+            turn = super().generate_native(messages, **kwargs)
+            if unnamed_flag is not None and unnamed_flag[0]:
+                self.active_model = ''
+            return turn
+
+    monkeypatch.setattr(ai, 'AIGateway', lambda model, **kw: Unnameable(
+        model, config_path=str(providers), routes_path=str(routes), **kw))
+    # The gate is ON because the DEPLOYMENT is configured, not because a verdict
+    # function was replaced: `cf_access.is_configured()` is the real switch, so
+    # `require_reader`/`require_writer`/`request_identity` run their own logic.
+    # Only the registry lookup is redirected, since it would open the production DB.
+    monkeypatch.setattr(cf_access, '_TEAM_DOMAIN', 'fixture.cloudflareaccess.com')
+    monkeypatch.setattr(cf_access, '_AUD', 'fixture-aud')
+    monkeypatch.setattr(authz, 'driver_registry', lambda: runtime.registry)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[manager] = lambda: runtime
+    return app
+
+
+async def test_completion_records_the_resolved_model_for_each_session(runtime, tmp_path, monkeypatch):
+    """The row is written where the endpoint was chosen, with that endpoint's name."""
+    from fastapi.testclient import TestClient
+    unnamed = [False]
+    app = _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=unnamed)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        payload = lambda session: {'session_id': session,
+                                   'messages': [{'role': 'user', 'content': 'work'}]}
+        with TestClient(app) as client:
+            root = client.post('/api/dsh-drivers/alpha/completion',
+                               json=payload(driver['session_id']), headers=headers)
+            assert root.status_code == 200, root.text
+            assert root.json()['served_by'] == DRIVER_ENDPOINTS[0]
+            child = client.post('/api/dsh-drivers/alpha/completion',
+                                json=payload('native-child-a'), headers=headers)
+            assert child.status_code == 200, child.text
+            assert child.json()['served_by'] == WORKER_ENDPOINTS[0]
+
+            # The row as FIRST written: one call, first and last sighting equal.
+            first = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-a']
+            assert first['calls'] == 1
+            assert first['first_seen'] == first['last_seen']
+
+            # Age BOTH stamps, then call again: the second call must MOVE
+            # last_seen. `last_seen > first_seen` alone would not measure that -
+            # the first insert already satisfies it, so dropping
+            # `last_seen=excluded.last_seen` from the UPSERT still passed.
+            with runtime.db.get_connection() as conn:
+                conn.execute("UPDATE dsh_driver_session_models SET first_seen=?, last_seen=? "
+                             "WHERE project_id='alpha' AND session_id='native-child-a'",
+                             ('2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'))
+                conn.commit()
+            again = client.post('/api/dsh-drivers/alpha/completion',
+                                json=payload('native-child-a'), headers=headers)
+            assert again.status_code == 200, again.text
+
+            # A gateway that cannot name a concrete model records UNKNOWN.
+            unnamed[0] = True
+            unknown = client.post('/api/dsh-drivers/alpha/completion',
+                                  json=payload('native-child-z'), headers=headers)
+            unnamed[0] = False
+            assert unknown.status_code == 200, unknown.text
+            assert unknown.json()['served_by'] in ('', None)
+
+            stored = {r['session_id']: r for r in runtime.session_models('alpha')}
+            assert set(stored) == {driver['session_id'], 'native-child-a', 'native-child-z'}
+            assert stored[driver['session_id']]['route'] == 'driver', (
+                'the root session is recorded under its own route, not as a worker')
+            assert stored[driver['session_id']]['served_by'] == DRIVER_ENDPOINTS[0]
+            assert stored[driver['session_id']]['calls'] == 1
+            child_row = stored['native-child-a']
+            assert child_row['route'] == 'worker'
+            assert child_row['served_by'] == WORKER_ENDPOINTS[0], (
+                'the concrete endpoint that answered, not the alias it asked for')
+            assert child_row['calls'] == 2, 'a later call is counted on the same row'
+            assert child_row['first_seen'] == '2026-01-01T00:00:00+00:00', (
+                'first_seen is the first sighting, not the latest')
+            assert child_row['last_seen'] != first['last_seen'], (
+                'the second call stores a NEW last_seen instead of keeping the first')
+            assert child_row['last_seen'] != '2026-01-01T00:00:00+00:00', (
+                'the aged stamp is overwritten; deleting last_seen=excluded.last_seen '
+                'from the UPSERT leaves it and would still satisfy last_seen > first_seen')
+            assert child_row['last_seen'] > child_row['first_seen']
+            unknown_row = stored['native-child-z']
+            assert unknown_row['served_by'] is None, (
+                'an unattributable turn stays unknown instead of repeating the route name')
+            assert unknown_row['served_by'] != 'worker', (
+                'storing the route alias in served_by would claim the alias answered')
+            assert unknown_row['route'] == 'worker'
+
+            served = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
+            assert served.status_code == 200, served.text
+            sessions = {s['session_id']: s for s in served.json()['sessions']}
+            assert set(sessions) == set(stored)
+            assert set(sessions['native-child-a']) == {'session_id', 'route', 'served_by',
+                                                       'first_seen', 'last_seen', 'calls'}
+            assert sessions['native-child-a']['served_by'] == WORKER_ENDPOINTS[0]
+            assert sessions['native-child-a']['calls'] == 2
+            assert sessions['native-child-z']['served_by'] is None
+            assert sessions['native-child-z']['served_by'] != 'worker', (
+                'the read surface must not hand back the alias in place of a model')
+
+        # The record is durable, not a cache that the gateway teardown clears.
+        await runtime.stop('alpha')
+        assert 'alpha' not in runtime.gateways
+        with TestClient(app) as client:
+            after = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
+            assert after.status_code == 200, after.text
+            assert len(after.json()['sessions']) == 3
+    finally:
+        await runtime.close()
+
+
+async def test_a_failed_record_write_still_returns_the_turn(runtime, tmp_path, monkeypatch, caplog):
+    """A bookkeeping write that fails must not fail a turn the model answered.
+
+    The endpoint writes the identity AFTER the model answered, and that call is
+    already paid for. A write that cannot land (a locked SQLite file past the
+    busy timeout, a read-only or full disk) is a reason to lose the RECORD, not a
+    reason to answer the driver with a 500 for a turn it already has. The loss is
+    reported - once, naming the project, the session and the exception class - so
+    an unrecorded turn is observable rather than silent.
+    """
+    import logging
+    import sqlite3
+    from fastapi.testclient import TestClient
+    app = _driver_app(runtime, tmp_path, monkeypatch)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        payload = lambda session: {'session_id': session,
+                                   'messages': [{'role': 'user', 'content': 'work'}]}
+        with TestClient(app) as client:
+            recorded = client.post('/api/dsh-drivers/alpha/completion',
+                                   json=payload('native-child-ok'), headers=headers)
+            assert recorded.status_code == 200, recorded.text
+
+            def unwritable(*args, **kwargs):
+                raise sqlite3.OperationalError('attempt to write a readonly database')
+
+            monkeypatch.setattr(runtime, 'record_model_call', unwritable)
+            caplog.set_level(logging.WARNING)
+            broken = client.post('/api/dsh-drivers/alpha/completion',
+                                 json=payload('native-child-unrecorded'), headers=headers)
+            assert broken.status_code == 200, (
+                'the answer is already paid for: a failed record must not 500 the turn')
+            assert set(broken.json()) == set(recorded.json()), (
+                'a failed write leaves the response shape unchanged')
+            assert broken.json()['served_by'] == recorded.json()['served_by'] == WORKER_ENDPOINTS[0]
+            assert broken.json()['text'] == 'ok'
+
+            lost = [r for r in caplog.records
+                    if 'could not record the answering model' in r.getMessage()]
+            assert len(lost) == 1, 'reported once: not swallowed, and not flooded'
+            assert lost[0].levelname == 'WARNING'
+            message = lost[0].getMessage()
+            assert 'alpha' in message and 'native-child-unrecorded' in message, (
+                'the warning names the project and the session that went unrecorded')
+            assert 'OperationalError' in message and 'readonly' in message, (
+                'the exception class tells an operator a locked/read-only DB from a bug')
+
+            # The write really failed: the 200 is the answer surviving, not a
+            # record that quietly was not attempted, and the earlier row is untouched.
+            stored = {r['session_id']: r for r in runtime.session_models('alpha')}
+            assert 'native-child-unrecorded' not in stored
+            assert stored['native-child-ok']['calls'] == 1
+    finally:
+        await runtime.close()
+
+
+async def test_recorded_served_by_follows_failover_not_the_first_endpoint(runtime, tmp_path, monkeypatch):
+    """A failed first endpoint must never be what the record names.
+
+    `served_by` is read off the gateway after the call, so a turn that failed
+    over records the endpoint that actually answered. A record taken from the
+    route's first configured candidate would name a model that produced nothing.
+    """
+    import litellm
+    from fastapi.testclient import TestClient
+    pool = ['opencodego/deepseek-v4.1-flash', 'deepseek/deepseek-pro']
+
+    def first_endpoint_is_down(gateway, kwargs):
+        if gateway.active_model == pool[0]:
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai',
+                                              model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant',
+                                                          'content': 'second answered'},
+                                               'finish_reason': 'stop'}],
+                                     usage={'prompt_tokens': 10, 'completion_tokens': 2,
+                                            'total_tokens': 12})
+
+    app = _driver_app(runtime, tmp_path, monkeypatch, worker_endpoints=pool, worker_rotate=False,
+                      transport=first_endpoint_is_down)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        with TestClient(app) as client:
+            answer = client.post('/api/dsh-drivers/alpha/completion', headers=headers, json={
+                'session_id': 'native-child-failover',
+                'messages': [{'role': 'user', 'content': 'work'}]})
+            assert answer.status_code == 200, answer.text
+            assert answer.json()['served_by'] == pool[1], 'the second endpoint is the one that answered'
+            assert answer.json()['text'] == 'second answered'
+        row = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-failover']
+        assert row['served_by'] == pool[1], (
+            'the record names the endpoint that ANSWERED, not the first configured one')
+        assert row['served_by'] != pool[0], 'the endpoint that failed produced no answer'
+        assert row['route'] == 'worker', 'a native child is recorded under its own route'
+        assert row['calls'] == 1
+    finally:
+        await runtime.close()
+
+
+async def test_recorded_session_identity_is_driver_scoped_and_never_anonymous(runtime, tmp_path, monkeypatch):
+    """A valid credential that is not THIS project's driver reads nothing."""
+    from api import authz
+    from fastapi.testclient import TestClient
+    app = _driver_app(runtime, tmp_path, monkeypatch)
+    try:
+        alpha = await runtime.start('alpha', actor='fixture')
+        beta = await runtime.start('beta', actor='fixture')
+        alpha_token, beta_token, owner_token = (_driver_token(runtime, 'alpha'),
+                                                _driver_token(runtime, 'beta'),
+                                                'fixture-owner-token')
+        payload = lambda session: {'session_id': session,
+                                   'messages': [{'role': 'user', 'content': 'work'}]}
+        with TestClient(app) as client:
+            for project, driver, token in (('alpha', alpha, alpha_token), ('beta', beta, beta_token)):
+                wrote = client.post(f'/api/dsh-drivers/{project}/completion', json=payload(driver['session_id']),
+                                    headers={'X-AItelier-Driver-Token': token})
+                assert wrote.status_code == 200, wrote.text
+
+            anonymous = client.get('/api/dsh-drivers/alpha/model-sessions')
+            assert anonymous.status_code == 403, 'the recorded identity is not an anonymous read'
+            assert anonymous.headers['X-AItelier-Denial'] == 'read_denied_not_authenticated'
+            assert alpha['session_id'] not in anonymous.text
+
+            # A token this app WOULD accept elsewhere must not become a read of
+            # this project. Each is measured against the layer that refuses it, in
+            # its own iteration: a loop that stops on its first token would leave
+            # the other two unmeasured (review finding). Another driver's token and
+            # the owner's seeded credential PASS the reader gate - they are refused
+            # by this runtime's OWNERSHIP check; an unregistered token never gets
+            # that far, the gate answers it with its own code.
+            for token, refusal in ((beta_token, 'owned-by-another-driver'),
+                                   (owner_token, 'owned-by-another-driver'),
+                                   ('not-a-registered-token', authz.READ_DENIED_BAD_ADMIN_TOKEN)):
+                refused = client.get('/api/dsh-drivers/alpha/model-sessions',
+                                     headers={'X-AItelier-Driver-Token': token})
+                assert refused.status_code == 403, f'{token!r} must not read alpha'
+                assert alpha['session_id'] not in refused.text
+                if refusal == 'owned-by-another-driver':
+                    assert 'X-AItelier-Denial' not in refused.headers, (
+                        f'{token!r} passed the reader gate and was refused by ownership')
+                    assert 'another driver' in refused.json()['detail']
+                else:
+                    assert refused.headers.get('X-AItelier-Denial') == refusal, (
+                        'an unregistered token is refused before any project is read')
+
+            own = client.get('/api/dsh-drivers/alpha/model-sessions',
+                             headers={'X-AItelier-Driver-Token': alpha_token})
+            assert own.status_code == 200, own.text
+            assert [s['session_id'] for s in own.json()['sessions']] == [alpha['session_id']]
+            assert beta['session_id'] not in own.text, "another project's session stays out"
+
+            theirs = client.get('/api/dsh-drivers/beta/model-sessions',
+                                headers={'X-AItelier-Driver-Token': beta_token})
+            assert theirs.status_code == 200, theirs.text
+            assert [s['session_id'] for s in theirs.json()['sessions']] == [beta['session_id']]
+            assert alpha['session_id'] not in theirs.text
+    finally:
+        await runtime.close()

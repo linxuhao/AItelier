@@ -1,4 +1,5 @@
 """Managed DSH drivers: existing State reader/writer authentication applies."""
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -163,6 +164,20 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
             "runtime_skill": (Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "driver.md").read_text()}
 
 
+@router.get("/{project_id}/model-sessions", dependencies=[Depends(authz.require_reader)])
+def model_sessions(project_id: str, request: Request, runtime=Depends(manager)):
+    """Which concrete model answered this driver's sessions, and what it asked for.
+
+    Driver-scoped exactly like `context`: the credential must belong to THIS
+    project's driver, so a valid token for another driver is refused rather than
+    turned into a read of somebody else's sessions, and the query itself is keyed
+    on the project so no foreign row can be served. `served_by` is NULL when the
+    gateway could not name a concrete model - never the route alias.
+    """
+    owned(project_id, request, runtime)
+    return {"project_id": project_id, "sessions": runtime.session_models(project_id)}
+
+
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
 async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
     row = owned(project_id, request, runtime)
@@ -258,11 +273,15 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     sessions = runtime.gateways.setdefault(project_id, {})
+    # The route this session ASKS for: the director's own configured model for
+    # the root session, the worker route for every native child. Resolved for
+    # every turn, not just the binding one, so the record always states the
+    # route the call was made under.
+    route = row["model"] if body.session_id == row["session_id"] else "worker"
     if body.session_id not in sessions:
         # Native children (including resumed old children) have their own session.
         # Bind once per child: rotate across workers, keep tool turns sticky.
-        model = row["model"] if body.session_id == row["session_id"] else "worker"
-        gateway = AIGateway(model, enable_thinking=True, thinking_effort=body.reasoning_effort,
+        gateway = AIGateway(route, enable_thinking=True, thinking_effort=body.reasoning_effort,
                             max_output_tokens=body.max_tokens)
         sessions[body.session_id] = (gateway, asyncio.Lock())
     gateway, lock = sessions[body.session_id]
@@ -271,5 +290,22 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         gateway.thinking_effort = body.reasoning_effort
         gateway.enable_thinking = body.reasoning_effort != "off"
         turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)
+        # Persisted here, where the endpoint was chosen, and with the concrete
+        # model that answered (`active_model` is the same value returned as
+        # `served_by`): the child's own session file only keeps the route alias.
+        # BEST-EFFORT: the model has already answered and the turn is already
+        # paid for, so a bookkeeping write that fails (a locked SQLite file past
+        # the busy timeout, a read-only or full disk) must not turn an answer
+        # the driver is owed into a 500. `Exception`, not `BaseException`: a
+        # cancellation still propagates. The failure is reported, not swallowed
+        # - an unrecorded turn has to be visible to an operator.
+        try:
+            runtime.record_model_call(project_id, body.session_id, route=route,
+                                      served_by=gateway.active_model)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "dsh driver: could not record the answering model for project %s "
+                "session %s (%s: %s) - the turn is served unrecorded",
+                project_id, body.session_id, type(exc).__name__, exc)
         return {"text": turn.text, "tool_calls": turn.tool_calls, "reasoning_content": turn.reasoning_content,
                 "truncated": turn.truncated, "usage": gateway.last_usage, "served_by": gateway.active_model}

@@ -29,12 +29,11 @@ Two things, and neither of them is "what a shell command does":
      it is reachable (`/`, `/opt`), the client's own file name, or a WORD that builds
      such a path at parse time (a shell variable, a glob or a brace whose literal head
      already points there). What separates one word from the next is decided in one
-     place, `_split_words`, and it is deliberately narrower than a shell: whitespace
-     (so a TAB separates exactly as a space does), an UNQUOTED `;`, `|`, `&`, `(`, `)`,
-     `<`, `>`, and an unquoted backslash escaping the character after it. A separator
-     INSIDE quotes does NOT separate (`sed -i 's|/opt|/srv|'` is three words, not six),
-     a BACKTICK stays inside its word, and quoting itself is removed later by `_word`
-     (`"/opt"`, `/o'pt'`, `\\/opt` and `//opt` are all the same word to it). The exec form
+     place, `_split_words`, and it is deliberately narrower than a shell AND blunter:
+     whitespace (so a TAB separates exactly as a space does) and `;`, `|`, `&`, `(`, `)`,
+     `<`, `>` - whether or not they sit inside quotes. Quoting is removed later, by
+     `_word` (`"/opt"`, `/o'pt'`, `\\/opt` and `//opt` are all the same word to it), and
+     a BACKTICK stays inside its word. The exec form
      is read as the JSON array Docker reads it as, and a line continuation is DELETED
      rather than spaced - `/opt/aitelier-gate-im\\` + `ports/...` is one word, which is
      the hole the round-6 review measured green. An instruction that mentions the tree
@@ -44,26 +43,36 @@ Two things, and neither of them is "what a shell command does":
      `chmod --reference=/tmp/refmode 0755 /opt/aitelier-gate-imports` and a later
      `chmod 0666 .../godot_harness.py` are all the same refusal.
 
-     Two false refusals are the stated price of judging text, and both are pinned by
-     `test_the_documented_false_refusal_is_refused_on_purpose`:
+     Quoting does not hide a word from that test, and that is why `RUN sh -c "chmod 0700
+     /opt"` is refused: a shell would run that command, so the text is judged as the words
+     it contains rather than as one opaque string.
+
+     Four refusals are the stated price of judging text, and every one of them is pinned:
 
        * a word that STARTS with an expansion (`${DIR}/x`, `${DIR}/..`) is refused when
          the expansion supplies a path: its literal head is empty, so the text says
          nothing about where it goes. A harmless `cp ${SRC}/x /tmp/` goes with it. A bare
-         `$BUILD_TOOL` names no path and IS read;
-       * a word with a `/`-headed literal head that also carries `$` or a backtick is
-         refused, because the literal part already points somewhere and the rest is
+         `$BUILD_TOOL` names no path and IS read. Pinned by
+         `test_the_documented_false_refusal_is_refused_on_purpose`;
+       * a word whose literal head CONTAINS a `/` and which also carries `$` or a backtick
+         is refused, because the literal part already points somewhere and the rest is
          spliced on. That refuses `ENV PATH="/opt/venv/bin:$PATH"` and
          `curl https://host/v${VERSION}/tool.tgz -o /tmp/t`, which are legitimate lines.
-
-     A third cost is stated and pinned in `test_the_seventh_review_false_refusals_are_read`:
-     a word that IS `/` or `/opt` is refused outright (`WORKDIR /`, `RUN mkdir -p /opt`,
-     `COPY --from=build / /`, `RUN find / -name '*.pyc' -delete`), because a mode on either
-     decides whether the export tree can be reached and the text of a RUN does not say what
-     it does with it. Those are real build lines this file will not read.
+         Pinned in the same test;
+       * a quoted expression that mentions a pinned path is refused, so
+         `RUN sed -i 's|/opt|/srv|' /etc/app.conf` fails although a shell would only
+         rewrite text there. Reading the quoted string as a command instead is what the
+         round-8 candidate did, and its review measured four quoted commands ACCEPTED that
+         its base refused; the mention is the rule, and the cost is this one line shape.
+         Pinned in the same test;
+       * a word that IS `/` or `/opt` is refused outright (`WORKDIR /`, `RUN mkdir -p
+         /opt`, `COPY --from=build / /`, `RUN find / -name '*.pyc' -delete`), because a
+         mode on either decides whether the export tree can be reached and the text of a
+         RUN does not say what it does with it. Those are real build lines this file will
+         not read. Pinned by `test_the_seventh_review_false_refusals_are_read`.
 
      `_directives` also drops blank and `#`-comment lines INSIDE a continuation, exactly
-     as Docker does; before the round-7 fix a comment line ended the instruction and left
+     as Docker does; before that change a comment line ended the instruction and left
      two halves of the name as separate words.
 
 That is deliberately NOT a model of `chmod`, `install` or `COPY`: five review rounds
@@ -77,13 +86,18 @@ is why those rounds' findings now hold without a new rule per finding.
 The sixth round found what a spelling is made of rather than another command: a word is
 not the bytes between two spaces (`"/opt"`, `/opt;`, `//opt`, the exec form's JSON
 array, a continued line). The seventh found the other half - a word can be SPLIT in the
-middle of a name (a backtick pair, a comment line inside a continuation) and a separator
-can sit inside quotes - and it also measured this file refusing a `sed` expression whose
-`|` was quoted. That fix is not one function: `_split_keyword` splits the keyword on any
-whitespace, `_directives` joins continuations and drops comment/blank lines, `_words`
-reads the exec form, `_split_words` decides what separates a word, `_word` removes what a
-shell would remove, and `_decides_reachability` normalises the leading slashes. The shapes
-below are rows of a table rather than five more branches.
+middle of a name (a backtick pair, a comment line inside a continuation) - and it
+measured this file refusing a `sed` expression whose `|` was quoted. The eighth tried to
+answer that by treating a quoted separator as ordinary text, and its review measured the
+cost: the same rule makes a whole quoted COMMAND one word, so `sh -c "chmod 0700 /opt"`
+and a `python -c` chmod slipped back to green, and an escaped quote closed and reopened
+the quoting. The split is quote-blind again, the `sed` refusal is a pinned cost, and the
+assignment's value is judged too. What remains is not one function: `_split_keyword`
+splits the keyword on any whitespace, `_directives` joins continuations and drops
+comment/blank lines, `_words` reads the exec form and an assignment's value,
+`_split_words` decides what separates a word, `_word` removes what a shell would remove,
+and `_decides_reachability` normalises the leading slashes. The shapes below are rows of a
+table rather than five more branches.
 
 What it cannot decide, and does not claim to
 --------------------------------------------
@@ -97,8 +111,10 @@ What it cannot decide, and does not claim to
     with a literal head that already points at or into the tree is refused, so `/opt/ai*`,
     `/opt/*`, `/opt/aitelier-gate-{imports,x}` and `/*/..` are all caught, but a token
     that begins with the wildcard gives the text nothing to judge;
-  * a path whose VALUE this file cannot know: a bare `$VAR` or `${VAR}` carrying one
-    (`ENV D=/opt` followed by `RUN chmod 0700 $D` is green here), a cwd-relative spelling
+  * the value of a bare `$VAR`/`${VAR}`: the text carries no path for it, so
+    `RUN chmod 0700 $D` is green unless the same file assigns `D` (an assignment's VALUE
+    is judged, so `ENV D=/opt` is refused; a value that arrives as a build argument is
+    text this file never reads), a cwd-relative spelling
     (`..` is `/` because the last `WORKDIR` is `/app`, and `~/../..` is `/` because HOME
     is `/home/app`), the RESULT of a command substitution (`$(dirname /opt/x)` is three
     words, none of them the directory it prints), and an alias path such as
@@ -296,61 +312,63 @@ _EDGE = "\"'\\[]{},="
 _UNQUOTED = {ord(character): None for character in "\"'\\"}
 
 
+#: What separates one WORD from the next in shell text. Quoting is deliberately NOT honoured
+#: here: a `;` or a `|` inside quotes still separates, because what this file decides is
+#: what the TEXT mentions, not what a shell would run (see `_split_words`, and the `sed`
+#: row in `test_the_documented_false_refusal_is_refused_on_purpose`). The backtick is
+#: deliberately absent: it stays inside its word.
+_SHELL_BREAK = re.compile(r"[\s;|&()<>]+")
+
+
 def _split_words(text: str) -> list[str]:
     """The words of one instruction's shell text, each still as WRITTEN (quoting attached).
 
-    Three things separate one word from the next, and only three:
+    One thing separates one word from the next: `\\s`, `;`, `|`, `&`, `(`, `)`, `<` or `>`,
+    so a TAB after `RUN` separates exactly as a space does (an earlier space-only split
+    made a whole instruction vanish).
 
-      * whitespace - `\\s`, so a TAB after `RUN` separates exactly as a space does (an
-        earlier space-only split made a whole instruction vanish);
-      * an UNQUOTED shell operator: `;`, `|`, `&`, `(`, `)`, `<`, `>`;
-      * an UNQUOTED backslash, which escapes the character after it and so keeps both.
+    Quoting does NOT protect a separator, and a BACKTICK is not a separator:
 
-    Three things deliberately do NOT separate words:
-
-      * a separator INSIDE quoting: `sed -i 's|/opt|/srv|'` is three words to a shell,
-        not six, and the round-7 review measured the six-word reading refusing that
-        harmless line - a false refusal, which is the fastest way to get a guard deleted;
-      * a BACKTICK: it stays inside its word, so `/opt/aitelier-gate-imp``orts` remains
-        one word whose literal head stops at the backtick, and `_refusal`'s expansion rule
-        refuses it. Splitting on the backtick is what let round 7's regression through:
+      * a quoted separator still separates, so `RUN sh -c "chmod 0700 /opt"` is five words
+        and its `chmod` argument is judged like any other. Treating a quoted string as one
+        word is what the round-8 candidate did, and its review measured four quoted
+        commands ACCEPTED that the candidate's own base refused - a shell runs the string,
+        so the words it would run are the words to judge. The price is one measured line
+        shape, pinned: `sed -i 's|/opt|/srv|'` is refused, because its text names `/opt`
+        and this file does not read a sed expression;
+      * a BACKTICK stays inside its word, so `/opt/aitelier-gate-imp``orts` remains one
+        word whose literal head stops at the backtick and `_refusal`'s expansion rule
+        refuses it. Splitting on the backtick is what let the round-7 regression through:
         the two halves spelled no name and no ancestor;
       * quoting itself: `"/opt"` is one word, and what it names is decided after the
-        quotes come off, in `_word`.
+        quotes come off, in `_word`. No escape handling is modelled at all - `\\"` is a
+        quote and a backslash, and `_word` removes both.
 
     Nothing more of quoting is modelled than that: no nested quoting, no `$'...'`, no
-    arithmetic. A word this cannot read is not silently dropped - it keeps whatever it
-    spells, and `_refusal` judges the literal text.
+    arithmetic. Every word keeps whatever it spells and is judged as written.
     """
-    words: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    index = 0
-    while index < len(text):
-        character = text[index]
-        if quote is not None:
-            current.append(character)
-            if character == quote:
-                quote = None
-            index += 1
-            continue
-        if character in "\"'":
-            quote = character
-            current.append(character)
-        elif character == "\\" and index + 1 < len(text):
-            current.append(character)
-            index += 1
-            current.append(text[index])
-        elif character.isspace() or character in ";|&()<>":
-            if current:
-                words.append("".join(current))
-                current = []
-        else:
-            current.append(character)
-        index += 1
-    if current:
-        words.append("".join(current))
-    return words
+    return [word for word in _SHELL_BREAK.split(text) if word]
+
+
+#: `NAME=value` as a shell assignment: an identifier on the left, so `--chmod=0644` and
+#: `--from=build` (a leading `-`) are not one.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.+)$")
+
+
+def _with_assigned_values(words: list[str]) -> list[str]:
+    """Each word, followed by the VALUE of its assignment when the word carries one.
+
+    `ENV D=/opt` puts the export tree's ancestor into a variable in one word that no shell
+    would split, and the value is the whole point of the line, so it is judged as its own
+    word. One level only: `A=B=/opt` yields `B=/opt`, whose own value is not re-expanded,
+    because a shell would not expand it either.
+    """
+    produced = list(words)
+    for word in words:
+        match = _ASSIGNMENT.match(word)
+        if match:
+            produced.append(match.group(1))
+    return produced
 
 
 def _words(arguments: str) -> list[str]:
@@ -360,10 +378,13 @@ def _words(arguments: str) -> list[str]:
     Docker reads it with a JSON reader, so this file does too, and
     `RUN ["chmod","0700","/opt"]` is three words rather than one bracket-wrapped blob
     that named nothing; the round-6 review measured that shape green. Everything else is
-    shell text, split by `_split_words` on whitespace and on an UNQUOTED operator, with a
-    backtick and a separator inside quoting left inside their word. An exec-form element
-    may itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`), so each
-    element is split again.
+    shell text, split by `_split_words` on whitespace and on `;`, `|`, `&`, `(`, `)`, `<`,
+    `>` whether or not they are quoted, with a backtick left inside its word. An exec-form
+    element may itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`),
+    so each element is split again.
+
+    The VALUE of an assignment is judged as its own word too, so `ENV D=/opt` is refused
+    rather than carried out of this file's reach; see `_with_assigned_values`.
     """
     text = arguments.strip()
     if text.startswith("[") and text.endswith("]"):
@@ -372,8 +393,9 @@ def _words(arguments: str) -> list[str]:
         except ValueError:
             parsed = None
         if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            return [word for item in parsed for word in _split_words(item)]
-    return _split_words(text)
+            return _with_assigned_values(
+                [word for item in parsed for word in _split_words(item)])
+    return _with_assigned_values(_split_words(text))
 
 
 def _word(raw: str) -> str:
@@ -397,13 +419,16 @@ def _refusal(word: str) -> str | None:
         ancestor of it (`/opt/*`, `/opt/aitelier-gate-{imports,x}`, `/*/..`)?
       * is it, plainly, one of the two ancestors (`/opt`, `/`)?
 
-    Two costs are stated rather than hidden, and both are pinned as false refusals:
-    a word that STARTS with an expansion (`${SRC}/tool`) is refused because its whole path
-    comes from the shell, and a word with a `/`-headed literal head that ALSO carries `$`
-    or a backtick is refused because the literal part already points somewhere and the
-    rest is spliced on. The second one refuses legitimate lines: `ENV PATH="/opt/venv/
-    bin:$PATH"` and `RUN curl https://host/v${VERSION}/tool.tgz -o /tmp/t`. That is the
-    price of judging text, and the module docstring names it.
+    Costs are stated rather than hidden, and every one is pinned by
+    `test_the_documented_false_refusal_is_refused_on_purpose`: a word that STARTS with an
+    expansion (`${SRC}/tool`) is refused because its whole path comes from the shell; a
+    word whose literal head CONTAINS a `/` and which ALSO carries `$` or a backtick is
+    refused because the literal part already points somewhere and the rest is spliced on
+    (`ENV PATH="/opt/venv/bin:$PATH"`, `RUN curl https://host/v${VERSION}/tool.tgz -o
+    /tmp/t`); and a QUOTED expression that mentions a pinned path is refused, so
+    `RUN sed -i 's|/opt|/srv|' /etc/app.conf` fails although a shell would only rewrite
+    text there. That is the price of judging text instead of running a shell, and the
+    module docstring names it.
     """
     if NAME in word or CLIENT in word:
         return "names the export tree or the client this image pins"
@@ -841,11 +866,34 @@ SEVENTH_REVIEW_ESCAPES: tuple[tuple[str, str, str], ...] = (
      "aitelier-gate-imports"),
 )
 
-#: The FALSE refusals the seventh review measured, the first of them new that round: a
-#: separator INSIDE quoting was taken as a word boundary, so a sed EXPRESSION became a word
-#: `/opt` that no shell ever produces. 3437a37b accepted both spellings.
-SEVENTH_REVIEW_FALSE_REFUSALS: tuple[str, ...] = (
+#: The escapes the EIGHTH review measured against the round-8 candidate (6237d9a6). X1, X1b,
+#: X1c and X2 were REFUSED by the branch's base (ee02377d2b) and accepted by the candidate:
+#: its quote-aware splitter kept a whole quoted COMMAND as one word, so the argument that
+#: re-modes an ancestor was never a word of its own, and an escaped quote closed and reopened
+#: the quoting, so the `;` after it disappeared into the same word. X3 is the control that was
+#: refused throughout. The expected token is what the refusal has to NAME on its first line.
+EIGHTH_REVIEW_ESCAPES: tuple[tuple[str, str, str], ...] = (
+    ("X1  a quoted shell command that re-modes an ancestor",
+     'RUN sh -c "chmod 0700 /opt"', "/opt"),
+    ("X1b a quoted recursive chmod of the root",
+     "RUN sh -c 'chmod -R 0700 /'", "names an ancestor"),
+    ("X1c a python one-liner that re-modes an ancestor from inside quotes",
+     "RUN python -c \"import os; os.chmod('/opt', 0o700)\"", "/opt"),
+    ("X2  an escaped quote that closes and reopens the quoting",
+     "RUN echo \"a\\\"\" ; chmod 0700 /opt", "/opt"),
+    ("X3  the same chmod with no quoting at all (the control that never went green)",
+     "RUN chmod 0700 /opt", "/opt"),
+)
+
+#: The `sed` spellings the seventh review measured as false refusals, re-measured after the
+#: round-9 split. The `|` one is REFUSED: a shell operator separates words whether or not it
+#: is quoted, so the expression's `/opt` IS a word and the line's text names a pinned path.
+#: The `#` and escaped-slash ones are ACCEPTED, because neither character separates words and
+#: the word they form spells no path. Both directions are pinned so neither can drift quietly.
+SED_SPELLINGS_REFUSED: tuple[str, ...] = (
     "RUN sed -i 's|/opt|/srv|' /etc/app.conf",
+)
+SED_SPELLINGS_READ: tuple[str, ...] = (
     "RUN sed -i 's#/opt#/srv#' /etc/app.conf",
     "RUN sed -i 's/\\/opt/\\/srv/' /etc/app.conf",
 )
@@ -890,27 +938,45 @@ def test_the_seventh_review_escapes_are_refused():
             f"{expected!r}):\n" + "\n".join(added))
 
 
-def test_the_seventh_review_false_refusals_are_read():
-    """The other direction: the line the round-7 review measured as a FALSE REFUSAL.
+def test_the_eighth_review_escapes_are_refused():
+    """The quoted-command spellings the round-8 candidate let back in.
 
-    `sed -i 's|/opt|/srv|' /etc/app.conf` names no pinned path: the `/opt` is a string
-    inside a sed expression, and a shell hands the whole quoted word to sed. The round-6
-    tokenizer split on `|` wherever it appeared, so this harmless line was refused on a
-    word the shell never produces, and 3437a37b accepted it - a false refusal is the
-    fastest way to get a guard deleted, which is why the quote-aware split belongs to the
-    same fix as the E1 regression rather than to a later loosening.
+    The round-8 splitter treated a separator inside quotes as ordinary text, which reads a
+    quoted COMMAND as one opaque word: `sh -c "chmod 0700 /opt"` then spelled no ancestor,
+    and a `python -c` chmod did the same. It also had no escape handling inside quotes, so
+    `"a\\""` closed at the escaped quote and reopened on the next one, swallowing the `;` and
+    the chmod after it. All four were refused by the branch's base and accepted by the
+    candidate; the base's reading is the one this file keeps, because a shell runs the
+    string and the words it would run are the words to judge.
 
-    The second table is the cost the review named as BY DESIGN BUT UNSTATED. `WORKDIR /`,
-    `RUN mkdir -p /opt`, `COPY --from=build / /` and `RUN find / -name '*.pyc' -delete` are
-    real builds this file will not read, because the word IS an ancestor and no text tells
-    a harmless mention from a mode change. Pinning them makes that a stated decision with a
-    test instead of a silence, and the reason is asserted too: a refusal that names the
-    ancestor is the contract, not a stray match.
+    X3 is the control: the same chmod with no quoting, refused before the round-8 change and
+    after it, so the table can tell "the quoted form is refused" from "this chmod is refused".
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
-    for line in SEVENTH_REVIEW_FALSE_REFUSALS:
-        assert not _added_problems(shipped, line), (
-            f"this line names no pinned path and must not be refused: {line}")
+    for name, extra, expected in EIGHTH_REVIEW_ESCAPES:
+        added = _added_problems(shipped, extra)
+        assert added, f"this shape is green again, and it re-modes a pinned path:\n{extra}"
+        assert _names(added, expected), (
+            f"{name} was refused, but not for the token that closes it (expected "
+            f"{expected!r}):\n" + "\n".join(added))
+
+
+def test_the_seventh_review_stated_costs_are_refused_on_purpose():
+    """The cost the seventh review named as BY DESIGN BUT UNSTATED.
+
+    `WORKDIR /`, `RUN mkdir -p /opt`, `COPY --from=build / /` and `RUN find / -name '*.pyc'
+    -delete` are real builds this file will not read, because the word IS an ancestor and no
+    text tells a harmless mention from a mode change. Pinning them makes that a stated
+    decision with a test instead of a silence, and the reason is asserted too: a refusal
+    that names the ancestor is the contract, not a stray match.
+
+    This test used to hold the `sed` spellings in the OTHER direction, on the round-8
+    reading that a quoted expression is one word. Round 8's review measured what that
+    reading costs, so the `sed` rows moved to
+    `test_the_documented_false_refusal_is_refused_on_purpose`, where one spelling is a
+    stated refusal and the other two are stated reads.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     for line, reason in SEVENTH_REVIEW_STATED_COSTS:
         added = _added_problems(shipped, line)
         assert added, (
@@ -959,21 +1025,39 @@ def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
         'RUN ["chmod","+x","scripts/entrypoint.sh"]',
         'SHELL ["/bin/bash","-c"]',
         'RUN ["/usr/local/bin/tool","--version"]',
+        # Refused by the round-8 candidate and accepted by its base: a quoted command whose
+        # `$` is not part of a path. The round-8 `$` rule read the head of the whole quoted
+        # word, so `cd /app && echo ` looked like the literal part of a path.
+        'RUN sh -c "cd /app && echo $HOME"',
     ):
         assert not _added_problems(shipped, line), (
             f"this line names no pinned path and must not be refused: {line}")
 
 
 def test_the_documented_false_refusal_is_refused_on_purpose():
-    """The one cost the docstring states, pinned so that it stays a decision.
+    """Every cost the module docstring states, pinned in both directions.
 
-    A word that STARTS with an expansion has an empty literal head: the text says
-    nothing about where the shell will point it, so this file refuses it. `cp ${SRC}/tool
-    /tmp/tool` is harmless in a real build and is still refused - that is the price of not
-    modelling the shell, and the module docstring says so. Pinning it here means the cost
-    is a stated decision with a test rather than an accident, and the last two rows are
-    the other side of the same line: a bare expansion with no path in it names a command
-    or an operand and IS read, so the rule is about paths and not about `$`.
+    Four refusals are the price of judging TEXT instead of running a shell, and each is paid
+    on a line a build could legitimately want:
+
+      * a word that STARTS with an expansion (`${SRC}/tool`) has an empty literal head, so
+        the text says nothing about where the shell will point it;
+      * a word whose literal head contains a `/` and which also carries `$` or a backtick is
+        refused, because the literal part already points somewhere and the rest is spliced
+        on. `ENV PATH="/opt/venv/bin:$PATH"` and `curl https://host/v${VERSION}/tool.tgz`
+        are legitimate lines this file will not read;
+      * a quoted expression whose text names a pinned path is refused, so
+        `sed -i 's|/opt|/srv|'` fails although a shell would only rewrite text there. The
+        two spellings that carry no shell operator, `s#/opt#/srv#` and `s/\\/opt/\\/srv/`,
+        are READ - not because they are safer, but because this file splits words on the
+        shell's operators and `#` is not one of them. That asymmetry is the measured
+        boundary, not a preference;
+      * a word that IS `/` or `/opt` is refused outright, pinned in
+        `test_the_seventh_review_stated_costs_are_refused_on_purpose`.
+
+    The last rows are the other side of the same rules: a bare expansion with no path in it
+    names a command or an operand and IS read, and so does a `sed` expression this file's
+    word rule does not split, so the rule is about paths and not about `$` or `sed`.
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     for line in ("RUN cp ${SRC}/tool /tmp/tool",
@@ -984,9 +1068,23 @@ def test_the_documented_false_refusal_is_refused_on_purpose():
         assert _names(added, "builds a path out of a shell variable"), (
             f"{line} was refused for another reason than the docstring states:\n"
             + "\n".join(added))
-    for line in ("RUN ${BUILD_TOOL} --version", "RUN chmod 0755 ${MODE}"):
+    for line in ('ENV PATH="/opt/venv/bin:$PATH"',
+                 "RUN curl https://host/v${VERSION}/tool.tgz -o /tmp/t"):
+        added = _added_problems(shipped, line)
+        assert added, (
+            f"the second documented cost is gone, and the docstring still states it: {line}")
+        assert _names(added, "builds a path out of a shell variable"), (
+            f"{line} was refused for another reason than the docstring states:\n"
+            + "\n".join(added))
+    for line in SED_SPELLINGS_REFUSED:
+        added = _added_problems(shipped, line)
+        assert added, f"the sed cost is documented as a refusal and is now read: {line}"
+        assert _names(added, "names an ancestor"), (
+            f"{line} was refused for another reason than the docstring states:\n"
+            + "\n".join(added))
+    for line in ("RUN ${BUILD_TOOL} --version", "RUN chmod 0755 ${MODE}", *SED_SPELLINGS_READ):
         assert not _added_problems(shipped, line), (
-            f"a bare expansion names no path and must not be refused: {line}")
+            f"this line spells no path and must not be refused: {line}")
 
 
 def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
@@ -1032,8 +1130,8 @@ def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
 #: is a decision with a test: closing one of them is a visible change to this table, never
 #: an accident of the next fix.
 NON_CLAIMS: tuple[tuple[str, str], ...] = (
-    ("E3  a path carried in a bare variable",
-     "ENV D=/opt\nRUN chmod 0700 $D"),
+    ("E3  a path carried in a bare variable the text never assigns",
+     "RUN chmod 0700 $D"),
     ("E4  a cwd-relative spelling of an ancestor",
      "RUN chmod 0700 ..\nRUN chmod 0700 ../opt\nRUN chmod 0700 ~/../.."),
     ("E5  the RESULT of a command substitution",
@@ -1066,3 +1164,12 @@ def test_the_declared_non_claims_are_still_accepted():
             f"{name} is declared a NON-CLAIM and must still be accepted, but the parser "
             f"now refuses it - if that is intended, move the row into a refusing table and "
             f"say why in the commit message:\n{extra}\n" + "\n".join(added))
+    # The ASSIGNMENT half of E3 was closed by the round-8 review's own finding: an
+    # instruction that puts a pinned path into a variable is refused on the VALUE, so what
+    # is left of the non-claim is a variable whose value the text never carries at all.
+    for line in ("ENV D=/opt", "ARG D=/opt", "RUN D=/opt; chmod 0700 $D"):
+        added = _added_problems(shipped, line)
+        assert added, (
+            f"this line does put a pinned path into a variable and must be refused: {line}")
+        assert _names(added, "/opt"), (
+            f"{line} was refused, but not for the path it assigns:\n" + "\n".join(added))

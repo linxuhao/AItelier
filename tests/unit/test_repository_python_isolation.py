@@ -386,8 +386,16 @@ def test_bridge_keeps_forwarding_after_client_write_halfclose(bridge_entry,tmp_p
     threading.Thread(target=upstream.serve_forever,daemon=True).start()
     client=_HALFCLOSE_AFTER_CLIENT if halfclose_after_headers else _HALFCLOSE_BEFORE_CLIENT
     try:
-        result=bridge_entry.run({"repo":str(tmp_path),"timeout":3,"args":[sys.executable,"-c",client],"relay_socket":socket_path})
-        assert done.wait(2)
+        # The budget below is scaffolding, NOT the assertion: no assertion in
+        # this witness is about elapsed time (return code, broken_pipe, the
+        # headers and the complete body are). It has to outlast interpreter
+        # start-up plus scheduling delay, not the paced upstream (8 bytes at
+        # 0.06 s), or CPU contention spends it and reports a false red
+        # (iss-22d5084f51764d66). The same bound must be used for the
+        # post-condition wait, since the upstream handler's last write and
+        # `done.set()` run inside the child's execution.
+        result=bridge_entry.run({"repo":str(tmp_path),"timeout":30,"args":[sys.executable,"-c",client],"relay_socket":socket_path})
+        assert done.wait(30)
         _retain_bridge_result("halfclose-after" if halfclose_after_headers else "halfclose-before",result,observations)
         assert result["returncode"] == 0,result
         # A supported write half-close (RFC 9112 9.6) must not be mistaken

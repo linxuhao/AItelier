@@ -90,26 +90,42 @@ def test_losing_the_drop_race_is_absorbed(tmp_path, monkeypatch):
 
 
 def test_losing_the_rename_race_is_absorbed(tmp_path, monkeypatch):
-    """The loser's RENAME finds its table already renamed: absorb, never raise."""
+    """The loser's RENAME finds its target already created: absorb, never raise.
+
+    The winner's work is seeded INSIDE the registry path - after the row count
+    has read the legacy registry, before the ALTER - so the ALTER really runs and
+    really loses. Seeding it before the call (as this test first did) makes the
+    row COUNT fail first and proves nothing about the rename branch.
+    """
     path = _pre_p3_database(tmp_path / "rename-loser.db", registry_rows=2)
-    with sqlite3.connect(path) as winner:  # the winner renamed it and moved on
-        winner.execute(f"ALTER TABLE driver_subagents RENAME TO {TAKEOVER_TABLE}")
-        winner.commit()
-    real_columns = state_subagents._registry_columns
-    calls = []
+    real_rows = state_subagents._registry_rows
+    real_done = state_subagents._already_done
+    seeded, absorbed = [], []
 
-    def stale_once(conn):
-        calls.append(1)
-        if len(calls) == 1:  # the check ran before the winner's rename landed
-            return {"context_sha256"}
-        return real_columns(conn)
+    def rows(conn):
+        count = real_rows(conn)  # the legacy registry, still ours at this point
+        if not seeded:
+            seeded.append(count)
+            with sqlite3.connect(path) as winner:  # ... and now the winner lands
+                winner.execute(f"ALTER TABLE driver_subagents RENAME TO {TAKEOVER_TABLE}")
+                winner.executescript(state_subagents.SCHEMA)
+                winner.commit()
+        return count
 
-    monkeypatch.setattr(state_subagents, "_registry_columns", stale_once)
+    def record(exc, source, target=None):
+        verdict = real_done(exc, source, target)
+        absorbed.append((str(exc), verdict))
+        return verdict
+
+    monkeypatch.setattr(state_subagents, "_registry_rows", rows)
+    monkeypatch.setattr(state_subagents, "_already_done", record)
 
     initialize(DBManager(path))  # must not raise
 
-    assert len(calls) >= 2, "the absorb branch never re-read the registry"
-    assert _rows(path, TAKEOVER_TABLE) == 2
+    collision = f"there is already another table or index with this name: {TAKEOVER_TABLE}"
+    assert seeded == [2], "the row count never saw the legacy registry"
+    assert absorbed == [(collision, True)], f"the ALTER branch was not what lost: {absorbed}"
+    assert _rows(path, TAKEOVER_TABLE) == 2, "the legacy rows survive the takeover"
     assert "context_sha256" not in _columns(path)
 
 

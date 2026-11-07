@@ -37,7 +37,11 @@ import stat
 from typing import Any, Mapping
 
 # `_relative` is reused, not restated: a declared path that escapes the workspace must be
-# refused by the SAME rule whether the plan or this audit looks at it.
+# refused by the SAME rule whether the plan or this audit looks at it. A report's PARENT is judged
+# by `core.security_jail.verify_path_safe`, the call the run makes (`core.todo_runtime._owned_entry`),
+# so the audit and the run cannot disagree about which parent escapes through a symlink.
+# `core.security_jail` imports nothing from `core`, so this import creates no cycle.
+from core.security_jail import SecurityException, verify_path_safe
 from core.todo_plan import Refusal, TodoPlan, _relative
 from core.todo_runtime import PredicateLibrary
 
@@ -303,9 +307,13 @@ REPORT_ARG = "report"
 #
 # THE REPORT PATH, added after `3202466603`: this audit now also refuses a `report` binding that
 # names a path outside the workspace (absolute, or holding `..`), by the same `todo_plan._relative`
-# call it already uses for declared delta paths. Main accepted all of those and discovered the
-# escape only at run time, where `_clear_report` refuses to touch anything outside the workspace and
-# the report is therefore never this run's - a plan frozen with an item that cannot pass as written.
+# call it already uses for declared delta paths. It also refuses a report whose PARENT resolves
+# outside the workspace through a symlink, judged by `core.security_jail.verify_path_safe` - the call
+# the run makes - so a symlinked parent cannot freeze a report the run can never clear. A link the
+# run creates after the freeze is not visible here; that boundary is stated in `check_declared_paths`.
+# Main accepted all of those and discovered the escape only at run time, where `_clear_report`
+# refuses to touch anything outside the workspace and the report is therefore never this run's - a
+# plan frozen with an item that cannot pass as written.
 # The refusal is containment ONLY: a report path still never enters `declared`, is never checked for
 # duplicates, and is never required to exist, so every in-workspace report path - a not-yet-existing
 # parent included, and one identical to a declared delta path - freezes exactly as it did on main.
@@ -375,6 +383,39 @@ def _what_it_is(path: Path) -> str:
     return "not a directory"
 
 
+def _report_parent_contained(plan: TodoPlan, report: str, where: str) -> None:
+    """Refuse a report whose PARENT the run would not clear, judged the way the run judges it.
+
+    The run builds the report's path from the RESOLVED workspace and contains its parent with
+    `verify_path_safe` (`core.todo_runtime._report_path`, `_owned_entry`). This does the same
+    join and the same call, so a symlinked parent that leaves the workspace is refused here
+    rather than discovered when the item runs. A parent that cannot be resolved at all (a loop,
+    an OSError) is refused too: the run treats that as a reason it cannot clear the report, so
+    the report can never be this run's either.
+
+    This reads the disk as it stands at freeze time. A link the run itself creates after the
+    plan froze is not seen here (see `check_declared_paths`).
+    """
+    try:
+        root = Path(plan.workspace).resolve()
+        parent = (root / str(report)).parent
+        verify_path_safe(root, parent)
+    except SecurityException:
+        raise Refusal(
+            "invalid_plan",
+            f"{where} must be a relative path inside the workspace, got {report!r}: its parent resolves to a "
+            f"place outside the workspace {plan.workspace}, and the run clears a report only under a parent "
+            f"that resolves inside it, so this report could never be established as the run's own",
+        ) from None
+    except (RuntimeError, OSError) as exc:
+        raise Refusal(
+            "invalid_plan",
+            f"{where} names {report!r}, whose parent cannot be resolved inside the workspace {plan.workspace} "
+            f"({exc.__class__.__name__}: {exc}), so the run could not clear this report and it could never be "
+            f"established as the run's own",
+        ) from None
+
+
 def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
@@ -405,19 +446,32 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
         the plan, not the workspace, so it is refused whether or not the workspace exists.
 
     * The REPORT a binding names (`REPORT_ARG`; `command_exit`'s `report`, today the only one).
-      It is judged by containment only, with that same `_relative` call: a plan whose command
-      declares a report outside the workspace - absolute, or holding a `..` component - is refused
-      here. Why: at run time the report's PARENT is contained to the workspace and the entry is
-      unlinked without following it (`todo_runtime._clear_report`), so an escaping report is a
-      reason, never a deletion - the command's report is neither removed nor read, ownership of it
-      is never established, and the exit code alone decides. That is safe, but if it is discovered
-      only when the item runs then the plan froze an item that cannot pass as written: the step's
-      own declared evidence was never this run's. So the escape is refused at freeze time instead.
-      Nothing more is asked of a report: it is NOT a delta claim, so it never joins `declared`, is
-      never compared for duplicates, and is not required to exist - a report path inside the
-      workspace, under a parent that does not exist yet, or identical to a declared delta path, is
-      accepted exactly as before (refusing the last of those would be a false refusal: one file,
-      written once, may be both the delta the item requires and the report its command writes).
+      It is judged by containment only, in two steps. First the plan's own `_relative` call: a
+      report that is absolute or holds a `..` component is refused. Second, the report's PARENT is
+      judged the way the run judges it: the parent is joined onto the RESOLVED workspace and
+      contained with `core.security_jail.verify_path_safe`, which resolves symlinks. So a parent
+      that is a symlink pointing outside the workspace is refused here, as is a parent whose
+      resolution fails (a symlink loop, an OSError), because the run cannot clear such a report
+      either. Why: at run time the report's PARENT must resolve inside the workspace before the
+      entry is unlinked (`todo_runtime._clear_report`), so an escaping parent is a reason, never a
+      deletion - the command's report is neither removed nor read, ownership of it is never
+      established, and the exit code alone decides. That is safe, but if it is discovered only when
+      the item runs then the plan froze an item that cannot pass as written: the step's own declared
+      evidence was never this run's. So the escape is refused at freeze time instead.
+      The parent is resolved on disk AS IT STANDS AT FREEZE TIME, and that is a boundary this audit
+      cannot cross. A parent that does not exist yet is accepted, because `verify_path_safe` resolves
+      a missing path lexically and nothing is yet linked. A link the RUN itself creates after the
+      plan froze - the command makes `d` a symlink to a directory outside the workspace - cannot be
+      seen here, and is caught only at run time: `_clear_report` refuses to clear, no report is read,
+      and the verdict is the exit code plus a reason. The test
+      `test_a_parent_the_run_links_out_after_freeze_is_only_caught_at_run_time` pins that boundary.
+      The report is NOT a delta claim: it never joins `declared`, is never compared for duplicates,
+      and is not required to exist. A report path inside the workspace, under a parent that does not
+      exist yet, or identical to a declared delta path, is accepted exactly as before (refusing the
+      last of those would be a false refusal: one file, written once, may be both the delta the item
+      requires and the report its command writes). A report whose FINAL component is a symlink
+      pointing outside is also accepted: the run removes the link and never follows it, so that
+      shape is safe and must stay accepted.
 
     A path that does not exist yet stays LEGAL: creating a file is a normal change and
     `code_change` relies on it. It is ANNOUNCED instead ("the step will have to create it"), in
@@ -428,8 +482,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     says which checks that cost - and which ones it did not: BOTH refusals that read the plan
     rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
     via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
-    missing directory cost. The report rule is one of those plan-reading refusals and runs there
-    too: whether a report path is contained is decided by the binding, not by the disk.
+    missing directory cost. The report rule's PLAN half - the `_relative` call - is one of those
+    plan-reading refusals and runs there too. Its PARENT half reads the disk: a symlinked parent can
+    only be resolved in a workspace that exists, so with no workspace there is nothing for it to find,
+    and the audit does not claim it checked one.
     """
     workspace = Path(plan.workspace)
     measured = workspace.is_dir()
@@ -459,6 +515,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                 # `tests/unit/test_todo_plan_judges_the_report_it_will_clear.py` pins that refusal to
                 # `from_json`, so loosening the type check cannot happen unnoticed.
                 _relative(binding.args[REPORT_ARG], where)
+                _report_parent_contained(plan, binding.args[REPORT_ARG], where)
             arg = DELTA_PATHS.get(binding.predicate)
             if arg is None or arg not in binding.args:
                 continue

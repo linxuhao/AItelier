@@ -53,8 +53,15 @@ def assert_fence_held():
 
 
 def override(action, observation, **extra):
+    # A decision binds two different things, and the gate checks them apart: the
+    # INVENTORY it was taken against (clock-free, so it survives the fresh
+    # re-measurement the gate always takes) and the observation INSTANCE it was
+    # taken against (clock-bearing - observation["digest"] - which the gate
+    # requires whenever the fresh measurement still reports authorizable effects).
     return {"action": action, "actor": "owned-operator", "reason": "bounded Source fixture",
-            "ticket": "owned-same-measurement", "inventory_digest": observation["digest"],
+            "ticket": "owned-same-measurement",
+            "inventory_digest": observation["inventory_digest"],
+            "observation_digest": observation["digest"],
             "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
             "acknowledge_unknown": True, **extra}
 

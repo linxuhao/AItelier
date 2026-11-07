@@ -39,9 +39,37 @@ BLOCKING_STATUSES = frozenset({"pending", "running", "paused", "draining"})
 DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
 OBSERVATION_SCHEMA_VERSION = 1
 PROC_ROOT = Path("/proc")
+# One measurement publishes two identities, and they answer different questions.
+#
+# ``inventory_digest`` is the INVENTORY identity: exactly INVENTORY_IDENTITY_FIELDS
+# (what was measured), with provenance reduced to its source identity. It carries
+# no clock, so the same inventory measured again seconds later has the same value.
+# It is a POSITIVE list on purpose: a field added to the observation later is not
+# silently absorbed into the identity earlier decisions were bound to.
+#
+# ``digest`` is the OBSERVATION instance stamp: the whole observation, so the
+# inventory PLUS the observation's own clocks - the top-level ``observed_at``, and
+# provenance's ``runtime_observed_at`` / ``runtime_digest`` (itself a digest over a
+# clocked runtime-fact document). Two measurements about a second apart differ
+# here, which is what makes a replayed decision detectable.
+#
+# A deployment decision binds the first question with its own
+# ``inventory_digest`` and, when it authorizes effects the fresh measurement
+# still reports, the second with ``observation_digest``; see
+# ``_decision_binds_measurement``.
+INVENTORY_IDENTITY_FIELDS = (
+    "schema_version", "projects", "runs", "resumable_runs", "sidecar_owners",
+    "godot_render_owners", "external_owners", "registered_external_owners",
+    "blockers", "errors", "quiescent", "provenance",
+)
+# The provenance entries that are the runtime route's own instance stamp: the
+# ``observed_at`` it reported, and the digest it took over a document containing
+# it. Excluded from the inventory identity's provenance; everything else in it
+# (runtime_identity, the two namespaces, domain) stays.
+PROVENANCE_INSTANCE_FIELDS = frozenset({"runtime_observed_at", "runtime_digest"})
 OBSERVATION_FIELDS = frozenset({
-    "schema_version", "observed_at", "projects", "runs", "resumable_runs",
-    "sidecar_owners", "godot_render_owners", "external_owners",
+    "schema_version", "observed_at", "inventory_digest", "projects", "runs",
+    "resumable_runs", "sidecar_owners", "godot_render_owners", "external_owners",
     "registered_external_owners", "blockers", "errors", "quiescent", "digest", "provenance",
 })
 CLEARANCE_EVENT_BINDING_FIELDS = (
@@ -153,6 +181,22 @@ def _observation_digest(observation: dict) -> str:
     """Use the producer's canonical JSON encoding over the frozen inventory."""
     return _digest({key: value for key, value in observation.items()
                     if key != "digest"})
+
+
+def _inventory_digest(observation: dict) -> str:
+    """The measured INVENTORY identity: no observation clock, no digest.
+
+    Same content as ``_observation_digest`` minus the observation's own instance
+    stamp (``observed_at``) and minus provenance's runtime-route stamps, so an
+    unchanged inventory measured again seconds later keeps the same value.
+    """
+    inventory = {key: observation[key] for key in INVENTORY_IDENTITY_FIELDS
+                 if key in observation}
+    provenance = inventory.get("provenance")
+    if type(provenance) is dict:
+        inventory["provenance"] = {key: value for key, value in provenance.items()
+                                   if key not in PROVENANCE_INSTANCE_FIELDS}
+    return _digest(inventory)
 
 
 def _plain_json_snapshot(value: Any) -> Any:
@@ -1790,6 +1834,7 @@ def measure(*, skillflow=None, db=None, runtime_facts: dict | None = None, sidec
             "host_pid_namespace": os.readlink("/proc/self/ns/pid"),
             "host_mount_namespace": os.readlink("/proc/self/ns/mnt"),
             "domain": "live-runtime-and-operator-host"}
+    observation["inventory_digest"] = _inventory_digest(observation)
     observation["digest"] = _observation_digest(observation)
     return observation
 
@@ -1805,6 +1850,7 @@ def failed_observation(reason: str) -> dict:
         "blockers": {"measurement_failure": [{"reason": str(reason)[:500]}]},
         "errors": [str(reason)[:500]], "quiescent": False,
     }
+    observation["inventory_digest"] = _inventory_digest(observation)
     observation["digest"] = _observation_digest(observation)
     return observation
 
@@ -2009,6 +2055,17 @@ def _validate_observation(observation: Any) -> str | None:
     if declared_quiescent != computed_quiescent:
         return ("quiescent contradicts validated blockers/errors: "
                 f"declared={declared_quiescent} computed={computed_quiescent}")
+    # The inventory identity a decision's `inventory_digest` may bind.  Checked
+    # last so a forged observation still names its own structural contradiction
+    # first, and it may be absent: a hand-built or pre-split observation then has
+    # no clock-free identity to bind, which only makes the clock-free binding
+    # unavailable (a decision must match the exact instance instead).
+    if "inventory_digest" in observation:
+        inventory = observation["inventory_digest"]
+        if not isinstance(inventory, str) or re.fullmatch(r"[0-9a-f]{64}", inventory) is None:
+            return "inventory_digest must be a lowercase hexadecimal SHA-256"
+        if inventory != _inventory_digest(observation):
+            return "inventory_digest does not match the canonical frozen inventory"
     return None
 
 
@@ -2177,6 +2234,38 @@ def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
     return None
 
 
+def _decision_binds_measurement(override: dict, observation: dict) -> tuple[bool, str]:
+    """Which inventory, and which observation instance: two questions, not one.
+
+    ``inventory_digest`` is the INVENTORY a decision binds: it must be the
+    inventory this fresh measurement reports, so nothing the operator saw has
+    changed - only the observation's own clock moved on.  A decision taken
+    against one exact measurement may instead declare that measurement's
+    instance ``digest`` there, which answers both questions at once; that is the
+    shape every pre-split decision and the CLI's acknowledgement produce.
+
+    ``observation_digest`` is the INSTANCE stamp the decision was taken against.
+    It must match whenever this fresh measurement still reports anything a
+    decision could authorize (blockers, unknown owners, measurement errors):
+    granting those from a state nobody measured is drift, not a re-measurement.
+    A quiescent inventory has neither by construction, so a decision recorded
+    against it can only restrict the effect - the one case where an unchanged
+    inventory measured later may carry an earlier decision without that stamp.
+    """
+    declared = override["inventory_digest"]
+    if declared == observation.get("digest"):
+        return True, "the decision was taken against this exact measurement"
+    if declared != observation.get("inventory_digest"):
+        return False, "override inventory digest does not match this fresh measurement"
+    if observation.get("quiescent") is True:
+        return True, "the decision binds this same inventory"
+    if override.get("observation_digest") == observation.get("digest"):
+        return True, "the decision binds this same inventory, taken against this exact measurement"
+    return False, ("override inventory digest does not match this fresh measurement instance "
+                   "(the decision authorizes measured effects, so it binds the exact "
+                   "observation it was taken against)")
+
+
 def _valid_override(action: str, observation: dict, override: dict | None, *,
                     backend_only: bool = False, godot_only: bool = False,
                     semantic_only: bool = False, cpu_only: bool = False) -> tuple[bool, str]:
@@ -2188,10 +2277,15 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
     if any(not isinstance(override.get(key), str) or not override[key].strip()
            for key in required):
         return False, "override needs action, actor, reason, ticket, inventory_digest and expires_at"
+    recorded_instance = override.get("observation_digest")
+    if recorded_instance is not None and (not isinstance(recorded_instance, str)
+                                          or not recorded_instance.strip()):
+        return False, "override observation_digest must be a non-empty string"
     if override["action"] != action:
         return False, f"override is for {override['action']!r}, not {action!r}"
-    if override["inventory_digest"] != observation.get("digest"):
-        return False, "override inventory digest does not match this fresh measurement"
+    bound, refusal = _decision_binds_measurement(override, observation)
+    if not bound:
+        return False, refusal
     try:
         expires = datetime.fromisoformat(override["expires_at"])
     except (TypeError, ValueError):

@@ -22,7 +22,9 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   non-regular file, a path under an existing non-directory, one outside the
   workspace, a repeat) is refused there, each refusal naming what to declare instead,
   and the ones that do not exist yet - legal, since creating a file is a change -
-  are announced in the result the director reads.
+  are announced in the result the director reads. It ALSO holds the `report` a
+  binding names to the plan's workspace-relative rule, because a plan that freezes a
+  report path the run can never clear has frozen an item that cannot pass as written.
 """
 from __future__ import annotations
 
@@ -263,6 +265,15 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
 #: pass as written, however good the work is.
 DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
 
+#: The argument that names the file a command CLEARS before it runs and reads afterwards
+#: (`core.todo_runtime._clear_report` / `_report_absence`; `_STRINGS` is what types it as a string).
+#: Only `command_exit` takes it today, and this audit names it by ARGUMENT, not by predicate, so a
+#: second predicate that clears a report cannot escape the containment rule below. The name is the
+#: honest source available here: a `TodoPlan` carries bindings, not the library's definitions, and
+#: `check_declared_paths` is handed nothing but the frozen plan - so there is no library to ask which
+#: predicates clear a report, and the runtime's own account of that is this argument name.
+REPORT_ARG = "report"
+
 
 # Who reads what `check_declared_paths` returns, as of this commit. Checked against the tree:
 #
@@ -289,6 +300,17 @@ DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
 # The directory, file-parent, FIFO and socket refusals were already on main at `c2f2a51c2b`, so
 # they are not new here. The only text that changes is the workspace-absent note. A missing parent
 # directory is still allowed, so an ordinary `write` or `mkdir` step is never refused.
+#
+# THE REPORT PATH, added after `3202466603`: this audit now also refuses a `report` binding that
+# names a path outside the workspace (absolute, or holding `..`), by the same `todo_plan._relative`
+# call it already uses for declared delta paths. Main accepted all of those and discovered the
+# escape only at run time, where `_clear_report` refuses to touch anything outside the workspace and
+# the report is therefore never this run's - a plan frozen with an item that cannot pass as written.
+# The refusal is containment ONLY: a report path still never enters `declared`, is never checked for
+# duplicates, and is never required to exist, so every in-workspace report path - a not-yet-existing
+# parent included, and one identical to a declared delta path - freezes exactly as it did on main.
+# `PathAudit` and its JSON gained no field, `command_exit` and every other run-time path are
+# untouched, and no template gained a `report` parameter. Nothing above changed meaning.
 #
 # SAFEGUARDS: no acceptance criterion, evidence format, non-author review control or privacy
 # boundary is weakened by this change. Only the test sweep and this comment changed.
@@ -355,29 +377,46 @@ def _what_it_is(path: Path) -> str:
 def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
-    The item's own predicate is "every listed path differs from its state at the start of the
-    step". A path whose change that predicate cannot see, as the plan is written, is refused HERE,
-    while the plan is being frozen, because a frozen plan whose item cannot pass as written keeps
-    its attempt running until someone abandons it and the director only finds out at delivery.
-    "Cannot be seen to change" describes the declared delta, not an impossibility: each refusal
-    names what the director should declare instead:
+    Two things are judged here, and only one of them is a delta:
 
-    * an existing DIRECTORY - `_digest` digests regular files only, and a directory has no digest,
-      so a step that edits inside it cannot be seen to change the path itself. The one change the
-      predicate can register for this path is the directory being replaced by a regular file (the
-      digest goes from None to a hash). A symlink to a directory is a directory here: `_digest`
-      follows the link;
-    * a path whose existing PARENT is not a directory (`app.py/x/y.txt`, where `app.py` is a
-      file) - the path has no digest while that parent stands, so the step cannot be seen to
-      change it unless it first replaces the parent with a directory;
-    * an existing path that is neither a directory nor a regular file (a FIFO, a socket, a
-      device) - `_digest` returns None for it, so a step cannot be seen to change it unless it
-      replaces it with a regular file;
-    * a path outside the workspace (absolute, or holding a `..` component) - refused by the
-      plan's own rule, `todo_plan._relative`, called here so there are never two rules;
-    * the same path twice in one list, compared in normalised form so `./a` and `a` collide -
-      a list that repeats one file names fewer files than it looks like it does. This one reads
-      the plan, not the workspace, so it is refused whether or not the workspace exists.
+    * The paths a predicate requires to CHANGE. The item's own predicate is "every listed path
+      differs from its state at the start of the step". A path whose change that predicate cannot
+      see, as the plan is written, is refused HERE, while the plan is being frozen, because a frozen
+      plan whose item cannot pass as written keeps its attempt running until someone abandons it and
+      the director only finds out at delivery. "Cannot be seen to change" describes the declared
+      delta, not an impossibility: each refusal names what the director should declare instead:
+
+      - an existing DIRECTORY - `_digest` digests regular files only, and a directory has no digest,
+        so a step that edits inside it cannot be seen to change the path itself. The one change the
+        predicate can register for this path is the directory being replaced by a regular file (the
+        digest goes from None to a hash). A symlink to a directory is a directory here: `_digest`
+        follows the link;
+      - a path whose existing PARENT is not a directory (`app.py/x/y.txt`, where `app.py` is a
+        file) - the path has no digest while that parent stands, so the step cannot be seen to
+        change it unless it first replaces the parent with a directory;
+      - an existing path that is neither a directory nor a regular file (a FIFO, a socket, a
+        device) - `_digest` returns None for it, so a step cannot be seen to change it unless it
+        replaces it with a regular file;
+      - a path outside the workspace (absolute, or holding a `..` component) - refused by the
+        plan's own rule, `todo_plan._relative`, called here so there are never two rules;
+      - the same path twice in one list, compared in normalised form so `./a` and `a` collide -
+        a list that repeats one file names fewer files than it looks like it does. This one reads
+        the plan, not the workspace, so it is refused whether or not the workspace exists.
+
+    * The REPORT a binding names (`REPORT_ARG`; `command_exit`'s `report`, today the only one).
+      It is judged by containment only, with that same `_relative` call: a plan whose command
+      declares a report outside the workspace - absolute, or holding a `..` component - is refused
+      here. Why: at run time the report's PARENT is contained to the workspace and the entry is
+      unlinked without following it (`todo_runtime._clear_report`), so an escaping report is a
+      reason, never a deletion - the command's report is neither removed nor read, ownership of it
+      is never established, and the exit code alone decides. That is safe, but if it is discovered
+      only when the item runs then the plan froze an item that cannot pass as written: the step's
+      own declared evidence was never this run's. So the escape is refused at freeze time instead.
+      Nothing more is asked of a report: it is NOT a delta claim, so it never joins `declared`, is
+      never compared for duplicates, and is not required to exist - a report path inside the
+      workspace, under a parent that does not exist yet, or identical to a declared delta path, is
+      accepted exactly as before (refusing the last of those would be a false refusal: one file,
+      written once, may be both the delta the item requires and the report its command writes).
 
     A path that does not exist yet stays LEGAL: creating a file is a normal change and
     `code_change` relies on it. It is ANNOUNCED instead ("the step will have to create it"), in
@@ -388,7 +427,8 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     says which checks that cost - and which ones it did not: BOTH refusals that read the plan
     rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
     via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
-    missing directory cost.
+    missing directory cost. The report rule is one of those plan-reading refusals and runs there
+    too: whether a report path is contained is decided by the binding, not by the disk.
     """
     workspace = Path(plan.workspace)
     measured = workspace.is_dir()
@@ -397,6 +437,21 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     created: list[str] = []
     for item in plan.items:
         for binding in item.predicates:
+            # The report a command declares, judged by the PLAN's rule and before the delta logic,
+            # which only ever looks at DELTA_PATHS predicates and would skip `command_exit` outright.
+            # A report outside the workspace is not removed and not read at run time
+            # (`todo_runtime._clear_report` returns a reason instead of deleting anything outside the
+            # workspace), so the exit code alone would decide and the frozen plan would carry a report
+            # the run can never establish as its own. Refused here, while the plan is being frozen.
+            # Containment only: a report path is NOT a delta claim, so it never enters `declared` and
+            # never collides with a declared delta path (see the docstring).
+            if REPORT_ARG in binding.args:
+                where = f"item {item.id}: {binding.predicate}.{REPORT_ARG}"
+                raw_report = binding.args[REPORT_ARG]
+                # One report per binding today; a list is judged element by element so that a
+                # predicate naming several reports is not left unchecked.
+                for value in (raw_report if isinstance(raw_report, list) else [raw_report]):
+                    _relative(value, where)
             arg = DELTA_PATHS.get(binding.predicate)
             if arg is None or arg not in binding.args:
                 continue

@@ -112,12 +112,26 @@ test('fresh context replaces names/statuses and both note indexes after compact'
   assert.deepEqual(rendered.nodes, [{ name: 'n', status: 'VERIFIED' }]);
   assert.equal(rendered.private_note.index[0].index_line, 'new private rule');
   assert.equal(rendered.project_note.index[0].index_line, 'project rule');
+  // The snapshot has no node_counts / nodes_omitted here, so render() adds neither.
   assert.deepEqual(Object.keys(rendered).sort(), ['driver_id','nodes','private_note','project_id','project_note']);
   assert.match(driverGoal('alpha'), /你是 alpha 项目 State DAG 的常驻导演/);
   assert.match(driverGoal('alpha'), /critical issues/);
   assert.match(driverGoal('alpha'), /Claude Sonnet 5\.5 和 GPT-6\.1 Sol/);
   assert.match(driverGoal('alpha'), /Claude Opus 5\.5/);
   assert.doesNotMatch(driverGoal('alpha'), /\{\{project_id\}\}/);
+}));
+test('render carries the count map and omission statement when the payload has them', async () => fixture(async directory => {
+  const omitted = { VERIFIED: 200, OPEN: 2, CANDIDATE: 1 };
+  const current = { ...snapshot('OPEN'), node_counts: omitted,
+    nodes_omitted: { VERIFIED: 200, statement: '200 VERIFIED node(s) omitted from this snapshot; read them from live State (project_overview).' } };
+  const r = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
+    request: async path => path.endsWith('/me') ? { driver_id: 'driver-a' } : current });
+  await r.init();
+  const rendered = JSON.parse(r.render());
+  assert.deepEqual(rendered.node_counts, omitted);
+  assert.equal(rendered.nodes_omitted.VERIFIED, 200);
+  assert.match(r.render(), /200 VERIFIED node\(s\) omitted from this snapshot; read them from live State/);
+  assert.deepEqual(Object.keys(rendered).sort(), ['driver_id','node_counts','nodes','nodes_omitted','private_note','project_id','project_note']);
 }));
 test('wrong identity refuses bootstrap before private context is read', async () => fixture(async directory => {
   let reads = 0;

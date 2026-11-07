@@ -720,8 +720,14 @@ export class DriverRuntime {
     return this.snapshot;
   }
   render() {
+    // node_counts / nodes_omitted exist only on a route that omits VERIFIED nodes;
+    // an older payload renders exactly as before.
+    const omission = {
+      ...(this.snapshot.node_counts ? { node_counts: this.snapshot.node_counts } : {}),
+      ...(this.snapshot.nodes_omitted ? { nodes_omitted: this.snapshot.nodes_omitted } : {}),
+    };
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
-      nodes: this.snapshot.nodes, project_note: this.snapshot.project_note,
+      nodes: this.snapshot.nodes, ...omission, project_note: this.snapshot.project_note,
       private_note: this.snapshot.private_note, ...(this.todo?.length ? { todo: this.todo } : {}),
       ...(this.todoError ? { todo_error: this.todoError } : {}) });
   }

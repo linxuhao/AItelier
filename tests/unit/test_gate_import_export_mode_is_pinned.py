@@ -28,23 +28,43 @@ Two things, and neither of them is "what a shell command does":
   2. no OTHER instruction names a pinned path, an ancestor whose mode decides whether
      it is reachable (`/`, `/opt`), the client's own file name, or a WORD that builds
      such a path at parse time (a shell variable, a glob or a brace whose literal head
-     already points there). A word is taken as a shell takes it: quoting and escaping
-     come off (`"/opt"`, `/o'pt'` and `\\/opt` are one word), `;`, `|`, `&`, `(`, `)`,
-     `<`, `>` and a TAB separate words exactly as a space does, the exec form is read as
-     the JSON array Docker reads it as, and a line continuation is DELETED rather than
-     spaced - `/opt/aitelier-gate-im\\` + `ports/...` is one word, which is the hole the
-     round-6 review measured green. An instruction that mentions the tree and is not one
-     of the two expected ones is refused with the word it mentions, whatever command
-     word it uses - so `chmod -R 0755 /opt/aitelier-gate-imports`, `install -m 0755
-     /tmp/x /opt/aitelier-gate-imports/docker`, `chmod --reference=/tmp/refmode 0755
-     /opt/aitelier-gate-imports` and a later `chmod 0666 .../godot_harness.py` are all
-     the same refusal.
+     already points there). What separates one word from the next is decided in one
+     place, `_split_words`, and it is deliberately narrower than a shell: whitespace
+     (so a TAB separates exactly as a space does), an UNQUOTED `;`, `|`, `&`, `(`, `)`,
+     `<`, `>`, and an unquoted backslash escaping the character after it. A separator
+     INSIDE quotes does NOT separate (`sed -i 's|/opt|/srv|'` is three words, not six),
+     a BACKTICK stays inside its word, and quoting itself is removed later by `_word`
+     (`"/opt"`, `/o'pt'`, `\\/opt` and `//opt` are all the same word to it). The exec form
+     is read as the JSON array Docker reads it as, and a line continuation is DELETED
+     rather than spaced - `/opt/aitelier-gate-im\\` + `ports/...` is one word, which is
+     the hole the round-6 review measured green. An instruction that mentions the tree
+     and is not one of the two expected ones is refused with the word it mentions,
+     whatever command word it uses - so `chmod -R 0755 /opt/aitelier-gate-imports`,
+     `install -m 0755 /tmp/x /opt/aitelier-gate-imports/docker`,
+     `chmod --reference=/tmp/refmode 0755 /opt/aitelier-gate-imports` and a later
+     `chmod 0666 .../godot_harness.py` are all the same refusal.
 
-     A word that STARTS with an expansion is refused when the expansion supplies a path
-     (`${DIR}/x`, `${DIR}/..`): its literal head is empty, so the text says nothing about
-     where it goes. That also refuses a harmless `cp ${SRC}/x /tmp/`, and that false
-     refusal is the price of not modelling the shell; bare `$BUILD_TOOL` is a command
-     word with no path in it, and it is read.
+     Two false refusals are the stated price of judging text, and both are pinned by
+     `test_the_documented_false_refusal_is_refused_on_purpose`:
+
+       * a word that STARTS with an expansion (`${DIR}/x`, `${DIR}/..`) is refused when
+         the expansion supplies a path: its literal head is empty, so the text says
+         nothing about where it goes. A harmless `cp ${SRC}/x /tmp/` goes with it. A bare
+         `$BUILD_TOOL` names no path and IS read;
+       * a word with a `/`-headed literal head that also carries `$` or a backtick is
+         refused, because the literal part already points somewhere and the rest is
+         spliced on. That refuses `ENV PATH="/opt/venv/bin:$PATH"` and
+         `curl https://host/v${VERSION}/tool.tgz -o /tmp/t`, which are legitimate lines.
+
+     A third cost is stated and pinned in `test_the_seventh_review_false_refusals_are_read`:
+     a word that IS `/` or `/opt` is refused outright (`WORKDIR /`, `RUN mkdir -p /opt`,
+     `COPY --from=build / /`, `RUN find / -name '*.pyc' -delete`), because a mode on either
+     decides whether the export tree can be reached and the text of a RUN does not say what
+     it does with it. Those are real build lines this file will not read.
+
+     `_directives` also drops blank and `#`-comment lines INSIDE a continuation, exactly
+     as Docker does; before the round-7 fix a comment line ended the instruction and left
+     two halves of the name as separate words.
 
 That is deliberately NOT a model of `chmod`, `install` or `COPY`: five review rounds
 each taught the parser the next shell spelling (a recursive `chmod`, an `install` into
@@ -56,7 +76,13 @@ is why those rounds' findings now hold without a new rule per finding.
 
 The sixth round found what a spelling is made of rather than another command: a word is
 not the bytes between two spaces (`"/opt"`, `/opt;`, `//opt`, the exec form's JSON
-array, a continued line). That is fixed once, in `_words` and `_word`, and the shapes
+array, a continued line). The seventh found the other half - a word can be SPLIT in the
+middle of a name (a backtick pair, a comment line inside a continuation) and a separator
+can sit inside quotes - and it also measured this file refusing a `sed` expression whose
+`|` was quoted. That fix is not one function: `_split_keyword` splits the keyword on any
+whitespace, `_directives` joins continuations and drops comment/blank lines, `_words`
+reads the exec form, `_split_words` decides what separates a word, `_word` removes what a
+shell would remove, and `_decides_reachability` normalises the leading slashes. The shapes
 below are rows of a table rather than five more branches.
 
 What it cannot decide, and does not claim to
@@ -71,6 +97,20 @@ What it cannot decide, and does not claim to
     with a literal head that already points at or into the tree is refused, so `/opt/ai*`,
     `/opt/*`, `/opt/aitelier-gate-{imports,x}` and `/*/..` are all caught, but a token
     that begins with the wildcard gives the text nothing to judge;
+  * a path whose VALUE this file cannot know: a bare `$VAR` or `${VAR}` carrying one
+    (`ENV D=/opt` followed by `RUN chmod 0700 $D` is green here), a cwd-relative spelling
+    (`..` is `/` because the last `WORKDIR` is `/app`, and `~/../..` is `/` because HOME
+    is `/home/app`), the RESULT of a command substitution (`$(dirname /opt/x)` is three
+    words, none of them the directory it prints), and an alias path such as
+    `/proc/self/root`, which IS `/`. None of them is decidable from the text without
+    running a shell, and running one is what five rounds proved is the wrong trade;
+  * bash-only forms after an explicit `SHELL ["/bin/bash","-c"]`: `{/opt,/opt}` reduces
+    to `/opt,/opt` once the braces come off, and `$'\\x2fopt'` to `$x2fopt`, so neither
+    spells a path this file can judge;
+  * `test_the_declared_non_claims_are_still_accepted` pins every shape above as ACCEPTED,
+    with the measured Dockerfile line in each row, so the boundary is a measured
+    decision rather than a silence. Closing one of them is a deliberate change to that
+    table, not an accident;
   * the EFFECTIVE modes in an image, and therefore the modes this file can only predict
     for a tree it read as text. `evidence/gate-import-dir-modes-20261106/` is the probe
     that measures all six pinned paths inside a built image, and the deployment that
@@ -173,14 +213,19 @@ def _directives(text: str) -> list[tuple[str, str]]:
     word and not two. The round-6 non-author review measured the space-inserting version
     green on exactly that instruction: it split the client's path into two operands that
     each spelled half of the name. Whitespace inside an instruction is then collapsed,
-    which is the only other difference Docker itself ignores. A blank line or a `#`
-    comment is not an instruction.
+    which is the only difference in WHITESPACE Docker itself ignores.
+
+    A blank line or a `#` comment is not an instruction - and Docker drops both INSIDE a
+    continuation too, which is what the round-7 review measured green: `RUN chmod -R 0777
+    /opt/aitelier-gate-im\\` + `# x` + `ports` runs the full path while the comment line
+    ended the instruction here, leaving two words that each spelled half of the name. So
+    they are skipped whether or not a continuation is pending.
     """
     instructions: list[tuple[str, str]] = []
     pending = ""
     for raw in text.splitlines():
         line = raw.rstrip()
-        if not pending and (not line.strip() or line.lstrip().startswith("#")):
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         if line.endswith("\\"):
             pending += line[:-1]
@@ -227,22 +272,85 @@ def _build_time_path(token: str) -> str | None:
     shell decides. Only the literal head can be judged, so the head is what is judged:
     `/opt/*` has the head `/opt/`, and that already points at the tree's ancestor, while
     `/var/lib/apt/lists/*` has the head `/var/lib/apt/lists/` and names nothing pinned.
+
+    A BACKTICK counts here for the same reason `$` does, and `_split_words` deliberately
+    keeps it inside its word, so `/opt/aitelier-gate-imp``orts` has the head
+    `/opt/aitelier-gate-imp`: a path that already points into the tree's parent, spliced
+    with a substitution this file cannot read. Splitting on the backtick instead left two
+    halves that spelled neither a name nor an ancestor, which is the round-7 regression.
+    `$(...)`, by contrast, IS split (on the `(`), so the result of a command substitution
+    is a declared non-claim rather than a refusal.
     """
     first = re.search(r"[*?\[{$`]", token)
     return token[:first.start()] if first else None
 
 
-#: What separates one WORD from the next in shell text. Quoting is NOT here on purpose:
-#: `"/opt"` is one word, and what it names is decided after the quotes come off.
-_SHELL_BREAK = re.compile(r"[\s;|&()`<>]+")
-
 #: What is taken off the EDGES of a word, where a shell's own syntax reaches into it:
 #: the quotes and backslashes it removes, and the brackets, comma and `=` of an exec-form
 #: array (`["chmod","0700","/opt"]` is three words, and `[` is no part of `chmod`).
-#: Braces are deliberately absent: `/opt/aitelier-gate-{imports,x}` is one word, whose
-#: literal head is what `_build_time_path` judges.
+#: Braces ARE here, and that is a stated cost rather than an oversight: a word `{/opt}`
+#: reduces to `/opt` and is refused, while a word `{/opt,/opt}` reduces to `/opt,/opt`,
+#: which names nothing this file knows. Neither brace form survives as a brace by the time
+#: a word is judged, so bash brace expansion is a declared non-claim (see the docstring).
 _EDGE = "\"'\\[]{},="
 _UNQUOTED = {ord(character): None for character in "\"'\\"}
+
+
+def _split_words(text: str) -> list[str]:
+    """The words of one instruction's shell text, each still as WRITTEN (quoting attached).
+
+    Three things separate one word from the next, and only three:
+
+      * whitespace - `\\s`, so a TAB after `RUN` separates exactly as a space does (an
+        earlier space-only split made a whole instruction vanish);
+      * an UNQUOTED shell operator: `;`, `|`, `&`, `(`, `)`, `<`, `>`;
+      * an UNQUOTED backslash, which escapes the character after it and so keeps both.
+
+    Three things deliberately do NOT separate words:
+
+      * a separator INSIDE quoting: `sed -i 's|/opt|/srv|'` is three words to a shell,
+        not six, and the round-7 review measured the six-word reading refusing that
+        harmless line - a false refusal, which is the fastest way to get a guard deleted;
+      * a BACKTICK: it stays inside its word, so `/opt/aitelier-gate-imp``orts` remains
+        one word whose literal head stops at the backtick, and `_refusal`'s expansion rule
+        refuses it. Splitting on the backtick is what let round 7's regression through:
+        the two halves spelled no name and no ancestor;
+      * quoting itself: `"/opt"` is one word, and what it names is decided after the
+        quotes come off, in `_word`.
+
+    Nothing more of quoting is modelled than that: no nested quoting, no `$'...'`, no
+    arithmetic. A word this cannot read is not silently dropped - it keeps whatever it
+    spells, and `_refusal` judges the literal text.
+    """
+    words: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote is not None:
+            current.append(character)
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in "\"'":
+            quote = character
+            current.append(character)
+        elif character == "\\" and index + 1 < len(text):
+            current.append(character)
+            index += 1
+            current.append(text[index])
+        elif character.isspace() or character in ";|&()<>":
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+        index += 1
+    if current:
+        words.append("".join(current))
+    return words
 
 
 def _words(arguments: str) -> list[str]:
@@ -252,8 +360,9 @@ def _words(arguments: str) -> list[str]:
     Docker reads it with a JSON reader, so this file does too, and
     `RUN ["chmod","0700","/opt"]` is three words rather than one bracket-wrapped blob
     that named nothing; the round-6 review measured that shape green. Everything else is
-    shell text, split on whitespace and on the separators above. An exec-form element may
-    itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`), so each
+    shell text, split by `_split_words` on whitespace and on an UNQUOTED operator, with a
+    backtick and a separator inside quoting left inside their word. An exec-form element
+    may itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`), so each
     element is split again.
     """
     text = arguments.strip()
@@ -263,8 +372,8 @@ def _words(arguments: str) -> list[str]:
         except ValueError:
             parsed = None
         if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            return [word for item in parsed for word in _SHELL_BREAK.split(item) if word]
-    return [word for word in _SHELL_BREAK.split(text) if word]
+            return [word for item in parsed for word in _split_words(item)]
+    return _split_words(text)
 
 
 def _word(raw: str) -> str:
@@ -287,6 +396,14 @@ def _refusal(word: str) -> str | None:
       * does its literal head, before the expansion, already point at the tree or at an
         ancestor of it (`/opt/*`, `/opt/aitelier-gate-{imports,x}`, `/*/..`)?
       * is it, plainly, one of the two ancestors (`/opt`, `/`)?
+
+    Two costs are stated rather than hidden, and both are pinned as false refusals:
+    a word that STARTS with an expansion (`${SRC}/tool`) is refused because its whole path
+    comes from the shell, and a word with a `/`-headed literal head that ALSO carries `$`
+    or a backtick is refused because the literal part already points somewhere and the
+    rest is spliced on. The second one refuses legitimate lines: `ENV PATH="/opt/venv/
+    bin:$PATH"` and `RUN curl https://host/v${VERSION}/tool.tgz -o /tmp/t`. That is the
+    price of judging text, and the module docstring names it.
     """
     if NAME in word or CLIENT in word:
         return "names the export tree or the client this image pins"
@@ -630,9 +747,10 @@ def test_the_fifth_review_shapes_are_refused_and_its_false_refusal_is_read():
 
 #: The escapes the SIXTH non-author reviews (round 6, two model families) measured GREEN
 #: against 3437a37b, with the word each must be refused by. G1-G5 were measured by those
-#: reviews; G6-G9 are not findings - they are the same word rule exercised on the next
-#: spellings its own examples imply, so the rule cannot be tightened for one of them and
-#: left open for its neighbour.
+#: reviews; G9 (`//opt`) is one of the spellings their brief lists as measured green, and
+#: G6-G8 are not findings - they are the same word rule exercised on the next spellings
+#: its own examples imply, so the rule cannot be tightened for one of them and left open
+#: for its neighbour.
 SIXTH_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("G1  the ancestor quoted, as a shell word",
      'RUN chmod 0700 "/opt"',
@@ -684,11 +802,13 @@ def test_every_shape_the_sixth_review_measured_green_is_now_refused():
     word BOUNDARIES the second review named: the exec form is a JSON array and not one
     bracket-wrapped word, `;` ends a word, and a TAB separates the keyword.
 
-    G6-G9 are variants, not review findings: an escaped separator, a quote inside the
-    word, a quoted second letter and `//opt` are all the SAME word as `/opt`, and the row
-    exists so the rule cannot be taught one of them and left open on its neighbour. Each
-    is refused with the word in the first line of the message, which is the only line
-    `_names` reads.
+    G9 is a finding of that review - `//opt` is one of the spellings its brief lists as
+    measured green against 3437a37b, and it needed a code change rather than a sentence:
+    `posixpath.normpath` keeps the leading double slash, so the ancestor comparison has to
+    collapse it first. G6-G8 are not findings: an escaped separator, a quote inside the
+    word and a quoted second letter are all the SAME word as `/opt`, and the row exists so
+    the rule cannot be taught one of them and left open on its neighbour. Each is refused
+    with the word in the first line of the message, which is the only line `_names` reads.
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     for name, extra, expected in SIXTH_REVIEW_SHAPES:
@@ -697,6 +817,108 @@ def test_every_shape_the_sixth_review_measured_green_is_now_refused():
         assert _names(added, expected), (
             f"{name} was refused, but not for the token that closes it (expected "
             f"{expected!r}):\n" + "\n".join(added))
+
+
+#: The escapes the SEVENTH non-author review measured against the round-6 candidate
+#: (ee02377d2b), with the word each must be refused by. E1a and E1b are a REGRESSION from
+#: 3437a37b rather than a hole that was always there: the round-6 tokenizer split a word on
+#: a backtick pair, so `/opt/aitelier-gate-imp``orts` became two halves that spelled
+#: neither the tree's name nor one of its ancestors. E2 and E2b reopen the G2 class:
+#: Docker drops a comment line or an empty line INSIDE a continuation, and `_directives`
+#: ended the instruction there, leaving two halves again.
+SEVENTH_REVIEW_ESCAPES: tuple[tuple[str, str, str], ...] = (
+    ("E1a a recursive chmod of the tree whose name is split by a backtick pair",
+     "RUN chmod -R 0777 /opt/aitelier-gate-imp``orts",
+     "/opt/aitelier-gate-imp``orts"),
+    ("E1b the client re-moded, with both halves of its name split",
+     "RUN chmod 0666 /opt/aitelier-gate-imp``orts/docker/godot/godot_har``ness.py",
+     "/opt/aitelier-gate-imp``orts/docker/godot/godot_har``ness.py"),
+    ("E2  a comment line inside a continuation",
+     "RUN chmod -R 0777 /opt/aitelier-gate-im\\\n# x\nports",
+     "aitelier-gate-imports"),
+    ("E2b an empty line inside a continuation",
+     "RUN chmod -R 0777 /opt/aitelier-gate-im\\\n\nports",
+     "aitelier-gate-imports"),
+)
+
+#: The FALSE refusals the seventh review measured, the first of them new that round: a
+#: separator INSIDE quoting was taken as a word boundary, so a sed EXPRESSION became a word
+#: `/opt` that no shell ever produces. 3437a37b accepted both spellings.
+SEVENTH_REVIEW_FALSE_REFUSALS: tuple[str, ...] = (
+    "RUN sed -i 's|/opt|/srv|' /etc/app.conf",
+    "RUN sed -i 's#/opt#/srv#' /etc/app.conf",
+    "RUN sed -i 's/\\/opt/\\/srv/' /etc/app.conf",
+)
+
+#: Legitimate build lines this file refuses ON PURPOSE, with the reason the refusal has to
+#: state. A word that IS `/` or `/opt` decides whether the export tree can be reached, and
+#: no text tells `mkdir -p /opt` from `chmod 0700 /opt` - so the mention is the refusal.
+SEVENTH_REVIEW_STATED_COSTS: tuple[tuple[str, str], ...] = (
+    ("WORKDIR /", "names an ancestor"),
+    ("RUN mkdir -p /opt", "names an ancestor"),
+    ("COPY --from=build / /", "names an ancestor"),
+    ("RUN find / -name '*.pyc' -delete", "names an ancestor"),
+    ("RUN tar -C / -xzf /tmp/build.tgz", "names an ancestor"),
+)
+
+
+def test_the_seventh_review_escapes_are_refused():
+    """The round-7 review's FAIL: the two that were a regression and the two it reopened.
+
+    Only these four are closed here, and that is deliberate. The same review listed E3-E7
+    as ACCEPTED shapes this file has never judged: E3 a path carried in a bare `$VAR`, E4
+    a cwd-relative spelling, E5 the RESULT of a command substitution, E6 the bash-only
+    brace and `$'\\x2fopt'` forms, E7 an alias path through `/proc/self/root`. Every one of
+    them needs a shell to decide, and five rounds of teaching this file one more spelling
+    is the history that produced the mention rule - so they are pinned as ACCEPTED in
+    `test_the_declared_non_claims_are_still_accepted` and stated as the boundary in the
+    module docstring. What could not wait is what the FAIL rests on: a word split by a
+    backtick pair was refused by 3437a37b and accepted by its successor, and a comment or
+    an empty line inside a continuation ended an instruction Docker continues.
+
+    The expected token is the one the refusal has to NAME, in the first line of its
+    message: the word as WRITTEN for E1a and E1b, and the path the join reconstructs for
+    E2 and E2b - the whole point of deleting the continuation instead of spacing it is
+    that the text then does contain the name.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for name, extra, expected in SEVENTH_REVIEW_ESCAPES:
+        added = _added_problems(shipped, extra)
+        assert added, f"this shape is still green, and it re-modes a pinned path:\n{extra}"
+        assert _names(added, expected), (
+            f"{name} was refused, but not for the token that closes it (expected "
+            f"{expected!r}):\n" + "\n".join(added))
+
+
+def test_the_seventh_review_false_refusals_are_read():
+    """The other direction: the line the round-7 review measured as a FALSE REFUSAL.
+
+    `sed -i 's|/opt|/srv|' /etc/app.conf` names no pinned path: the `/opt` is a string
+    inside a sed expression, and a shell hands the whole quoted word to sed. The round-6
+    tokenizer split on `|` wherever it appeared, so this harmless line was refused on a
+    word the shell never produces, and 3437a37b accepted it - a false refusal is the
+    fastest way to get a guard deleted, which is why the quote-aware split belongs to the
+    same fix as the E1 regression rather than to a later loosening.
+
+    The second table is the cost the review named as BY DESIGN BUT UNSTATED. `WORKDIR /`,
+    `RUN mkdir -p /opt`, `COPY --from=build / /` and `RUN find / -name '*.pyc' -delete` are
+    real builds this file will not read, because the word IS an ancestor and no text tells
+    a harmless mention from a mode change. Pinning them makes that a stated decision with a
+    test instead of a silence, and the reason is asserted too: a refusal that names the
+    ancestor is the contract, not a stray match.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for line in SEVENTH_REVIEW_FALSE_REFUSALS:
+        assert not _added_problems(shipped, line), (
+            f"this line names no pinned path and must not be refused: {line}")
+    for line, reason in SEVENTH_REVIEW_STATED_COSTS:
+        added = _added_problems(shipped, line)
+        assert added, (
+            f"this cost is documented as a refusal and is now read; the docstring says "
+            f"it is refused on purpose: {line}")
+        assert _names(added, reason), (
+            f"{line} was refused, but not because a word of it IS an ancestor:\n"
+            + "\n".join(added))
 
 
 def test_the_guard_does_not_refuse_a_command_that_names_no_pinned_path():
@@ -803,3 +1025,44 @@ def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
         assert _names(added, expected), (
             f"{line} was refused, but not for the path it names (expected "
             f"{expected!r}):\n" + "\n".join(added))
+
+
+#: Every shape the module docstring declares OUT of this file's reach, with the Dockerfile
+#: text that exhibits it. Each row is measured against the CURRENT parser, so the boundary
+#: is a decision with a test: closing one of them is a visible change to this table, never
+#: an accident of the next fix.
+NON_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("E3  a path carried in a bare variable",
+     "ENV D=/opt\nRUN chmod 0700 $D"),
+    ("E4  a cwd-relative spelling of an ancestor",
+     "RUN chmod 0700 ..\nRUN chmod 0700 ../opt\nRUN chmod 0700 ~/../.."),
+    ("E5  the RESULT of a command substitution",
+     "RUN chmod 0700 $(dirname /opt/x)"),
+    ("E7  an alias path that IS `/` without spelling it",
+     "RUN chmod 0700 /proc/self/root"),
+    ("E6  a bash brace list after an explicit SHELL",
+     'SHELL ["/bin/bash","-c"]\nRUN chmod 0700 {/opt,/opt}'),
+    ("E6  a bash ANSI-C quoted slash after an explicit SHELL",
+     'SHELL ["/bin/bash","-c"]\nRUN chmod 0700 $\'\\x2fopt\''),
+)
+
+
+def test_the_declared_non_claims_are_still_accepted():
+    """The boundary the docstring declares, measured rather than assumed.
+
+    Each row is a way to re-mode a pinned path that this file cannot see, and every one of
+    them is ACCEPTED by the parser as it stands. That is not an oversight to be fixed by
+    the next reading rule: a bare `$D`, a `..`, a `$(...)`, an alias and a bash-only word
+    all need a shell to say what path they name, and the five rounds that taught this file
+    one more shell spelling produced the next spelling as the next review's finding. The
+    boundary is therefore declared in the module docstring and pinned here, so a later
+    commit that closes one of these has to say so by editing this table - and a review that
+    finds a NEW escape knows which side of the line it lands on.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for name, extra in NON_CLAIMS:
+        added = _added_problems(shipped, extra)
+        assert not added, (
+            f"{name} is declared a NON-CLAIM and must still be accepted, but the parser "
+            f"now refuses it - if that is intended, move the row into a refusing table and "
+            f"say why in the commit message:\n{extra}\n" + "\n".join(added))

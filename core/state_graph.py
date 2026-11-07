@@ -14,6 +14,7 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_schema_migration import add_column_if_missing
 from typing import Any
 
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -296,18 +297,17 @@ def initialize_graph_schema(db) -> None:
         from core.state_metadata import SCHEMA as METADATA_SCHEMA
         conn.executescript(SCHEMA + METADATA_SCHEMA)
         # Additive: existing rows stay NULL (legacy, exempt from facet rules).
-        if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
-            conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
-                         "CHECK(facet IN ('design','contract','test','content','integration'))")
+        # Each add tolerates a concurrent writer that already added the column
+        # (core/state_schema_migration.py); nothing else is absorbed.
+        add_column_if_missing(conn, "state_nodes", "facet", "TEXT "
+                              "CHECK(facet IN ('design','contract','test','content','integration'))")
         # Legacy column (design/multi-driver-coop.md §9.1), kept so old and fresh
         # databases share one shape; ignored since multi_driver is always on.
-        if "multi_driver" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_policy)")}:
-            conn.execute("ALTER TABLE state_project_policy ADD COLUMN multi_driver TEXT NOT NULL "
-                         "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
+        add_column_if_missing(conn, "state_project_policy", "multi_driver", "TEXT NOT NULL "
+                              "DEFAULT 'off' CHECK(multi_driver IN ('off','on'))")
         # Additive (design §7.2, P4): every existing project keeps review_independence=off.
-        if "review_independence" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_project_enforcement)")}:
-            conn.execute("ALTER TABLE state_project_enforcement ADD COLUMN review_independence TEXT NOT NULL "
-                         "DEFAULT 'off' CHECK(review_independence IN ('off','advisory'))")
+        add_column_if_missing(conn, "state_project_enforcement", "review_independence", "TEXT NOT NULL "
+                              "DEFAULT 'off' CHECK(review_independence IN ('off','advisory'))")
         conn.commit()
 
 

@@ -8,6 +8,7 @@ from uuid import uuid4
 from core.drivers import recipient_presence_block, touch_driver
 from core.state_graph import StateGraphError, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_schema_migration import add_column_if_missing
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS driver_inbox_messages (
@@ -77,23 +78,17 @@ class DriverInbox:
                 conn.executescript(SCHEMA)
                 # Additive (driver -> user messages): every existing row is a
                 # driver-addressed message, which is what 'driver' means.
-                if "audience" not in {r["name"] for r in conn.execute(
-                        "PRAGMA table_info(driver_inbox_messages)")}:
-                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN audience TEXT "
-                                 "NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
+                add_column_if_missing(conn, "driver_inbox_messages", "audience",
+                                      "TEXT NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
                 # Additive (the user -> driver half of one conversation). Every
                 # existing row keeps channel NULL: a driver-addressed message
                 # that no human wrote is not part of the user's thread, and the
                 # rows the driver sent the user are recognised by `audience`.
-                if "channel" not in {r["name"] for r in conn.execute(
-                        "PRAGMA table_info(driver_inbox_messages)")}:
-                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN channel TEXT "
-                                 "CHECK(channel IN ('user'))")
+                add_column_if_missing(conn, "driver_inbox_messages", "channel",
+                                      "TEXT CHECK(channel IN ('user'))")
                 # Additive (tagged segments). NULL means the message was written
                 # as one body, which is what every row before this column was.
-                if "segments_json" not in {r["name"] for r in conn.execute(
-                        "PRAGMA table_info(driver_inbox_messages)")}:
-                    conn.execute("ALTER TABLE driver_inbox_messages ADD COLUMN segments_json TEXT")
+                add_column_if_missing(conn, "driver_inbox_messages", "segments_json", "TEXT")
                 conn.commit()
 
     @staticmethod

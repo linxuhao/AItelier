@@ -14,6 +14,7 @@ import uuid
 
 from core.driver_credentials import read_token_file
 from core.state_graph import now
+from core.state_schema_migration import add_column_if_missing
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dsh_drivers (
@@ -105,10 +106,11 @@ class DshDrivers:
             # alone, so the column that records EVERY endpoint a session named
             # has to be added to a database that predates it. The rows already
             # there keep the one endpoint they named; they are not re-derived.
-            if "served_by_seen" not in {r["name"] for r in conn.execute(
-                    "PRAGMA table_info(dsh_driver_session_models)")}:
-                conn.execute("ALTER TABLE dsh_driver_session_models ADD COLUMN "
-                             "served_by_seen TEXT NOT NULL DEFAULT '[]'")
+            # `add_column_if_missing` is safe against another constructor doing
+            # the same check at the same moment: only the call that actually
+            # added the column returns True, so the one-time backfill runs once.
+            if add_column_if_missing(conn, "dsh_driver_session_models",
+                                     "served_by_seen", "TEXT NOT NULL DEFAULT '[]'"):
                 # A row written before the column existed named exactly one
                 # endpoint (or none) - `served_by` is that list of length <= 1.
                 for row in conn.execute("SELECT project_id,session_id,route,served_by "

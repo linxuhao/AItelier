@@ -2261,9 +2261,9 @@ def _decision_binds_measurement(override: dict, observation: dict) -> tuple[bool
         return True, "the decision binds this same inventory"
     if override.get("observation_digest") == observation.get("digest"):
         return True, "the decision binds this same inventory, taken against this exact measurement"
-    return False, ("override inventory digest does not match this fresh measurement instance "
-                   "(the decision authorizes measured effects, so it binds the exact "
-                   "observation it was taken against)")
+    return False, ("override observation digest does not match this fresh measurement instance "
+                   "(the inventory still matches, but the decision authorizes measured "
+                   "effects, so it binds the exact observation it was taken against)")
 
 
 def _valid_override(action: str, observation: dict, override: dict | None, *,

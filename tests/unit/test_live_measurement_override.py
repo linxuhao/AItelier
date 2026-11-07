@@ -17,6 +17,10 @@ from tests.unit.test_host_live_deployment_observation import live, wire_client
 from tests.unit.test_normal_gate_preparation import bound, QUOTAS
 
 SOURCE = Path(__file__).resolve().parents[2]
+# The instance fence's own words. The two refusals name DIFFERENT digests, so
+# each is assertable on its own; a substring shared by both would stop telling
+# which fence held.
+INSTANCE_REFUSAL = "override observation digest does not match this fresh measurement instance"
 
 
 @pytest.fixture
@@ -92,13 +96,50 @@ def test_exact_preimage_and_current_file_refuse_distinct_fresh_observation(norma
     exec(compile(ast.Module(body=[node], type_ignores=[]), "exact-source-preimage", "exec"), scope)
     for gate in (scope["_require_deployment_clearance"], server._require_deployment_clearance):
         time.sleep(1.05)
-        with pytest.raises(RuntimeError, match="digest does not match this fresh measurement"):
+        # Name the fence that must refuse here. The decision binds the same
+        # inventory (previous and current measure it unchanged), so what is
+        # stale is the observation INSTANCE - a looser pattern such as
+        # "digest does not match this fresh measurement" matches both fences
+        # and would stop telling the two apart.
+        # Note pytest.raises(match=) searches the whole message (it is prefixed
+        # by "refusing redeploy: ... ("), so the discrimination comes from
+        # naming the instance fence, not from anchoring the pattern.
+        with pytest.raises(RuntimeError, match=INSTANCE_REFUSAL):
             gate("redeploy")
         event = latest()
         assert event["status"] == "aborted" and event["usable"] is False
         assert event["inventory_digest"] not in (previous["digest"], current["digest"])
         print("fresh-file-refusal", event["inventory_digest"])
     assert normal[1] == []
+
+
+def test_the_two_fences_name_the_digest_that_mismatched():
+    """Which fence held must be readable off the refusal, not assumed.
+
+    The inventory fence and the instance fence are different answers to
+    different questions, and a decision can satisfy one while missing the
+    other. Neither message may be reported under the other's name: a reader -
+    or a test - that matches a substring shared by both stops discriminating.
+    """
+    fresh = {"digest": "a" * 64, "inventory_digest": "b" * 64, "quiescent": False}
+    changed_inventory = {"inventory_digest": "c" * 64,
+                         "observation_digest": fresh["digest"]}
+    stale_instance = {"inventory_digest": fresh["inventory_digest"],
+                      "observation_digest": "d" * 64}
+    inventory_ok, inventory_reason = dq._decision_binds_measurement(changed_inventory, fresh)
+    instance_ok, instance_reason = dq._decision_binds_measurement(stale_instance, fresh)
+    assert (inventory_ok, instance_ok) == (False, False)
+    assert inventory_reason.startswith(
+        "override inventory digest does not match this fresh measurement")
+    assert instance_reason.startswith(INSTANCE_REFUSAL)
+    assert "observation digest" not in inventory_reason
+    assert "inventory digest" not in instance_reason
+    # The split itself: an UNCHANGED inventory carries an earlier decision only
+    # while that inventory reports nothing a decision could authorize.
+    quiescent = {"digest": "a" * 64, "inventory_digest": "b" * 64, "quiescent": True}
+    same_inventory = {"inventory_digest": "b" * 64}
+    assert dq._decision_binds_measurement(same_inventory, quiescent)[0] is True
+    assert dq._decision_binds_measurement(same_inventory, fresh)[0] is False
 
 
 def test_fresh_decision_same_measurement_fence_and_replay_refusal(normal):

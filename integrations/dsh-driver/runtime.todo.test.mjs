@@ -22,6 +22,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
+import { watchProgress } from './progress.mjs';
 
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
 import argparse, hashlib, json, os, signal, subprocess, sys, time
@@ -246,7 +247,20 @@ export function apply(ctx) {
   let pressure = false, woke = false;
   const once = (key, block) => done.has(key) ? undefined : (done.add(key), block);
   class FixtureAdapter extends LlmAdapter {
-    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 16000 }, defaultMaxTokens: 1024 }; }
+    // 24000, not the 16000 this fixture used to declare. The director's request
+    // envelope is ~27.7k chars of tool schemas plus a ~25k-char surface: ~13.3k
+    // estimated tokens (dsh-token-meter prices 4 chars/token), so a 16000 window
+    // at thresholdRatio 0.8 (12800) put the director permanently ABOVE its own
+    // compaction threshold from its first turn, and every turn was pre-empted by
+    // a compaction. On a loaded host one compaction outlasts the 3 s idle-review
+    // interval, so reviews arrived during compactions and were compacted away
+    // before the model saw them: the scenario looped (measured: 69 s of root
+    // compaction turns, "root never finished") instead of merely running slowly -
+    // a fixture that declares a window smaller than the surface it forces cannot
+    // tell a slow runtime from a stuck one. 24000 keeps the ordinary surface below
+    // the threshold while the 30000-token padding blocks still force exactly the
+    // pressure compactions this scenario asserts on.
+    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 24000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
       const text = JSON.stringify(options.messages);
       if (!roles.has(options.sessionId)) roles.set(options.sessionId, options.sessionId === root ? 'root'
@@ -268,14 +282,22 @@ export function apply(ctx) {
         } else blocks = [next];
       } else if (role === 'root') {
         const handed = text.includes('AItelier todo handback:'), completed = text.includes('FULL_CHILD_DONE');
-        // The director waits for the runtime's idle review before it finishes a plan
-        // whose items have all passed (it is the reminder that tells it to). Keeping
-        // that order is what puts a real review payload - the one the runtime emitted
-        // while plan a was all-passed and unfinished - into this scenario; finishing
-        // in the same turn as the handback lets every review arrive after the
-        // candidate exists, when the plan has legitimately dropped out.
+        // The director waits until it has SEEN the runtime's idle review naming plan a
+        // as ready_to_finish before it finishes that plan (the review is the reminder
+        // that tells it to). Requiring the review to be in THIS request is what makes
+        // the review payloads asserted below deterministic instead of a race: any
+        // earlier review merely satisfied "some review arrived", so a slow child boot
+        // let the director finish in the same turn as the handback and every review
+        // then arrived after the candidate existed, when the plan has legitimately
+        // dropped out. Waiting for the specific payload guarantees one exists.
         const reviewed = (options.messages ?? []).some(message => (message.content ?? [])
-          .some(part => typeof part.text === 'string' && part.text.startsWith('AItelier director review due:')));
+          .some(part => {
+            if (typeof part.text !== 'string' || !part.text.startsWith('AItelier director review due:')) return false;
+            try {
+              return JSON.parse(part.text.split('\n').slice(1).join('\n')).todo_unfinished
+                ?.some(plan => plan.attempt_id === plans.a.attempt_id && plan.ready_to_finish);
+            } catch { return false; }
+          }));
         const block = once('templates', tool('root-todo_templates', 'todo_templates', {}))
           ?? once('plan-items', tool('root-todo_plan-items', 'todo_plan', { ...plans.bad.input, items: [{ id: 'improvised', title: 'x', needs: [], predicates: [] }] }))
           ?? once('plan-typo', tool('root-todo_plan-typo', 'todo_plan', { ...plans.bad.input, params: { ...plans.bad.input.params, paths: 'a.txt' } }))
@@ -339,7 +361,14 @@ async function fakeCli(directory) {
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: process.env.AITELIER_TODO_TEST_CWD ?? directory };
 }
 
-test('real pinned DSH: plans walked by native children, runtime handback, State-writer refusal, briefs across compaction', { timeout: 90000 }, async (t) => {
+// This scenario is bounded by the progress it observes, not by the clock (see
+// progress.mjs): the wait below is a watch over the plans' own milestones - a
+// child's item passing, a handback, an idle review, the director's finish and
+// post-compaction status - so a runtime that is merely slow finishes and passes
+// whatever the host is doing, while a runtime whose watched progress stops
+// arriving still fails. A harness timeout would be a second, silent wall budget
+// on exactly the thing this replaces.
+test('real pinned DSH: plans walked by native children, runtime handback, State-writer refusal, briefs across compaction', { timeout: Infinity }, async (t) => {
   const entry = await measuredEntryForTest(t);
   if (!entry) return;                       // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-todo-'));
@@ -415,21 +444,63 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '3000',
       AITELIER_TODO_PYTHON: cli.python, AITELIER_TODO_CWD: cli.cwd, AITELIER_TEST_PLANS: JSON.stringify(plans) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
-    const reviews = () => events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
-      && e.event.data.content?.[0]?.text?.startsWith('AItelier director review due:'))
-      .map(e => JSON.parse(e.event.data.content[0].text.split('\n').slice(1).join('\n')));
+    // Each review carries its arrival position, the one ordering that spans both
+    // the root's and a child's session (session seq numbers are per session).
+    const reviews = () => events.map((e, index) => ({ index, e }))
+      .filter(({ e }) => e.session === 'fixture-root' && e.event.type === 'user/message'
+        && e.event.data.content?.[0]?.text?.startsWith('AItelier director review due:'))
+      .map(({ index, e }) => ({ index, ...JSON.parse(e.event.data.content[0].text.split('\n').slice(1).join('\n')) }));
     const reviewedB = () => reviews().some(r => r.todo_unfinished?.some(p => p.attempt_id === plans.b.attempt_id));
-    const deadline = Date.now() + 75000;
     const handbackCount = () => events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message'
       && e.event.data.content?.[0]?.text?.startsWith('AItelier todo handback:')).length;
-    while (Date.now() < deadline && proc.exitCode === null && !(rootDone && reviewedB() && handbackCount() >= 2) && !activity.some(a => a.phase === 'failed')) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
     const diagnostics = () => output + '\n' + JSON.stringify(requests.map(r => ({ role: r.role, purpose: r.purpose,
       last: JSON.stringify(r.messages.at(-1)).slice(0, 300) })), null, 1).slice(-12000);
+    const resultOf = id => events.find(e => e.event.type === 'tool/result' && e.event.data.message.toolCallId === id);
+    const passed = id => { const r = resultOf(id); return Boolean(r) && !r.event.data.message.isError && toolJson(r.event).outcome === 'pass'; };
+    const sessionOfRole = role => requests.find(r => r.role === role)?.session;
+    // Wait for the plans' OBSERVED PROGRESS, not for the wall clock. Every
+    // milestone below is something this scenario then asserts on, so the wait
+    // covers the assertions instead of racing them; under load the old 75 s
+    // deadline expired on a runtime that was still walking the plans and said
+    // only "scenario did not finish". Only forward signals are listed: the
+    // runtime's idle traffic (activity posts, heartbeats, the 3 s idle review, a
+    // repeated review naming the same plan) advances none of them, so a runtime
+    // whose watched progress never arrives still reds - after `quietMs`, naming
+    // the milestones it never reached.
+    const progress = await watchProgress({
+      what: 'the todo scenario to complete (both plans walked by native children, the runtime handbacks, the idle reviews, the director finish and its post-compaction status)',
+      running: () => proc.exitCode === null,
+      failed: () => activity.some(a => a.phase === 'failed'),
+      milestones: [
+        { name: 'root listed the todo templates', met: () => resultOf('root-todo_templates') },
+        { name: 'root froze plan a from the template', met: () => resultOf('root-todo_plan-a') },
+        { name: 'root froze plan b from the template', met: () => resultOf('root-todo_plan-b') },
+        { name: 'full child session dispatched', met: () => sessionOfRole('full') },
+        { name: 'partial child session dispatched', met: () => sessionOfRole('partial') },
+        { name: 'root recorded the evidence through State', met: () => resultOf('root-judge-record_evidence') },
+        { name: 'full child passed implement', met: () => passed('full-todo_done-implement') },
+        { name: 'full child compacted its own context', met: () => events.some(e => e.session === sessionOfRole('full') && e.event.type === 'compaction/end' && !e.event.data.error) },
+        { name: 'compacted child was given its plan brief', met: () => events.some(e => e.session === sessionOfRole('full') && e.event.type === 'user/message' && e.event.data.source?.kind === todoBriefSource) },
+        { name: 'full child passed test', met: () => passed('full-todo_done-test') },
+        { name: 'full child passed deliver, leaving plan a all-passed', met: () => passed('full-todo_done-deliver') },
+        { name: 'partial child stopped with items left (first handback)', met: () => handbackCount() >= 1 },
+        { name: 'idle review named the unfinished plan b', met: () => reviewedB() },
+        { name: 'idle review named the all-passed plan a as ready to finish', met: () => reviews().some(r => r.todo_unfinished?.some(p => p.attempt_id === plans.a.attempt_id && p.ready_to_finish)) },
+        { name: 'resume child dispatched for the handed-back plan', met: () => sessionOfRole('resume') },
+        { name: 'resume child was handed back too (second handback)', met: () => handbackCount() >= 2 },
+        { name: 'root finished the all-passed plan', met: () => resultOf('root-todo_finish-a') },
+        { name: 'root compacted after the finish', met: () => events.some(e => e.session === 'fixture-root' && e.event.type === 'compaction/end' && !e.event.data.error) },
+        { name: 'post-compaction State snapshot carried the plans', met: () => events.some(e => e.session === 'fixture-root' && e.event.type === 'user/message' && e.event.data.source?.kind === stateInjectionSource && e.event.data.source.compaction_seq > 0) },
+        { name: 'root re-read plan b after that compaction', met: () => resultOf('root-todo_status-after-compact') },
+        { name: 'root reported the walk finished (ROOT_DONE)', met: () => rootDone },
+      ],
+    });
     assert.equal(proc.exitCode, null, output);
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity.filter(a => a.phase === 'failed')) + output);
-    assert.ok(rootDone, 'scenario did not finish\n' + diagnostics());
+    // A red names the watch that expired and the last progress it saw, plus the
+    // request diagnostics - the old "scenario did not finish" named neither.
+    assert.ok(progress.done, `${progress.message}\n` + diagnostics());
+    assert.ok(rootDone, 'the director never finished the walk\n' + diagnostics());
     const results = events.filter(e => e.event.type === 'tool/result').map(e => ({ session: e.session, id: e.event.data.message.toolCallId, event: e.event }));
     const result = id => results.find(r => r.id === id);
     const roles = new Map(requests.map(r => [r.session, r.role]));
@@ -521,7 +592,16 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       { attempt_id: plans.b.attempt_id, node_key: 'execution.todo-partial', next: 'deliver', remaining: ['deliver'], ready_to_finish: false }]);
     assert.ok(review.todo_unfinished.every(p => p.ready_to_finish === (p.remaining.length === 0)),
       'a plan was marked the wrong way round: ' + JSON.stringify(review.todo_unfinished));
-    const allPassed = reviews().filter(r => r.todo_unfinished?.some(p => p.attempt_id === plans.a.attempt_id));
+    // Only reviews that can speak to this property are checked: one that arrives
+    // before plan a is all-passed may legitimately list it with items left (a slow
+    // native child boot puts one in that window - that is not an all-passed plan
+    // "handed back as items to run"), and one that already lists it all-passed is
+    // evidence whatever the arrival order of two concurrent loopback posts was.
+    const allPassedAt = events.findIndex(e => e.event.type === 'tool/result'
+      && e.event.data.message.toolCallId === 'full-todo_done-deliver');
+    const namedA = r => r.todo_unfinished?.filter(p => p.attempt_id === plans.a.attempt_id) ?? [];
+    const allPassed = reviews().filter(r => namedA(r).length
+      && (r.index > allPassedAt || namedA(r).every(p => p.remaining.length === 0)));
     assert.ok(allPassed.length, 'no idle review named the all-passed plan before it was finished: ' + JSON.stringify(reviews()));
     for (const payload of allPassed) {
       assert.deepEqual(payload.todo_unfinished.filter(p => p.attempt_id === plans.a.attempt_id), [

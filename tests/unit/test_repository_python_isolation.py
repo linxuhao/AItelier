@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -85,9 +86,20 @@ def test_actual_container_entry_captures_real_pytest_and_junit(tmp_path, failing
 
 def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
     pid_file = tmp_path / "child.pid"
-    code = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));print('partial',flush=True);time.sleep(20)"
-    result = entry.run({"repo":str(tmp_path),"timeout":0.2,"args":[sys.executable,"-c",code]})
+    # The budget clock starts when entry.run is called, so the child's first
+    # byte must not depend on CPython start-up (interpreter init alone can exceed
+    # 0.2 s under CPU contention). /bin/sh prints "partial" BEFORE it writes its
+    # pid, so the pid file is a witness that the byte already reached the pipe;
+    # `exec` keeps that pid for the reap check below.
+    script = f"echo partial; echo $$ > {shlex.quote(str(pid_file))}; exec sleep 20"
+    result = entry.run({"repo":str(tmp_path),"timeout":0.2,"args":["/bin/sh","-c",script]})
     assert result["timed_out"] and result["returncode"] != 0
+    # Child-side witness: the child got its first write out inside the budget.
+    # Without it, an empty stdout would be a timing miss, not the partial-capture
+    # contract, and the assertion below would blame the wrong thing.
+    assert pid_file.exists(), (
+        "child never reached its first write inside the 0.2 s budget "
+        f"(start-up outran the budget under load): {result!r}")
     assert "partial" in result["stdout"]
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()),0)

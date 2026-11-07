@@ -24,7 +24,12 @@ Two things, and neither of them is "what a shell command does":
      that creates and modes the export tree - compared as canonical text, so only
      whitespace and line continuations are normalised away. Every mode is therefore
      bound to the path token its own `chmod` names: nothing can satisfy this file by
-     putting 0755 somewhere in a RUN.
+     putting 0755 somewhere in a RUN. The mode in that COPY is pinned EXACTLY to 0644
+     (leading zeros do not change an octal value, so `0644` and `644` are the same mode
+     and `0755` is not): the client's mode comes from this line and from no `chmod`, so
+     `--chmod=0755 ... godot_harness.py` used to satisfy the pin while baking an
+     executable client - the round-9 review's finding, iss-363a4758f4974b31, refused now
+     and pinned in `test_the_client_copy_refuses_every_other_mode`.
   2. no OTHER instruction names a pinned path, an ancestor whose mode decides whether
      it is reachable (`/`, `/opt`), the client's own file name, or a WORD that builds
      such a path at parse time (a shell variable, a glob or a brace whose literal head
@@ -155,15 +160,193 @@ EXPORT = "/opt/aitelier-gate-imports"
 TARGET = "/opt/aitelier-gate-imports/docker/godot/godot_harness.py"
 
 
-def test_the_baked_gate_client_pins_its_mode():
-    text = (ROOT / "Dockerfile").read_text()
-    copies = [ln for ln in text.splitlines()
-              if ln.strip().upper().startswith("COPY") and TARGET in ln]
-    assert copies, f"no COPY bakes {TARGET}; the gate client must come from the image"
+#: One `--chmod=` flag and its value, as Docker's COPY carries it. The value stops at the
+#: first whitespace, so `--chmod=0644` on the shipped line is the value `0644`.
+_MODE_FLAG = re.compile(r"--chmod=(\S*)")
+
+
+def _is_pinned_mode(mode: str) -> bool:
+    """True when `mode` is octal 0644 - the only mode the client may be baked with.
+
+    Leading zeros do not change an octal value, so `0644`, `644` and `00644` are the same
+    mode and all three are read. `0755`, `0600` and `6440` are different modes, and so is a
+    value this file cannot read as a mode at all. Nothing else is modelled: this is one value
+    compared with one value, not an octal parser.
+    """
+    return bool(re.fullmatch(r"0*644", mode))
+
+
+def _mode_pin_problems(text: str) -> list[str]:
+    """Why the COPY that bakes the client does not pin its mode to 0644, or [] when it does.
+
+    This comparison is the WHOLE pin, which is why it has to be exact. The image bakes the
+    client's mode from this line and from nothing else - a `chmod` of the client in a RUN is
+    refused outright, and `test_the_import_tree_is_searchable_and_not_only_the_file` rests
+    on that, so a mode this file reads but the image does not use has no second line to fall
+    back on. It read ANY four-digit octal until the round-9 review measured
+    `--chmod=0755 ... godot_harness.py` green (iss-363a4758f4974b31), and 0755 bakes an
+    executable client while 0777 bakes a writable one.
+
+    The spelling read is the one the shipped COPY uses, `--chmod=0644`; Docker's flag parser
+    also accepts `--chmod 0644` with a space, which this file does not read. That is a stated
+    cost and not a new one - the assertion this replaces did not read it either - and it is
+    pinned as a refusal by `test_the_client_copy_refuses_every_other_mode`, so a build that
+    wants the space spelling changes this file deliberately.
+
+    A line carrying MORE than one `--chmod=` must pin every one of them to 0644: two flags
+    are a spelling this file cannot resolve (which one the image ends up with is a detail of
+    the builder), so it refuses rather than picking the one that reads well.
+    """
+    copies = [line for line in text.splitlines()
+              if line.strip().upper().startswith("COPY") and TARGET in line]
+    if not copies:
+        return [f"no COPY bakes {TARGET}; the gate client must come from the image"]
+    problems: list[str] = []
     for line in copies:
-        assert re.search(r"--chmod=0?6?4?4|--chmod=0[0-7]{3}", line), (
-            f"this COPY inherits the build host's mode and can bake 0600 root:root:\n  {line}\n"
-            "Pin it with --chmod=0644: the backend runs as uid 1000 and cannot read 0600.")
+        modes = _MODE_FLAG.findall(line)
+        if not modes:
+            spaced = re.search(r"(?:^|\s)(--chmod\s+\S+)", line)
+            if spaced:
+                problems.append(
+                    f"this COPY spells the mode flag as {spaced.group(1)!r}, which this file "
+                    "does not read - what it reads is one token, --chmod=<octal>:\n  " + line
+                    + "\nPin it with --chmod=0644 - that is the spelling the image uses, and "
+                    "the backend runs as uid 1000 and cannot read 0600.")
+            else:
+                problems.append(
+                    "this COPY carries no --chmod=, so it bakes the build host's mode "
+                    "(0600 root:root on this host):\n  " + line + "\n"
+                    "Pin it with --chmod=0644: the backend runs as uid 1000 and cannot read "
+                    "0600.")
+            continue
+        for mode in modes:
+            if _is_pinned_mode(mode):
+                continue
+            problems.append(
+                f"this COPY bakes the client with --chmod={mode}, not --chmod=0644:\n  "
+                + line + "\n"
+                "The client's mode is 0644 and nothing else: 0755 makes it executable, 0777 "
+                "makes it writable, and no `chmod` of it elsewhere is allowed to correct this "
+                "- that line IS the pin. Change it deliberately and say why in the commit "
+                "message.")
+    return problems
+
+
+def test_the_baked_gate_client_pins_its_mode():
+    problems = _mode_pin_problems((ROOT / "Dockerfile").read_text())
+    assert not problems, "\n".join(problems)
+
+
+#: The spellings of octal 0644 this file must READ, measured on a mutated COPY of the
+#: Dockerfile text. This column is the CONTROL: an assertion that refused every mode would
+#: pass the refusing column below and be worthless. `00644` is here because leading zeros do
+#: not change an octal value - it is the same mode as `0644`, not a neighbour of it.
+CLIENT_MODES_READ: tuple[str, ...] = ("0644", "644", "00644")
+
+#: The modes the shipped COPY must be REFUSED with, and the reason each one is a real bug
+#: rather than a spelling this file dislikes. 0755 is the round-9 review's measured escape
+#: (iss-363a4758f4974b31); 0777 is the same hole one step wider; 0600 is the mode the image
+#: actually baked before this COPY pinned one, which the module docstring measures.
+CLIENT_MODES_REFUSED: tuple[tuple[str, str], ...] = (
+    ("0755 an executable gate client, baked by a line the old assertion read", "0755"),
+    ("0777 a client any user in the image can write", "0777"),
+    ("0600 the mode this image used to bake, unreadable to uid 1000", "0600"),
+)
+
+#: The other three ways the SAME line stops pinning 0644, each measured as a text mutation
+#: `(name, shipped fragment, mutated fragment, token the refusal must name)`. Every branch
+#: `_mode_pin_problems` has appears here: the absent flag is the bug this file exists for, the
+#: space-spelled flag is the cost its docstring states, and two flags on one line is a mode
+#: the builder picks and this file will not. Leaving one of them prose-only would be a
+#: boundary the suite never measures, which is the failure mode the docstring calls a silence.
+CLIENT_COPY_SHAPES_REFUSED: tuple[tuple[str, str, str, str], ...] = (
+    ("the flag is absent, so the build host's 0600 is baked",
+     "COPY --chmod=0644 docker", "COPY docker", "no --chmod="),
+    ("the flag is spelled with a space, the form Docker's parser also accepts",
+     "--chmod=0644", "--chmod 0644", "'--chmod 0644'"),
+    ("a second flag decides the mode by builder detail",
+     "COPY --chmod=0644 docker", "COPY --chmod=0644 --chmod=0755 docker", "--chmod=0755"),
+)
+
+
+def _client_copy_with_mode(text: str, mode: str) -> str:
+    """`text` with the client's COPY re-moded to `mode` - a MUTATED COPY of the Dockerfile.
+
+    The line is found by the same test the guard uses (a COPY naming the client) and only the
+    digits after its `--chmod=` change. Nothing on disk is edited and nothing is built: like
+    `_added_problems`, which mutates the same text by APPENDING an instruction, this mutates
+    it by REPLACING one line's mode, because a mode is a property of the pinned line rather
+    than a line of its own. That is what lets the suite measure the refusal of 0755 without a
+    rebuild, and it is the same in-process mechanism - not a second runner.
+    """
+    lines = text.splitlines(keepends=True)
+    hits = [index for index, line in enumerate(lines)
+            if line.strip().upper().startswith("COPY") and TARGET in line]
+    assert len(hits) == 1, (
+        f"expected exactly one COPY of the client to re-mode, found {len(hits)}")
+    index = hits[0]
+    assert _MODE_FLAG.search(lines[index]), (
+        f"the client's COPY carries no --chmod= to re-mode, so this case would measure "
+        f"nothing:\n  {lines[index]}")
+    lines[index] = _MODE_FLAG.sub(f"--chmod={mode}", lines[index], count=1)
+    return "".join(lines)
+
+
+def test_the_client_copy_refuses_every_other_mode():
+    """The mode pin is EXACT, measured in both directions on a mutated copy of the text.
+
+    The round-9 review of this guard (iss-363a4758f4974b31) measured the hole: the assertion
+    accepted `--chmod=0?6?4?4|--chmod=0[0-7]{3}`, so `--chmod=0755 ... godot_harness.py`
+    satisfied the file pin. That matters beyond the line itself, because the rest of this file
+    rests on the claim that the client's mode comes SOLELY from this COPY: no RUN may `chmod`
+    the client, so a mode accepted here is the mode the image bakes. 0755 bakes an executable
+    gate client; 0777 bakes one any user in the image can overwrite, which is a gate whose
+    measurements another process can rewrite.
+
+    Every row runs `_mode_pin_problems`, the function the real assertion runs, on the shipped
+    text with that one line re-moded - never the file, never the image. The READ column is the
+    control in the other direction: an assertion tightened to "no --chmod satisfies it" would
+    pass every refused row here, and the three accepted spellings are what rules that out. The
+    last loop is the same check's other three branches - an absent flag, the space-spelled flag
+    Docker also accepts, and a second flag - each of which used to be prose in the helper.
+    """
+    shipped = (ROOT / "Dockerfile").read_text()
+    assert not _mode_pin_problems(shipped), (
+        "the CONTROL is red - the shipped COPY does not pin the mode - so every case below "
+        "would measure a refusal that is already there for another reason:\n"
+        + "\n".join(_mode_pin_problems(shipped)))
+
+    for mode in CLIENT_MODES_READ:
+        problems = _mode_pin_problems(_client_copy_with_mode(shipped, mode))
+        assert not problems, (
+            f"--chmod={mode} IS 0644 and the pin must read it, but it refuses:\n"
+            + "\n".join(problems))
+
+    for name, mode in CLIENT_MODES_REFUSED:
+        problems = _mode_pin_problems(_client_copy_with_mode(shipped, mode))
+        assert problems, (
+            f"this COPY re-modes the client to {mode} and the pin is still green - that is "
+            f"the round-9 hole (iss-363a4758f4974b31): {name}")
+        assert _names(problems, f"--chmod={mode}"), (
+            f"the refusal does not name the mode it refused (expected '--chmod={mode}'): {name}\n"
+            + "\n".join(problems))
+
+    # The three branches besides a wrong mode: no flag at all (the bug this file exists for),
+    # the space-spelled flag (the cost `_mode_pin_problems` states) and a second flag. Each is
+    # a one-fragment mutation of the shipped line, so none of them touches the file.
+    for name, shipped_part, mutated_part, expected in CLIENT_COPY_SHAPES_REFUSED:
+        assert shipped_part in shipped, (
+            f"the shipped Dockerfile no longer carries {shipped_part!r}, so this case would "
+            f"measure nothing: {name}")
+        mutated = shipped.replace(shipped_part, mutated_part)
+        assert mutated != shipped, f"this case does not change the text: {name}"
+        problems = _mode_pin_problems(mutated)
+        assert problems, (
+            f"this COPY is not pinned to 0644 and the check reads it anyway - {name}:\n"
+            + "\n".join(line for line in mutated.splitlines() if TARGET in line))
+        assert _names(problems, expected), (
+            f"the refusal does not name what closes this case (expected {expected!r}): {name}\n"
+            + "\n".join(problems))
 
 
 def test_no_other_opt_copy_of_repository_source_is_left_unpinned():

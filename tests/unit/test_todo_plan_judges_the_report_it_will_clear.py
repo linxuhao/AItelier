@@ -1,0 +1,141 @@
+"""The freeze-time path audit judges the report a command declares, by the plan's own rule.
+
+`command_exit` accepts a `report` path, and the run-time half of that binding is already safe:
+`core.todo_runtime._clear_report` contains the report's PARENT to the workspace and unlinks the
+entry without following it, so a binding that escapes the workspace is a reason at run time, never
+a deletion - which means the command's report is neither removed nor read and the exit code alone
+decides. Safe, but discovered only when the item runs: the plan froze, the work was done, and the
+report the step declared was never this run's.
+
+So the audit (`core.todo_templates.check_declared_paths`) judges the report path while the plan is
+still being frozen, with the SAME `core.todo_plan._relative` call it already applies to declared
+delta paths. These tests pin both halves of that:
+
+* an absolute report path, and one holding a `..` component, are REFUSED, each refusal naming the
+  path it refused and stating the ground - the same ground, spelled the same way, as a delta path
+  outside the workspace;
+* a relative report path is NOT narrowed: in the workspace, under a parent that does not exist
+  yet, absent altogether, and even identical to a declared delta path (a report is not a delta
+  claim, so judging it as one would be a false refusal).
+"""
+import pytest
+
+from core.todo_plan import Refusal, TodoPlan
+from core.todo_runtime import builtin_library
+from core.todo_templates import check_declared_paths
+
+#: The sentence `todo_plan._relative` refuses with, shared verbatim by every path it judges.
+GROUND = "must be a relative path inside the workspace"
+COMMAND = [["true"], 0]          # argv and expected exit code: nothing here runs the command
+
+
+def item(item_id: str, predicates, needs=()) -> dict:
+    return {"id": item_id, "title": item_id, "needs": list(needs), "predicates": predicates}
+
+
+def command_exit(**args) -> dict:
+    argv, expect = COMMAND
+    return {"predicate": "command_exit", "args": {"argv": argv, "expect": expect, **args}}
+
+
+def plan_data(workspace, predicates) -> dict:
+    return {"attempt_id": "att-report", "node_key": "execution.demo", "context_hash": "c" * 64,
+            "base_sha": "0" * 40, "workspace": str(workspace), "scope": ["app.py"],
+            "goal": "a command declares where its report goes",
+            "items": [item("verify", predicates)]}
+
+
+def workspace_at(tmp_path, *files):
+    """A real workspace; a file listed here exists before the plan is frozen."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)   # a test may build the workspace itself before it audits
+    for name in files:
+        (workspace / name).write_text("x = 1\n")
+    return workspace
+
+
+def audit(tmp_path, predicates, *files):
+    workspace = workspace_at(tmp_path, *files)
+    return check_declared_paths(TodoPlan.from_json(plan_data(workspace, predicates), builtin_library()))
+
+
+def refusal(tmp_path, predicates, *files) -> Refusal:
+    with pytest.raises(Refusal) as caught:
+        audit(tmp_path, predicates, *files)
+    return caught.value
+
+
+# -- refused: a report the run could never establish as its own ------------------------------
+
+def test_an_absolute_report_path_is_refused_while_the_plan_is_frozen(tmp_path):
+    """`/etc/hostname` is neither removed nor read at run time, so freezing it freezes a dead item."""
+    caught = refusal(tmp_path, [command_exit(report="/etc/hostname")])
+    assert caught.code == "invalid_plan", caught.reason
+    assert "/etc/hostname" in caught.reason, "the refusal must name the report path it refused"
+    assert GROUND in caught.reason, caught.reason
+    assert "command_exit.report" in caught.reason, "the refusal must name the binding it came from"
+
+
+def test_a_report_path_holding_a_dotdot_component_is_refused(tmp_path):
+    caught = refusal(tmp_path, [command_exit(report="../outside/x.json")])
+    assert caught.code == "invalid_plan", caught.reason
+    assert "../outside/x.json" in caught.reason
+    assert GROUND in caught.reason, caught.reason
+    assert "command_exit.report" in caught.reason
+
+
+def test_both_refusals_come_from_the_plan_s_own_relative_path_rule(tmp_path):
+    """Not a second rule for reports: the same call, the same code, the same sentence.
+
+    The delta refusal is measured in the same run so this cannot pass by comparing two spellings
+    of one hand-written string: the report refusal must equal the delta refusal with only the
+    binding name substituted.
+    """
+    delta = refusal(tmp_path, [{"predicate": "file_changed", "args": {"path": "/etc/hostname"}}])
+    absolute = refusal(tmp_path, [command_exit(report="/etc/hostname")])
+    dotdot = refusal(tmp_path, [command_exit(report="../outside/x.json")])
+    assert {delta.code, absolute.code, dotdot.code} == {"invalid_plan"}
+    assert absolute.reason == delta.reason.replace("item verify: file_changed.path",
+                                                   "item verify: command_exit.report"), \
+        "a report path is judged by `todo_plan._relative`, exactly as a declared delta path is"
+    assert dotdot.reason == f"item verify: command_exit.report {GROUND}, got '../outside/x.json'"
+
+
+def test_the_report_rule_reads_the_plan_so_it_refuses_even_without_a_workspace(tmp_path):
+    """Containment is decided by the plan, not by what is on disk: a missing workspace costs nothing here."""
+    data = plan_data(tmp_path / "no-such-workspace", [command_exit(report="/etc/hostname")])
+    with pytest.raises(Refusal) as caught:
+        check_declared_paths(TodoPlan.from_json(data, builtin_library()))
+    assert caught.value.code == "invalid_plan" and "/etc/hostname" in caught.value.reason
+
+
+# -- accepted: the audit must not narrow a legitimate plan -----------------------------------
+
+def test_a_relative_report_path_in_the_workspace_is_accepted(tmp_path):
+    result = audit(tmp_path, [command_exit(report="out/test_report.json")], "app.py")
+    assert result.measured is True
+    assert result.declared == (), "a report is not a declared delta path and must not be reported as one"
+
+
+def test_a_report_under_a_parent_that_does_not_exist_yet_is_accepted(tmp_path):
+    """The command may create the directory it writes into; that is an ordinary change."""
+    workspace = workspace_at(tmp_path, "app.py")
+    assert not (workspace / "reports").exists(), "the parent must be missing for this to prove anything"
+    result = audit(tmp_path, [command_exit(report="reports/deep/new.json")], "app.py")
+    assert result.declared == () and result.notes == (), "no refusal, and no note invented about it"
+
+
+def test_a_command_exit_binding_without_a_report_is_accepted(tmp_path):
+    result = audit(tmp_path, [command_exit()], "app.py")
+    assert result.measured is True and result.declared == ()
+
+
+def test_a_report_that_is_also_a_declared_delta_path_is_accepted(tmp_path):
+    """The false-refusal guard: a report may legitimately NAME a file the item also declares.
+
+    Adding report paths to the delta `declared`/duplicate machinery would refuse this plan - one
+    path, declared once and written once - which is why containment is the only thing judged.
+    """
+    result = audit(tmp_path, [{"predicate": "files_changed", "args": {"paths": ["app.py"]}},
+                              command_exit(report="app.py")], "app.py")
+    assert result.declared == ("app.py",), "the report did not enter the delta bookkeeping"

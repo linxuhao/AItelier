@@ -286,6 +286,16 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
             result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
             assert result.json()['served_by'] == endpoints[2]
             assert 'x-opencode-session' not in called[-1][1].get('extra_headers', {})
+            # The plan recovers: once the probe interval passes, the session
+            # leaves the paid fallback instead of sticking to it for its life.
+            fail_go = False
+            assert client.post('/api/dsh-drivers/alpha/completion', json=payload).json()['served_by'] == endpoints[2]
+            import time as _time
+            later = _time.time() + ai._RETURN_PROBE_EVERY_S + 1
+            monkeypatch.setattr(_time, 'time', lambda: later)
+            result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
+            assert result.json()['served_by'] == endpoints[1]
+            assert called[-1][1]['extra_headers']['x-opencode-session'] == session_header
             identity.driver_id = 'other'
             assert client.post('/api/dsh-drivers/alpha/completion', json=payload).status_code == 403
         await runtime.stop('alpha')

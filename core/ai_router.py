@@ -248,6 +248,12 @@ def _retry_llm_error(exc: BaseException) -> bool:
 _ENDPOINT_COOLDOWN: dict[str, float] = {}
 _COOLDOWN_MAX_S = 6 * 3600      # never trust one report further than this
 _COOLDOWN_FALLBACK_S = 300      # provider named no reset instant
+# A long-lived gateway (one DSH session) that failed over stays on the later
+# candidate for the rest of its life unless something moves it back. Measured
+# 2026-11-07: a 429 burst at 09:16Z left the aitelier director on the paid
+# deepseek fallback for hours while both OpenCode Go plans were serving again.
+# return_to_earlier() probes an earlier candidate at most this often.
+_RETURN_PROBE_EVERY_S = 600
 # In-place retries of a burst 429 before it is allowed to cost us the preferred
 # endpoint. tenacity gives 3 attempts, so 2 leaves one for the failover itself.
 _BURST_TOLERANCE = 2
@@ -540,6 +546,10 @@ class AIGateway:
         self._routes_path = routes_path
         self._candidates = get_routes(routes_path).resolve(model_name, rotate=True)
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
+        # Epoch seconds after which return_to_earlier() may move this gateway
+        # back up its candidate list; None while it has nothing to return to.
+        self._return_after: float | None = None
+        self._context_failed_over = False
         # Cleared for good the first time an endpoint rejects the thinking-off
         # keys — see `_apply_binding`'s else branch and `_complete_prebuilt`.
         self._suppress_thinking = True
@@ -1256,10 +1266,41 @@ class AIGateway:
         nxt = self._candidates[nxt_ix]
         self._failovers.append((failed, f"{type(exc).__name__}: {str(exc)[:200]}"))
         self._bind(nxt)
+        import time as _t
+        self._return_after = _t.time() + _RETURN_PROBE_EVERY_S
         # Loud on purpose. A silent failover reads as "the cheap provider is
         # fine" while every run is quietly served by the expensive fallback.
         print(f"[ai_router] failover {self.internal_model}: {failed} -> {nxt} "
               f"({type(exc).__name__}{held})", flush=True)
+        return True
+
+    def return_to_earlier(self) -> bool:
+        """Move a failed-over gateway back to an earlier candidate. True if moved.
+
+        For gateways that outlive one step (a DSH session binds once and keeps
+        its gateway). Runs at most every _RETURN_PROBE_EVERY_S after a
+        failover, and only onto a candidate that is not parked; if that
+        candidate still fails, the normal failover walks forward again, which
+        is why the failover history is cleared here. Never after a context
+        failover: the earlier windows cannot hold this conversation.
+        """
+        import time as _t
+        if (self._candidate_ix == 0 or self._return_after is None
+                or self._context_failed_over or _t.time() < self._return_after):
+            return False
+        self._return_after = _t.time() + _RETURN_PROBE_EVERY_S
+        i = self._next_usable(0)
+        if i >= self._candidate_ix or not _endpoint_available(self._candidates[i]):
+            return False
+        left = self.active_model
+        self._candidate_ix = i
+        self._failovers = []
+        self._burst_hits = 0
+        self._bind(self._candidates[i])
+        if i == 0:
+            self._return_after = None
+        print(f"[ai_router] return {self.internal_model}: {left} -> "
+              f"{self.active_model} (earlier candidate is no longer parked)", flush=True)
         return True
 
     def _failover_context(self, why: str) -> bool:
@@ -1297,6 +1338,9 @@ class AIGateway:
             nxt = self._candidates[i]
             self._failovers.append((failed, why))
             self._bind(nxt)
+            # The earlier candidates are too small for this conversation, and
+            # it only grows: never return to them.
+            self._context_failed_over = True
             print(f"[ai_router] context-failover {self.internal_model}: "
                   f"{failed} ({here}) -> {nxt} ({w or 'unbounded'})  {why}",
                   flush=True)

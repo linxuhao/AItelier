@@ -794,7 +794,7 @@ async function bootRebindScenario(t) {
   const session = 'rebind-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const here = dirname(fileURLToPath(import.meta.url));
   const requests = [], events = [], planStates = {}, held = new Set();
-  let finished = false, output = '', proc;
+  let finished = false, liveChildHeld = false, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -807,8 +807,11 @@ async function bootRebindScenario(t) {
     if (req.url.endsWith('/context')) return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: 'PENDING' }], project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'fixture driver skill' });
     if (req.url.endsWith('/activity') || req.url.endsWith('/heartbeat')) return send({ ok: true });
-    // Parked long-poll and the live child's held reply: closed with the server.
-    if (req.url === '/api/state/query/wait_for_state_change' || req.url === '/test/hold') {
+    // The live child's held reply: it began its item and keeps its own turn open,
+    // which is the signal the director's takeover step waits for.
+    if (req.url === '/test/hold') { liveChildHeld = true; held.add(res); res.on('close', () => held.delete(res)); return; }
+    // Parked long-poll: closed with the server.
+    if (req.url === '/api/state/query/wait_for_state_change') {
       held.add(res); res.on('close', () => held.delete(res)); return;
     }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
@@ -843,13 +846,54 @@ async function bootRebindScenario(t) {
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '60000',
       AITELIER_TODO_PYTHON: cli.python, AITELIER_TODO_CWD: cli.cwd, AITELIER_TEST_PLANS: JSON.stringify(plans) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline && proc.exitCode === null && !finished) await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal(proc.exitCode, null, output);
     const trace = () => JSON.stringify(requests.map(r => [r.role, r.purpose])) + '\n'
       + JSON.stringify(events.map(e => [e.session === session ? 'root' : e.session.slice(0, 8), e.event.type,
         e.event.data?.message?.toolCallId ?? ''])) + '\n' + output.slice(-4000);
-    assert.ok(finished, 'the rebind scenario did not finish\n' + trace());
+    // The scenario is bounded by the progress it OBSERVES, not by the clock (see
+    // progress.mjs). The fixture drives one director step per turn and every step
+    // is a tool call the runtime must record, so the milestones below are the
+    // takeover flow itself: the dead child's item taken over and finished, the
+    // live child's plan refused, dormancy refused around the finish. A loaded
+    // host could expire the old 60 s budget while the director was still walking
+    // that flow and report only "the rebind scenario did not finish". Only
+    // forward signals are listed: activity posts, heartbeats, "Director idle."
+    // turns and a repeated pending review advance none of them, so a runtime
+    // whose watched progress stops still reds - and when a child DIES instead of
+    // finishing, the red names the step that never happened.
+    const handbackFor = id => events.some(e => {
+      const text = e.event.type === 'user/message' ? (e.event.data?.content?.[0]?.text ?? '') : '';
+      if (!text.startsWith('AItelier todo handback:')) return false;
+      try { return JSON.parse(text.slice('AItelier todo handback:'.length).trim()).attempt_id === id; } catch { return false; }
+    });
+    const recorded = id => events.some(e => e.event.type === 'tool/result' && e.event.data.message?.toolCallId === id);
+    const progress = await watchProgress({
+      what: 'the rebind scenario to be driven end to end (a dead child\'s item taken over and finished, a live child\'s plan refused, dormancy refused before the takeover and cleared after it)',
+      running: () => proc.exitCode === null,
+      milestones: [
+        { name: 'the director froze the stuck plan', met: () => recorded('root-todo_plan-stuck') },
+        { name: 'the stuck native child began its item', met: () => recorded('RB_CHILD_BEGIN-stuck-implement') },
+        { name: 'the stuck child stopped and the runtime handed its plan back', met: () => handbackFor(plans.stuck.attempt_id) },
+        { name: 'dormancy refused the unfinished stuck plan', met: () => recorded('root-idle-blocked') },
+        { name: 'the takeover of the dead child\'s item succeeded', met: () => recorded('root-todo_rebind-stuck') },
+        { name: 'the taken-over plan was finished', met: () => recorded('root-todo_finish-stuck') },
+        { name: 'dormancy stopped refusing the finished plan', met: () => recorded('root-idle-after') },
+        { name: 'the director froze the died plan', met: () => recorded('root-todo_plan-died') },
+        { name: 'the died native child began its item', met: () => recorded('RB_CHILD_BEGIN-died-implement') },
+        { name: 'the died child was handed back', met: () => handbackFor(plans.died.attempt_id) },
+        { name: 'the died plan was taken over', met: () => recorded('root-todo_rebind-died') },
+        { name: 'the died plan was finished', met: () => recorded('root-todo_finish-died') },
+        { name: 'the director froze the live plan', met: () => recorded('root-todo_plan-live') },
+        { name: 'the live native child began its item and held its turn open', met: () => recorded('RB_CHILD_BEGIN-live-implement') && liveChildHeld },
+        { name: 'the takeover of the live child\'s plan was refused', met: () => recorded('root-todo_rebind-live') },
+        { name: 'the director\'s edit of the live plan was refused', met: () => recorded('root-todo_done-live-implement') },
+        { name: 'the scenario reported itself complete', met: () => finished },
+      ],
+    });
+    // A red names the milestone that never arrived and the last progress it saw,
+    // then the request/event trace - the old "scenario did not finish" named
+    // neither, and said nothing at all about a child that died rather than stalled.
+    assert.ok(progress.done, `${progress.message}\n` + trace());
+    assert.equal(proc.exitCode, null, output);
     for (const key of Object.keys(plans)) {
       planStates[key] = JSON.parse(await readFile(join(directory, 'todo', plans[key].attempt_id + '.json'), 'utf8'));
     }
@@ -874,7 +918,11 @@ async function bootRebindScenario(t) {
   }
 }
 
-test('todo_rebind: a director takes over an item begun by a session that died, then done and finish succeed', { timeout: 180000 }, async (t) => {
+// These three read one shared boot, and that boot is bounded by the progress it
+// observes (see bootRebindScenario), never by a harness timeout: their own bodies
+// only assert what the boot already watched arrive, so a wall budget here would
+// bound nothing but the host's load.
+test('todo_rebind: a director takes over an item begun by a session that died, then done and finish succeed', async (t) => {
   const run = await rebindScenario(t);
   if (!run) return;
   const died = run.sessions.died;
@@ -901,7 +949,7 @@ test('todo_rebind: a director takes over an item begun by a session that died, t
   assert.deepEqual([...run.planStates.died.done].sort(), ['deliver', 'implement', 'test']);
 });
 
-test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', { timeout: 180000 }, async (t) => {
+test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', async (t) => {
   const run = await rebindScenario(t);
   if (!run) return;
   const live = run.sessions.live;
@@ -917,7 +965,7 @@ test('todo_rebind: a live child keeps its plan - the takeover refuses and done s
   for (const role of ['stuck', 'died', 'live']) assert.ok(!run.toolsOf(role).includes('todo_rebind'), role + ' child sees todo_rebind');
 });
 
-test('todo_rebind: dormancy refuses unfinished_plans before the takeover and stops refusing it after', { timeout: 180000 }, async (t) => {
+test('todo_rebind: dormancy refuses unfinished_plans before the takeover and stops refusing it after', async (t) => {
   const run = await rebindScenario(t);
   if (!run) return;
   const id = run.plans.stuck.attempt_id;

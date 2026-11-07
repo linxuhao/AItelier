@@ -7,8 +7,12 @@
   // DriverStatus so the dashboard table and the conversation pane show the same
   // records instead of two implementations drifting apart.
   const { projectId, projectTitle = '', driverId = '', driverEnabled = false,
-    onclose = () => {}, onactivity = () => {} }: {
+    onclose, onactivity = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string; driverEnabled?: boolean;
+    // Only a host that can actually dismiss the history passes `onclose`: the
+    // dashboard pane always shows the run log, so it passes nothing and gets no
+    // close button (the control it had there closed the live stream and never
+    // reopened it: the tab sat on "Reconnecting…" with nothing left to press).
     onclose?: () => void; onactivity?: (phase: string, subagents: number) => void;
   } = $props();
   let history = $state<DriverHistory | null>(null), historyLoading = $state(false), historyError = $state('');
@@ -85,7 +89,7 @@
     } catch (e) { messageError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
-  function close() { stream?.close(); stream = undefined; live = false; pendingLive = []; historyGeneration++; onclose(); }
+  function close() { stream?.close(); stream = undefined; live = false; pendingLive = []; historyGeneration++; onclose?.(); }
   function recordText(text: string) {
     try {
       const data = JSON.parse(text), content = data.message?.content;
@@ -100,7 +104,7 @@
   <header><strong>{st('driverHistory')} · {projectTitle || projectId}</strong>
     {#if latest && driverEnabled}<span class:live>{live ? st('driverLive') : st('driverReconnecting')}</span>{/if}
     <button class="outline" type="button" disabled={historyLoading} onclick={() => void load()}>{st('driverHistoryRefresh')}</button>
-    <button class="outline" type="button" onclick={close}>{st('driverHistoryClose')}</button></header>
+    {#if onclose}<button class="outline" type="button" onclick={close}>{st('driverHistoryClose')}</button>{/if}</header>
   <form onsubmit={(event) => {event.preventDefault(); void sendMessage();}}>
     <label>{st('driverMessage')}<textarea bind:value={message} maxlength="8000" rows="2" disabled={sending}></textarea></label>
     <button type="submit" disabled={sending || !message.trim()}>{sending ? '…' : st('driverMessageSend')}</button>

@@ -55,6 +55,57 @@ def _registry_columns(conn) -> set:
     return {r[1] for r in conn.execute("PRAGMA table_info(driver_subagents)")}
 
 
+def _registry_rows(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM driver_subagents").fetchone()[0]
+
+
+def _already_done(exc, source: str, target=None) -> bool:
+    """Is this error the loss of a race, i.e. did another construction get there first?
+
+    A DROP - or the COUNT before it - on a table another construction already
+    dropped says ``no such table: <source>``; a RENAME whose target another
+    construction already created says ``there is already another table or index
+    with this name: <target>``. Those two, and nothing else, may be absorbed.
+    """
+    message = str(exc)
+    if message == f"no such table: {source}":
+        return True
+    return target is not None and \
+        message == f"there is already another table or index with this name: {target}"
+
+
+def _drop_if_empty(conn, table: str) -> None:
+    """Drop one retired table that holds no rows, absorbing a losing race."""
+    try:
+        if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] != 0:
+            return
+        conn.execute(f"DROP TABLE {table}")
+    except sqlite3.OperationalError as exc:
+        # The count loses the race as readily as the drop does, so both sit
+        # inside the guard; either way the table is already gone.
+        if not _already_done(exc, table):
+            raise
+
+
+def _retire_registry(conn) -> None:
+    """Drop an empty takeover-era registry, rename a non-empty one."""
+    try:
+        if _registry_rows(conn) == 0:
+            conn.execute("DROP TABLE driver_subagents")
+            return
+        conn.execute(f"ALTER TABLE driver_subagents RENAME TO {TAKEOVER_TABLE}")
+    except sqlite3.OperationalError as exc:
+        if not _already_done(exc, "driver_subagents", TAKEOVER_TABLE):
+            raise
+        # Absorb while the winner getting there first is what happened: our legacy
+        # registry is gone, and whatever `driver_subagents` may exist by now is the
+        # post-P3 table another construction just created. One still carrying
+        # context_sha256 is the legacy registry sitting beside an existing takeover
+        # table - a state nobody has explained, and not ours to leave in place.
+        if "context_sha256" in _registry_columns(conn):
+            raise
+
+
 def _retire(conn) -> None:
     """Drop the tables the P3 slimming retired, tolerating a concurrent winner.
 
@@ -68,36 +119,10 @@ def _retire(conn) -> None:
     taking no write lock.
     """
     for table in RETIRED_TABLES:
-        if not _table_exists(conn, table):
-            continue
-        try:
-            if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] != 0:
-                continue
-            conn.execute(f"DROP TABLE {table}")
-        except sqlite3.OperationalError as exc:
-            # The count loses the race as readily as the drop does, so both are
-            # inside the guard; either way the table is already gone.
-            if str(exc) != f"no such table: {table}":
-                raise
-    if "context_sha256" not in _registry_columns(conn):
-        return
-    # The takeover-era registry (adoption, orphans, leases, instructions).
-    try:
-        if conn.execute("SELECT COUNT(*) FROM driver_subagents").fetchone()[0] == 0:
-            conn.execute("DROP TABLE driver_subagents")
-            return
-        conn.execute(f"ALTER TABLE driver_subagents RENAME TO {TAKEOVER_TABLE}")
-    except sqlite3.OperationalError as exc:
-        if str(exc) not in ("no such table: driver_subagents",
-                            f"there is already another table or index with this name: {TAKEOVER_TABLE}"):
-            raise
-        # Absorb while the winner getting there first is what happened: our legacy
-        # registry is gone, and whatever `driver_subagents` may exist by now is the
-        # post-P3 table another construction just created. One still carrying
-        # context_sha256 is the legacy registry sitting beside an existing takeover
-        # table - a state nobody has explained, and not ours to leave in place.
-        if "context_sha256" in _registry_columns(conn):
-            raise
+        if _table_exists(conn, table):
+            _drop_if_empty(conn, table)
+    if "context_sha256" in _registry_columns(conn):
+        _retire_registry(conn)
 
 
 def initialize(db) -> None:

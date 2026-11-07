@@ -1,22 +1,37 @@
 """Two render requests that carry the same operation_id are not one admission.
 
 The relay decides "this request was admitted" from the harness's render-owner
-row (`aitelier/gate_admission.py:_AdmissionWatch`): a row whose
-`operation_id` was not there before the request was sent. `acquire_render_owner`
-mints `owner_id` itself, so the row names no request. Two requests carrying the
-SAME operation_id therefore alias: when the first one's row appears after the
-second one's snapshot, the second recorded `admitted_after_sec` from the first
-one's row and sent the final admission `100 Continue` although its own render
-had not started. The gate then counted its own client timeout from an admission
-it never got, timed out while still queued, and reported a render it never began
-as not run (iss-b859d7478c524da1 item 4).
+table (`aitelier/gate_admission.py:_AdmissionWatch`): a row for the request's
+`operation_id` that was not there before the request was sent. `acquire_render_owner`
+mints `owner_id` itself, so a row names an operation, not a request. Two render
+requests carrying the SAME operation_id therefore alias: a row that appears
+while both are in flight is attributable to neither, and either one reading it
+as its own admission sends the admission `100 Continue` that ends its queue
+keepalive although its own render has not started. The gate then counts its own
+client timeout from an admission it never got and reports a render it never
+began as not run (iss-b859d7478c524da1 item 4).
 
-Every test here serves the REAL harness admission code (`tests/gate_fixture.py`)
-at a scale where the queue and the render are both measurable, and reads the
-relay's own per-request records. The client speaks raw HTTP/1.1 so the interim
-`100 Continue` responses are visible too: the admission one ends the queue
-keepalive once, and a request whose keepalive never ended keeps receiving them
-at the ordinary cadence.
+Every test here drives the REAL `AdmissionRelay` over HTTP against a SCRIPTED
+sidecar (`Sidecar`): its `/lifecycle` answers with exactly the rows the test
+added, and its render route holds each answer until the test releases it. So
+both facts the relay's witness depends on -- which request arrived first, and
+when an owner row appears -- are events the TEST sets, never a race the test
+sleeps through. The client speaks raw HTTP/1.1 so the interim `100 Continue`
+responses are visible too. Assertions read the relay's own per-request records
+through its public `snapshot()`; no private attribute is touched, and nothing
+here assumes a duration.
+
+Boundary this file does NOT fix and this change leaves unchanged: a request
+that is never witnessed as admitted is not bounded by the gate client's own
+timeout. Its bound is `upstream_timeout` in the relay and the harness's own
+render wait. The reviewer measured it on this commit's parent (8eb1d8b18d) --
+with a 1 s client timeout against a 3 s render, the admitted request timed out
+at 1 s while the never-witnessed duplicate returned 200 with 32 keepalive
+interim responses. That measurement is quoted, not re-made here: the gate path
+that produces it is `@pytest.mark.docker`, deselected in the disposable
+container this suite runs in. Bounding it needs a per-request nonce from the
+harness (`docker/godot/godot_harness.py` mints `owner_id`), which this change
+does not touch.
 """
 from __future__ import annotations
 
@@ -25,16 +40,97 @@ import socket
 import threading
 import time
 import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from aitelier import gate_admission as admission
-from tests.gate_fixture import HOLDER, HarnessRig
+
+OP = "op-shared"
 
 
-def _answer(url, operation_id, *, path="/script", timeout=180):
+class Sidecar:
+    """The harness's two surfaces, scripted: its owner table and a render route.
+
+    `/lifecycle` answers with exactly the rows the test has added, so "a new
+    owner row appears" is something the test decides. The render route records
+    each POST's arrival and holds its answer until the test releases it, so a
+    request is never answered before the test says so. `arrived` and `answer`
+    are indexed by arrival order and pre-created, so the test can wait on a
+    request that has not arrived yet.
+    """
+
+    def __init__(self, capacity: int = 3):
+        self.owners: list[dict] = []
+        self.posts: list[dict] = []
+        self.arrived = [threading.Event() for _ in range(capacity)]
+        self.answer = [threading.Event() for _ in range(capacity)]
+        self._lock = threading.Lock()
+        sidecar = self
+
+        class Handler(BaseHTTPRequestHandler):
+            # The harness itself speaks HTTP/1.1 for its own links; the relay
+            # puts one connection per read through it.
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                with sidecar._lock:
+                    owners = [dict(row) for row in sidecar.owners]
+                body = json.dumps({"owners": owners}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                with sidecar._lock:
+                    index = len(sidecar.posts)
+                    sidecar.posts.append(payload)
+                sidecar.arrived[index].set()
+                sidecar.answer[index].wait(120)
+                body = json.dumps({"passed": True, "results": [],
+                                   "summary": "2 passed"}).encode()
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def add_owner(self, owner_id: str, operation_id: str = OP) -> None:
+        """Add one row to the harness's table, as `acquire_render_owner` does."""
+        with self._lock:
+            self.owners.append({"owner_id": owner_id,
+                                "operation_id": operation_id,
+                                "status": "active"})
+
+    def close(self) -> None:
+        for event in self.answer:
+            event.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _answer(url, operation_id, progress, *, path="/script", timeout=180):
     """POST one render request over raw HTTP/1.1 and read the whole answer.
 
-    Returns the final status, its body, the arrival time of every interim
-    `100 Continue`, and when the final answer arrived.
+    `progress["interim"]` is the live list of interim arrival times (monotonic,
+    so the test can compare them with its own markers while the request is
+    still in flight). The return value carries the final status, its body, the
+    interim times and when the answer arrived.
     """
     parts = urllib.parse.urlsplit(url)
     payload = json.dumps({"project_dir": "/tmp/shared-operation",
@@ -49,6 +145,7 @@ def _answer(url, operation_id, *, path="/script", timeout=180):
     sock = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
     started = time.monotonic()
     interim: list[float] = []
+    progress["interim"] = interim
     buffer = b""
     try:
         sock.sendall(head + payload)
@@ -62,7 +159,7 @@ def _answer(url, operation_id, *, path="/script", timeout=180):
                 block, buffer = buffer[:head_end], buffer[head_end + 4:]
                 status = int(block.split(b" ", 2)[1])
                 if status == 100:
-                    interim.append(time.monotonic() - started)
+                    interim.append(time.monotonic())
                 else:
                     length = 0
                     for line in block.split(b"\r\n")[1:]:
@@ -95,146 +192,281 @@ def _in_thread(target, *args, **kwargs):
     return thread, box
 
 
-def _wait_in_flight(relay, operation, count, timeout=30.0):
-    """Wait until the relay is carrying `count` requests for `operation`.
+def _until(predicate, timeout=5.0) -> bool:
+    """True as soon as the predicate holds; False if it never does.
 
-    The relay counts an operation id from arrival to answer; that counter is
-    the only observable that a request has reached the relay and taken its
-    snapshot, so the test can order the two requests without sleeping on the
-    implementation's own timings.
+    This only waits for a fact the code under test produces (a record names an
+    admission decision, more interim responses arrive). It never assumes that
+    some interval has elapsed, which is what makes the ordering in these tests
+    the test's own.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with relay._lock:
-            if relay._in_flight_operations.get(operation, 0) >= count:
-                return
+        if predicate():
+            return True
         time.sleep(0.01)
-    raise AssertionError(f"{operation} never reached {count} request(s) in flight")
+    return False
 
 
-def test_a_second_same_operation_id_borrows_no_admission_from_the_first(
-        tmp_path, monkeypatch):
-    """Queue 0.3 s, then first renders 1.5 s, then the duplicate renders 1.5 s."""
-    rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=1.5)
-    relay = admission.AdmissionRelay(rig.base, render_wait_sec=60,
-                                     upstream_timeout=120, keepalive_sec=0.2)
+def _await(predicate, what, timeout=30.0) -> None:
+    if not _until(predicate, timeout):
+        raise AssertionError(f"never observed: {what}")
+
+
+def _records(relay) -> dict:
+    """The relay's own per-request records, keyed by arrival sequence."""
+    return {record["seq"]: record for record in relay.snapshot()}
+
+
+def _claims(record) -> bool:
+    return "admitted_after_sec" in record
+
+
+def _decided(record) -> bool:
+    """True once this record says what its admission was: a claim or a refusal."""
+    return _claims(record) or record.get("admission_witnessed") is False
+
+
+def _interims_since(progress, marker: float) -> int:
+    return sum(1 for at in progress.get("interim") or [] if at > marker)
+
+
+def _recorded(relay, count: int) -> None:
+    """Wait until the relay has finished recording `count` requests.
+
+    The relay writes the last of a record AFTER it has written the answer, so a
+    client can return before its own record is complete; the test waits for the
+    fact instead of assuming the handler thread got there first.
+    """
+    _await(lambda: sum(1 for record in _records(relay).values()
+                       if "outcome" in record) == count,
+           f"{count} answers recorded by the relay")
+
+
+def _start(relay, url, operation_id, progress):
+    thread, box = _in_thread(_answer, url, operation_id, progress)
+    return thread, box
+
+
+@pytest.fixture
+def rig():
+    """A sidecar and a relay over it, torn down even when an assertion fires."""
+    side = Sidecar()
+    relay = admission.AdmissionRelay(side.base, render_wait_sec=60,
+                                     upstream_timeout=120, keepalive_sec=0.1)
     url = relay.start()
-    first_box: dict = {}
-    second_box: dict = {}
     try:
-        rig.hold()
-        first, first_box = _in_thread(_answer, url, "op-shared")
-        _wait_in_flight(relay, "op-shared", 1)
-        second, second_box = _in_thread(_answer, url, "op-shared")
-        _wait_in_flight(relay, "op-shared", 2)
-        # Both requests are inside the relay and neither owns a row yet.
-        # Releasing the holder is what makes the FIRST request's row appear --
-        # the only new row either request can see -- and its admission now
-        # happens strictly after the duplicate was already in flight.
-        time.sleep(0.3)
-        rig.release.set()
-        first.join(120)
-        second.join(120)
-        assert not first.is_alive() and not second.is_alive()
+        yield side, relay, url
     finally:
+        for event in side.answer:
+            event.set()
         relay.stop()
-        rig.close()
+        side.close()
 
-    assert "error" not in first_box, first_box.get("error")
-    assert "error" not in second_box, second_box.get("error")
-    first_answer, second_answer = first_box["result"], second_box["result"]
-    first_record, second_record = relay.snapshot()
-    assert (first_record["seq"], second_record["seq"]) == (0, 1)
 
-    # The first request owns the operation id, so it IS witnessed, from the row
-    # that appears when the holder lets go.
-    assert first_answer["status"] == 200
+@pytest.mark.parametrize("owner", ["first-request", "second-request"],
+                         ids=["rows-of-first-request", "rows-of-second-request"])
+def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(rig, owner):
+    """BOTH arrival orders: the one row that appears belongs to neither request.
+
+    Request 1 arrives and takes its `before` snapshot (the relay reads the
+    owner table before it forwards the POST, so the sidecar's arrival event
+    bounds that read). Request 2 then arrives with the same operation_id and
+    takes its own snapshot. A row appearing now is strictly after BOTH
+    snapshots, and it is labelled as each request in turn: the old
+    `owners - before` witness read it as the FIRST request's admission when it
+    was the second's, and as the second's when it was the first's. The label
+    changes nothing here on purpose -- neither request can attribute it.
+    """
+    side, relay, url = rig
+    progress = [dict(), dict()]
+    threads: list[threading.Thread] = []
+    boxes: list[dict] = [dict(), dict()]
+    try:
+        for index in (0, 1):
+            thread, boxes[index] = _start(relay, url, OP, progress[index])
+            threads.append(thread)
+            assert side.arrived[index].wait(30), (
+                f"request {index + 1} never reached the engine")
+        side.add_owner(f"row-of-the-{owner}")
+        marker = time.monotonic()
+        _await(lambda: all(_decided(record) for record in _records(relay).values()),
+               "both requests to say what the new owner row was")
+        # The admission interim is what ENDS the queue keepalive, so a request
+        # that may not claim has to keep receiving the ordinary interim until
+        # its answer. Two more of them after the decision is that fact; it is
+        # best effort -- on the old witness the claim ends the keepalive and
+        # this expires -- because the record is the assertion, not the cadence.
+        kept_alive = [_until(lambda i=index: _interims_since(progress[i], marker) >= 2,
+                             timeout=3.0)
+                      for index in (0, 1)]
+    finally:
+        for event in side.answer:
+            event.set()
+        for thread in threads:
+            thread.join(60)
+
+    _recorded(relay, 2)
+    for index, box in enumerate(boxes):
+        assert "error" not in box, box.get("error")
+    first, second = boxes[0]["result"], boxes[1]["result"]
+    first_record, second_record = _records(relay)[0], _records(relay)[1]
+
+    for label, answer, record, kept in (
+            ("first", first, first_record, kept_alive[0]),
+            ("second", second, second_record, kept_alive[1])):
+        assert answer["status"] == 200, answer
+        assert record["outcome"] == admission.ANSWERED
+        # The owner table WAS readable: this is the shared-id rule, not the
+        # "admission cannot be observed" one.
+        assert record["admission_observed"] is True
+        assert not _claims(record), (
+            f"the {label} request claimed an admission from an owner row it "
+            "cannot attribute to itself (the id was carried by two requests): "
+            f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
+        assert record.get("admission_witnessed") is False, record
+        assert kept, (
+            f"the {label} request stopped receiving interim responses at a row "
+            "it cannot call its own: that is the admission interim, which must "
+            "not be sent by a request that was never witnessed as admitted")
+        # Every interim the relay counted reached the gate: one stream, and the
+        # admission interim is in it or is not.
+        assert record["keepalives"] == len(answer["interim"])
+
+    # Both requests were queued and answered by the harness: neither was
+    # refused, cancelled, or told to wait differently, and the harness still
+    # serialises them (the scripted sidecar saw exactly two POSTs).
+    assert [post.get("operation_id") for post in side.posts] == [OP, OP]
+
+
+def test_a_row_this_request_alone_can_claim_is_still_admitted(rig):
+    """An admission witnessed while the id was UNIQUE is not retracted later.
+
+    Request 1's own row appears while it is the only request carrying the id,
+    so it is admitted and says so. Request 2 arrives afterwards: the row
+    predates its snapshot, so it can borrow nothing -- and request 1's admission
+    stands, because the row was attributable when it was read.
+    """
+    side, relay, url = rig
+    progress = [dict(), dict()]
+    boxes: list[dict] = [dict(), dict()]
+    threads: list[threading.Thread] = []
+    try:
+        thread, boxes[0] = _start(relay, url, OP, progress[0])
+        threads.append(thread)
+        assert side.arrived[0].wait(30), "request 1 never reached the engine"
+        side.add_owner("row-of-request-1")
+        _await(lambda: _claims(_records(relay).get(0, {})),
+               "request 1's own admission")
+        thread, boxes[1] = _start(relay, url, OP, progress[1])
+        threads.append(thread)
+        assert side.arrived[1].wait(30), "request 2 never reached the engine"
+    finally:
+        for event in side.answer:
+            event.set()
+        for thread in threads:
+            thread.join(60)
+
+    _recorded(relay, 2)
+    for box in boxes:
+        assert "error" not in box, box.get("error")
+    first_record, second_record = _records(relay)[0], _records(relay)[1]
+
+    assert boxes[0]["result"]["status"] == 200
     assert first_record["outcome"] == admission.ANSWERED
-    assert first_record["admission_observed"] is True
-    assert first_record["admitted_after_sec"] > 0.2
+    assert _claims(first_record)
     assert "admission_witnessed" not in first_record
 
-    # The duplicate ran and was answered by the harness, and it reports no
-    # admission of its own: no admitted_after_sec from the first one's row.
-    assert second_answer["status"] == 200
-    assert second_record["outcome"] == admission.ANSWERED
-    assert "admitted_after_sec" not in second_record
-    assert second_record["admission_witnessed"] is False
-
-    # Both renders really happened, in the harness's own order: the duplicate
-    # was neither refused nor cancelled, and the serialisation is untouched.
-    assert rig.rendered == [HOLDER, "op-shared", "op-shared"]
-
-    # Its interim responses are the ordinary keepalive cadence for the whole
-    # wait, so none of them ended the keepalive: the admission send happens
-    # once and is then followed by nothing but the answer.
-    interim = second_answer["interim"]
-    assert len(interim) >= 5, second_answer
-    assert max(later - earlier for earlier, later in zip(interim, interim[1:])) < 1.0
-    assert second_answer["answered_after"] - interim[-1] < 1.0
+    assert boxes[1]["result"]["status"] == 200
+    assert not _claims(second_record), second_record
+    assert [post.get("operation_id") for post in side.posts] == [OP, OP]
 
 
-def test_a_later_request_with_the_same_operation_id_is_still_admitted(
-        tmp_path, monkeypatch):
-    """Sequential retry: the first answer released the operation id."""
-    rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=0.4)
-    relay = admission.AdmissionRelay(rig.base, render_wait_sec=60,
-                                     upstream_timeout=60, keepalive_sec=0.1)
-    url = relay.start()
+def test_a_later_request_with_the_same_id_is_admitted_after_the_first_answered(rig):
+    """Sequential retry: the id is counted from arrival to ANSWER.
+
+    The first request is answered and only then does the second one arrive with
+    the same operation_id. Nothing is in flight for that id any more, so the
+    retry owns its row like any other request.
+    """
+    side, relay, url = rig
+    progress = [dict(), dict()]
+    boxes: list[dict] = [dict(), dict()]
+    threads: list[threading.Thread] = []
     try:
-        first_answer = _answer(url, "op-repeat")
-        second_answer = _answer(url, "op-repeat")
+        thread, boxes[0] = _start(relay, url, OP, progress[0])
+        threads.append(thread)
+        assert side.arrived[0].wait(30), "the first request never reached the engine"
+        side.add_owner("row-of-request-1")
+        _await(lambda: _claims(_records(relay).get(0, {})),
+               "the first request's own admission")
+        side.answer[0].set()
+        thread.join(60)
+        assert not thread.is_alive()
+
+        thread, boxes[1] = _start(relay, url, OP, progress[1])
+        threads.append(thread)
+        assert side.arrived[1].wait(30), "the retry never reached the engine"
+        side.add_owner("row-of-request-2")
+        _await(lambda: _claims(_records(relay).get(1, {})),
+               "the retry's own admission")
     finally:
-        relay.stop()
-        rig.close()
+        for event in side.answer:
+            event.set()
+        for thread in threads:
+            thread.join(60)
 
-    first_record, second_record = relay.snapshot()
-    for answer, record in ((first_answer, first_record),
-                           (second_answer, second_record)):
-        assert answer["status"] == 200
-        assert record["outcome"] == admission.ANSWERED
-        assert "admission_witnessed" not in record
-        assert record["admission_observed"] is True
-        # Its own row, seen while it renders: a request that starts after the
-        # earlier one was answered is not its duplicate.
-        assert record["admitted_after_sec"] >= 0
-    assert rig.rendered == ["op-repeat", "op-repeat"]
-
-
-def test_two_requests_with_different_operation_ids_are_each_admitted(
-        tmp_path, monkeypatch):
-    """Different ids: the concurrent case, unchanged in both records."""
-    rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=0.5)
-    relay = admission.AdmissionRelay(rig.base, render_wait_sec=60,
-                                     upstream_timeout=120, keepalive_sec=0.2)
-    url = relay.start()
-    first_box: dict = {}
-    second_box: dict = {}
-    try:
-        rig.hold()
-        first, first_box = _in_thread(_answer, url, "op-a")
-        _wait_in_flight(relay, "op-a", 1)
-        second, second_box = _in_thread(_answer, url, "op-b")
-        _wait_in_flight(relay, "op-b", 1)
-        time.sleep(0.3)
-        rig.release.set()
-        first.join(120)
-        second.join(120)
-        assert not first.is_alive() and not second.is_alive()
-    finally:
-        relay.stop()
-        rig.close()
-
-    for box in (first_box, second_box):
+    _recorded(relay, 2)
+    for box in boxes:
         assert "error" not in box, box.get("error")
-    first_record, second_record = relay.snapshot()
-    for answer, record in ((first_box["result"], first_record),
-                           (second_box["result"], second_record)):
-        assert answer["status"] == 200
+    for index, box in enumerate(boxes):
+        assert box["result"]["status"] == 200
+        record = _records(relay)[index]
         assert record["outcome"] == admission.ANSWERED
-        # Each waited in the queue and each was admitted by its own row: no
-        # operation id is shared, so nothing here is a duplicate.
-        assert record["admission_observed"] is True
-        assert record["admitted_after_sec"] > 0.2
+        assert _claims(record)
         assert "admission_witnessed" not in record
-    assert sorted(rig.rendered) == sorted([HOLDER, "op-a", "op-b"])
+    assert [post.get("operation_id") for post in side.posts] == [OP, OP]
+
+
+def test_another_requests_shared_id_does_not_suppress_a_unique_one(rig):
+    """The rule is per operation_id: a third request with its own id is admitted.
+
+    Two requests share `op-shared` and a third carries `op-solo`. The shared id's
+    rows are unclaimable, and the unique one's row is still this request's own
+    admission -- the relay must not stop witnessing everything because one id
+    is aliased.
+    """
+    side, relay, url = rig
+    progress = [dict(), dict(), dict()]
+    boxes: list[dict] = [dict(), dict(), dict()]
+    threads: list[threading.Thread] = []
+    try:
+        for index, operation in enumerate((OP, OP, "op-solo")):
+            thread, boxes[index] = _start(relay, url, operation, progress[index])
+            threads.append(thread)
+            assert side.arrived[index].wait(30), (
+                f"request {index + 1} never reached the engine")
+        side.add_owner("row-of-request-1", OP)
+        side.add_owner("row-of-request-3", "op-solo")
+        side.add_owner("row-of-request-2", OP)
+        _await(lambda: all(_decided(record) for record in _records(relay).values()),
+               "all three requests to say what the new owner rows were")
+    finally:
+        for event in side.answer:
+            event.set()
+        for thread in threads:
+            thread.join(60)
+
+    _recorded(relay, 3)
+    for box in boxes:
+        assert "error" not in box, box.get("error")
+    records = _records(relay)
+    for index in (0, 1):
+        assert boxes[index]["result"]["status"] == 200
+        assert not _claims(records[index]), records[index]
+        assert records[index].get("admission_witnessed") is False
+        assert records[index]["admission_observed"] is True
+    assert boxes[2]["result"]["status"] == 200
+    assert _claims(records[2]), records[2]
+    assert "admission_witnessed" not in records[2]
+    assert [post.get("operation_id") for post in side.posts] == [OP, OP, "op-solo"]

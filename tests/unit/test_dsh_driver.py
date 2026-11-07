@@ -197,6 +197,14 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
         service = StateService(runtime.db, actor="driver:" + driver_id, project_read_trusted=True, driver_id=driver_id)
         service.store.add_nodes("alpha", [{"key": "n", "goal": "A full node description that must not be injected",
             "acceptance": [{"id": "a", "kind": "test", "description": "fixture criterion"}]}])
+        # One node of each status the snapshot can see; only VERIFIED is omitted.
+        seeded = {"v-done": "VERIFIED", "o-open": "OPEN", "c-cand": "CANDIDATE", "s-stale": "STALE", "x-old": "SUPERSEDED"}
+        service.store.add_nodes("alpha", [{"key": key, "goal": f"fixture {key}",
+            "acceptance": [{"id": "a", "kind": "test", "description": "fixture criterion"}]} for key in seeded])
+        with runtime.db.get_connection() as conn:
+            for key, status in seeded.items():
+                conn.execute("UPDATE state_nodes SET status=? WHERE project_id='alpha' AND node_key=?", (status, key))
+            conn.commit()
         execute(service, "write_driver_note_entry", {"project_id": "alpha", "assertion": "Project standing rule",
             "body": "Project body stays fetchable by address", "director_identity": driver_id}, allow_write=True)
         execute(service, "write_driver_note_entry", {"driver_id": driver_id, "assertion": "Private standing rule",
@@ -213,7 +221,13 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
             result = client.get("/api/dsh-drivers/alpha/context")
             assert result.status_code == 200, result.text
             body = result.json()
-            assert body["nodes"] == [{"name": "n", "status": "OPEN"}]
+            listed = {n["name"]: n["status"] for n in body["nodes"]}
+            assert listed == {"n": "OPEN", "o-open": "OPEN", "c-cand": "CANDIDATE", "s-stale": "STALE", "x-old": "SUPERSEDED"}
+            assert "v-done" not in json.dumps(body), "no VERIFIED node name may reach the snapshot"
+            assert body["node_counts"] == {"VERIFIED": 1, "OPEN": 2, "CANDIDATE": 1, "STALE": 1, "SUPERSEDED": 1}
+            assert body["nodes_omitted"]["VERIFIED"] == 1
+            assert "1 VERIFIED node(s) omitted" in body["nodes_omitted"]["statement"]
+            assert "live State" in body["nodes_omitted"]["statement"]
             assert "Project standing rule" in json.dumps(body["project_note"])
             assert "Private standing rule" in json.dumps(body["private_note"])
             assert "fetchable by address" not in json.dumps(body)

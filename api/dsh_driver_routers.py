@@ -157,8 +157,16 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
     graph = execute(service, "project_overview", {"project_id": project_id})
     project_note = execute(service, "get_driver_note", {"project_id": project_id})
     private_note = execute(service, "get_driver_note", {"driver_id": row["driver_id"]})
+    # VERIFIED nodes are closed history nobody acts on: they stay in live State
+    # and the snapshot only counts them. Everything else is listed with its status.
+    open_nodes = [n for n in graph["nodes"] if n["status"] != "VERIFIED"]
+    counts = {"VERIFIED": 0, **graph.get("counts", {})}
+    verified = counts["VERIFIED"]
     return {"project_id": project_id, "driver_id": row["driver_id"], "event_seq": graph["event_seq"],
-            "nodes": [{"name": n["node_key"], "status": n["status"]} for n in graph["nodes"]],
+            "nodes": [{"name": n["node_key"], "status": n["status"]} for n in open_nodes],
+            "node_counts": counts,
+            "nodes_omitted": {"VERIFIED": verified,
+                              "statement": f"{verified} VERIFIED node(s) omitted from this snapshot; read them from live State (project_overview)."},
             "project_note": project_note, "private_note": private_note,
             "driver_skill": STATE_DRIVER_GUIDE_INDEX,
             "runtime_skill": (Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "driver.md").read_text()}

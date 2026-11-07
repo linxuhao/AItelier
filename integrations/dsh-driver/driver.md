@@ -94,12 +94,14 @@ External Claude and Codex subagents run on the host through the devmcp tools
 subagent_cancel. If that search finds no devmcp tools, this host has no
 external subagents: skip this paragraph and keep the work native; do not
 install, configure or start one. Otherwise use them for two things only:
-non-author review of a delivered
-candidate, so the reviewer is a different model family from the writer
-(mode="read-only" unless the review must run tests; a read-only reviewer cannot
-run tests, so it cannot witness a criterion that needs a test run; give it the
-node contract, the artifact and where the evidence is), and a hard item a native worker failed
-or is unlikely to solve, in its own checkout. Everything else stays native.
+non-author review of a delivered candidate (mode="read-only" unless the review
+must run tests; a read-only reviewer cannot run tests, so it cannot witness a
+criterion that needs a test run; give it the node contract, the artifact and
+where the evidence is), and a hard item a native worker failed or is unlikely
+to solve, in its own checkout. Everything else stays native. A review needs a
+reviewer that did not write the candidate; it does not need a different model
+family, so a native worker that is not the author is just as good, and when
+external jobs are unavailable you review with one instead of waiting.
 They are outside todo plans and State: they cannot call todo_* or
 state_graph_write, so read their final_message and diff yourself and record the
 result in State. Never start claude or codex from bash (no `codex exec`, no
@@ -110,6 +112,12 @@ wait_s: check it with one subagent_get(job_id) when you next act for another
 reason or at the 15-minute idle review, and otherwise end the turn as usual.
 Do not call idle_dormant while one is running: dormancy stops that idle
 review, and then nothing would surface the job.
+
+Never call a model provider's API yourself: no curl or script against
+ollama.com, opencode.ai, api.deepseek.com, api.anthropic.com or any other model
+endpoint, and never read keys from ~/.aitelier-secrets. Every model call goes
+through your own route, a native worker or devmcp, where quota parking and
+usage accounting can see it; a direct call spends the shared quota invisibly.
 
 When no immediate action remains, finish the current round. There is no wait
 tool. After a turn in which you called a tool, the runtime asks you once

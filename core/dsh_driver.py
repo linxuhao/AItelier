@@ -28,25 +28,49 @@ CREATE TABLE IF NOT EXISTS dsh_drivers (
     updated_at TEXT NOT NULL
 );
 
--- Which model actually answered each driver session. The completion endpoint
+-- Which models actually answered each driver session. The completion endpoint
 -- chose the endpoint (gateway.active_model) and then kept nothing: the child's
 -- own session file only ever recorded the route alias, so a review criterion
 -- keyed on the writer's model family had no measured value to cite.
--- `served_by` is NULL when the gateway could not name a concrete model; it is
--- deliberately never filled with `route`, which would read as if the alias had
--- answered. One row per (project, session): a later call moves `last_seen` and
--- `calls`, `first_seen` stays.
+--
+-- `served_by` is the LAST endpoint this session could NAME - not "the endpoint
+-- of the last turn". Those are different facts the moment a turn cannot name
+-- one (the gateway answered but could not attribute the answer, or handed back
+-- the route argument it was given): such a turn leaves the known endpoint in
+-- place, because one unattributable turn is not evidence that the earlier
+-- attribution was wrong, and overwriting it would erase the only measured
+-- identity the session ever had. NULL means this session has named NO endpoint
+-- yet - never a placeholder, and never `route` (an alias in this column would
+-- read as if `worker` had answered).
+--
+-- `served_by_seen` is every endpoint the session named, as JSON text: first-seen
+-- order, no duplicates, capped at SERVED_BY_SEEN_LIMIT distinct values (a
+-- session that exhausted the cap keeps the FIRST ones and `served_by` still
+-- names the latest). One column would answer "who spoke last" for a session
+-- that failed over mid-life and so mis-report which model family wrote it; the
+-- list makes that a property of the session rather than of its final turn.
+--
+-- One row per (project, session): a later call moves `last_seen` and `calls`,
+-- `first_seen` stays.
 CREATE TABLE IF NOT EXISTS dsh_driver_session_models (
     project_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     route TEXT NOT NULL,
     served_by TEXT,
+    served_by_seen TEXT NOT NULL DEFAULT '[]',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     calls INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, session_id)
 );
 """
+
+# How many distinct endpoints one session's `served_by_seen` keeps. Small on
+# purpose: the question it answers is "which model families wrote this", and a
+# session that named more than a handful of endpoints is a routing story, not a
+# list anybody reads. The FIRST endpoints are kept (that is the order the column
+# promises) even after the cap; `served_by` still names the latest one.
+SERVED_BY_SEEN_LIMIT = 8
 
 
 # Local MCP endpoints the driver is given by default on this host. Ports match
@@ -77,6 +101,33 @@ class DshDrivers:
         self.host_controller = host_controller
         with db.get_connection() as conn:
             conn.executescript(SCHEMA)
+            # Additive: `CREATE TABLE IF NOT EXISTS` leaves an existing table
+            # alone, so the column that records EVERY endpoint a session named
+            # has to be added to a database that predates it. The rows already
+            # there keep the one endpoint they named; they are not re-derived.
+            if "served_by_seen" not in {r["name"] for r in conn.execute(
+                    "PRAGMA table_info(dsh_driver_session_models)")}:
+                conn.execute("ALTER TABLE dsh_driver_session_models ADD COLUMN "
+                             "served_by_seen TEXT NOT NULL DEFAULT '[]'")
+                # A row written before the column existed named exactly one
+                # endpoint (or none) - `served_by` is that list of length <= 1.
+                for row in conn.execute("SELECT project_id,session_id,route,served_by "
+                                        "FROM dsh_driver_session_models "
+                                        "WHERE served_by IS NOT NULL AND served_by<>route").fetchall():
+                    conn.execute("UPDATE dsh_driver_session_models SET served_by_seen=? "
+                                 "WHERE project_id=? AND session_id=?",
+                                 (json.dumps([row["served_by"]]), row["project_id"], row["session_id"]))
+            # The invariant this column enforces also has to hold for what is
+            # already stored - and on EVERY start, not only when the column is
+            # added: a row whose `served_by` IS the route alias claims the alias
+            # answered, which is exactly the defect, and a build older than this
+            # one can still write such a row into this database (a rollback to an
+            # older image, or a second deployment sharing the file). Measured
+            # consequence of skipping it on an already-migrated database: the
+            # alias is read back as if it were an endpoint
+            # (repro/probe_alias_cleanup_boundary.py, kept with the delivery).
+            conn.execute("UPDATE dsh_driver_session_models SET served_by=NULL "
+                         "WHERE served_by=route")
             conn.commit()
 
     @property
@@ -397,36 +448,116 @@ class DshDrivers:
             raise ValueError("DSH history unavailable: " + result.stderr[-1000:])
         return {"driver_id": row["driver_id"], **json.loads(result.stdout)}
 
+    @staticmethod
+    def _named_endpoint(served_by, route):
+        """The endpoint this turn NAMED, or None when it could not name one.
+
+        Two different ways a turn fails to name an endpoint, and the store owes
+        the same answer to both. It answered but could not attribute the answer
+        (None/''), or the gateway handed back the ROUTE argument it was given
+        (`worker`) - an alias, not anywhere this session was served from. Both
+        land here as None; neither may be turned into a string that reads like
+        an endpoint, and `route` must never be stored as if the alias answered.
+        """
+        if not served_by or served_by == route:
+            return None
+        return served_by
+
+    @staticmethod
+    def _seen_endpoints(raw):
+        """The stored JSON list, never a string that would break the reader."""
+        try:
+            values = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return []
+        return [v for v in values if isinstance(v, str) and v]
+
     def record_model_call(self, project_id, session_id, *, route, served_by):
-        """Keep WHICH model answered this session, durably, per project.
+        """Keep WHICH endpoints answered this session, durably, per project.
 
         Called by the completion endpoint for every answered turn, with the
-        endpoint the gateway was actually bound to (after any failover) and the
-        route the session asked for. `served_by` empty/None means the gateway
-        could not name a concrete model; it is stored as NULL rather than as
-        `route`, because a route alias in that column would claim the alias
-        answered.
+        endpoint the gateway was actually bound to after any failover and the
+        route the session asked for.
+
+        `served_by` is the LAST endpoint this session could NAME - deliberately
+        not "the endpoint of the last turn". A turn that cannot name one (empty,
+        or the route alias) leaves the already-known endpoint in place: one
+        unattributable turn says nothing about who answered the earlier ones, so
+        writing NULL there would erase the session's only measured identity.
+
+        `served_by_seen` is every endpoint this session has named, first-seen
+        order, no duplicates, bounded by SERVED_BY_SEEN_LIMIT - the answer to
+        "which model family wrote this" for a session that failed over, which a
+        single last-value column gets wrong by construction.
+
+        Neither column ever holds `route`: an endpoint equal to the alias is
+        stored as unknown (NULL / absent from the list), here, so no caller can
+        get it wrong by passing `served_by=gateway.model`.
         """
+        endpoint = self._named_endpoint(served_by, route)
         stamp = now()
         with self.db.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO dsh_driver_session_models"
-                "(project_id,session_id,route,served_by,first_seen,last_seen,calls) "
-                "VALUES(?,?,?,?,?,?,1) "
-                "ON CONFLICT(project_id,session_id) DO UPDATE SET "
-                "route=excluded.route, served_by=excluded.served_by, "
-                "last_seen=excluded.last_seen, "
-                "calls=dsh_driver_session_models.calls+1",
-                (project_id, session_id, route, served_by or None, stamp, stamp))
-            conn.commit()
+            # The merge below is a read-modify-write, so the write lock is taken
+            # BEFORE the read: two turns for one session arriving at once must
+            # not each merge onto the same list and lose one endpoint. Explicit
+            # BEGIN/COMMIT because a DEFERRED transaction would only take the
+            # lock at the INSERT, after both had read.
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT route,served_by,served_by_seen "
+                                   "FROM dsh_driver_session_models "
+                                   "WHERE project_id=? AND session_id=?",
+                                   (project_id, session_id)).fetchone()
+                seen = self._seen_endpoints(row["served_by_seen"]) if row else []
+                if not seen and row is not None:
+                    # A row written before `served_by_seen` existed named one
+                    # endpoint at most; keep it as the first sighting instead of
+                    # losing it to the backfill this process may have missed.
+                    known = self._named_endpoint(row["served_by"], row["route"] or route)
+                    if known:
+                        seen.append(known)
+                if endpoint and endpoint not in seen and len(seen) < SERVED_BY_SEEN_LIMIT:
+                    seen.append(endpoint)
+                conn.execute(
+                    "INSERT INTO dsh_driver_session_models"
+                    "(project_id,session_id,route,served_by,served_by_seen,first_seen,last_seen,calls) "
+                    "VALUES(?,?,?,?,?,?,?,1) "
+                    "ON CONFLICT(project_id,session_id) DO UPDATE SET "
+                    "route=excluded.route, "
+                    # COALESCE, not excluded: an unnamed turn keeps the endpoint
+                    # the session named earlier. This is the whole of c1 - the
+                    # value only moves when a turn actually names one.
+                    "served_by=COALESCE(excluded.served_by,dsh_driver_session_models.served_by), "
+                    "served_by_seen=excluded.served_by_seen, "
+                    "last_seen=excluded.last_seen, "
+                    "calls=dsh_driver_session_models.calls+1",
+                    (project_id, session_id, route, endpoint, json.dumps(seen), stamp, stamp))
+                conn.execute("COMMIT")
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass  # BEGIN itself may have been what failed; nothing to undo.
+                raise
 
     def session_models(self, project_id):
-        """This project's recorded sessions, oldest first. Never another project's."""
+        """This project's recorded sessions, oldest first. Never another project's.
+
+        Returns the stored values as the read surface must hand them back:
+        `served_by` is the last endpoint the session could NAME (NULL when it has
+        named none) and `served_by_seen` is the parsed list of every endpoint it
+        named, first-seen order - a caller never has to re-derive either from the
+        raw JSON text or fall back to "well, it said worker".
+        """
         with self.db.get_connection() as conn:
-            rows = conn.execute("SELECT session_id,route,served_by,first_seen,last_seen,calls "
-                                "FROM dsh_driver_session_models WHERE project_id=? "
-                                "ORDER BY first_seen,session_id", (project_id,))
-            return [dict(r) for r in rows]
+            rows = [dict(r) for r in conn.execute(
+                "SELECT session_id,route,served_by,served_by_seen,first_seen,last_seen,calls "
+                "FROM dsh_driver_session_models WHERE project_id=? "
+                "ORDER BY first_seen,session_id", (project_id,))]
+        for row in rows:
+            row["served_by_seen"] = self._seen_endpoints(row["served_by_seen"])
+        return rows
 
     @staticmethod
     def public(row):

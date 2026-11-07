@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.drivers import DriverRegistry
-from core.dsh_driver import DshDrivers
+from core.dsh_driver import DshDrivers, SERVED_BY_SEEN_LIMIT
 from core.state_database import StateDatabase
 from core.state_service import StateService
 
@@ -617,7 +617,7 @@ def _driver_token(runtime, project_id):
 
 
 def _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=None, *,
-                worker_endpoints=None, worker_rotate=True, transport=None):
+                alias_flag=None, worker_endpoints=None, worker_rotate=True, transport=None):
     """The real router, the real authz verdicts, a stubbed transport.
 
     Nothing here overrides `require_reader`, `require_writer` or
@@ -628,7 +628,10 @@ def _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=None, *,
     `worker_endpoints` / `worker_rotate` shape the worker route (a rotation pool
     by default, a plain ordered list when a test needs a deterministic first
     endpoint), and `transport` replaces the one canned answer, so a test can make
-    an ENDPOINT fail the way the real transport fails one.
+    an ENDPOINT fail the way the real transport fails one. `unnamed_flag` /
+    `alias_flag` make the gateway hand back, respectively, nothing and the ROUTE
+    ARGUMENT it was constructed with - the two ways a turn fails to name an
+    endpoint that the store has to survive.
     """
     from fastapi import FastAPI
     from api import authz
@@ -664,11 +667,30 @@ def _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=None, *,
     monkeypatch.setattr(gateway_class, '_call_llm', answer)
 
     class Unnameable(gateway_class):
-        """A turn whose endpoint the gateway cannot attribute to one model."""
+        """A turn whose endpoint the gateway cannot attribute to one model.
+
+        The unnamed/alias report is a POST-HOC edit of what this gateway says it
+        was bound to, so the real binding is put back before the next turn:
+        otherwise the fixture would leave the gateway believing it is bound to ''
+        and a later turn could not fail over or answer at all - an artifact of
+        the fixture, not anything the deployment does.
+        """
+        _true_binding = None
+
         def generate_native(self, messages, **kwargs):
+            if self._true_binding is not None:
+                self.active_model = self._true_binding
+                self._true_binding = None
             turn = super().generate_native(messages, **kwargs)
+            self._true_binding = self.active_model
             if unnamed_flag is not None and unnamed_flag[0]:
                 self.active_model = ''
+            if alias_flag is not None and alias_flag[0]:
+                # A gateway that hands back the model argument it was GIVEN
+                # (`worker`, `driver`) rather than the endpoint it bound. It is
+                # the route alias, so the store must refuse it - `served_by or
+                # None` did not, and stored `worker` as if the alias answered.
+                self.active_model = self.internal_model
             return turn
 
     monkeypatch.setattr(ai, 'AIGateway', lambda model, **kw: Unnameable(
@@ -752,23 +774,32 @@ async def test_completion_records_the_resolved_model_for_each_session(runtime, t
                 'from the UPSERT leaves it and would still satisfy last_seen > first_seen')
             assert child_row['last_seen'] > child_row['first_seen']
             unknown_row = stored['native-child-z']
-            assert unknown_row['served_by'] is None, (
-                'an unattributable turn stays unknown instead of repeating the route name')
+            # The alias assertion comes FIRST so it is the one that fails when
+            # the store stops refusing it: behind an `is None` check it could
+            # never fire, because a stored 'worker' is not None either and the
+            # earlier assertion aborted the test with the wrong complaint.
             assert unknown_row['served_by'] != 'worker', (
                 'storing the route alias in served_by would claim the alias answered')
+            assert unknown_row['served_by'] is None, (
+                'an unattributable turn stays unknown instead of repeating the route name')
             assert unknown_row['route'] == 'worker'
+            assert unknown_row['served_by_seen'] == [], (
+                'a turn that named nothing adds nothing to the endpoints the session named')
 
             served = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
             assert served.status_code == 200, served.text
             sessions = {s['session_id']: s for s in served.json()['sessions']}
             assert set(sessions) == set(stored)
             assert set(sessions['native-child-a']) == {'session_id', 'route', 'served_by',
-                                                       'first_seen', 'last_seen', 'calls'}
+                                                       'served_by_seen', 'first_seen',
+                                                       'last_seen', 'calls'}
             assert sessions['native-child-a']['served_by'] == WORKER_ENDPOINTS[0]
+            assert sessions['native-child-a']['served_by_seen'] == list(WORKER_ENDPOINTS)
             assert sessions['native-child-a']['calls'] == 2
-            assert sessions['native-child-z']['served_by'] is None
             assert sessions['native-child-z']['served_by'] != 'worker', (
                 'the read surface must not hand back the alias in place of a model')
+            assert sessions['native-child-z']['served_by'] is None
+            assert sessions['native-child-z']['served_by_seen'] == []
 
         # The record is durable, not a cache that the gateway teardown clears.
         await runtime.stop('alpha')
@@ -786,32 +817,70 @@ async def test_a_failed_record_write_still_returns_the_turn(runtime, tmp_path, m
 
     The endpoint writes the identity AFTER the model answered, and that call is
     already paid for. A write that cannot land (a locked SQLite file past the
-    busy timeout, a read-only or full disk) is a reason to lose the RECORD, not a
-    reason to answer the driver with a 500 for a turn it already has. The loss is
-    reported - once, naming the project, the session and the exception class - so
-    an unrecorded turn is observable rather than silent.
+    busy timeout, a missing table, a read-only or full disk) is a reason to lose
+    the RECORD, not a reason to answer the driver with a 500 for a turn it
+    already has. The loss is reported - once, naming the project, the session and
+    the exception class - so an unrecorded turn is observable rather than silent.
+
+    Measured on REAL SQLite failures, not by stubbing `record_model_call` out:
+    the store method runs for real and SQLite is what refuses it, so the 200
+    below is this handler's `except` branch surviving an actual failed write.
+    Two shapes, because they break different parts of it: another connection
+    holding the database's write lock (the real contention case - the
+    transaction cannot even begin) and the table absent from a database that
+    still answers reads (the statement never prepares).
     """
+    import contextlib
     import logging
     import sqlite3
     from fastapi.testclient import TestClient
     app = _driver_app(runtime, tmp_path, monkeypatch)
     try:
-        driver = await runtime.start('alpha', actor='fixture')
+        await runtime.start('alpha', actor='fixture')
         headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
         payload = lambda session: {'session_id': session,
                                    'messages': [{'role': 'user', 'content': 'work'}]}
+        database = runtime.db
         with TestClient(app) as client:
             recorded = client.post('/api/dsh-drivers/alpha/completion',
                                    json=payload('native-child-ok'), headers=headers)
             assert recorded.status_code == 200, recorded.text
 
-            def unwritable(*args, **kwargs):
-                raise sqlite3.OperationalError('attempt to write a readonly database')
+            def warnings_for(session):
+                return [r for r in caplog.records
+                        if 'could not record the answering model' in r.getMessage()
+                        and session in r.getMessage()]
 
-            monkeypatch.setattr(runtime, 'record_model_call', unwritable)
-            caplog.set_level(logging.WARNING)
-            broken = client.post('/api/dsh-drivers/alpha/completion',
-                                 json=payload('native-child-unrecorded'), headers=headers)
+            @contextlib.contextmanager
+            def impatient():
+                """The REAL database; only the busy timeout is short.
+
+                The lock, the refusal and the OperationalError are SQLite's own -
+                waiting the production 10s would change the duration of this test
+                and nothing it measures.
+                """
+                conn = sqlite3.connect(database.db_path, timeout=0.05)
+                conn.row_factory = sqlite3.Row
+                try:
+                    conn.execute('PRAGMA foreign_keys=ON')
+                    yield conn
+                finally:
+                    conn.close()
+
+            # ── a second connection holds the write lock ────────────────────
+            locker = sqlite3.connect(database.db_path, timeout=0.05)
+            try:
+                locker.execute('BEGIN IMMEDIATE')
+                database.get_connection = impatient
+                caplog.set_level(logging.WARNING)
+                try:
+                    broken = client.post('/api/dsh-drivers/alpha/completion',
+                                         json=payload('native-child-locked'), headers=headers)
+                finally:
+                    del database.get_connection
+            finally:
+                locker.rollback()
+                locker.close()
             assert broken.status_code == 200, (
                 'the answer is already paid for: a failed record must not 500 the turn')
             assert set(broken.json()) == set(recorded.json()), (
@@ -819,21 +888,44 @@ async def test_a_failed_record_write_still_returns_the_turn(runtime, tmp_path, m
             assert broken.json()['served_by'] == recorded.json()['served_by'] == WORKER_ENDPOINTS[0]
             assert broken.json()['text'] == 'ok'
 
-            lost = [r for r in caplog.records
-                    if 'could not record the answering model' in r.getMessage()]
+            lost = warnings_for('native-child-locked')
             assert len(lost) == 1, 'reported once: not swallowed, and not flooded'
             assert lost[0].levelname == 'WARNING'
             message = lost[0].getMessage()
-            assert 'alpha' in message and 'native-child-unrecorded' in message, (
+            assert 'alpha' in message and 'native-child-locked' in message, (
                 'the warning names the project and the session that went unrecorded')
-            assert 'OperationalError' in message and 'readonly' in message, (
-                'the exception class tells an operator a locked/read-only DB from a bug')
+            assert 'OperationalError' in message and 'locked' in message, (
+                'the exception class and SQLite\'s own reason tell an operator a '
+                'locked database from a bug')
 
             # The write really failed: the 200 is the answer surviving, not a
             # record that quietly was not attempted, and the earlier row is untouched.
             stored = {r['session_id']: r for r in runtime.session_models('alpha')}
-            assert 'native-child-unrecorded' not in stored
+            assert 'native-child-locked' not in stored
             assert stored['native-child-ok']['calls'] == 1
+
+            # ── the table is gone; reads still answer, the write cannot ─────
+            with database.get_connection() as conn:
+                conn.execute('DROP TABLE dsh_driver_session_models')
+                conn.commit()
+            caplog.clear()
+            absent = client.post('/api/dsh-drivers/alpha/completion',
+                                 json=payload('native-child-no-table'), headers=headers)
+            assert absent.status_code == 200, (
+                'a record that cannot be written is still not a reason to lose the turn')
+            assert set(absent.json()) == set(recorded.json())
+            assert absent.json()['text'] == 'ok'
+            lost = warnings_for('native-child-no-table')
+            assert len(lost) == 1
+            assert lost[0].levelname == 'WARNING'
+            message = lost[0].getMessage()
+            assert 'alpha' in message and 'native-child-no-table' in message
+            assert 'OperationalError' in message and 'no such table' in message, (
+                'the statement really reached SQLite and was refused there')
+            with database.get_connection() as conn:
+                exists = conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                      "AND name='dsh_driver_session_models'").fetchone()
+            assert exists is None, 'no row can exist for that session: the table does not'
     finally:
         await runtime.close()
 
@@ -879,6 +971,269 @@ async def test_recorded_served_by_follows_failover_not_the_first_endpoint(runtim
         assert row['calls'] == 1
     finally:
         await runtime.close()
+
+
+async def test_an_unnamed_turn_keeps_the_endpoint_the_session_already_named(runtime, tmp_path, monkeypatch):
+    """A turn that cannot name an endpoint must not erase one the session named.
+
+    Measured through the real completion handler: turn 1 names endpoint A, turn
+    2 is a turn the gateway cannot attribute (`active_model` is ''), turn 3
+    names B after a failover. The stored row keeps A across the unattributable
+    turn - `served_by = A`, `calls = 2` - because the column records the last
+    endpoint this session could NAME, not the endpoint of the last turn; a turn
+    that does name B moves it. The read surface reports the same value.
+    """
+    import litellm
+    from fastapi.testclient import TestClient
+    pool = ['opencodego/deepseek-v4.1-flash', 'deepseek/deepseek-pro']
+    unnamed = [False]
+    state = {'first_endpoint_down': False}
+
+    def transport(gateway, kwargs):
+        if state['first_endpoint_down'] and gateway.active_model == pool[0]:
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai',
+                                              model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': 'ok'},
+                                               'finish_reason': 'stop'}],
+                                     usage={'prompt_tokens': 10, 'completion_tokens': 2,
+                                            'total_tokens': 12})
+
+    app = _driver_app(runtime, tmp_path, monkeypatch, unnamed_flag=unnamed,
+                      worker_endpoints=pool, worker_rotate=False, transport=transport)
+    try:
+        await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        payload = lambda session: {'session_id': session,
+                                   'messages': [{'role': 'user', 'content': 'work'}]}
+        with TestClient(app) as client:
+            named = client.post('/api/dsh-drivers/alpha/completion',
+                                json=payload('native-child-keep'), headers=headers)
+            assert named.status_code == 200, named.text
+            assert named.json()['served_by'] == pool[0]
+            first = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-keep']
+            assert first['served_by'] == pool[0] and first['calls'] == 1
+            assert first['served_by_seen'] == [pool[0]]
+
+            unnamed[0] = True
+            silent = client.post('/api/dsh-drivers/alpha/completion',
+                                 json=payload('native-child-keep'), headers=headers)
+            unnamed[0] = False
+            assert silent.status_code == 200, silent.text
+            assert silent.json()['served_by'] in ('', None), (
+                'the fixture must hand back NO endpoint for this turn, or the test '
+                'measures a turn that named one')
+            kept = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-keep']
+            assert kept['calls'] == 2, 'the unattributable turn still counts as a turn'
+            assert kept['served_by'] == pool[0], (
+                'a turn that could not name an endpoint ERASED the one the session had '
+                'named: the row now claims this session was never attributed, and the '
+                'only measured identity it had is gone')
+            assert kept['served_by_seen'] == [pool[0]], (
+                'and the list of named endpoints neither gains nor loses anything')
+
+            served = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
+            assert served.status_code == 200, served.text
+            row = {s['session_id']: s for s in served.json()['sessions']}['native-child-keep']
+            assert row['served_by'] == pool[0], (
+                'the read surface must report the endpoint the session kept')
+            assert row['served_by_seen'] == [pool[0]]
+
+            state['first_endpoint_down'] = True
+            moved = client.post('/api/dsh-drivers/alpha/completion',
+                                json=payload('native-child-keep'), headers=headers)
+            assert moved.status_code == 200, moved.text
+            assert moved.json()['served_by'] == pool[1], 'the second endpoint answered this turn'
+        final = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-keep']
+        assert final['served_by'] == pool[1], (
+            'a turn that DOES name an endpoint moves the record to it')
+        assert final['served_by_seen'] == pool, 'both endpoints the session named, first-seen order'
+        assert final['calls'] == 3
+    finally:
+        await runtime.close()
+
+
+async def test_a_session_that_fails_over_records_every_endpoint_it_named(runtime, tmp_path, monkeypatch):
+    """A, B, A: the session's model families are BOTH, not "whatever spoke last".
+
+    One session survives more than one gateway: a failover to B (a real endpoint
+    error, measured above) and a driver restart that binds a fresh gateway back
+    to A while the child's session keeps its id. The record must name A and B in
+    that order, with no duplicate when A answers again, and `served_by` stays the
+    last one NAMED - so "which model family wrote this session" is answerable for
+    a session that failed over mid-life instead of reading as the last family.
+    """
+    import litellm
+    from fastapi.testclient import TestClient
+    pool = ['opencodego/deepseek-v4.1-flash', 'deepseek/deepseek-pro']
+    state = {'first_endpoint_down': False}
+
+    def transport(gateway, kwargs):
+        if state['first_endpoint_down'] and gateway.active_model == pool[0]:
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai',
+                                              model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': 'ok'},
+                                               'finish_reason': 'stop'}],
+                                     usage={'prompt_tokens': 10, 'completion_tokens': 2,
+                                            'total_tokens': 12})
+
+    app = _driver_app(runtime, tmp_path, monkeypatch, worker_endpoints=pool,
+                      worker_rotate=False, transport=transport)
+    try:
+        await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        payload = lambda session: {'session_id': session,
+                                   'messages': [{'role': 'user', 'content': 'work'}]}
+        turn = lambda client, session: client.post('/api/dsh-drivers/alpha/completion',
+                                                   json=payload(session), headers=headers)
+        with TestClient(app) as client:
+            first = turn(client, 'native-child-life')
+            assert first.status_code == 200, first.text
+            assert first.json()['served_by'] == pool[0]
+
+            state['first_endpoint_down'] = True
+            failed_over = turn(client, 'native-child-life')
+            state['first_endpoint_down'] = False
+            assert failed_over.status_code == 200, failed_over.text
+            assert failed_over.json()['served_by'] == pool[1], 'the second endpoint answered'
+
+            # A restarted driver rebuilds its gateway per session; the SESSION id
+            # is what survives, and the record has to span both lifetimes.
+            runtime.gateways.clear()
+            back = turn(client, 'native-child-life')
+            assert back.status_code == 200, back.text
+            assert back.json()['served_by'] == pool[0], 'a fresh gateway binds the first endpoint'
+
+            served = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
+            assert served.status_code == 200, served.text
+            row = {s['session_id']: s for s in served.json()['sessions']}['native-child-life']
+            assert row['served_by'] == pool[0], 'served_by is the last endpoint this session named'
+            assert row['served_by_seen'] == pool, (
+                'both endpoints, in first-seen order, without repeating the one that '
+                'answered twice - a single last-value column records only A here and '
+                'so reports the wrong model family for the middle of the session')
+            assert row['calls'] == 3
+
+        # The list is bounded, and the bound is on the LIST - the last named
+        # endpoint is still recorded past it. Measured on the store directly: a
+        # session that names more endpoints than the cap is a routing story, not
+        # a longer list to read.
+        endpoints = [f'pool/m{i}' for i in range(SERVED_BY_SEEN_LIMIT + 2)]
+        for endpoint in endpoints:
+            runtime.record_model_call('alpha', 'native-child-cap', route='worker', served_by=endpoint)
+        capped = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-cap']
+        assert capped['served_by_seen'] == endpoints[:SERVED_BY_SEEN_LIMIT], (
+            'the cap keeps the FIRST endpoints the session named (the order the column '
+            'promises) rather than dropping the oldest to make room')
+        assert capped['served_by'] == endpoints[-1], (
+            'the cap bounds the list, not the last named endpoint')
+        assert capped['calls'] == len(endpoints)
+    finally:
+        await runtime.close()
+
+
+async def test_a_route_alias_is_stored_as_unknown_never_as_an_endpoint(runtime, tmp_path, monkeypatch):
+    """`served_by` equal to the route is an ALIAS, and the store refuses it.
+
+    An endpoint that is merely the route name says nothing about where a turn was
+    served from; storing it claims the alias answered. Measured twice: through
+    the real handler with a gateway that hands back the model argument it was
+    given (`worker`), and against the store directly for both routes - plus the
+    control that a real endpoint is NOT nulled, and that an alias turn does not
+    overwrite an endpoint the session had already named.
+    """
+    from fastapi.testclient import TestClient
+    alias = [False]
+    app = _driver_app(runtime, tmp_path, monkeypatch, alias_flag=alias)
+    try:
+        await runtime.start('alpha', actor='fixture')
+        headers = {'X-AItelier-Driver-Token': _driver_token(runtime, 'alpha')}
+        with TestClient(app) as client:
+            alias[0] = True
+            echoed = client.post('/api/dsh-drivers/alpha/completion', headers=headers, json={
+                'session_id': 'native-child-alias',
+                'messages': [{'role': 'user', 'content': 'work'}]})
+            alias[0] = False
+            assert echoed.status_code == 200, echoed.text
+            assert echoed.json()['served_by'] == 'worker', (
+                'the fixture must actually hand the ALIAS back, or this test measures nothing')
+
+            row = {r['session_id']: r for r in runtime.session_models('alpha')}['native-child-alias']
+            assert row['served_by'] != 'worker', (
+                'the store kept the route alias as if `worker` had answered')
+            assert row['served_by'] is None, (
+                'an endpoint that is only the route name is UNKNOWN, not an attribution')
+            assert row['served_by_seen'] == [], (
+                'and the alias must not enter the list of endpoints the session named')
+
+            served = client.get('/api/dsh-drivers/alpha/model-sessions', headers=headers)
+            assert served.status_code == 200, served.text
+            read = {s['session_id']: s for s in served.json()['sessions']}['native-child-alias']
+            assert read['served_by'] != 'worker'
+            assert read['served_by'] is None
+            assert read['served_by_seen'] == []
+
+        # The store's own refusal, for both routes, and the control that shows it
+        # is a comparison against the route rather than "drop everything".
+        runtime.record_model_call('alpha', 'alias-only', route='worker', served_by='worker')
+        runtime.record_model_call('alpha', 'driver-alias', route='driver', served_by='driver')
+        runtime.record_model_call('alpha', 'real-endpoint', route='worker',
+                                  served_by='deepseek/deepseek-flash')
+        runtime.record_model_call('alpha', 'named-then-alias', route='worker',
+                                  served_by='deepseek/deepseek-flash')
+        runtime.record_model_call('alpha', 'named-then-alias', route='worker', served_by='worker')
+        rows = {r['session_id']: r for r in runtime.session_models('alpha')}
+        assert rows['alias-only']['served_by'] != 'worker'
+        assert rows['alias-only']['served_by'] is None
+        assert rows['alias-only']['served_by_seen'] == []
+        assert rows['driver-alias']['served_by'] != 'driver'
+        assert rows['driver-alias']['served_by'] is None
+        assert rows['driver-alias']['served_by_seen'] == []
+        assert rows['real-endpoint']['served_by'] == 'deepseek/deepseek-flash', (
+            'a concrete endpoint is a real attribution, not something to null')
+        assert rows['real-endpoint']['served_by_seen'] == ['deepseek/deepseek-flash']
+        assert rows['named-then-alias']['served_by'] == 'deepseek/deepseek-flash', (
+            'an alias turn is unnamed: it must not overwrite the endpoint the session named')
+        assert rows['named-then-alias']['served_by_seen'] == ['deepseek/deepseek-flash']
+        assert rows['named-then-alias']['calls'] == 2
+    finally:
+        await runtime.close()
+
+
+async def test_an_alias_that_reaches_an_already_migrated_database_is_cleaned_on_the_next_start(
+        runtime, tmp_path):
+    """The migration's alias cleanup must not be a one-off inside the column-add branch.
+
+    A build older than this one can still write an alias row into a database this
+    build already migrated - a rollback to an older image, or a second deployment
+    sharing the file - and the measured consequence of cleaning only while the
+    column is being added is that `model-sessions` then reports `worker` as the
+    endpoint that answered (repro/probe_alias_cleanup_boundary.py, in the
+    delivery's evidence). So every start re-establishes the invariant, and this
+    test writes the shape an older build writes into a migrated database, opens
+    the store again, and requires the alias to be gone.
+    """
+    db = runtime.db
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO dsh_driver_session_models "
+            "(project_id,session_id,route,served_by,served_by_seen,first_seen,last_seen,calls) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ('alpha', 'old-build-alias', 'worker', 'worker', '[]',
+             '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 3))
+        conn.commit()
+    with db.get_connection() as conn:
+        raw = {r['session_id']: dict(r) for r in conn.execute(
+            "SELECT session_id,served_by FROM dsh_driver_session_models").fetchall()}
+    assert raw['old-build-alias']['served_by'] == 'worker', (
+        'the fixture must actually write the alias, or this test measures nothing')
+
+    # A second construction is what a restart is: the column already exists, so the
+    # migration branch above does not run and only the per-start cleanup can act.
+    reopened = DshDrivers(db, runtime.registry, runtime.root, command=runtime.command)
+    rows = {r['session_id']: r for r in reopened.session_models('alpha')}
+    assert rows['old-build-alias']['served_by'] is None, (
+        'an alias row that reached a migrated database is still read back as an endpoint')
+    assert rows['old-build-alias']['calls'] == 3, 'the cleanup must not invent or drop calls'
 
 
 async def test_recorded_session_identity_is_driver_scoped_and_never_anonymous(runtime, tmp_path, monkeypatch):

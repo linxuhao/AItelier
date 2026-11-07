@@ -117,12 +117,17 @@ class DshDrivers:
                     conn.execute("UPDATE dsh_driver_session_models SET served_by_seen=? "
                                  "WHERE project_id=? AND session_id=?",
                                  (json.dumps([row["served_by"]]), row["project_id"], row["session_id"]))
-                # The invariant this column now enforces also has to hold for
-                # what is already stored: an old row whose `served_by` IS the
-                # route alias claims the alias answered, which is exactly the
-                # defect. It becomes unknown, which is what it measurably was.
-                conn.execute("UPDATE dsh_driver_session_models SET served_by=NULL "
-                             "WHERE served_by=route")
+            # The invariant this column enforces also has to hold for what is
+            # already stored - and on EVERY start, not only when the column is
+            # added: a row whose `served_by` IS the route alias claims the alias
+            # answered, which is exactly the defect, and a build older than this
+            # one can still write such a row into this database (a rollback to an
+            # older image, or a second deployment sharing the file). Measured
+            # consequence of skipping it on an already-migrated database: the
+            # alias is read back as if it were an endpoint
+            # (repro/probe_alias_cleanup_boundary.py, kept with the delivery).
+            conn.execute("UPDATE dsh_driver_session_models SET served_by=NULL "
+                         "WHERE served_by=route")
             conn.commit()
 
     @property

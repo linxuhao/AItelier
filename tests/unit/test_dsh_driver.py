@@ -1199,6 +1199,43 @@ async def test_a_route_alias_is_stored_as_unknown_never_as_an_endpoint(runtime, 
         await runtime.close()
 
 
+async def test_an_alias_that_reaches_an_already_migrated_database_is_cleaned_on_the_next_start(
+        runtime, tmp_path):
+    """The migration's alias cleanup must not be a one-off inside the column-add branch.
+
+    A build older than this one can still write an alias row into a database this
+    build already migrated - a rollback to an older image, or a second deployment
+    sharing the file - and the measured consequence of cleaning only while the
+    column is being added is that `model-sessions` then reports `worker` as the
+    endpoint that answered (repro/probe_alias_cleanup_boundary.py, in the
+    delivery's evidence). So every start re-establishes the invariant, and this
+    test writes the shape an older build writes into a migrated database, opens
+    the store again, and requires the alias to be gone.
+    """
+    db = runtime.db
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO dsh_driver_session_models "
+            "(project_id,session_id,route,served_by,served_by_seen,first_seen,last_seen,calls) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ('alpha', 'old-build-alias', 'worker', 'worker', '[]',
+             '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', 3))
+        conn.commit()
+    with db.get_connection() as conn:
+        raw = {r['session_id']: dict(r) for r in conn.execute(
+            "SELECT session_id,served_by FROM dsh_driver_session_models").fetchall()}
+    assert raw['old-build-alias']['served_by'] == 'worker', (
+        'the fixture must actually write the alias, or this test measures nothing')
+
+    # A second construction is what a restart is: the column already exists, so the
+    # migration branch above does not run and only the per-start cleanup can act.
+    reopened = DshDrivers(db, runtime.registry, runtime.root, command=runtime.command)
+    rows = {r['session_id']: r for r in reopened.session_models('alpha')}
+    assert rows['old-build-alias']['served_by'] is None, (
+        'an alias row that reached a migrated database is still read back as an endpoint')
+    assert rows['old-build-alias']['calls'] == 3, 'the cleanup must not invent or drop calls'
+
+
 async def test_recorded_session_identity_is_driver_scoped_and_never_anonymous(runtime, tmp_path, monkeypatch):
     """A valid credential that is not THIS project's driver reads nothing."""
     from api import authz

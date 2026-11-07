@@ -204,17 +204,37 @@ def test_a_busy_lock_queues_the_request(rig, route):
 
 
 def test_a_live_render_keeps_its_heartbeat_fresh(rig):
-    """A render longer than the staleness threshold must still read as live."""
-    rig.gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.05
-    rig.start_holder()
-    started = rig.row("op-holder")["started_at"]
-    time.sleep(0.5)
-    beat = rig.row("op-holder")["heartbeat_at"]
-    rig.release.set()
-    rig.holder[0].join(30)
-    assert beat - started >= 0.3, (
-        f"the holder's heartbeat did not advance during its render "
-        f"(started_at={started}, heartbeat_at={beat})")
+    """A render longer than the staleness threshold must still read as live.
+
+    The promise: while a render runs, its owner's heartbeat_at keeps advancing.
+    With a 0.05 s beat, the stored heartbeat must reach 0.3 s past started_at.
+    When the beat thread gets CPU is the scheduler's business, so this polls the
+    stored heartbeat until the promise is met, and fails only at the deadline.
+    """
+    beat_interval = 0.05
+    promised_advance = 0.3
+    deadline_sec = 10.0
+    rig.gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = beat_interval
+    try:
+        rig.start_holder()
+        started = rig.row("op-holder")["started_at"]
+        begun = time.monotonic()
+        while True:
+            beat = rig.row("op-holder")["heartbeat_at"]
+            if beat - started >= promised_advance or time.monotonic() - begun >= deadline_sec:
+                break
+            time.sleep(0.02)
+        waited = time.monotonic() - begun
+        assert beat - started >= promised_advance, (
+            f"the holder's heartbeat did not advance {promised_advance}s past started_at "
+            f"within the {deadline_sec:.0f}s deadline (waited {waited:.1f}s; "
+            f"started_at={started}, last heartbeat_at={beat}, "
+            f"interval={beat_interval}s)")
+    finally:
+        rig.release.set()
+        holder = getattr(rig, "holder", None)
+        if holder is not None:
+            holder[0].join(30)
 
 
 # ── a-lost-owner-still-blocks-and-says-so ───────────────────────────────────

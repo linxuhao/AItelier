@@ -168,28 +168,82 @@ plain `python3`. V1 cancellation retains the accepted exact fields/preimage and
 assertions. V2 cancellation requires authenticated `decide`; legacy `cancel`
 refuses v2 fields. Never restore old ticket bytes while a daemon can run.
 
-The focused tests are **UNRUN by the Source author**. A different author must
-review and execute the final exact commit in a detached owned throwaway container
-with `--rm --init --network none --cpus 2 --memory 2g --memory-swap 2g`, at most four
-such containers globally, never the production backend or the host. Mount the
-existing CLI venv read-only at its identical absolute path and set
-`GATE_QUEUE_TEST_VENV_PYTHON` to that interpreter. Set
-`GATE_QUEUE_TEST_ORDINARY_PYTHON=/usr/bin/python3`. Use the container's own exact
-checkout and explicit PYTHONPATH for pytest; the child recipe does not inherit it.
+## The two interpreters, and how the suite supplies them
+
+The owned vectors spawn real children under two interpreters:
+
+| variable | role | supplied only when observed to |
+|---|---|---|
+| `GATE_QUEUE_TEST_VENV_PYTHON` | real owning CLI/client surface | run and `import httpx` succeed |
+| `GATE_QUEUE_TEST_ORDINARY_PYTHON` | stdlib-only surface | run and `import httpx` fail |
+
+`tests/host_gate_queue/conftest.py` supplies both from the environment the suite
+actually runs in, and both invocation shapes load it — the gate's pytest leg
+(`pytest <repo> --rootdir <repo> …`, which collects this tree) and the review
+shape below. A hook in `tests/conftest.py` would not serve the second one, which
+is why the supply sits in the directory itself.
 
 ```sh
+# gate shape: the gate's pytest leg runs this argv over the repo
+python3 -m pytest tests/host_gate_queue --rootdir "$REPO" \
+  --continue-on-collection-errors -p no:cacheprovider
+# review shape
 python3 -m pytest -c tests/host_gate_queue/pytest.ini \
   --confcutdir=tests/host_gate_queue -s tests/host_gate_queue
 ```
+
+Nothing about either role is assumed from a path. Each candidate is executed
+(`subprocess.run([candidate, "-c", "import httpx"], …)`, with `PYTHONPATH`
+removed because the fixture strips it from every child it builds) and only that
+observed result fills the variable; the running interpreter is the first
+candidate, and when it lacks the client it serves the stdlib-only role instead.
+A pair that is already set is never probed. In the ordinary case this costs two
+short subprocess probes, writes no file, installs nothing, re-execs nothing and
+mounts no venv. Measured in the disposable container of this image
+(2026-11-07): `/usr/local/bin/python` → `python3.12` (3.12.15, the binary the
+image's `python3` resolves to) imports `httpx` 0.28.1, and `/usr/bin/python3`
+(3.13.5) fails `import httpx`. With no `GATE_QUEUE_TEST_*` set the gate shape is
+63 passed / 0 skipped and the review shape is 63 passed / 0 skipped; with
+`GATE_QUEUE_TEST_VENV_PYTHON=` (present but empty) it is 17 passed / 46 skipped.
+The supply itself was observed case by case in that same container: two probes
+and both roles when nothing is set, zero probes and both values kept when the
+caller set the pair, and neither variable set when a role could not be observed.
+Those numbers are this image's, measured with the directory mounted read-write
+and `.git` read-only; no capability is claimed for any other image, host or
+mount, and none of the three measurements is a claim about the production
+backend.
+
+What the suite still refuses, deliberately:
+
+- a variable the caller sets is used verbatim and never overwritten — including
+  one that is present but empty, so `GATE_QUEUE_TEST_VENV_PYTHON=` keeps the
+  owned suite skipping, naming
+  `GATE_QUEUE_TEST_VENV_PYTHON must name the existing read-only CLI venv interpreter`,
+  and running none of the owned vectors;
+- an environment where a role cannot be observed — no candidate imports
+  `httpx`, or no candidate is a working stdlib-only interpreter — fills
+  *neither* variable and therefore skips, because a half-supplied pair would make
+  the fixture raise instead of skipping;
+- a value that names a missing interpreter or missing modules, or an escaped
+  credential path, is still an error, never a skip;
+- nothing is installed or downloaded, and no virtualenv is created or assumed to
+  exist at any path.
+
+Supplying the exact CLI venv by hand remains available for reproducing one
+specific owned environment (mount it read-only at its identical absolute path
+and set `GATE_QUEUE_TEST_VENV_PYTHON` to that interpreter), but it is no longer
+required for the suite to run. Use the container's own exact checkout and
+explicit PYTHONPATH for pytest; the child recipe does not inherit it.
+
+The focused tests are **UNRUN by the Source author**. A different author must
+review and execute the final exact commit in a detached owned throwaway container
+with `--rm --init --network none --cpus 2 --memory 2g --memory-swap 2g`, at most four
+such containers globally, never the production backend or the host.
 
 The owned suite exports only six required tracked files from exact `HEAD` into a
 disposable root (queue, package initializers, client, credentials and datadir;
 about 95 KiB, with no full-repository copy per test), uses the real
 APIClient/httpx/credential modules and a loopback stdlib HTTP fixture.
-An unset or empty `GATE_QUEUE_TEST_VENV_PYTHON` makes the owned suite skip,
-naming that variable as the requirement: an absence, not a pass and not a
-failure. A value that names a missing interpreter or missing modules, or an
-escaped credential path, is still an error, never a skip.
 It builds the accepted literal harmless Git objects and five registrations,
 exercises real CLI transitions and a pipe-controlled harmless child, and prints
 nonempty timelines and literal request transcripts without token bytes. All

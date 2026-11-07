@@ -14,6 +14,7 @@ byte-for-byte intact. No production path is resolved.
 from __future__ import annotations
 import re
 import sqlite3
+from core.state_schema_migration import add_column_if_missing
 
 ATTEMPT_TABLE = """
 CREATE TABLE {name} (
@@ -354,10 +355,9 @@ def initialize(db, existing_schema: str) -> None:
             # P3 rebuild produced already has them.)
             for column, ddl in LEASE_COLUMNS:
                 if column not in columns_now:
-                    conn.execute(f'ALTER TABLE state_attempts ADD COLUMN {column} {ddl}')
-            if 'abandon_kind' not in columns_now:
-                conn.execute("ALTER TABLE state_attempts ADD COLUMN abandon_kind TEXT "
-                             "CHECK(abandon_kind IN ('confirmed_stopped','unknown'))")
+                    add_column_if_missing(conn, 'state_attempts', column, ddl)
+            add_column_if_missing(conn, 'state_attempts', 'abandon_kind', "TEXT "
+                                  "CHECK(abandon_kind IN ('confirmed_stopped','unknown'))")
             if "'abandoned'" not in (_table_sql(conn, 'state_attempts') or ''):
                 raise sqlite3.IntegrityError('state_attempts lacks the abandoned status after migration; refusing')
             conn.execute(_LEASE_INDEX)
@@ -365,20 +365,15 @@ def initialize(db, existing_schema: str) -> None:
             # schema and triggers, indexes and explicit legacy compatibility.
             for statement in _statements(existing_schema):
                 conn.execute(statement)
-            evidence_cols = {r['name'] for r in conn.execute('PRAGMA table_info(state_evidence)')}
-            if 'director_identity' not in evidence_cols:
-                conn.execute("ALTER TABLE state_evidence ADD COLUMN director_identity TEXT")
-            receipt_cols = {r['name'] for r in conn.execute('PRAGMA table_info(state_acceptances)')}
-            if 'provenance_json' not in receipt_cols:
-                conn.execute("ALTER TABLE state_acceptances ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'")
+            add_column_if_missing(conn, 'state_evidence', 'director_identity', 'TEXT')
+            add_column_if_missing(conn, 'state_acceptances', 'provenance_json', "TEXT NOT NULL DEFAULT '{}'")
             observation_cols = {r['name'] for r in conn.execute('PRAGMA table_info(state_external_observations)')}
-            if observation_cols and 'late_after_abandon' not in observation_cols:
+            if observation_cols:
                 # P3 (design §9.1): a report filed after its attempt was abandoned
                 # is kept and marked; the fence it presented is recorded.
-                conn.execute("ALTER TABLE state_external_observations ADD COLUMN late_after_abandon INTEGER NOT NULL "
-                             "DEFAULT 0 CHECK(late_after_abandon IN (0,1))")
-            if observation_cols and 'fence' not in observation_cols:
-                conn.execute("ALTER TABLE state_external_observations ADD COLUMN fence INTEGER")
+                add_column_if_missing(conn, 'state_external_observations', 'late_after_abandon',
+                                      "INTEGER NOT NULL DEFAULT 0 CHECK(late_after_abandon IN (0,1))")
+                add_column_if_missing(conn, 'state_external_observations', 'fence', 'INTEGER')
             owners_sql = _table_sql(conn, 'state_external_owners')
             if owners_sql is not None and "'abandoned'" not in owners_sql:
                 # P3: the owner lifecycle gains `abandoned` too (design §9.1).

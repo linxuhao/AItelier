@@ -12,6 +12,7 @@ from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID, V3
 from core.drivers import recipient_presence_block
 from core.state_driver_notes import _redact
 from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_schema_migration import add_column_if_missing
 
 
 def _message_errors(method):
@@ -130,20 +131,19 @@ def initialize(db) -> None:
         conn.executescript(SCHEMA)
         columns = {row["name"] for row in conn.execute(
             "PRAGMA table_info(state_director_messages)")}
-        if "delivery_mode" not in columns:
-            conn.execute(
-                "ALTER TABLE state_director_messages ADD COLUMN "
-                "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
-                "CHECK(delivery_mode IN ('transient','standing'))")
+        add_column_if_missing(conn, "state_director_messages", "delivery_mode",
+                              "TEXT NOT NULL DEFAULT 'transient' "
+                              "CHECK(delivery_mode IN ('transient','standing'))")
         from core import director_messaging_quorum as quorum
+        # Decided from the snapshot taken before any ADD, as before: the legacy
+        # ack backfill below runs exactly when this call found ack_mode missing.
         migrate_acks = "ack_mode" not in columns
         for name, definition in [
             ("sender_driver_id", "TEXT"),
             ("ack_mode", "TEXT NOT NULL DEFAULT 'at_least_n' CHECK(ack_mode IN ('at_least_n','broadcast'))"),
             ("ack_quorum", "INTEGER NOT NULL DEFAULT 1 CHECK(ack_quorum>=1)"),
         ]:
-            if name not in columns:
-                conn.execute("ALTER TABLE state_director_messages ADD COLUMN " + name + " " + definition)
+            add_column_if_missing(conn, "state_director_messages", name, definition)
         conn.executescript(quorum.SCHEMA)
         if migrate_acks:
             conn.execute("INSERT OR IGNORE INTO state_director_legacy_acks SELECT delivery_id FROM state_director_deliveries WHERE status IN ('acknowledged','resolved')")

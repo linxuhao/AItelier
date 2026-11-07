@@ -10,6 +10,7 @@ import { once } from 'node:events';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { readHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
+import { watchProgress } from './progress.mjs';
 
 function assertInjectionCadence(events) {
   let epoch = 0;
@@ -70,7 +71,13 @@ async function deniedScratchRoot(t) {
   return null;
 }
 
-test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: 45000 }, async (t) => {
+// This scenario is bounded by the progress it observes, not by the clock (see
+// progress.mjs): every wait below is a watch over the child's own milestones, so
+// a runtime that is merely slow finishes and passes whatever the host is doing,
+// while a runtime whose watched progress stops arriving still fails - and says
+// which watch expired. A harness timeout on the whole scenario would be a second,
+// silent wall budget on exactly the thing this replaces.
+test('real pinned DSH: native child, auto compact, fresh injection, raw history grep and automatic notifications', { timeout: Infinity }, async (t) => {
   // Measure the pinned harness or report this run unmeasured; never invent one.
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
@@ -168,15 +175,46 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       return child;
     };
     proc = launch();
-    const deadline = Date.now() + 35000;
-    while (Date.now() < deadline && proc.exitCode === null) {
-      if (activity.some(a => a.phase === 'failed')) break;
-      if (events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq'))
-          && events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') && activity.some(a => a.phase === 'waiting' && a.subagents.length === 0)
-          && requests.some(r=>!r.child&&!r.summary&&JSON.stringify(r.options.messages).includes('Native child completed.'))) break;
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+    // Wait for the child's OBSERVED PROGRESS, not for the wall clock. Every
+    // milestone below is a step this scenario then asserts on, so the wait covers
+    // the assertions instead of racing them (the old 35 s deadline stopped at the
+    // first four signals and left the second compaction, the post-compaction State
+    // and the live history to whatever the host had managed by then - which is how
+    // a loaded box turned "still working" into an assertion failure). Only forward
+    // signals are listed: the idle director's own turns, activity heartbeats and
+    // the periodic idle review advance none of them, so a runtime that stops
+    // making progress still reds, after `quietMs` and with the expired watch named.
+    const compactions = () => events.filter(e => e.type === 'compaction/end' && !e.data.error).length;
+    const injections = () => events.filter(e => e.type === 'user/message' && e.data.source?.kind === stateInjectionSource);
+    const booted = await watchProgress({
+      what: 'the smoke scenario to complete (native child walks its own checkout, the director compacts twice and re-reads State, the child completion is notified)',
+      running: () => proc.exitCode === null,
+      failed: () => activity.some(a => a.phase === 'failed'),
+      milestones: [
+        { name: 'State snapshot read on boot', met: () => contextReads >= 1 },
+        { name: 'first native root tool result', met: () => events.some(e => e.type === 'tool/result') },
+        { name: 'pipeline tool answered through the call_tool bridge', met: () => events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('fixture_pipeline')) },
+        { name: 'native child spawned (live child in activity)', met: () => activity.some(a => a.subagents.length > 0) },
+        { name: 'native child ran its own tool loop', met: () => requests.filter(r => r.child && !r.summary).length > 1 },
+        { name: 'native child dispatched MCP under its own identity', met: () => dispatches.some(d => d.nested && !d.isError) },
+        { name: 'native child shell result published', met: () => events.some(e => e.data?.message?.toolCallId === 'fixture-child-shell') },
+        { name: 'native child owned-work calls (open, write, bash, deliver)', met: () => workCalls.length >= 4 },
+        { name: 'native child messaged the idle parent', met: () => requests.some(r => !r.child && JSON.stringify(r.options.messages).includes('CHILD_MESSAGE_MARKER')) },
+        { name: 'goal history grep answered from before the compaction', met: () => events.some(e => e.type === 'tool/result' && JSON.stringify(e.data).includes('next_after_seq') && JSON.stringify(e.data).includes('goal_round')) },
+        { name: 'automatic compaction ended', met: () => compactions() >= 1 },
+        { name: 'context-window overflow recovered by a second compaction', met: () => compactions() >= 2 },
+        { name: 'fresh State re-injected after a compaction', met: () => injections().length >= 2 },
+        { name: 'overflow retry got fresh private State', met: () => injections().some(e => JSON.stringify(e.data).includes('overflow fresh private rule')) },
+        { name: 'State re-read after compaction', met: () => contextReads >= 2 },
+        { name: 'child completion notified the idle parent', met: () => requests.some(r => !r.child && !r.summary && JSON.stringify(r.options.messages).includes('Native child completed.')) },
+        { name: 'parent waited with no live child', met: () => activity.some(a => a.phase === 'waiting' && a.subagents.length === 0) },
+        { name: 'native history published live on activity', met: () => activity.some(a => a.event?.type === 'tool/result') },
+      ],
+    });
     assert.equal(proc.exitCode, null, output);
+    // A red names the watch that expired and the last progress it saw, plus the
+    // driver's own output - the old "scenario did not finish" named neither.
+    assert.ok(booted.done, `${booted.message}\n` + output);
     // The fixture reports the mode it really booted in, so an inherited
     // execution mode fails here instead of corrupting a later filesystem claim.
     assert.ok(requests.length > 0 && requests.every(r => r.host === false),
@@ -254,11 +292,24 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     environment.AITELIER_DSH_EXECUTION = 'host';
     environment.DSH_PERMISSION_MODE = 'danger-full-access';
     proc = launch();
-    const resumedBy = Date.now() + 20000;
-    while (Date.now() < resumedBy && proc.exitCode === null && !events.slice().reverse().some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_ALLOWED'))) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+    // The resumed session is watched the same way: its own forward milestones
+    // bound the wait, so a host-mode child that is merely slow is not indicted by
+    // a 20 s wall budget, while one that never gets the outside write still reds.
+    const resumedFrom = events.length;
+    const resumedProgress = await watchProgress({
+      what: 'the resumed host-mode session to rearm its goal and drive its native child to the outside-write proof',
+      running: () => proc.exitCode === null,
+      failed: () => activity.some(a => a.phase === 'failed'),
+      milestones: [
+        { name: 'resumed driver served a host turn', met: () => requests.slice(before).some(r => r.host && !r.summary && r.options.tools?.length) },
+        { name: 'persisted goal was rearmed, not recreated', met: () => events.slice(resumedFrom).some(e => e.type === 'goal/change' && e.data.operation === 'resume') },
+        { name: 'root host shell result published', met: () => events.slice(resumedFrom).some(e => e.data?.message?.toolCallId === 'fixture-root-host-shell') },
+        { name: 'resumed child ran its own tool loop', met: () => requests.slice(before).filter(r => r.child && !r.summary).length > 1 },
+        { name: 'resumed child allowed the outside write', met: () => events.slice(resumedFrom).some(e => e.data?.message?.toolCallId === 'fixture-child-shell' && JSON.stringify(e.data).includes('OUTSIDE_WRITE_ALLOWED')) },
+      ],
+    });
     assert.equal(proc.exitCode, null, output);
+    assert.ok(resumedProgress.done, `${resumedProgress.message}\n` + output);
     const resumed = requests.slice(before).find(r => r.host && r.options.tools?.some(t => t.name === 'state_read'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
@@ -266,7 +317,12 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.equal(events.filter(e=>e.type==='goal/change'&&e.data.operation==='create').length,1,'restart replaced the persisted goal');
     const rearmed=events.find(e=>e.type==='goal/change'&&e.data.operation==='resume');
     assert.equal(rearmed?.data.goal.id,created[0].data.goal.id,'active goal was not rearmed after restart');
-    assert.ok(!resumed.options.tools.some(t => t.name === 'project_work'), 'host kept obsolete coding bridge');
+    // Which of the resumed process's requests tripped it: the driver's own
+    // envelope or the compaction backend replaying the recorded one. A red that
+    // cannot say that sends the next reader through the whole scenario.
+    assert.ok(!resumed.options.tools.some(t => t.name === 'project_work'), 'host kept obsolete coding bridge\n'
+      + JSON.stringify(requests.slice(before).map(r => ({ summary: r.summary, child: r.child, host: r.host,
+        tools: r.options.tools?.length, codingBridge: r.options.tools?.some(t => t.name === 'project_work') }))));
     assert.equal(await readFile(join(outsideDirectory, 'root-host-proof.txt'), 'utf8'), 'ROOT_HOST_OK');
     assert.equal(await readFile(join(outsideDirectory, 'outside-probe.txt'), 'utf8'), 'allowed');
     assert.match(await readFile(join(outsideDirectory, 'host-git-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/);

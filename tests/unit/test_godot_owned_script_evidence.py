@@ -214,7 +214,7 @@ def test_run_script_default_stays_headless(monkeypatch, tmp_path):
     monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
     seen = []
 
-    def fake_run(cmd, timeout, extra_env=None, render=False):
+    def fake_run(cmd, timeout, extra_env=None, render=False, idle_window=None):
         seen.append(render)
         return _CP(0, "PASS all\n", "")
 
@@ -232,7 +232,7 @@ def test_run_script_render_true_runs_the_same_admitted_entries_in_render_mode(mo
     monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
     seen = []
 
-    def fake_run(cmd, timeout, extra_env=None, render=False):
+    def fake_run(cmd, timeout, extra_env=None, render=False, idle_window=None):
         seen.append({"render": render, "script": cmd[-1], "home": extra_env["HOME"]})
         return _CP(0, "PASS all\n", "")
 
@@ -261,7 +261,7 @@ def test_run_script_retention_copies_before_the_throwaway_home_is_removed(monkey
                         lambda dst, timeout=0, raw_logs=None: None)
     homes = []
 
-    def fake_run(cmd, timeout, extra_env=None, render=False):
+    def fake_run(cmd, timeout, extra_env=None, render=False, idle_window=None):
         # Stand in for a suite that renders a PNG and a report into user://.
         home = Path(extra_env["HOME"])
         homes.append(home)
@@ -552,7 +552,7 @@ def test_unexpected_script_error_still_writes_a_truthful_failure_manifest(monkey
                         lambda dst, timeout=0, raw_logs=None: None)
     homes = []
 
-    def boom(cmd, timeout, extra_env=None, render=False):
+    def boom(cmd, timeout, extra_env=None, render=False, idle_window=None):
         home = Path(extra_env["HOME"])
         homes.append(home)
         (home / "reports").mkdir(parents=True, exist_ok=True)
@@ -582,7 +582,7 @@ def test_import_isolates_home_and_xdg_cleans_and_keeps_full_outcomes(monkeypatch
         raw = []
         marker = "IMPORT-RAW-" + "x" * 5000
 
-        def fake(args, timeout, extra_env=None, render=False):
+        def fake(args, timeout, extra_env=None, render=False, idle_window=None):
             assert "--import" in args and not render
             home = Path(extra_env["HOME"])
             homes.append(home)
@@ -636,7 +636,7 @@ def test_declared_import_artifact_survives_normal_routes_and_smoke_all_outcomes(
             _script_project(case)
             (case / "project.godot").write_text('[application]\nconfig/name="ImportOwned"\n')
             homes = []
-            def fake(args, timeout, extra_env=None, render=False):
+            def fake(args, timeout, extra_env=None, render=False, idle_window=None):
                 home = Path(extra_env["HOME"])
                 homes.append(home)
                 if "--import" in args:
@@ -696,7 +696,7 @@ def test_import_home_is_registered_before_effect_and_deferred_to_caller(monkeypa
     gh = _load(tmp_path, monkeypatch)
     homes, labels = [], []
     raw = gh._InvocationLogs(homes, labels)
-    def fake(args, timeout, extra_env=None, render=False):
+    def fake(args, timeout, extra_env=None, render=False, idle_window=None):
         assert homes == [Path(extra_env["HOME"])] and homes[0].is_dir()
         assert labels == [{"import": "resources"}]
         return _CP(0, "FULL-IMPORT", "")

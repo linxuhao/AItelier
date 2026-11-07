@@ -78,7 +78,7 @@ def test_owner_read_write_refusal_and_release_close_all_scopes(tmp_path,monkeypa
 def test_fresh_normal_http_closes_ownerdb_fds_without_warmup_or_gc(tmp_path,monkeypatch,outcome):
     m=load(tmp_path,monkeypatch);proj=tmp_path/"project";proj.mkdir();(proj/"project.godot").write_text('[application]\nconfig/name="OwnedFD"\n');(proj/"tests").mkdir();(proj/"tests/a.gd").write_text("extends SceneTree\n")
     homes=[]
-    def boundary(argv,timeout,extra_env=None,render=False):
+    def boundary(argv,timeout,extra_env=None,render=False, idle_window=None):
         home=Path(extra_env["HOME"]);homes.append(home)
         f=home/".local/share/godot/app_userdata/OwnedFD/report.json";f.parent.mkdir(parents=True);f.write_text('{"owned":true}')
         if outcome=="exception" and "--import" not in argv:raise RuntimeError("owned engine boundary exception")

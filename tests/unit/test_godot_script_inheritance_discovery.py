@@ -182,7 +182,7 @@ def test_zero_entry_failure_is_about_absence_not_a_blanket_filter(
         returncode, stdout, stderr = 0, "PASS all\n", ""
 
     monkeypatch.setattr(harness, "_run",
-                        lambda cmd, timeout, extra_env=None, render=False: _CP)
+                        lambda cmd, timeout, extra_env=None, render=False, idle_window=None: _CP)
 
     r = harness.run_script(str(root), [], timeout=30)
     assert r["passed"] is True and r["discovered"] == ["res://tests/entry.gd"], r

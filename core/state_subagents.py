@@ -13,6 +13,7 @@ working context are stored.
 from __future__ import annotations
 
 import re
+import sqlite3
 
 from core.state_attempts import ACTIVE
 from core.state_claims import ClaimError, digest, now_stamp
@@ -42,18 +43,61 @@ BEGIN SELECT RAISE(ABORT,'subagent records are kept'); END;
 RETIRED_TABLES = ("state_subagent_contexts", "driver_notices", "driver_checkpoint_decisions")
 
 
+TAKEOVER_TABLE = "driver_subagents_p3_takeover"
+
+
+def _table_exists(conn, table: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (table,)).fetchone() is not None
+
+
+def _registry_columns(conn) -> set:
+    return {r[1] for r in conn.execute("PRAGMA table_info(driver_subagents)")}
+
+
 def _retire(conn) -> None:
+    """Drop the tables the P3 slimming retired, tolerating a concurrent winner.
+
+    This runs on EVERY StateService construction (the service is built per
+    request), so two requests can both pass a check and the loser's DROP or
+    RENAME raises sqlite3.OperationalError straight into the request. The loser
+    has nothing left to do - what it wanted gone is already gone, or already
+    renamed - so exactly those two texts are absorbed. Every other error, and a
+    registry that is somehow still here beside an existing takeover table, still
+    reaches the caller. No transaction is opened here, so construction keeps
+    taking no write lock.
+    """
     for table in RETIRED_TABLES:
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() \
-                and conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0:
+        if not _table_exists(conn, table):
+            continue
+        try:
+            if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] != 0:
+                continue
             conn.execute(f"DROP TABLE {table}")
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(driver_subagents)")}
-    if "context_sha256" in columns:
-        # The takeover-era registry (adoption, orphans, leases, instructions).
+        except sqlite3.OperationalError as exc:
+            # The count loses the race as readily as the drop does, so both are
+            # inside the guard; either way the table is already gone.
+            if str(exc) != f"no such table: {table}":
+                raise
+    if "context_sha256" not in _registry_columns(conn):
+        return
+    # The takeover-era registry (adoption, orphans, leases, instructions).
+    try:
         if conn.execute("SELECT COUNT(*) FROM driver_subagents").fetchone()[0] == 0:
             conn.execute("DROP TABLE driver_subagents")
-        else:
-            conn.execute("ALTER TABLE driver_subagents RENAME TO driver_subagents_p3_takeover")
+            return
+        conn.execute(f"ALTER TABLE driver_subagents RENAME TO {TAKEOVER_TABLE}")
+    except sqlite3.OperationalError as exc:
+        if str(exc) not in ("no such table: driver_subagents",
+                            f"there is already another table or index with this name: {TAKEOVER_TABLE}"):
+            raise
+        # Absorb while the winner getting there first is what happened: our legacy
+        # registry is gone, and whatever `driver_subagents` may exist by now is the
+        # post-P3 table another construction just created. One still carrying
+        # context_sha256 is the legacy registry sitting beside an existing takeover
+        # table - a state nobody has explained, and not ours to leave in place.
+        if "context_sha256" in _registry_columns(conn):
+            raise
 
 
 def initialize(db) -> None:

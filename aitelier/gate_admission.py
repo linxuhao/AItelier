@@ -13,9 +13,10 @@ Render requests are admitted through the harness's durable render queue
 finds a live render owner waits for it to release, and the answer carries
 `render_owner_wait_sec` and `render_owner_waited_for_owner_ids`. The relay
 gives each render request a bounded `render_wait_timeout_sec` when the gate
-sent none, so a request that is not admitted inside that window comes back as
-the harness's structured refusal while the gate is still listening. A gate
-that sends its own value keeps it.
+sent none -- a missing key and an explicit JSON null both mean none, because
+the harness reads a null wait as an unbounded queue -- so a request that is not
+admitted inside that window comes back as the harness's structured refusal
+while the gate is still listening. A gate that sends its own number keeps it.
 
 While a render request waits in that queue the relay keeps the gate's socket
 alive: every `keepalive_sec` it sends the gate an interim
@@ -284,7 +285,11 @@ class AdmissionRelay:
             except ValueError:
                 payload = None
             if isinstance(payload, dict):
-                if "render_wait_timeout_sec" not in payload:
+                # A missing key and an explicit JSON null both mean the gate
+                # sent no bound of its own. The harness reads a null wait as
+                # "queue forever", so forwarding one would drop the bound this
+                # relay exists to impose; a number (0 included) is kept as sent.
+                if payload.get("render_wait_timeout_sec") is None:
                     payload["render_wait_timeout_sec"] = self._render_wait
                     record["render_wait_injected"] = True
                 record["render_wait_timeout_sec"] = payload["render_wait_timeout_sec"]

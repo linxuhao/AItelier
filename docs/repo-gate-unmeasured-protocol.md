@@ -179,6 +179,11 @@ forwards every request to the real builder. On the render routes (`/playtest`,
 `/script`, `/x11_input_smoke`) it adds `render_wait_timeout_sec`
 (`AITELIER_REPO_GATE_RENDER_WAIT_SECONDS`, default 1500) when the gate sent
 none, so the request waits in the harness render queue behind a live owner.
+"Sent none" means a missing key **or an explicit JSON `null`**:
+`docker/godot/godot_harness.py` (the `wait_timeout` read at 6745-6749) keeps a
+null wait as `None`, which the render queue takes as "queue forever", so
+forwarding one would drop the bound the relay exists to impose. A number the
+gate sends, 0 included, is kept.
 For each request it records the route, the status and the owner fields of a
 409 payload, as `answered`, `not_admitted`, `engine_error`, `unreachable` or
 `abandoned`. The summary (from the LAST request) is written to

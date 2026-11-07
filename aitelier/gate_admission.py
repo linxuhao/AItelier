@@ -28,15 +28,26 @@ relay sends one last interim response and then nothing until the answer. So
 the gate's own timeout measures the render, counted from admission, and not
 the queue in front of it. A request whose admission cannot be observed (no
 `/lifecycle`, or the gate speaks HTTP/1.0) gets no interim responses at all.
-The witness names a request only while it is the only one carrying that
-`operation_id` (the harness mints `owner_id` itself, so a row has no
-per-request nonce): a request that shares its id with another in flight claims
-no new row as its admission, keeps the ordinary keepalive, and records
-`admission_witnessed: false`.
+
+That witness is one owner row for one `operation_id`, and the row carries no
+per-request nonce (the harness mints `owner_id` itself), so it identifies a
+REQUEST only while one request carries that id. A render request that arrives
+while another request on this relay is still carrying the same `operation_id`
+is a duplicate: the row it will eventually get is indistinguishable from the
+one already in flight, so its admission is NOT witnessed. It is still queued
+and answered by the harness like any other request -- it is not refused,
+cancelled, or told to wait differently -- and it keeps receiving the ordinary
+interim response while it waits, but it never sends the admission interim
+response that ends that keepalive and its record carries
+`admission_witnessed: false` instead of `admitted_after_sec`. The aliasing
+lasts only while both requests are in flight: an operation id is counted from
+arrival to answer, so a later sequential request with the same id is admitted
+and witnessed normally.
 
 The relay adds no retries. A refusal is recorded and handed to the gate
 unchanged; what happens next is the scheduler's business
 (`core/gate_deferral.py`), and it never charges the implementer for it.
+A request that was joined while it waited also claims no new row.
 """
 from __future__ import annotations
 
@@ -175,7 +186,10 @@ class AdmissionRelay:
         self._lock = threading.Lock()
         self._records: list[dict] = []
         self._in_flight: set = set()
-        # operation_id -> how many requests this relay is carrying with it.
+        # operation_id -> the records of the requests this relay is carrying
+        # with it. A record leaves when its request ends; while two are listed
+        # the id is shared, and the record keeps that request's own no-claim
+        # decision even if the mark behind it goes away.
         self._in_flight_operations: dict = {}
         # operation_ids that two requests on this relay carried at once: while
         # any of those overlaps is in flight, its owner rows name no request.
@@ -230,11 +244,27 @@ class AdmissionRelay:
         Cutting the upstream socket is what lets the harness see that nobody
         is waiting any more, so a queued request is dropped from the queue
         instead of rendering for a caller that is gone.
+
+        Nothing still in flight when this returns can witness an admission
+        afterwards: the mark and the record of every request carrying an
+        operation_id are fenced here, so a row that appears while the relay is
+        going away is credited to nobody.
         """
         with self._lock:
             self._stopping = True
+            # A request that is still in flight here must never be able to claim
+            # an owner row afterwards, so nothing it depends on is taken away:
+            # every id still in flight keeps its shared mark (clearing it would
+            # hand the next row for that id to the first request, which is
+            # exactly the request that was joined while it waited), and each of
+            # those requests is told now that its admission was not witnessed.
+            # The record is a second authority, read by `_claim_admission` too.
+            self._shared_operations.update(self._in_flight_operations)
+            for carried in self._in_flight_operations.values():
+                for record in carried:
+                    if "admitted_after_sec" not in record:
+                        record["admission_witnessed"] = False
             self._in_flight_operations.clear()
-            self._shared_operations.clear()
             conns = list(self._in_flight)
         if self._server is not None:
             self._server.shutdown()
@@ -260,29 +290,36 @@ class AdmissionRelay:
         with self._lock:
             return [dict(r) for r in self._records]
 
-    def _enter_operation(self, operation: str) -> bool:
+    def _enter_operation(self, operation: str, record: dict) -> bool:
         """Count this request in for `operation`; True if another one is in flight.
 
         From here until this request's `_leave_operation` no owner row for
         `operation` can be attributed to a single request, so the flag stays
         set for the whole overlap: a request that joined, or that was joined
-        while it waited, never claims a row as its own admission.
+        while it waited, never claims a row as its own admission. The record is
+        listed so `stop()` can still name every request carrying the id.
         """
         with self._lock:
-            in_flight = self._in_flight_operations.get(operation, 0)
-            self._in_flight_operations[operation] = in_flight + 1
-            if in_flight:
+            carried = self._in_flight_operations.setdefault(operation, [])
+            joined = bool(carried)
+            carried.append(record)
+            if joined:
                 self._shared_operations.add(operation)
-            return in_flight > 0
+            return joined
 
-    def _leave_operation(self, operation: str) -> None:
-        """Drop this request's count, so a later request is not its duplicate."""
+    def _leave_operation(self, operation: str, record: dict) -> None:
+        """Drop this request from the id, so a later one is not its duplicate."""
         with self._lock:
-            in_flight = self._in_flight_operations.get(operation, 1) - 1
-            if in_flight > 0:
-                self._in_flight_operations[operation] = in_flight
-            else:
-                self._in_flight_operations.pop(operation, None)
+            carried = self._in_flight_operations.get(operation) or []
+            if record in carried:
+                carried.remove(record)
+            if carried:
+                self._in_flight_operations[operation] = carried
+                return
+            self._in_flight_operations.pop(operation, None)
+            if not self._stopping:
+                # `stop()` cleared the counts and kept the marks on purpose: a
+                # request leaving afterwards must not clear what it may not claim.
                 self._shared_operations.discard(operation)
 
     def _operation_shared(self, operation: str) -> bool:
@@ -303,12 +340,16 @@ class AdmissionRelay:
         and stops watching; False means it keeps the ordinary keepalive.
         """
         with self._lock:
-            if (operation in self._shared_operations
+            if (self._stopping
+                    or operation in self._shared_operations
                     or record.get("admission_witnessed") is False):
-                # The record is the second authority. `stop()` clears the shared
-                # marks while in-flight watches are still running, and a request
-                # that has already been named as never-witnessed must not claim
-                # afterwards in any case.
+                # Three authorities, and any one of them refuses the claim. A
+                # stopped relay witnesses nothing: a request still in flight when
+                # `stop()` ran can never credit itself with a row. The record is
+                # the second authority -- `stop()` writes the refusal into it, so
+                # a request already named as never-witnessed cannot claim
+                # afterwards in any case -- and the shared mark itself is kept by
+                # `stop()` for every id still in flight.
                 record["admission_witnessed"] = False
                 return False
             record["admitted_after_sec"] = round(time.monotonic() - started, 3)
@@ -383,7 +424,7 @@ class AdmissionRelay:
         # new row for it: it keeps the ordinary keepalive and its record says
         # so (module docstring).
         shared = (watched_operation is not None
-                  and self._enter_operation(watched_operation))
+                  and self._enter_operation(watched_operation, record))
         if shared:
             record["admission_witnessed"] = False
         watch = None
@@ -438,7 +479,7 @@ class AdmissionRelay:
                 # From here only the final answer is written to the gate. The
                 # watch is stopped while this request still counts as in
                 # flight, so a claim it has not made by now is never made, and
-                # the shared mark below is cleared only afterwards.
+                # the record it was given is never contradicted afterwards.
                 watch.stop()
             with self._lock:
                 self._in_flight.discard(conn)
@@ -447,7 +488,7 @@ class AdmissionRelay:
                 # while it waited still has to name what it could not claim,
                 # even when its answer lands between two polls.
                 shared = shared or self._operation_shared(watched_operation)
-                self._leave_operation(watched_operation)
+                self._leave_operation(watched_operation, record)
             conn.close()
         done["elapsed_sec"] = round(time.monotonic() - started, 3)
         if watch is not None:

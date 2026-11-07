@@ -13,13 +13,16 @@ began as not run (iss-b859d7478c524da1 item 4).
 
 Every test here drives the REAL `AdmissionRelay` over HTTP against a SCRIPTED
 sidecar (`Sidecar`): its `/lifecycle` answers with exactly the rows the test
-added, and its render route holds each answer until the test releases it. So
-both facts the relay's witness depends on -- which request arrived first, and
-when an owner row appears -- are events the TEST sets, never a race the test
-sleeps through. The client speaks raw HTTP/1.1 so the interim `100 Continue`
-responses are visible too. Assertions read the relay's own per-request records
-through its public `snapshot()`; no private attribute is touched, and nothing
-here assumes a duration.
+added, its render route holds each answer until the test releases it, and one
+`/lifecycle` answer can be held open so the test decides when a watch learns
+about a row. So the three facts the relay's witness depends on -- which request
+arrived first, when an owner row appears, and when the relay stops -- are
+events the TEST sets, never a race the test sleeps through. The client speaks
+raw HTTP/1.1 so the interim `100 Continue` responses are visible too; an
+HTTP/1.0 client is how one test carries a second request with the same
+`operation_id` without opening a second watch. Assertions read the relay's own
+per-request records through its public `snapshot()`; no private attribute is
+touched, and nothing here assumes a duration.
 
 Boundary this file does NOT fix and this change leaves unchanged: a request
 that is never witnessed as admitted is not bounded by the gate client's own
@@ -65,6 +68,14 @@ class Sidecar:
         self.posts: list[dict] = []
         self.arrived = [threading.Event() for _ in range(capacity)]
         self.answer = [threading.Event() for _ in range(capacity)]
+        # One `/lifecycle` answer can be held open: the test raises
+        # `hold_lifecycle`, `lifecycle_held` says a read is now inside the
+        # hold, and `release_lifecycle` lets it answer -- with the owner rows
+        # that exist at THAT moment. So "a watch read the table after the row
+        # appeared" is an event the test sets, not an interval it waits out.
+        self.hold_lifecycle = False
+        self.lifecycle_held = threading.Event()
+        self.release_lifecycle = threading.Event()
         self._lock = threading.Lock()
         sidecar = self
 
@@ -74,6 +85,9 @@ class Sidecar:
             protocol_version = "HTTP/1.1"
 
             def do_GET(self):
+                if sidecar.hold_lifecycle:
+                    sidecar.lifecycle_held.set()
+                    sidecar.release_lifecycle.wait(120)
                 with sidecar._lock:
                     owners = [dict(row) for row in sidecar.owners]
                 body = json.dumps({"owners": owners}).encode()
@@ -118,19 +132,24 @@ class Sidecar:
                                 "status": "active"})
 
     def close(self) -> None:
+        self.release_lifecycle.set()
         for event in self.answer:
             event.set()
         self.server.shutdown()
         self.server.server_close()
 
 
-def _answer(url, operation_id, progress, *, path="/script", timeout=180):
-    """POST one render request over raw HTTP/1.1 and read the whole answer.
+def _answer(url, operation_id, progress, *, path="/script", timeout=180,
+            version="HTTP/1.1"):
+    """POST one render request over raw HTTP and read the whole answer.
 
     `progress["interim"]` is the live list of interim arrival times (monotonic,
     so the test can compare them with its own markers while the request is
     still in flight). The return value carries the final status, its body, the
-    interim times and when the answer arrived.
+    interim times and when the answer arrived. `version` is the client's
+    protocol line: an HTTP/1.0 client gets no interim responses at all
+    (module docstring), so it is the way to carry an `operation_id` without
+    opening a second admission watch.
     """
     parts = urllib.parse.urlsplit(url)
     payload = json.dumps({"project_dir": "/tmp/shared-operation",
@@ -138,7 +157,7 @@ def _answer(url, operation_id, progress, *, path="/script", timeout=180):
                           "run_id": "shared-operation",
                           "operation_id": operation_id,
                           "scripts": ["res://tests/a.gd"]}).encode()
-    head = (f"POST {path} HTTP/1.1\r\nHost: {parts.hostname}\r\n"
+    head = (f"POST {path} {version}\r\nHost: {parts.hostname}\r\n"
             "Content-Type: application/json\r\n"
             f"Content-Length: {len(payload)}\r\n"
             f"X-AItelier-Operation: {operation_id}\r\n\r\n").encode()
@@ -243,9 +262,22 @@ def _recorded(relay, count: int) -> None:
            f"{count} answers recorded by the relay")
 
 
-def _start(relay, url, operation_id, progress):
-    thread, box = _in_thread(_answer, url, operation_id, progress)
+def _start(relay, url, operation_id, progress, **kwargs):
+    thread, box = _in_thread(_answer, url, operation_id, progress, **kwargs)
     return thread, box
+
+
+def _watch_running() -> bool:
+    """True while an admission watch is still running.
+
+    The relay starts a watch as a daemon thread named `gate-admission-watch`
+    and names nothing else that way, so "the watch that could still write a
+    claim has finished" is a fact about the process the test can wait for.
+    Without it, an assertion that a record does NOT carry a claim could pass
+    before the claim was written. No relay attribute is read here.
+    """
+    return any(thread.name == "gate-admission-watch" and thread.is_alive()
+               for thread in threading.enumerate())
 
 
 @pytest.fixture
@@ -264,29 +296,38 @@ def rig():
         side.close()
 
 
-@pytest.mark.parametrize("owner", ["first-request", "second-request"],
-                         ids=["rows-of-first-request", "rows-of-second-request"])
-def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(rig, owner):
+@pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
+                         ids=["a-arrives-first", "b-arrives-first"])
+@pytest.mark.parametrize("owner", ["first-to-arrive", "second-to-arrive"],
+                         ids=["rows-of-first-arrival", "rows-of-second-arrival"])
+def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(
+        rig, owner, arrival):
     """BOTH arrival orders: the one row that appears belongs to neither request.
 
-    Request 1 arrives and takes its `before` snapshot (the relay reads the
-    owner table before it forwards the POST, so the sidecar's arrival event
-    bounds that read). Request 2 then arrives with the same operation_id and
-    takes its own snapshot. A row appearing now is strictly after BOTH
-    snapshots, and it is labelled as each request in turn: the old
-    `owners - before` witness read it as the FIRST request's admission when it
-    was the second's, and as the second's when it was the first's. The label
-    changes nothing here on purpose -- neither request can attribute it.
+    Request A reaches the engine and takes its `before` snapshot (the relay
+    reads the owner table before it forwards the POST, so the sidecar's arrival
+    event bounds that read). Request B then arrives with the same
+    operation_id and takes its own snapshot. A row appearing now is strictly
+    after BOTH snapshots, and it is labelled as each arrival in turn: the old
+    `owners - before` witness read it as A's admission when it was B's, and as
+    B's when it was A's. Which of them actually arrived first is a parameter
+    here, not a constant -- the first version of this test started request 0
+    first in both cases and only relabelled the row, so the net effect of
+    swapping who claims was never exercised. The label and the order change
+    nothing on purpose: neither request can attribute the row.
     """
     side, relay, url = rig
+    # Which request starts first is the parameter; the sidecar's arrival slots
+    # are filled in that order, so `side.arrived[slot]` is the slot-th arrival.
+    order = (0, 1) if arrival == "a-then-b" else (1, 0)
     progress = [dict(), dict()]
     threads: list[threading.Thread] = []
     boxes: list[dict] = [dict(), dict()]
     try:
-        for index in (0, 1):
+        for slot, index in enumerate(order):
             thread, boxes[index] = _start(relay, url, OP, progress[index])
             threads.append(thread)
-            assert side.arrived[index].wait(30), (
+            assert side.arrived[slot].wait(30), (
                 f"request {index + 1} never reached the engine")
         side.add_owner(f"row-of-the-{owner}")
         marker = time.monotonic()
@@ -309,26 +350,27 @@ def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(rig,
     _recorded(relay, 2)
     for index, box in enumerate(boxes):
         assert "error" not in box, box.get("error")
-    first, second = boxes[0]["result"], boxes[1]["result"]
-    first_record, second_record = _records(relay)[0], _records(relay)[1]
+    records = _records(relay)
 
-    for label, answer, record, kept in (
-            ("first", first, first_record, kept_alive[0]),
-            ("second", second, second_record, kept_alive[1])):
+    # Each request's record is identified by the ORDER it arrived in, so the
+    # reversed case asserts on the reverse request's record and not on a label.
+    for slot, index in enumerate(order):
+        label = f"the request that arrived {'first' if slot == 0 else 'second'}"
+        answer, record, kept = boxes[index]["result"], records[slot], kept_alive[index]
         assert answer["status"] == 200, answer
         assert record["outcome"] == admission.ANSWERED
         # The owner table WAS readable: this is the shared-id rule, not the
         # "admission cannot be observed" one.
         assert record["admission_observed"] is True
         assert not _claims(record), (
-            f"the {label} request claimed an admission from an owner row it "
-            "cannot attribute to itself (the id was carried by two requests): "
+            f"{label} claimed an admission from an owner row it cannot "
+            "attribute to itself (the id was carried by two requests): "
             f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
         assert record.get("admission_witnessed") is False, record
         assert kept, (
-            f"the {label} request stopped receiving interim responses at a row "
-            "it cannot call its own: that is the admission interim, which must "
-            "not be sent by a request that was never witnessed as admitted")
+            f"{label} stopped receiving interim responses at a row it cannot "
+            "call its own: that is the admission interim, which must not be "
+            "sent by a request that was never witnessed as admitted")
         # Every interim the relay counted reached the gate: one stream, and the
         # admission interim is in it or is not.
         assert record["keepalives"] == len(answer["interim"])
@@ -470,3 +512,74 @@ def test_another_requests_shared_id_does_not_suppress_a_unique_one(rig):
     assert _claims(records[2]), records[2]
     assert "admission_witnessed" not in records[2]
     assert [post.get("operation_id") for post in side.posts] == [OP, OP, "op-solo"]
+
+
+def test_a_request_in_flight_when_the_relay_stops_claims_no_row(rig):
+    """A row that appears while the relay stops is credited to nobody.
+
+    753d1c03b6 cleared the shared marks inside `stop()`, so the next owner row
+    for an id was handed to the first request -- the one that was never refused
+    -- while it was still queued: measured on that commit as
+    `admitted_after_sec` on its record, twice, and never without a `stop()`.
+    The interleaving is the test's own, in three events: request 1 reached the
+    engine, request 1's watch is inside a `/lifecycle` read, and the relay has
+    stopped. Only then does the row appear, so the row is read AFTER `stop()`
+    returned by a request that was still in flight when it ran. Request 2
+    carries the same id over HTTP/1.0 -- it joins the id but opens no watch --
+    so the one watch here is unambiguously request 1's, and request 1 is the
+    first arrival, which is the request the leak was measured on.
+    """
+    side, relay, url = rig
+    progress = [dict(), dict()]
+    boxes: list[dict] = [dict(), dict()]
+    threads: list[threading.Thread] = []
+    try:
+        thread, boxes[0] = _start(relay, url, OP, progress[0])
+        threads.append(thread)
+        assert side.arrived[0].wait(30), "request 1 never reached the engine"
+        thread, boxes[1] = _start(relay, url, OP, progress[1], version="HTTP/1.0")
+        threads.append(thread)
+        assert side.arrived[1].wait(30), "request 2 never reached the engine"
+        _await(lambda: _records(relay)[0].get("admission_observed") is True,
+               "request 1's watch to be running")
+        # The watch's next read of the owner table is held open, so the watch is
+        # parked inside the read the row has to be seen through.
+        side.hold_lifecycle = True
+        assert side.lifecycle_held.wait(30), "no watch read the owner table"
+        relay.stop()
+        # The row exists only from here: it is the row the stop-path leak was
+        # measured from, and the request it is offered to was already stopped.
+        side.add_owner("row-while-the-relay-stopped")
+        side.hold_lifecycle = False
+        side.release_lifecycle.set()
+        # The claim is written by the watch thread, so the assertion below is
+        # only meaningful once that thread has finished.
+        _await(lambda: not _watch_running(), "request 1's watch to finish")
+    finally:
+        side.release_lifecycle.set()
+        for event in side.answer:
+            event.set()
+        for thread in threads:
+            thread.join(60)
+
+    for index, box in enumerate(boxes):
+        assert "error" not in box, box.get("error")
+    records = _records(relay)
+    first, second = records[0], records[1]
+
+    # The relay stopped under both of them: this is the stop path, not an
+    # ordinary answer.
+    assert first["outcome"] == admission.ABANDONED, first
+    assert first["admission_observed"] is True, first
+    assert "admitted_after_sec" not in first, (
+        "a request still in flight when the relay stopped claimed an owner row "
+        f"as its admission: admitted_after_sec={first.get('admitted_after_sec')}")
+    assert first.get("admission_witnessed") is False, first
+    # Request 2 shared the id, so it claims nothing either.
+    assert second["outcome"] == admission.ABANDONED, second
+    assert "admitted_after_sec" not in second, second
+    assert second.get("admission_witnessed") is False, second
+    # The row the leak was measured from existed, and the harness saw exactly
+    # one request per client: nothing was retried or refused along the way.
+    assert [row["owner_id"] for row in side.owners] == ["row-while-the-relay-stopped"]
+    assert [post.get("operation_id") for post in side.posts] == [OP, OP]

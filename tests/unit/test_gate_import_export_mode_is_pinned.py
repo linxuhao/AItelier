@@ -69,7 +69,7 @@ Two things, and neither of them is "what a shell command does":
          /opt`, `COPY --from=build / /`, `RUN find / -name '*.pyc' -delete`), because a
          mode on either decides whether the export tree can be reached and the text of a
          RUN does not say what it does with it. Those are real build lines this file will
-         not read. Pinned by `test_the_seventh_review_false_refusals_are_read`.
+         not read. Pinned by `test_the_seventh_review_stated_costs_are_refused_on_purpose`.
 
      `_directives` also drops blank and `#`-comment lines INSIDE a continuation, exactly
      as Docker does; before that change a comment line ended the instruction and left
@@ -92,7 +92,11 @@ answer that by treating a quoted separator as ordinary text, and its review meas
 cost: the same rule makes a whole quoted COMMAND one word, so `sh -c "chmod 0700 /opt"`
 and a `python -c` chmod slipped back to green, and an escaped quote closed and reopened
 the quoting. The split is quote-blind again, the `sed` refusal is a pinned cost, and the
-assignment's value is judged too. What remains is not one function: `_split_keyword`
+assignment's value is judged too. The tenth found the two halves of one hole: a word FUSED by
+a comma (`os.chmod('/opt',0o700)` was one word whose comma never reached an edge), and a
+variable assigned a PREFIX of the tree and completed by the expansion (`D=/op`, then
+`${D}t`). So a comma separates words, and a word is judged after the file's own assignments
+are filled into the places they expand. What remains is not one function: `_split_keyword`
 splits the keyword on any whitespace, `_directives` joins continuations and drops
 comment/blank lines, `_words` reads the exec form and an assignment's value,
 `_split_words` decides what separates a word, `_word` removes what a shell would remove,
@@ -111,18 +115,20 @@ What it cannot decide, and does not claim to
     with a literal head that already points at or into the tree is refused, so `/opt/ai*`,
     `/opt/*`, `/opt/aitelier-gate-{imports,x}` and `/*/..` are all caught, but a token
     that begins with the wildcard gives the text nothing to judge;
-  * the value of a bare `$VAR`/`${VAR}`: the text carries no path for it, so
-    `RUN chmod 0700 $D` is green unless the same file assigns `D` (an assignment's VALUE
-    is judged, so `ENV D=/opt` is refused; a value that arrives as a build argument is
-    text this file never reads), a cwd-relative spelling
+  * the value of a bare `$VAR`/`${VAR}` the file never assigns: the text carries no path
+    for it, so `RUN chmod 0700 $D` is green. (An assignment's VALUE is judged, so
+    `ENV D=/opt` is refused; a word that expands one of the file's own assignments is
+    judged as the text it would become, so `RUN D=/op; chmod 0700 ${D}t` is refused; a
+    value that arrives as a build argument is text this file never reads.) A cwd-relative spelling
     (`..` is `/` because the last `WORKDIR` is `/app`, and `~/../..` is `/` because HOME
     is `/home/app`), the RESULT of a command substitution (`$(dirname /opt/x)` is three
     words, none of them the directory it prints), and an alias path such as
     `/proc/self/root`, which IS `/`. None of them is decidable from the text without
     running a shell, and running one is what five rounds proved is the wrong trade;
-  * bash-only forms after an explicit `SHELL ["/bin/bash","-c"]`: `{/opt,/opt}` reduces
-    to `/opt,/opt` once the braces come off, and `$'\\x2fopt'` to `$x2fopt`, so neither
-    spells a path this file can judge;
+  * a bash ANSI-C quoted slash after an explicit `SHELL ["/bin/bash","-c"]`:
+    `$'\\x2fopt'` reduces to `$x2fopt`, which spells no path this file can judge. The
+    brace list that used to sit next to it (`{/opt,/opt}` reduced to a brace-free blob) is
+    now REFUSED, because a comma separates words - see `_SHELL_BREAK`;
   * `test_the_declared_non_claims_are_still_accepted` pins every shape above as ACCEPTED,
     with the measured Dockerfile line in each row, so the boundary is a measured
     decision rather than a silence. Closing one of them is a deliberate change to that
@@ -316,16 +322,24 @@ _UNQUOTED = {ord(character): None for character in "\"'\\"}
 #: here: a `;` or a `|` inside quotes still separates, because what this file decides is
 #: what the TEXT mentions, not what a shell would run (see `_split_words`, and the `sed`
 #: row in `test_the_documented_false_refusal_is_refused_on_purpose`). The backtick is
-#: deliberately absent: it stays inside its word.
-_SHELL_BREAK = re.compile(r"[\s;|&()<>]+")
+#: deliberately absent: it stays inside its word. A COMMA separates for the same reason: it
+#: is no part of a path, and without it `os.chmod('/opt',0o700)` is one word whose comma is
+#: INTERIOR, so nothing on its edge is stripped and `'/opt',0o700` named no path at all -
+#: the round-9 review measured that escape (`RUN python -c "import os;
+#: os.chmod('/opt',0o700)"` was accepted, while the same command with a space after the
+#: comma was refused). A comma is also what a bash brace list separates its members with,
+#: which is why `{/opt,/opt}` is now refused rather than reduced to a brace-free blob.
+_SHELL_BREAK = re.compile(r"[\s,;|&()<>]+")
 
 
 def _split_words(text: str) -> list[str]:
     """The words of one instruction's shell text, each still as WRITTEN (quoting attached).
 
-    One thing separates one word from the next: `\\s`, `;`, `|`, `&`, `(`, `)`, `<` or `>`,
-    so a TAB after `RUN` separates exactly as a space does (an earlier space-only split
-    made a whole instruction vanish).
+    One thing separates one word from the next: `\\s`, `,`, `;`, `|`, `&`, `(`, `)`, `<` or
+    `>`, so a TAB after `RUN` separates exactly as a space does (an earlier space-only split
+    made a whole instruction vanish), and a comma separates because it belongs to no path:
+    without it, `os.chmod('/opt',0o700)` is one word whose only comma is interior, so the
+    edge trimming of `_word` never reaches it and the word names nothing.
 
     Quoting does NOT protect a separator, and a BACKTICK is not a separator:
 
@@ -354,48 +368,86 @@ def _split_words(text: str) -> list[str]:
 #: `--from=build` (a leading `-`) are not one.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.+)$")
 
+#: A `$NAME` or `${NAME}` expansion, so a word carrying one can be judged after the value
+#: this file has already read is put where the shell would put it.
+_EXPANSION = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
-def _with_assigned_values(words: list[str]) -> list[str]:
-    """Each word, followed by the VALUE of its assignment when the word carries one.
 
-    `ENV D=/opt` puts the export tree's ancestor into a variable in one word that no shell
-    would split, and the value is the whole point of the line, so it is judged as its own
-    word. One level only: `A=B=/opt` yields `B=/opt`, whose own value is not re-expanded,
-    because a shell would not expand it either.
+def _with_assigned_values(
+    words: list[str], known: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """Each word, plus the value of its assignment and its expansion filled in.
+
+    Three kinds of word are produced for one instruction, because all three name what a
+    later line would use:
+
+      * every word as written;
+      * the VALUE of an assignment the word carries: `ENV D=/opt` puts the export tree's
+        ancestor into a variable in one word no shell would split, so the value is judged
+        as its own word;
+      * every word with a `$NAME`/`${NAME}` that this file has ALREADY read replaced by that
+        value, so `RUN D=/op; chmod 0700 ${D}t` is judged as the `/opt` a shell would build.
+        The round-9 review measured that escape: the assignment's own value `/op` names
+        nothing and `${D}t` carries no `/`, so neither word was refused while the shell
+        re-moded the ancestor. One level only - `A=B=/opt` yields `B=/opt`, whose own value
+        is not re-expanded, because a shell would not expand it either.
+
+    `known` carries the assignments of the instructions BEFORE this one, so an `ENV D=/op`
+    is visible to the `RUN` that expands it, and the returned mapping adds this one's.
     """
-    produced = list(words)
+    values = dict(known)
     for word in words:
         match = _ASSIGNMENT.match(word)
         if match:
+            values[word.split("=", 1)[0]] = match.group(1)
+    produced: list[str] = []
+    for word in words:
+        produced.append(word)
+        match = _ASSIGNMENT.match(word)
+        if match:
             produced.append(match.group(1))
-    return produced
+            continue
+        if "$" in word:
+            substituted = _EXPANSION.sub(
+                lambda found: values.get(found.group(1) or found.group(2), found.group(0)),
+                word)
+            if substituted != word:
+                produced.append(substituted)
+    return produced, values
 
 
-def _words(arguments: str) -> list[str]:
+def _words(
+    arguments: str, known: dict[str, str] | None = None,
+) -> tuple[list[str], dict[str, str]]:
     """The words of one instruction, each still as WRITTEN (its quoting attached).
 
     Docker has two forms and they split differently. The exec form IS a JSON array -
     Docker reads it with a JSON reader, so this file does too, and
     `RUN ["chmod","0700","/opt"]` is three words rather than one bracket-wrapped blob
     that named nothing; the round-6 review measured that shape green. Everything else is
-    shell text, split by `_split_words` on whitespace and on `;`, `|`, `&`, `(`, `)`, `<`,
-    `>` whether or not they are quoted, with a backtick left inside its word. An exec-form
-    element may itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700 /opt"]`),
-    so each element is split again.
+    shell text, split by `_split_words` on whitespace, a comma and on `;`, `|`, `&`, `(`,
+    `)`, `<`, `>` whether or not they are quoted, with a backtick left inside its word. An
+    exec-form element may itself be shell text (`SHELL ["/bin/sh","-c","true;chmod -R 0700
+    /opt"]`), so each element is split again.
 
-    The VALUE of an assignment is judged as its own word too, so `ENV D=/opt` is refused
-    rather than carried out of this file's reach; see `_with_assigned_values`.
+    The VALUE of an assignment is judged as its own word too, and so is a word with one of
+    the file's own assignments expanded into it, so neither `ENV D=/opt` nor a later
+    `chmod 0700 ${D}t` is carried out of this file's reach; see `_with_assigned_values`,
+    which also returns the mapping so the next instruction sees it.
     """
     text = arguments.strip()
+    words: list[str] | None = None
     if text.startswith("[") and text.endswith("]"):
         try:
             parsed = json.loads(text)
         except ValueError:
             parsed = None
         if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            return _with_assigned_values(
-                [word for item in parsed for word in _split_words(item)])
-    return _with_assigned_values(_split_words(text))
+            words = [word for item in parsed for word in _split_words(item)]
+    if words is None:
+        words = _split_words(text)
+    return _with_assigned_values(words, known or {})
+
 
 
 def _word(raw: str) -> str:
@@ -456,12 +508,14 @@ def _problems(text: str) -> list[str]:
     """Every way this Dockerfile departs from the instruction set this file expects."""
     problems: list[str] = []
     found: list[str] = []
+    known: dict[str, str] = {}
     for keyword, arguments in _directives(text):
         canonical = _canonical(keyword, arguments)
+        words, known = _words(arguments, known)
         if canonical in EXPECTED:
             found.append(canonical)
             continue
-        for raw in [keyword, *_words(arguments)]:
+        for raw in [keyword, *words]:
             word = _word(raw)
             why = _refusal(word)
             if why:
@@ -680,10 +734,13 @@ FOURTH_REVIEW_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("E6  a symlink, then a chmod of the link",
      "RUN ln -s aitelier-gate-imports /opt/g && chmod 0700 /opt/g",
      "aitelier-gate-imports"),
+    # Refused on the FIRST brace-list member: a comma separates words (round 10), so the
+    # token this row is closed on is `/opt/aitelier-gate-{imports` rather than the whole
+    # list. The list was already refused before that change, on its literal head.
     ("E4  bash brace expansion, armed by a SHELL override",
      'SHELL ["/bin/bash","-c"]\n'
      "RUN chmod -R 0700 /opt/aitelier-gate-{imports,x}",
-     "/opt/aitelier-gate-{imports,x}"),
+     "/opt/aitelier-gate-{imports"),
     ("E1  a quoted WORKDIR, then `COPY ... ./`",
      'WORKDIR "/opt/aitelier-gate-imports/docker/godot"\n'
      "COPY --chmod=0600 docker/godot/godot_harness.py ./",
@@ -1130,6 +1187,10 @@ def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
 #: is a decision with a test: closing one of them is a visible change to this table, never
 #: an accident of the next fix.
 NON_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("E1  an alias that does not spell the name (a symlink, a bind mount, a COPY --from)",
+     "RUN chmod -x /usr/local/bin/tool"),
+    ("E2  a token that spells no literal character of the path",
+     "RUN chmod 0700 *"),
     ("E3  a path carried in a bare variable the text never assigns",
      "RUN chmod 0700 $D"),
     ("E4  a cwd-relative spelling of an ancestor",
@@ -1138,8 +1199,6 @@ NON_CLAIMS: tuple[tuple[str, str], ...] = (
      "RUN chmod 0700 $(dirname /opt/x)"),
     ("E7  an alias path that IS `/` without spelling it",
      "RUN chmod 0700 /proc/self/root"),
-    ("E6  a bash brace list after an explicit SHELL",
-     'SHELL ["/bin/bash","-c"]\nRUN chmod 0700 {/opt,/opt}'),
     ("E6  a bash ANSI-C quoted slash after an explicit SHELL",
      'SHELL ["/bin/bash","-c"]\nRUN chmod 0700 $\'\\x2fopt\''),
 )
@@ -1173,3 +1232,49 @@ def test_the_declared_non_claims_are_still_accepted():
             f"this line does put a pinned path into a variable and must be refused: {line}")
         assert _names(added, "/opt"), (
             f"{line} was refused, but not for the path it assigns:\n" + "\n".join(added))
+
+
+def test_the_tenth_review_escapes_are_refused():
+    """The two shapes the round-9 review measured green, and the non-claim it closed.
+
+    The review found that the quoted-command class this file claims to have closed still had
+    a hole, twice over:
+
+      * a quoted `os.chmod('/opt',0o700)` with NO space after the comma. The comma stayed
+        inside one word (`'/opt',0o700`), the edge trimming in `_word` only reaches the ENDS
+        of a word, and so the word named nothing at all - the same command WITH a space was
+        already refused. `_SHELL_BREAK` separates on a comma now, because no path contains
+        one and a comma is not a character a shell keeps in a path;
+      * an assignment of a PREFIX of the tree followed by an expansion: `D=/op` names
+        nothing and `${D}t` carries no `/`, so neither word was refused while the shell
+        built `/opt`. `_with_assigned_values` fills the file's own assignments into a word
+        before judging it, so the second word is judged as `/opt`.
+
+    The comma rule also closed a declared non-claim the review did not have to discover: a
+    bash brace list `{/opt,/opt}` used to reduce to a brace-free blob and be ACCEPTED, and
+    is now refused on `/opt`, which is one operand a shell would hand to `chmod`.
+    `$'\\x2fopt'` stays a non-claim - no comma, and no literal character of the path.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for line, expected in (
+        ('RUN python -c "import os; os.chmod(\'/opt\',0o700)"', "/opt"),
+        ('RUN python -c "import os; os.chmod(\'/\',0o700)"', "/"),
+        ('RUN node -e "require(\'fs\').chmodSync(\'/opt\',0o700)"', "/opt"),
+        ("RUN D=/op; chmod 0700 ${D}t", "/opt"),
+        ("ENV D=/op\nRUN chmod 0700 ${D}t", "/opt"),
+        ('SHELL ["/bin/bash","-c"]\nRUN chmod 0700 {/opt,/opt}', "/opt"),
+    ):
+        added = _added_problems(shipped, line)
+        assert added, f"this line re-modes a pinned path and must be refused: {line}"
+        assert _names(added, expected), (
+            f"{line} was refused, but not for the path it names (expected {expected!r}):\n"
+            + "\n".join(added))
+    # The control: the SAME command with a space after the comma was refused before this
+    # round and stays refused, so the comma rule cannot be the only thing carrying the
+    # class - and a prefix assignment that composes to nothing pinned stays accepted.
+    assert _names(_added_problems(
+        shipped, 'RUN python -c "import os; os.chmod(\'/opt\', 0o700)"'), "/opt")
+    for innocent in ("RUN D=/srv; echo ${D}",
+                     "ENV D=/srv\nRUN echo ${D}"):
+        assert not _added_problems(shipped, innocent), (
+            f"this line assigns and expands a path that names nothing pinned: {innocent}")

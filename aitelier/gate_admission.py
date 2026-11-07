@@ -29,9 +29,25 @@ the gate's own timeout measures the render, counted from admission, and not
 the queue in front of it. A request whose admission cannot be observed (no
 `/lifecycle`, or the gate speaks HTTP/1.0) gets no interim responses at all.
 
+That witness is one owner row for one `operation_id`, and the row carries no
+per-request nonce (the harness mints `owner_id` itself), so it identifies a
+REQUEST only while one request carries that id. A render request that arrives
+while another request on this relay is still carrying the same `operation_id`
+is a duplicate: the row it will eventually get is indistinguishable from the
+one already in flight, so its admission is NOT witnessed. It is still queued
+and answered by the harness like any other request -- it is not refused,
+cancelled, or told to wait differently -- and it keeps receiving the ordinary
+interim response while it waits, but it never sends the admission interim
+response that ends that keepalive and its record carries
+`admission_witnessed: false` instead of `admitted_after_sec`. The aliasing
+lasts only while both requests are in flight: an operation id is counted from
+arrival to answer, so a later sequential request with the same id is admitted
+and witnessed normally.
+
 The relay adds no retries. A refusal is recorded and handed to the gate
 unchanged; what happens next is the scheduler's business
 (`core/gate_deferral.py`), and it never charges the implementer for it.
+A request that was joined while it waited also claims no new row.
 """
 from __future__ import annotations
 
@@ -148,7 +164,10 @@ class AdmissionRelay:
 
     `records` holds one dict per request, appended when the request ARRIVES
     and completed when it ends, so a request the gate abandoned mid-flight is
-    still listed (with no `outcome`) rather than missing.
+    still listed (with no `outcome`) rather than missing. `admitted_after_sec`
+    is only ever written from an owner row this request is alone in claiming;
+    a request whose `operation_id` another request is still carrying records
+    `admission_witnessed: false` and no admission time (module docstring).
     """
 
     def __init__(self, upstream: str, *, render_wait_sec: float,
@@ -167,6 +186,14 @@ class AdmissionRelay:
         self._lock = threading.Lock()
         self._records: list[dict] = []
         self._in_flight: set = set()
+        # operation_id -> the records of the requests this relay is carrying
+        # with it. A record leaves when its request ends; while two are listed
+        # the id is shared, and the record keeps that request's own no-claim
+        # decision even if the mark behind it goes away.
+        self._in_flight_operations: dict = {}
+        # operation_ids that two requests on this relay carried at once: while
+        # any of those overlaps is in flight, its owner rows name no request.
+        self._shared_operations: set = set()
         self._stopping = False
         self._server = None
         self._unix_socket_identity = None
@@ -217,9 +244,27 @@ class AdmissionRelay:
         Cutting the upstream socket is what lets the harness see that nobody
         is waiting any more, so a queued request is dropped from the queue
         instead of rendering for a caller that is gone.
+
+        Nothing still in flight when this returns can witness an admission
+        afterwards: the mark and the record of every request carrying an
+        operation_id are fenced here, so a row that appears while the relay is
+        going away is credited to nobody.
         """
         with self._lock:
             self._stopping = True
+            # A request that is still in flight here must never be able to claim
+            # an owner row afterwards, so nothing it depends on is taken away:
+            # every id still in flight keeps its shared mark (clearing it would
+            # hand the next row for that id to the first request, which is
+            # exactly the request that was joined while it waited), and each of
+            # those requests is told now that its admission was not witnessed.
+            # The record is a second authority, read by `_claim_admission` too.
+            self._shared_operations.update(self._in_flight_operations)
+            for carried in self._in_flight_operations.values():
+                for record in carried:
+                    if "admitted_after_sec" not in record:
+                        record["admission_witnessed"] = False
+            self._in_flight_operations.clear()
             conns = list(self._in_flight)
         if self._server is not None:
             self._server.shutdown()
@@ -244,6 +289,71 @@ class AdmissionRelay:
     def snapshot(self) -> list[dict]:
         with self._lock:
             return [dict(r) for r in self._records]
+
+    def _enter_operation(self, operation: str, record: dict) -> bool:
+        """Count this request in for `operation`; True if another one is in flight.
+
+        From here until this request's `_leave_operation` no owner row for
+        `operation` can be attributed to a single request, so the flag stays
+        set for the whole overlap: a request that joined, or that was joined
+        while it waited, never claims a row as its own admission. The record is
+        listed so `stop()` can still name every request carrying the id.
+        """
+        with self._lock:
+            carried = self._in_flight_operations.setdefault(operation, [])
+            joined = bool(carried)
+            carried.append(record)
+            if joined:
+                self._shared_operations.add(operation)
+            return joined
+
+    def _leave_operation(self, operation: str, record: dict) -> None:
+        """Drop this request from the id, so a later one is not its duplicate."""
+        with self._lock:
+            carried = self._in_flight_operations.get(operation) or []
+            if record in carried:
+                carried.remove(record)
+            if carried:
+                self._in_flight_operations[operation] = carried
+                return
+            self._in_flight_operations.pop(operation, None)
+            if not self._stopping:
+                # `stop()` cleared the counts and kept the marks on purpose: a
+                # request leaving afterwards must not clear what it may not claim.
+                self._shared_operations.discard(operation)
+
+    def _operation_shared(self, operation: str) -> bool:
+        """True while two requests carrying `operation` are both in flight."""
+        with self._lock:
+            return operation in self._shared_operations
+
+    def _claim_admission(self, operation: str, record: dict, started: float) -> bool:
+        """Write the admission time iff this request is alone in claiming it.
+
+        An owner row carries no per-request nonce, so a row that appears while
+        another request carries the same `operation_id` is not evidence about
+        THIS request: the claim is refused and the record says
+        `admission_witnessed: false`. Both answers are written under one lock
+        hold, against the requests in flight at that instant, so a row and a
+        duplicate arriving together cannot slip between the check and the
+        write. True means the caller sends the one admission interim response
+        and stops watching; False means it keeps the ordinary keepalive.
+        """
+        with self._lock:
+            if (self._stopping
+                    or operation in self._shared_operations
+                    or record.get("admission_witnessed") is False):
+                # Three authorities, and any one of them refuses the claim. A
+                # stopped relay witnesses nothing: a request still in flight when
+                # `stop()` ran can never credit itself with a row. The record is
+                # the second authority -- `stop()` writes the refusal into it, so
+                # a request already named as never-witnessed cannot claim
+                # afterwards in any case -- and the shared mark itself is kept by
+                # `stop()` for every id still in flight.
+                record["admission_witnessed"] = False
+                return False
+            record["admitted_after_sec"] = round(time.monotonic() - started, 3)
+            return True
 
     def _owner_ids(self, operation_id: str) -> set | None:
         """Owner rows the harness holds for `operation_id`, or None if unreadable."""
@@ -306,6 +416,17 @@ class AdmissionRelay:
         # harness's owner table can be read: without it admission cannot be
         # seen, and a keepalive that never stopped would take the gate's own
         # timeout away altogether.
+        #
+        # An operation_id is counted from arrival to answer, and an owner row
+        # names no request (the harness mints `owner_id` itself). A request
+        # that arrives while another one carries the same id -- or that is
+        # still waiting when another one arrives -- therefore cannot claim a
+        # new row for it: it keeps the ordinary keepalive and its record says
+        # so (module docstring).
+        shared = (watched_operation is not None
+                  and self._enter_operation(watched_operation, record))
+        if shared:
+            record["admission_witnessed"] = False
         watch = None
         if (watched_operation is not None
                 and handler.request_version == "HTTP/1.1"):
@@ -354,13 +475,23 @@ class AdmissionRelay:
                 if done["outcome"] != ANSWERED and "error" in answer:
                     done["error"] = str(answer["error"])[:500]
         finally:
+            if watch is not None:
+                # From here only the final answer is written to the gate. The
+                # watch is stopped while this request still counts as in
+                # flight, so a claim it has not made by now is never made, and
+                # the record it was given is never contradicted afterwards.
+                watch.stop()
             with self._lock:
                 self._in_flight.discard(conn)
+            if watched_operation is not None:
+                # Read the overlap BEFORE leaving it: a request that was joined
+                # while it waited still has to name what it could not claim,
+                # even when its answer lands between two polls.
+                shared = shared or self._operation_shared(watched_operation)
+                self._leave_operation(watched_operation, record)
             conn.close()
         done["elapsed_sec"] = round(time.monotonic() - started, 3)
         if watch is not None:
-            # From here only the final answer is written to the gate.
-            watch.stop()
             with self._lock:
                 done["keepalives"] = watch.sent
 
@@ -376,6 +507,12 @@ class AdmissionRelay:
             done["delivered"] = False
             done["delivery_error"] = f"{type(exc).__name__}: {exc}"[:300]
         with self._lock:
+            if shared and "admitted_after_sec" not in record:
+                # The id was shared while this request waited and no admission
+                # was ever attributable to it: the record says so, so the
+                # gate's own timeout is never counted from another request's
+                # row (module docstring).
+                done["admission_witnessed"] = False
             record.update(done)
 
 
@@ -384,10 +521,16 @@ class _AdmissionWatch:
 
     Polls the harness's owner table; a NEW owner row for the request's
     `operation_id` (one that was not there before the request was sent) is its
-    admission. Until then an interim `100 Continue` goes to the gate every
-    `keepalive_sec`; at admission one more goes, and then none. Writes to the
-    gate happen under `write_lock`, and none after `stop()`, so an interim
-    response can never interleave with the final one.
+    admission, but only while this request is the ONLY one carrying that id.
+    While another request on this relay carries it too, the row names no
+    request (the harness mints `owner_id` itself), so it is attributed to
+    neither: the watch keeps the ordinary keepalive running instead of ending
+    it, and the record says `admission_witnessed: false` rather than claiming
+    someone else's row as this request's admission. Until an admission is
+    witnessed an interim `100 Continue` goes to the gate every `keepalive_sec`;
+    at admission one more goes, and then none. Writes to the gate happen under
+    `write_lock`, and none after `stop()`, so an interim response can never
+    interleave with the final one.
     """
 
     def __init__(self, relay: AdmissionRelay, handler, operation_id: str,
@@ -428,6 +571,7 @@ class _AdmissionWatch:
 
     def _run(self) -> None:
         last = time.monotonic()
+        decided = False
         while not self._stopped.wait(self._poll):
             owners = self._relay._owner_ids(self._operation)
             if owners is None:
@@ -436,12 +580,15 @@ class _AdmissionWatch:
                 with self._relay._lock:
                     self._record["admission_observed"] = False
                 return
-            if owners - self._before:
-                with self._relay._lock:
-                    self._record["admitted_after_sec"] = round(
-                        time.monotonic() - self._started, 3)
-                self._send()
-                return
+            if owners - self._before and not decided:
+                # A row appeared; whether it may be read as THIS request's
+                # admission is decided under the relay's lock, against the
+                # requests it is carrying right now.
+                decided = True
+                if self._relay._claim_admission(self._operation, self._record,
+                                                self._started):
+                    self._send()
+                    return
             if time.monotonic() - last >= self._interval:
                 if not self._send():
                     return

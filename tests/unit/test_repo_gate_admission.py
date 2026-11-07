@@ -97,7 +97,13 @@ def test_two_concurrent_repo_gates_are_each_admitted_by_the_queue(
 
 
 def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
-    """The relay fills `render_wait_timeout_sec` only when the gate sent none."""
+    """The relay fills `render_wait_timeout_sec` only when the gate sent none.
+
+    "Sent none" covers both a missing key and an explicit JSON `null`: the
+    harness reads a null wait as "queue forever", so forwarding one would drop
+    the bound the relay exists to impose. A number the gate sent is kept as
+    sent.
+    """
     relay = gate_admission.AdmissionRelay(rig.base, render_wait_sec=7,
                                           upstream_timeout=30)
     url = relay.start()
@@ -105,7 +111,9 @@ def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
         import urllib.request
         for body in ({"project_dir": str(tmp_path), "operation_id": "own",
                       "render_wait_timeout_sec": 3},
-                     {"project_dir": str(tmp_path), "operation_id": "none"}):
+                     {"project_dir": str(tmp_path), "operation_id": "none"},
+                     {"project_dir": str(tmp_path), "operation_id": "null",
+                      "render_wait_timeout_sec": None}):
             req = urllib.request.Request(url + "/script", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json"},
                                          method="POST")
@@ -113,9 +121,11 @@ def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
                 assert r.status == 200
     finally:
         relay.stop()
-    own, injected = relay.snapshot()
+    own, injected, null = relay.snapshot()
     assert own["render_wait_timeout_sec"] == 3 and "render_wait_injected" not in own
     assert injected["render_wait_timeout_sec"] == 7 and injected["render_wait_injected"]
+    assert null["render_wait_timeout_sec"] == 7, null
+    assert null["render_wait_injected"] is True, null
 
 
 # ── contention-is-a-distinct-outcome ───────────────────────────────────────

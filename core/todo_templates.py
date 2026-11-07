@@ -313,7 +313,8 @@ REPORT_ARG = "report"
 # untouched, and no template gained a `report` parameter. Nothing above changed meaning.
 #
 # SAFEGUARDS: no acceptance criterion, evidence format, non-author review control or privacy
-# boundary is weakened by this change. Only the test sweep and this comment changed.
+# boundary is weakened by the path audit. The report rule above joined the delta refusals in
+# `d7e2b30bb6`; `PathAudit` gained no field, no bucket and no template parameter with it.
 @dataclass(frozen=True)
 class PathAudit:
     """What a plan's declared paths are, judged against the real workspace at freeze time."""
@@ -447,11 +448,17 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             # never collides with a declared delta path (see the docstring).
             if REPORT_ARG in binding.args:
                 where = f"item {item.id}: {binding.predicate}.{REPORT_ARG}"
-                raw_report = binding.args[REPORT_ARG]
-                # One report per binding today; a list is judged element by element so that a
-                # predicate naming several reports is not left unchecked.
-                for value in (raw_report if isinstance(raw_report, list) else [raw_report]):
-                    _relative(value, where)
+                # ONE value, ONE check. The plan's own binding validation requires `report` to be a
+                # non-empty STRING (`core/todo_runtime` `_STRINGS`), and it runs inside
+                # `TodoPlan.from_json` - the only way `core/todo_cli._plan_from_args`, this audit's
+                # only production caller, ever gets a plan. So exactly one string arrives here, and an
+                # element-wise loop would be a branch no frozen plan can reach.
+                # Keep these two together: `_relative` judges `PurePosixPath(str(value))`, so a list
+                # would reach it as its own repr and `['../x']` has no `..` PART - the type check,
+                # not this call, is what keeps a list from passing. A test in
+                # `tests/unit/test_todo_plan_judges_the_report_it_will_clear.py` pins that refusal to
+                # `from_json`, so loosening the type check cannot happen unnoticed.
+                _relative(binding.args[REPORT_ARG], where)
             arg = DELTA_PATHS.get(binding.predicate)
             if arg is None or arg not in binding.args:
                 continue

@@ -84,6 +84,114 @@ def test_a_report_path_holding_a_dotdot_component_is_refused(tmp_path):
     assert "command_exit.report" in caught.reason
 
 
+def test_a_report_under_a_symlinked_parent_that_escapes_the_workspace_is_refused(tmp_path):
+    """c1: the parent is a link that resolves OUTSIDE the workspace, so the run would never clear it.
+
+    `report: "link/x.json"` is lexically relative with no `..`, so `_relative` alone let it freeze.
+    The run contains the report's parent with `verify_path_safe` and refuses to clear it, so the
+    audit must apply that SAME call to the parent. Pinned against the escape, not the spelling: the
+    report text carries no `..` and no leading `/`.
+    """
+    workspace = workspace_at(tmp_path, "app.py")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+    caught = refusal(tmp_path, [command_exit(report="link/x.json")], "app.py")
+    assert caught.code == "invalid_plan", caught.reason
+    assert "link/x.json" in caught.reason, "the refusal must name the report it refused"
+    assert "command_exit.report" in caught.reason, "the refusal must name the binding it came from"
+    assert "its parent resolves to a place outside the workspace" in caught.reason, caught.reason
+
+
+def test_a_report_under_a_symlinked_parent_that_stays_inside_the_workspace_is_accepted(tmp_path):
+    """c2: a link that resolves INSIDE the workspace is the run's own tree and must still freeze.
+
+    The containment is on the resolved parent, not on the presence of a symlink, so refusing every
+    linked parent would narrow a plan the run can clear. Asserted against `verify_path_safe` truth
+    too, so the accepted shape is the one the run would also accept.
+    """
+    workspace = workspace_at(tmp_path, "app.py")
+    (workspace / "real").mkdir()
+    (workspace / "link").symlink_to("real", target_is_directory=True)
+    result = audit(tmp_path, [command_exit(report="link/x.json")], "app.py")
+    assert result.measured is True and result.declared == ()
+    assert result.notes == (), "an accepted report invents no note"
+
+
+def test_a_report_whose_final_component_is_a_symlink_outside_the_workspace_is_accepted(tmp_path):
+    """c3: the run removes the LINK and never follows it, so this shape is safe and must stay accepted.
+
+    `_owned_entry` contains the PARENT only and `unlink`s the entry, so `out/x.json -> /elsewhere`
+    removes the link and leaves its target. Refusing it would be a false refusal of a safe plan.
+    """
+    workspace = workspace_at(tmp_path, "app.py")
+    outside = tmp_path / "outside-target.json"
+    outside.write_text("{}")
+    (workspace / "out").mkdir()
+    (workspace / "out" / "x.json").symlink_to(outside)
+    result = audit(tmp_path, [command_exit(report="out/x.json")], "app.py")
+    assert result.measured is True and result.declared == ()
+    assert outside.exists(), "the audit itself must not touch the link's target"
+
+
+def test_a_report_under_a_symlink_loop_parent_is_refused_because_the_run_could_never_clear_it(tmp_path):
+    """c5: a parent that cannot be resolved at all is a reason the run cannot clear the report either.
+
+    `out -> out` is a loop: resolving it raises, and `_owned_entry` turns that into "could not be
+    resolved". The audit refuses the same report at freeze, so the dead item is not frozen.
+    """
+    workspace = workspace_at(tmp_path, "app.py")
+    (workspace / "out").symlink_to("out")                # a directory that is only itself
+    caught = refusal(tmp_path, [command_exit(report="out/x.json")], "app.py")
+    assert caught.code == "invalid_plan", caught.reason
+    assert "out/x.json" in caught.reason and "cannot be resolved inside the workspace" in caught.reason, caught.reason
+
+
+def test_a_parent_the_run_links_out_after_freeze_is_only_caught_at_run_time(tmp_path):
+    """c4: the boundary freeze time cannot see, measured on the REAL `command_exit`, no stub.
+
+    The audit reads the disk as it stands at freeze time. The report's parent `d` does not exist
+    yet, so the audit accepts it. Then `d` is created as a symlink to a directory OUTSIDE the
+    workspace - this stands in for the run's own command making the link - and the real
+    `command_exit` predicate runs `["true"]` (a real subprocess, exit 0).
+
+    What must hold, asserted on the actual `PredicateResult`:
+      * the run REFUSES to clear the report: its detail says so and names the cause;
+      * no report is READ: the verdict is the exit code (0 matches `expect`), so it passes, and
+        the detail carries the "could not be cleared before the run" reason instead of an absence;
+      * the file the link points at, outside the workspace, is neither removed nor read.
+    """
+    from core.todo_runtime import PredicateResult
+
+    workspace = workspace_at(tmp_path, "app.py")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "x.json"
+    victim.write_text('{"repo_gate_absent": true, "repo_gate": {"script": "stranger"}}')
+    assert not (workspace / "d").exists(), "the parent must be missing at freeze for this to prove anything"
+
+    data = plan_data(workspace, [command_exit(report="d/x.json")])
+    plan = TodoPlan.from_json(data, builtin_library())
+    audit_result = check_declared_paths(plan)            # the audit accepts it: nothing links out yet
+    assert audit_result.measured is True
+
+    # The run creates the link after the freeze. This is the boundary, not a freeze-time refusal.
+    (workspace / "d").symlink_to(outside, target_is_directory=True)
+
+    binding = plan.items[0].predicates[0]
+    result = builtin_library().evaluate(binding, workspace=workspace, pre_state={})
+    assert isinstance(result, PredicateResult)
+    assert result.predicate == "command_exit"
+    assert result.outcome == "pass", result.detail         # the exit code (0) decides; no report was read
+    assert "could not be cleared before the run" in result.detail, result.detail
+    assert "outside the workspace" in result.detail, result.detail
+    assert "no report was read" in result.detail, result.detail
+    assert "declared in d/x.json that it measured nothing" not in result.detail, \
+        "the stranger's absence declaration must not be read as this run's"
+    assert victim.exists() and "stranger" in victim.read_text(), \
+        "a file outside the workspace is neither removed nor read"
+
+
 def test_both_refusals_come_from_the_plan_s_own_relative_path_rule(tmp_path):
     """Not a second rule for reports: the same call, the same code, the same sentence.
 

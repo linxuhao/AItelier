@@ -4,6 +4,7 @@ The executable fixture emits Docker's distinct rm-conflict, inspect-404,
 transport failure and still-present replies. It never runs repository code.
 """
 import json
+import os
 import sys
 import time
 
@@ -21,7 +22,14 @@ state_path = Path(os.environ["CPU_LIFECYCLE_FIXTURE_STATE"])
 s = json.loads(state_path.read_text())
 args = sys.argv[1:]
 s["calls"].append(args)
-state_path.write_text(json.dumps(s))
+# Publish the whole document by renaming it over the old one, never by
+# truncating that one in place: the reader is a DIFFERENT process (the test),
+# and write_text leaves a zero-byte file in the window it opens. Same publish
+# as _publish_state below; the child stays self-contained, and the pid keeps
+# two clients from sharing one scratch name.
+replacement = state_path.with_name(state_path.name + "." + str(os.getpid()) + ".replacement.tmp")
+replacement.write_text(json.dumps(s))
+os.replace(replacement, state_path)
 cid = s["cid"]
 if args[:1] == ["create"]:
     if s["scenario"] == "create_refused":
@@ -78,13 +86,27 @@ def docker_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(executor, "REMOVE_DEADLINE", 3)
 
     def configure(scenario):
-        state.write_text(json.dumps({"cid": CID, "scenario": scenario, "calls": []}))
+        _publish_state(state, {"cid": CID, "scenario": scenario, "calls": []})
         return str(cli), state
 
     return configure
 
 
+def _publish_state(state, document):
+    """Make the whole state document visible in one step (rename, not truncation).
+
+    A reader in this process and a writer in the fixture child see the same
+    file, so replacing the name is what makes the handoff impossible to observe
+    half-written; `write_text` empties it first and a reader landing in that
+    window gets JSONDecodeError instead of the recorded calls.
+    """
+    replacement = state.with_name(state.name + "." + str(os.getpid()) + ".replacement.tmp")
+    replacement.write_text(json.dumps(document))
+    os.replace(replacement, state)
+
+
 def calls(state):
+    # Deliberately a plain reader: no retry may hide a half-written document.
     return json.loads(state.read_text())["calls"]
 
 
@@ -149,3 +171,20 @@ def test_rm_acknowledgement_does_not_require_an_extra_probe(docker_cli):
     docker, state = docker_cli("rm_success")
     executor._remove_owned(docker, CID, NAME)
     assert calls(state) == [["rm", "-f", CID]]
+
+
+def test_the_fixture_publishes_state_by_replacement_so_it_is_never_read_empty(docker_cli):
+    """The state file has a writer in the fixture child and a reader here.
+
+    `write_text` truncates before it writes, and a whole-unit run caught this
+    test's reader inside that window: `json.loads` on a zero-byte file. A
+    renamed-in document has no such window, and the inode changing is what says
+    the publish is a replacement rather than an in-place rewrite — reverting to
+    `write_text` fails here deterministically instead of only under load.
+    """
+    docker, state = docker_cli("rm_success")
+    published = state.stat().st_ino
+    executor._remove_owned(docker, CID, NAME)
+    assert calls(state) == [["rm", "-f", CID]]
+    assert state.stat().st_ino != published
+    assert list(state.parent.glob("state.json.*.tmp")) == []  # the scratch file is consumed

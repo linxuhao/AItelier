@@ -19,12 +19,20 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   state at the start of the step. `check_declared_paths` judges those paths against
   the real workspace while the plan is still being frozen: a path whose change the
   predicate cannot see as the plan is written (an existing directory, an existing
-  non-regular file, a path under an existing non-directory, one outside the
-  workspace, a repeat) is refused there, each refusal naming what to declare instead,
-  and the ones that do not exist yet - legal, since creating a file is a change -
-  are announced in the result the director reads. It ALSO holds the `report` a
-  binding names to the plan's workspace-relative rule, because a plan that freezes a
-  report path the run can never clear has frozen an item that cannot pass as written.
+  non-regular file, a path under an existing non-directory, a repeat) is refused
+  there, each refusal naming what to declare instead, and the ones that do not exist
+  yet - legal, since creating a file is a change - are announced in the result the
+  director reads. The remaining containment refusal, a path outside the workspace
+  (absolute, or holding a `..` component), is NOT this audit's on the production
+  route: the plan's own binding validation (`TodoPlan._binding`, inside
+  `TodoPlan.from_json`) applies `todo_plan._relative` to every `path`/`paths`/
+  `pattern` argument while the plan is CONSTRUCTED, so it refuses first and this
+  audit is never entered. The audit's own `_relative` call for delta paths is a
+  backstop, reachable only for a plan built without `from_json` - kept, so the same
+  rule holds on both routes. It ALSO holds the `report` a binding names to the plan's
+  workspace-relative rule, because a plan that freezes a report path the run can never
+  clear has frozen an item that cannot pass as written; a `report` argument is not one
+  of the three `_binding` checks, so THAT refusal is this audit's on both routes.
 """
 from __future__ import annotations
 
@@ -37,10 +45,13 @@ import stat
 from typing import Any, Mapping
 
 # `_relative` is reused, not restated: a declared path that escapes the workspace must be
-# refused by the SAME rule whether the plan or this audit looks at it. A report's PARENT is judged
-# by `core.security_jail.verify_path_safe`, the call the run makes (`core.todo_runtime._owned_entry`),
-# so the audit and the run cannot disagree about which parent escapes through a symlink.
-# `core.security_jail` imports nothing from `core`, so this import creates no cycle.
+# refused by the SAME rule whichever site answers. On the production route the plan's own binding
+# validation (`TodoPlan._binding`, inside `TodoPlan.from_json`) answers first, while the plan is
+# constructed; this audit's call for delta paths is a backstop for a plan built without `from_json`.
+# (For a report the audit IS the answering site, since `report` is not one of `_binding`'s keys.)
+# A report's PARENT is judged by `core.security_jail.verify_path_safe`, the call the run makes
+# (`core.todo_runtime._owned_entry`), so the audit and the run cannot disagree about which parent
+# escapes through a symlink. `core.security_jail` imports nothing from `core`, so no cycle.
 from core.security_jail import SecurityException, verify_path_safe
 from core.todo_plan import Refusal, TodoPlan, _relative
 from core.todo_runtime import PredicateLibrary
@@ -307,10 +318,13 @@ REPORT_ARG = "report"
 #
 # THE REPORT PATH, added after `3202466603`: this audit now also refuses a `report` binding that
 # names a path outside the workspace (absolute, or holding `..`), by the same `todo_plan._relative`
-# call it already uses for declared delta paths. It also refuses a report whose PARENT resolves
-# outside the workspace through a symlink, judged by `core.security_jail.verify_path_safe` - the call
-# the run makes - so a symlinked parent cannot freeze a report the run can never clear. A link the
-# run creates after the freeze is not visible here; that boundary is stated in `check_declared_paths`.
+# call it also applies to declared delta paths - a backstop there (the plan's own binding validation,
+# inside `TodoPlan.from_json`, is what refuses a delta path on the production route), but the
+# answering site here: `report` is not one of the keys `_binding` contains, so no earlier check exists.
+# It also refuses a report whose PARENT resolves outside the workspace through a symlink, judged by
+# `core.security_jail.verify_path_safe` - the call the run makes - so a symlinked parent cannot freeze
+# a report the run can never clear. A link the run creates after the freeze is not visible here; that
+# boundary is stated in `check_declared_paths`.
 # Main accepted all of those and discovered the escape only at run time, where `_clear_report`
 # refuses to touch anything outside the workspace and the report is therefore never this run's - a
 # plan frozen with an item that cannot pass as written.
@@ -439,14 +453,21 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       - an existing path that is neither a directory nor a regular file (a FIFO, a socket, a
         device) - `_digest` returns None for it, so a step cannot be seen to change it unless it
         replaces it with a regular file;
-      - a path outside the workspace (absolute, or holding a `..` component) - refused by the
-        plan's own rule, `todo_plan._relative`, called here so there are never two rules;
+      - a path outside the workspace (absolute, or holding a `..` component). On the production route
+        this one is NOT refused here: `TodoPlan.from_json` applies `todo_plan._relative` to every
+        `path`/`paths`/`pattern` argument while the plan is CONSTRUCTED (`TodoPlan._binding`), and
+        `core.todo_cli._plan_from_args` - this audit's only production caller - always hands the audit
+        a plan built there, so the plan refuses and this audit is never entered. The `_relative` call
+        below is a backstop, reachable only for a plan built without `from_json`, kept so the same
+        rule answers on both routes (never two rules). A test measures the route rather than the
+        outcome: `test_the_delta_refusal_arrives_with_the_audit_never_entered`;
       - the same path twice in one list, compared in normalised form so `./a` and `a` collide -
         a list that repeats one file names fewer files than it looks like it does. This one reads
         the plan, not the workspace, so it is refused whether or not the workspace exists.
 
     * The REPORT a binding names (`REPORT_ARG`; `command_exit`'s `report`, today the only one).
-      It is judged by containment only, in two steps. First the plan's own `_relative` call: a
+      It is judged by containment only, in two steps. First `_relative` - the plan's rule, and here
+      the answering site, because `report` is not one of the keys `_binding` validates: a
       report that is absolute or holds a `..` component is refused. Second, the report's PARENT is
       judged the way the run judges it: the parent is joined onto the RESOLVED workspace and
       contained with `core.security_jail.verify_path_safe`, which resolves symlinks. So a parent
@@ -482,8 +503,12 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     says which checks that cost - and which ones it did not: BOTH refusals that read the plan
     rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
     via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
-    missing directory cost. The report rule's PLAN half - the `_relative` call - is one of those
-    plan-reading refusals and runs there too. Its PARENT half reads the disk: a symlinked parent can
+    missing directory cost. The outside-workspace one is the backstop again: on the production route
+    `TodoPlan.from_json` has already refused such a path before this audit is entered - workspace or
+    not - and the audit's own `_relative` call is what answers only for a plan built without
+    `from_json`. The report rule's PLAN half - the `_relative` call - is one of those
+    plan-reading refusals and runs there too, and for a report the audit is the answering site on
+    both routes. Its PARENT half reads the disk: a symlinked parent can
     only be resolved in a workspace that exists, so with no workspace there is nothing for it to find,
     and the audit does not claim it checked one.
     """
@@ -523,6 +548,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             raw = binding.args[arg]
             seen: dict[str, str] = {}
             for value in (raw if isinstance(raw, list) else [raw]):
+                # backstop, not the production answering site: `TodoPlan._binding`, inside
+                # `TodoPlan.from_json`, applied this same rule to `path`/`paths` while the plan was
+                # constructed, so on the route `core.todo_cli._plan_from_args` drives this is only
+                # reached by a plan built without `from_json`. Kept so no plan escapes the one rule.
                 _relative(value, where)
                 rel = str(PurePosixPath(str(value)))
                 if rel in seen:

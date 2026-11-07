@@ -29,6 +29,21 @@ the gate's own timeout measures the render, counted from admission, and not
 the queue in front of it. A request whose admission cannot be observed (no
 `/lifecycle`, or the gate speaks HTTP/1.0) gets no interim responses at all.
 
+That witness is one owner row for one `operation_id`, and the row carries no
+per-request nonce (the harness mints `owner_id` itself), so it identifies a
+REQUEST only while one request carries that id. A render request that arrives
+while another request on this relay is still carrying the same `operation_id`
+is a duplicate: the row it will eventually get is indistinguishable from the
+one already in flight, so its admission is NOT witnessed. It is still queued
+and answered by the harness like any other request -- it is not refused,
+cancelled, or told to wait differently -- and it keeps receiving the ordinary
+interim response while it waits, but it never sends the admission interim
+response that ends that keepalive and its record carries
+`admission_witnessed: false` instead of `admitted_after_sec`. The aliasing
+lasts only while both requests are in flight: an operation id is counted from
+arrival to answer, so a later sequential request with the same id is admitted
+and witnessed normally.
+
 The relay adds no retries. A refusal is recorded and handed to the gate
 unchanged; what happens next is the scheduler's business
 (`core/gate_deferral.py`), and it never charges the implementer for it.
@@ -148,7 +163,10 @@ class AdmissionRelay:
 
     `records` holds one dict per request, appended when the request ARRIVES
     and completed when it ends, so a request the gate abandoned mid-flight is
-    still listed (with no `outcome`) rather than missing.
+    still listed (with no `outcome`) rather than missing. `admitted_after_sec`
+    is only ever written from an owner row this request is alone in claiming;
+    a request whose `operation_id` another request is still carrying records
+    `admission_witnessed: false` and no admission time (module docstring).
     """
 
     def __init__(self, upstream: str, *, render_wait_sec: float,
@@ -167,6 +185,8 @@ class AdmissionRelay:
         self._lock = threading.Lock()
         self._records: list[dict] = []
         self._in_flight: set = set()
+        # operation_id -> how many requests this relay is carrying with it.
+        self._in_flight_operations: dict = {}
         self._stopping = False
         self._server = None
         self._unix_socket_identity = None
@@ -220,6 +240,7 @@ class AdmissionRelay:
         """
         with self._lock:
             self._stopping = True
+            self._in_flight_operations.clear()
             conns = list(self._in_flight)
         if self._server is not None:
             self._server.shutdown()
@@ -244,6 +265,22 @@ class AdmissionRelay:
     def snapshot(self) -> list[dict]:
         with self._lock:
             return [dict(r) for r in self._records]
+
+    def _enter_operation(self, operation: str) -> bool:
+        """Count this request in for `operation`; True if another one is in flight."""
+        with self._lock:
+            in_flight = self._in_flight_operations.get(operation, 0)
+            self._in_flight_operations[operation] = in_flight + 1
+            return in_flight > 0
+
+    def _leave_operation(self, operation: str) -> None:
+        """Drop this request's count, so a later request is not its duplicate."""
+        with self._lock:
+            in_flight = self._in_flight_operations.get(operation, 1) - 1
+            if in_flight > 0:
+                self._in_flight_operations[operation] = in_flight
+            else:
+                self._in_flight_operations.pop(operation, None)
 
     def _owner_ids(self, operation_id: str) -> set | None:
         """Owner rows the harness holds for `operation_id`, or None if unreadable."""
@@ -306,14 +343,28 @@ class AdmissionRelay:
         # harness's owner table can be read: without it admission cannot be
         # seen, and a keepalive that never stopped would take the gate's own
         # timeout away altogether.
+        #
+        # An operation_id another request is still carrying makes this one a
+        # duplicate: the owner row it gets cannot be told apart from that
+        # request's, so it is watched for its own keepalive only.
+        duplicate = (watched_operation is not None
+                     and self._enter_operation(watched_operation))
+        if duplicate:
+            # The row this request will get cannot be told apart from the one
+            # already in flight, so ITS admission is not witnessed.
+            record["admission_witnessed"] = False
         watch = None
         if (watched_operation is not None
                 and handler.request_version == "HTTP/1.1"):
-            before = self._owner_ids(watched_operation)
-            record["admission_observed"] = before is not None
-            if before is not None:
+            if duplicate:
                 watch = _AdmissionWatch(self, handler, watched_operation,
-                                        before, started, record)
+                                        None, started, record)
+            else:
+                before = self._owner_ids(watched_operation)
+                record["admission_observed"] = before is not None
+                if before is not None:
+                    watch = _AdmissionWatch(self, handler, watched_operation,
+                                            before, started, record)
         conn = http.client.HTTPConnection(self._host, self._port,
                                           timeout=self._timeout)
         with self._lock:
@@ -356,6 +407,8 @@ class AdmissionRelay:
         finally:
             with self._lock:
                 self._in_flight.discard(conn)
+            if watched_operation is not None:
+                self._leave_operation(watched_operation)
             conn.close()
         done["elapsed_sec"] = round(time.monotonic() - started, 3)
         if watch is not None:
@@ -388,10 +441,18 @@ class _AdmissionWatch:
     `keepalive_sec`; at admission one more goes, and then none. Writes to the
     gate happen under `write_lock`, and none after `stop()`, so an interim
     response can never interleave with the final one.
+
+    `before=None` means admission cannot be witnessed FOR THIS REQUEST: another
+    request on the relay already carries its `operation_id`, and an owner row
+    carries no per-request nonce, so a new row may be that request's. Such a
+    watch sends only the ordinary keepalive -- the request is really in the
+    queue, and its gate's timeout must not run there -- and writes no
+    `admitted_after_sec`, so no other request's admission is reported as this
+    one's.
     """
 
     def __init__(self, relay: AdmissionRelay, handler, operation_id: str,
-                 before: set, started: float, record: dict):
+                 before: set | None, started: float, record: dict):
         self._relay = relay
         self._handler = handler
         self._operation = operation_id
@@ -429,19 +490,20 @@ class _AdmissionWatch:
     def _run(self) -> None:
         last = time.monotonic()
         while not self._stopped.wait(self._poll):
-            owners = self._relay._owner_ids(self._operation)
-            if owners is None:
-                # Admission can no longer be seen: stop, so the gate's own
-                # timeout is never suspended past it.
-                with self._relay._lock:
-                    self._record["admission_observed"] = False
-                return
-            if owners - self._before:
-                with self._relay._lock:
-                    self._record["admitted_after_sec"] = round(
-                        time.monotonic() - self._started, 3)
-                self._send()
-                return
+            if self._before is not None:
+                owners = self._relay._owner_ids(self._operation)
+                if owners is None:
+                    # Admission can no longer be seen: stop, so the gate's own
+                    # timeout is never suspended past it.
+                    with self._relay._lock:
+                        self._record["admission_observed"] = False
+                    return
+                if owners - self._before:
+                    with self._relay._lock:
+                        self._record["admitted_after_sec"] = round(
+                            time.monotonic() - self._started, 3)
+                    self._send()
+                    return
             if time.monotonic() - last >= self._interval:
                 if not self._send():
                     return

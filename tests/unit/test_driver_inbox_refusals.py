@@ -8,6 +8,12 @@ Two contracts are pinned here:
    violated constraint with the parameter names. A refusal that is only a bare
    code is a blind guess for the caller.
 
+   One reachable refusal carries NO leading code: a `project_members` value that
+   names no State project raises StateNotFound ("state project '<id>' not
+   found") from the shared project lookup. It is pinned by its own test below,
+   outside the table, and is reported as an open gap rather than papered over:
+   changing the shared lookup is outside this witness-only change.
+
 2. An HTTP witness: the real command route (`POST /api/state/commands/{action}`)
    answers the refused request with text that names BOTH parameters.
 
@@ -25,7 +31,7 @@ from fastapi.testclient import TestClient
 from api.state_http import create_state_router
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
-from core.state_graph import StateGraphError
+from core.state_graph import StateGraphError, StateNotFound, now
 from core.state_service import StateService
 
 BASE_WITNESS_DETAIL = "invalid_request"  # what 9bdc8f389de68bde8d99395a3bd339e2b1f2409d answered
@@ -125,6 +131,71 @@ def test_inactive_sender_is_named(peers):
     text = _refusal_text(ada, dict(request_key="k-inactive"))
     assert text.split(":", 1)[0].strip() == "inactive_driver", text
     assert "not active" in text, text
+
+
+def test_missing_identity_is_named(peers):
+    """No driver identity and no owner actor: the send is refused, not guessed at."""
+    anonymous = StateService(peers["ada"].db, actor="local-operator", project_read_trusted=True)
+    text = _refusal_text(anonymous, dict(request_key="k-anon"))
+    assert text.split(":", 1)[0].strip() == "invalid_request", text
+    assert "sending requires a driver identity or an owner actor" in text, text
+    assert text != "invalid_request", text
+
+
+def test_unregistered_sender_is_named(peers):
+    """A driver_id that was never registered is refused before any target is resolved."""
+    with peers["ada"].db.get_connection() as conn:
+        # Precondition: the id really is absent, so the refusal is the registry's, not a typo's.
+        assert conn.execute("SELECT 1 FROM drivers WHERE driver_id='ghost'").fetchone() is None
+    ghost = StateService(peers["ada"].db, actor="driver:ghost", driver_id="ghost", project_read_trusted=True)
+    text = _refusal_text(ghost, dict(request_key="k-ghost"))
+    assert text.split(":", 1)[0].strip() == "unknown_driver", text
+    assert "no driver with this driver_id is registered" in text, text
+    assert text != "unknown_driver", text
+
+
+def test_more_than_200_recipients_names_the_limit(peers):
+    """201 active members resolve to 201 recipients, and the cap refuses them by name.
+
+    The members are inserted with SQL rather than registry.register: a
+    registry call per member is too slow for a unit test. The sender is not a
+    member, so none of the 201 is excluded and the count is exactly 201.
+    """
+    ada = peers["ada"]
+    seed = StateService(ada.db, actor="fixture", project_read_trusted=True)
+    seed.create_project("big", "big")
+    stamp = now()
+    with ada.db.get_connection() as conn:
+        conn.executemany(
+            "INSERT INTO drivers(driver_id,display_name,kind,is_admin,token_hash,token_rotated_at,"
+            "host_label,capabilities_json,status,revision,created_at,last_seen_at) "
+            "VALUES(?,?,'lan',0,?,NULL,'','{}','active',1,?,NULL)",
+            [(f"member-{i:03d}", f"member {i:03d}", f"sha256:fixture-{i:03d}", stamp) for i in range(201)])
+        conn.executemany(
+            "INSERT INTO project_drivers(project_id,driver_id,status,revision,actor,updated_at) "
+            "VALUES('big',?,'member',1,'fixture',?)",
+            [(f"member-{i:03d}", stamp) for i in range(201)])
+        conn.commit()
+    text = _refusal_text(ada, dict(request_key="k-big", target_driver_id=None, project_members="big"))
+    assert text.split(":", 1)[0].strip() == "no_recipients", text
+    assert "project_members resolved to 201 recipients" in text, text
+    assert "above the limit of 200 per message" in text, text
+    assert text != "no_recipients", text
+
+
+def test_unknown_project_members_project_is_named(peers):
+    """A project_members name with no State project is refused by name.
+
+    This is the one reachable refusal that carries NO leading machine code:
+    StateNotFound is raised by the shared project lookup, and its text is
+    "state project '<id>' not found". The module docstring records the exception.
+    """
+    ada = peers["ada"]
+    with pytest.raises(StateNotFound) as refused:
+        ada.driver_inbox.send_driver_message(**_ok(
+            request_key="k-noproj", target_driver_id=None, project_members="no-such-project"))
+    text = str(refused.value)
+    assert "no-such-project" in text and "not found" in text, text
 
 
 def test_http_witness_both_targets_names_both_parameters(peers):

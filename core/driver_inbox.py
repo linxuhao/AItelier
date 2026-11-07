@@ -138,7 +138,7 @@ class DriverInbox:
     def _driver(conn, driver_id):
         row = conn.execute("SELECT driver_id FROM drivers WHERE driver_id=?", (driver_id,)).fetchone()
         if row is None:
-            raise StateGraphError("unknown_driver")
+            raise StateGraphError("unknown_driver: no driver with this driver_id is registered")
 
     def _refs(self, conn, refs, project_id):
         """Resolve every refs key to an existing record, or refuse the message."""
@@ -149,21 +149,24 @@ class DriverInbox:
                 self.store._node(conn, project_id, value)
             elif key in tables:
                 if not isinstance(value,str) or not value:
-                    raise StateGraphError("invalid_refs")
+                    raise StateGraphError(f"invalid_refs: refs.{key} must be a non-empty string id")
                 table, column = tables[key]
                 if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
-                    raise StateGraphError("invalid_refs")
+                    raise StateGraphError(f"invalid_refs: refs.{key} cannot be resolved because the {table} table does not exist")
                 if not conn.execute(f"SELECT 1 FROM {table} WHERE {column}=?", (value,)).fetchone():
-                    raise StateGraphError("invalid_refs")
+                    raise StateGraphError(f"invalid_refs: refs.{key} names no existing record in {table}")
+            elif key == "node_key":
+                raise StateGraphError("invalid_refs: refs.node_key needs project_id; set project_id or drop node_key")
             else:
-                raise StateGraphError("invalid_refs")
+                raise StateGraphError("invalid_refs: refs key " + repr(key) + " is not allowed; use one of "
+                                      "node_key, attempt_id, issue_id, claim_id, subagent_id")
 
     def _replay(self, conn, operation, request_key, payload):
         row = conn.execute("SELECT payload_json,result_json FROM driver_inbox_requests WHERE actor=? AND operation=? AND request_key=?",
                            (self.actor, operation, request_key)).fetchone()
         if row:
             if row["payload_json"] != payload:
-                raise StateGraphError("idempotency_conflict")
+                raise StateGraphError("idempotency_conflict: request_key was already used with a different payload; use a new request_key")
             return json.loads(row["result_json"])
 
     def _record(self, conn, operation, request_key, payload, result):
@@ -176,17 +179,25 @@ class DriverInbox:
                             delivery_mode="transient", refs=None, reply_to_message_id=None,
                             _system=False):
         if type(request_key) is not str or not request_key or len(request_key)>320:
-            raise StateGraphError("invalid_request")
-        if type(subject) is not str or not 1 <= len(subject) <= 200 or type(body) is not str or len(body)>8000:
-            raise StateGraphError("invalid_request")
-        if bool(target_driver_id) == bool(project_members) or delivery_mode not in ("transient","standing"):
-            raise StateGraphError("invalid_request")
+            raise StateGraphError("invalid_request: request_key must be a non-empty string of at most 320 characters")
+        if type(subject) is not str or not 1 <= len(subject) <= 200:
+            raise StateGraphError("invalid_request: subject must be a non-empty string of at most 200 characters")
+        if type(body) is not str or len(body)>8000:
+            raise StateGraphError("invalid_request: body must be a string of at most 8000 characters")
+        if bool(target_driver_id) and bool(project_members):
+            raise StateGraphError("invalid_request: target_driver_id and project_members are mutually exclusive; set exactly one")
+        if not target_driver_id and not project_members:
+            raise StateGraphError("invalid_request: one of target_driver_id or project_members is required; set exactly one")
+        if delivery_mode not in ("transient","standing"):
+            raise StateGraphError("invalid_request: delivery_mode must be 'transient' or 'standing'")
         human_owner = self.project_read_trusted and self.actor.startswith("owner:")
-        if kind not in (SYSTEM_KINDS if _system else KINDS) or (not _system and not self.driver_id and not human_owner):
-            raise StateGraphError("invalid_request")
+        if kind not in (SYSTEM_KINDS if _system else KINDS):
+            raise StateGraphError("invalid_request: kind must be one of " + ", ".join(sorted(SYSTEM_KINDS if _system else KINDS)))
+        if not _system and not self.driver_id and not human_owner:
+            raise StateGraphError("invalid_request: sending requires a driver identity or an owner actor")
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
-            raise StateGraphError("invalid_refs")
+            raise StateGraphError("invalid_refs: refs must be an object mapping allowed keys to ids")
         payload = json.dumps([subject, body, target_driver_id, project_members, project_id, kind, delivery_mode, refs, reply_to_message_id, None if _system else self.driver_id], sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send", request_key, payload)
@@ -195,7 +206,7 @@ class DriverInbox:
             if not _system and self.driver_id:
                 self._driver(conn, self.driver_id)
                 if conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()[0]!="active":
-                    raise StateGraphError("inactive_driver")
+                    raise StateGraphError("inactive_driver: the sending driver is not active; only active drivers can send")
             if project_members:
                 self.store._project(conn, project_members)
                 targets = [r["driver_id"] for r in conn.execute(
@@ -203,8 +214,10 @@ class DriverInbox:
                     (project_members, self.driver_id or ""))]
             else:
                 targets = [target_driver_id]
-            if not targets or len(targets)>200:
-                raise StateGraphError("no_recipients")
+            if not targets:
+                raise StateGraphError("no_recipients: project_members resolved to no active member other than the sender; name a project with at least one other active member")
+            if len(targets)>200:
+                raise StateGraphError(f"no_recipients: project_members resolved to {len(targets)} recipients, above the limit of 200 per message")
             for target in targets:
                 self._driver(conn, target)
             if project_id:
@@ -215,7 +228,7 @@ class DriverInbox:
                 prior = conn.execute("SELECT m.thread_id FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE m.message_id=? AND d.target_driver_id=?",
                                      (reply_to_message_id, self.driver_id)).fetchone()
                 if prior is None:
-                    raise StateGraphError("unknown_message")
+                    raise StateGraphError("unknown_message: reply_to_message_id must name a message delivered to this driver")
                 thread = prior["thread_id"]
             mid = str(uuid4())
             conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"

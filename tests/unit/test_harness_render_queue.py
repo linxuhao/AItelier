@@ -602,6 +602,129 @@ def test_the_heartbeat_stops_when_the_render_ends(rig, monkeypatch, ending):
     assert not beats[0].is_alive(), "the heartbeat outlived its render"
 
 
+# ── two-locked-beats-in-a-row-still-beat ───────────────────────────────────
+# The one-failure test (P2d) cannot see a heartbeat that gives up on its second
+# consecutive locked beat: one failure, then a success, passes either way.
+
+def test_two_locked_beats_in_a_row_still_beat(tmp_path, monkeypatch):
+    gh = _load(tmp_path, monkeypatch)
+    monkeypatch.setattr(gh, "RENDER_OWNER_HEARTBEAT_INTERVAL_SEC", 0.01)
+    owner = gh.acquire_render_owner("p-beat", "r-beat", "op-beat")
+    stale_beat = 1.0
+    with gh._lifecycle_connection() as conn:
+        conn.execute("UPDATE render_owners SET heartbeat_at=? WHERE owner_id=?",
+                     (stale_beat, owner["owner_id"]))
+        conn.commit()
+    real_beat = gh.heartbeat_render_owner
+    outcomes: list[str] = []
+    beat_ok = threading.Event()
+
+    def beat(owner_id, generation):
+        if len(outcomes) < 2:
+            outcomes.append("locked")
+            raise sqlite3.OperationalError("database is locked")
+        real_beat(owner_id, generation)
+        outcomes.append("ok")
+        beat_ok.set()
+
+    monkeypatch.setattr(gh, "heartbeat_render_owner", beat)
+    heartbeat = gh._start_owner_heartbeat(owner["owner_id"], owner["generation"])
+    try:
+        assert beat_ok.wait(5), (
+            f"the heartbeat stopped after two locked beats in a row: {outcomes}")
+    finally:
+        gh._stop_owner_heartbeat(heartbeat)
+    assert outcomes[:3] == ["locked", "locked", "ok"], outcomes
+    row = next(r for r in gh.render_owner_snapshot() if r["owner_id"] == owner["owner_id"])
+    assert row["heartbeat_at"] > stale_beat, (
+        "the owner row's heartbeat_at did not advance after the two locked beats", row)
+    gh.release_render_owner(owner["owner_id"], owner["generation"], "test finished")
+
+
+# ── a-non-locked-sqlite-error-propagates-from-the-waiting-acquire ──────────
+# The waiting acquire keeps waiting on "database is locked" and raises every
+# other sqlite error to its caller at once, without retrying it.
+
+def test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire(tmp_path, monkeypatch):
+    gh = _load(tmp_path, monkeypatch)
+    real_acquire = gh.acquire_render_owner
+    attempts: list[str] = []
+
+    def locked_then_free(project_id, run_id, operation_id, **kwargs):
+        attempts.append("locked")
+        if len(attempts) <= 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_acquire(project_id, run_id, operation_id, **kwargs)
+
+    monkeypatch.setattr(gh, "acquire_render_owner", locked_then_free)
+    row = gh._acquire_render_owner_waiting_inner(
+        "p-wait", "r-wait", "op-locked", wait_timeout=5)
+    assert len(attempts) == 3, (
+        "a locked table at the acquire was not waited out", attempts)
+    assert row["operation_id"] == "op-locked" and row["waited_for_owner_ids"] == [], row
+    gh.release_render_owner(row["owner_id"], row["generation"], "test finished")
+
+    malformed: list[str] = []
+
+    def corrupt(project_id, run_id, operation_id, **kwargs):
+        malformed.append(operation_id)
+        raise sqlite3.OperationalError("database is malformed")
+
+    monkeypatch.setattr(gh, "acquire_render_owner", corrupt)
+    escaped: list[BaseException] = []
+    try:
+        gh._acquire_render_owner_waiting_inner(
+            "p-wait", "r-wait", "op-corrupt", wait_timeout=1)
+    except BaseException as exc:
+        escaped.append(exc)
+    assert len(malformed) == 1, (
+        "a non-locked sqlite error was retried instead of propagated", malformed, escaped)
+    assert isinstance(escaped[0], sqlite3.OperationalError), escaped
+    assert "database is malformed" in str(escaped[0]), escaped
+
+
+# ── the-heartbeat-stops-once-its-row-is-no-longer-active ───────────────────
+# Not the event-set stop above: here the row itself is released under a live
+# heartbeat, and the next beat must end the thread instead of retrying it.
+
+def test_the_heartbeat_stops_once_its_row_is_no_longer_active(tmp_path, monkeypatch):
+    gh = _load(tmp_path, monkeypatch)
+    monkeypatch.setattr(gh, "RENDER_OWNER_HEARTBEAT_INTERVAL_SEC", 0.01)
+    owner = gh.acquire_render_owner("p-gone", "r-gone", "op-gone")
+    real_beat = gh.heartbeat_render_owner
+    beats: list[str] = []
+    live = threading.Event()
+    gone = threading.Event()
+
+    def beat(owner_id, generation):
+        try:
+            real_beat(owner_id, generation)
+        except RuntimeError:
+            beats.append("gone")
+            gone.set()
+            raise
+        beats.append("ok")
+        live.set()
+
+    monkeypatch.setattr(gh, "heartbeat_render_owner", beat)
+    heartbeat = gh._start_owner_heartbeat(owner["owner_id"], owner["generation"])
+    thread = heartbeat[1]
+    try:
+        assert live.wait(5), "the heartbeat never beat while its row was active"
+        gh.release_render_owner(owner["owner_id"], owner["generation"], "released by test")
+        assert gone.wait(5), f"no beat saw the released row: {beats}"
+        thread.join(2)
+        assert not thread.is_alive(), (
+            f"the heartbeat outlived its row: {len(beats)} beats, last {beats[-3:]}")
+        settled = len(beats)
+        time.sleep(0.1)
+        assert len(beats) == settled, (
+            "the heartbeat kept beating after its row was gone", beats)
+    finally:
+        gh._stop_owner_heartbeat(heartbeat)
+    assert beats.count("gone") == 1 and beats[-1] == "gone", beats
+
+
 # ── a-queue-wait-is-never-charged-as-a-product-failure ─────────────────────
 # Built from the r2 review's P4 and readers probes:
 # ~/.AItelier/director/reports/lockq-r2-review-20260924/probes/probe_queue_timeout_test.py

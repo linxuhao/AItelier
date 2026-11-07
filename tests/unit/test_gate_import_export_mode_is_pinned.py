@@ -122,9 +122,14 @@ What it cannot decide, and does not claim to
     that begins with the wildcard gives the text nothing to judge;
   * the value of a bare `$VAR`/`${VAR}` the file never assigns: the text carries no path
     for it, so `RUN chmod 0700 $D` is green. (An assignment's VALUE is judged, so
-    `ENV D=/opt` is refused; a word that expands one of the file's own assignments is
-    judged as the text it would become, so `RUN D=/op; chmod 0700 ${D}t` is refused; a
-    value that arrives as a build argument is text this file never reads.) A cwd-relative spelling
+    `ENV D=/opt` - and the legacy `ENV D /opt` - is refused; a word that expands one of the
+    file's own assignments is judged as the text it would become, so `RUN D=/op; chmod 0700
+    ${D}t` is refused, and a CHAIN resolves because a value is expanded at the point it is
+    assigned: `RUN D=/op; E=${D}t; chmod 0700 $E` stores `/opt` in `E` and is refused too.
+    The one shape left out is a value naming a variable defined LATER in the file - a shell
+    stores the empty string there and this file has no order to read it in, so
+    `RUN E=${D}t; D=/op` leaves `E` as written; a value that arrives as a build argument is
+    text this file never reads.) A cwd-relative spelling
     (`..` is `/` because the last `WORKDIR` is `/app`, and `~/../..` is `/` because HOME
     is `/home/app`), the RESULT of a command substitution (`$(dirname /opt/x)` is three
     words, none of them the directory it prints), and an alias path such as
@@ -555,9 +560,29 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.+)$")
 #: this file has already read is put where the shell would put it.
 _EXPANSION = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
+#: The NAME half of the legacy `ENV NAME VALUE` form. Docker exports it exactly like
+#: `ENV NAME=VALUE`, so a path carried that way is no further from the shell than one
+#: carried by `=`; a first word that is not an identifier is not that form.
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _expand_with(text: str, values: dict[str, str]) -> str:
+    """`text` with every `$NAME`/`${NAME}` this file has already read put in its place.
+
+    ONE pass over ONE text, never a fixed point: `values` holds values that are already
+    expanded (an assignment's value is expanded at the point it is assigned, below), so a
+    replacement is never re-scanned and `A=$A` cannot loop. A name this file has not read is
+    left as written - a shell would put the empty string there, and emptying it here would
+    decide a word on evidence this file does not have.
+    """
+    if "$" not in text:
+        return text
+    return _EXPANSION.sub(
+        lambda found: values.get(found.group(1) or found.group(2), found.group(0)), text)
+
 
 def _with_assigned_values(
-    words: list[str], known: dict[str, str],
+    words: list[str], known: dict[str, str], keyword: str = "",
 ) -> tuple[list[str], dict[str, str]]:
     """Each word, plus the value of its assignment and its expansion filled in.
 
@@ -565,42 +590,68 @@ def _with_assigned_values(
     later line would use:
 
       * every word as written;
-      * the VALUE of an assignment the word carries: `ENV D=/opt` puts the export tree's
-        ancestor into a variable in one word no shell would split, so the value is judged
-        as its own word;
+      * the VALUE of an assignment the word carries, judged EXPANDED: `ENV D=/opt` puts the
+        export tree's ancestor into a variable in one word no shell would split, so the value
+        is its own word;
       * every word with a `$NAME`/`${NAME}` that this file has ALREADY read replaced by that
         value, so `RUN D=/op; chmod 0700 ${D}t` is judged as the `/opt` a shell would build.
         The round-9 review measured that escape: the assignment's own value `/op` names
         nothing and `${D}t` carries no `/`, so neither word was refused while the shell
-        re-moded the ancestor. One level only - `A=B=/opt` yields `B=/opt`, whose own value
-        is not re-expanded, because a shell would not expand it either.
+        re-moded the ancestor.
+
+    A value is expanded at the point it is assigned, which is when a shell expands it, and
+    that is what makes a chain resolve: `RUN D=/op; E=${D}t; chmod 0700 $E` stores `/opt` in
+    `E`, so `$E` is judged as `/opt`. The tenth round stored the value as written and
+    substituted once, and the round-10 review measured that line green
+    (`evidence/guard-r11-repro-20261107.txt`). What this file does NOT do is expand a value
+    that names a variable defined LATER in the file: a shell would store the empty string
+    there, and this file has no order to read it in, so `RUN E=${D}t; D=/op` leaves `E` as
+    written. `A=B=/opt` still yields `B=/opt`, because that text is what a shell puts in `A`.
+
+    An `ENV` also has a LEGACY two-word form - `ENV D /opt`, `ENV LANG C.UTF-8` - which
+    Docker still accepts and which a shell exports exactly like the `=` form: the first word
+    is the name, the rest of the line is the value. `keyword` is what says an instruction is
+    an `ENV`; the value is expanded the same way, because an instruction that carries a path
+    is not less reachable for being spelled the old way.
 
     `known` carries the assignments of the instructions BEFORE this one, so an `ENV D=/op`
     is visible to the `RUN` that expands it, and the returned mapping adds this one's.
     """
     values = dict(known)
-    for word in words:
-        match = _ASSIGNMENT.match(word)
-        if match:
-            values[word.split("=", 1)[0]] = match.group(1)
     produced: list[str] = []
-    for word in words:
-        produced.append(word)
+    # The legacy `ENV NAME VALUE...` form first, so a later RUN sees the value: the name is
+    # the first word and the value is everything after it, as a shell would export it.
+    if keyword.upper() == "ENV" and len(words) > 1 and not _ASSIGNMENT.match(words[0]):
+        name = _word(words[0])
+        if _ENV_NAME.match(name):
+            value = _expand_with(" ".join(words[1:]), values)
+            values[name] = value
+            produced.append(value)
+    assignments: list[str | None] = [None] * len(words)
+    for index, word in enumerate(words):
         match = _ASSIGNMENT.match(word)
-        if match:
-            produced.append(match.group(1))
+        if match is None:
             continue
-        if "$" in word:
-            substituted = _EXPANSION.sub(
-                lambda found: values.get(found.group(1) or found.group(2), found.group(0)),
-                word)
-            if substituted != word:
-                produced.append(substituted)
+        # Expanded HERE, in word order, so `D=/op; E=${D}t` stores `/opt` in `E`. The word
+        # BEFORE an assignment still sees it below, because this pass finishes first - that
+        # is the round-9 shape (`chmod 0700 ${D}t` with no assignment in its own word) and
+        # it must keep being refused.
+        value = _expand_with(match.group(1), values)
+        assignments[index] = value
+        values[word.split("=", 1)[0]] = value
+    for index, word in enumerate(words):
+        produced.append(word)
+        if assignments[index] is not None:
+            produced.append(assignments[index])
+            continue
+        substituted = _expand_with(word, values)
+        if substituted != word:
+            produced.append(substituted)
     return produced, values
 
 
 def _words(
-    arguments: str, known: dict[str, str] | None = None,
+    arguments: str, known: dict[str, str] | None = None, keyword: str = "",
 ) -> tuple[list[str], dict[str, str]]:
     """The words of one instruction, each still as WRITTEN (its quoting attached).
 
@@ -616,7 +667,9 @@ def _words(
     The VALUE of an assignment is judged as its own word too, and so is a word with one of
     the file's own assignments expanded into it, so neither `ENV D=/opt` nor a later
     `chmod 0700 ${D}t` is carried out of this file's reach; see `_with_assigned_values`,
-    which also returns the mapping so the next instruction sees it.
+    which also returns the mapping so the next instruction sees it. A value is expanded where
+    it is ASSIGNED, so a chain (`D=/op` then `E=${D}t`) is judged as the path it becomes, and
+    the legacy two-word `ENV NAME VALUE` form is read as the same assignment.
     """
     text = arguments.strip()
     words: list[str] | None = None
@@ -629,7 +682,7 @@ def _words(
             words = [word for item in parsed for word in _split_words(item)]
     if words is None:
         words = _split_words(text)
-    return _with_assigned_values(words, known or {})
+    return _with_assigned_values(words, known or {}, keyword)
 
 
 
@@ -694,7 +747,7 @@ def _problems(text: str) -> list[str]:
     known: dict[str, str] = {}
     for keyword, arguments in _directives(text):
         canonical = _canonical(keyword, arguments)
-        words, known = _words(arguments, known)
+        words, known = _words(arguments, known, keyword)
         if canonical in EXPECTED:
             found.append(canonical)
             continue
@@ -1461,3 +1514,59 @@ def test_the_tenth_review_escapes_are_refused():
                      "ENV D=/srv\nRUN echo ${D}"):
         assert not _added_problems(shipped, innocent), (
             f"this line assigns and expands a path that names nothing pinned: {innocent}")
+
+
+def test_a_variable_defined_from_another_variable_is_resolved_first():
+    """The chained-assignment escape the round-10 review measured, refused.
+
+    The tenth round expanded a word with the assignments the file had already read, ONE
+    level only: a value was stored as written, so `E=${D}t` put the literal text `${D}t`
+    into `E`, and `$E` was substituted into that text and never looked at again. The
+    round-10 non-author review measured the consequence, and the round-11 probe reproduced
+    it on the candidate itself (`evidence/guard-r11-repro-20261107.txt`): `RUN D=/op;
+    E=${D}t; chmod 0700 $E` was ACCEPTED, and so were the braced form, a chain of three,
+    the same chain over two `ENV` lines, and the legacy two-word `ENV D /op` form - each of
+    which re-modes `/opt`, the ancestor whose mode decides whether the export tree can be
+    reached at all.
+
+    The fix is substitution, not suspicion: a value is expanded at the point it is assigned
+    (as a shell does) and the RESULT is stored, so an arbitrary chain resolves in
+    instruction order. The controls at the bottom are what says so - a chain that composes
+    `/srvt` or `/srv/data` stays accepted, and so does a legacy `ENV` whose value names
+    nothing pinned, because "refuse every instruction that carries a `$`" would pass every
+    refused row above and be worthless as a guard.
+
+    The one shape still unresolved is a value naming a variable defined LATER in the file: a
+    shell stores the empty string there, and this file has no order to read it in.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+
+    for line, expected in (
+        ("RUN D=/op; E=${D}t; chmod 0700 $E", "/opt"),
+        ("RUN D=/op; E=${D}t; chmod 0700 ${E}", "/opt"),
+        ("RUN A=/o; B=${A}p; C=${B}t; chmod 0700 ${C}", "/opt"),
+        ("ENV D=/op\nENV E=${D}t\nRUN chmod 0700 ${E}", "/opt"),
+        ("ENV D /op\nRUN chmod 0700 ${D}t", "/opt"),
+    ):
+        added = _added_problems(shipped, line)
+        assert added, (
+            "this line builds a pinned path out of a variable defined from another and must "
+            f"be refused: {line}")
+        assert _names(added, expected), (
+            f"{line} was refused, but not for the path it builds (expected {expected!r}):\n"
+            + "\n".join(added))
+
+    # The round-10 control: the SINGLE-level shape stays refused, so the chain fix cannot
+    # have moved the earlier case onto a different ground.
+    assert _names(_added_problems(shipped, "RUN D=/op; chmod 0700 ${D}t"), "/opt")
+
+    # And the other direction - the substitution is precise, so a chain that lands on a
+    # path naming nothing pinned is accepted. A guard that refused every expansion would
+    # pass every row above and fail exactly here.
+    for innocent in ("RUN D=/srv; E=${D}t; echo $E",
+                     "RUN D=/srv; E=${D}/data; echo ${E}",
+                     "ENV LANG C.UTF-8\nRUN echo hi",
+                     "ENV D=/srv\nRUN echo ${D}"):
+        assert not _added_problems(shipped, innocent), (
+            "this line composes a path that names nothing pinned and must be accepted: "
+            f"{innocent}")

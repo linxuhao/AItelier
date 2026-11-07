@@ -35,9 +35,10 @@ Two things, and neither of them is "what a shell command does":
      such a path at parse time (a shell variable, a glob or a brace whose literal head
      already points there) - and, when a word spells only the NAME of the tree or of the
      client, that it says so instead of claiming a path it never placed (see the ground
-     paragraph below). Every operand WORD is first PLACED against the stage's
+     paragraph below). Every RELATIVE operand WORD is first PLACED against the stage's
      WORKDIR, accumulated from the `WORKDIR` instructions before it and reset at every
-     `FROM` (Docker resets it there too), because
+     `FROM` to what the base brings (an earlier stage's WORKDIR when the `FROM` names one,
+     nothing this file can read when it names an external image), because
      `WORKDIR /opt/aitelier-gate-imports` followed by `RUN chmod 0700
      docker/godot/godot_harness.py` re-modes the client with a word that spells no part
      of its path. What separates one word from the next is decided in one
@@ -88,23 +89,36 @@ Two things, and neither of them is "what a shell command does":
      two halves of the name as separate words.
 
      A refusal says WHICH ground it rests on, and the two are kept apart because a message
-     that over-claims is how a guard stops being read. `NAMES` is for a word that, PLACED,
-     IS a pinned path: the tree, an ancestor whose mode decides whether it is reachable
-     (`/`, `/opt`), the client's own file, or a relative word the stage WORKDIR puts on one
-     of those - and then the message prints the path it resolved to. `UNPLACED` is for a
-     word that spells only the NAME of the tree or of the client, or a path no text
-     supplies: it could reach a pinned path, but cannot be placed, because it is relative
-     and the stage has no `WORKDIR` of its own, or it carries a `..` the kernel resolves
-     after it follows a symlink, or the shell supplies part of it. The refusal stays a
-     refusal either way; only the claim changes, and
-     `test_a_refusal_prints_the_ground_it_measured` measures both directions.
+     that over-claims is how a guard stops being read. `NAMES` is for a word whose MEASURED,
+     exact placement IS a pinned path: the tree, a path inside it (the client's own file
+     among them), or an ancestor whose mode decides whether it is reachable (`/`, `/opt`) -
+     an absolute word as itself, never joined to a WORKDIR, or a relative word the stage
+     WORKDIR puts on one of those, and then the message prints the path it resolved to.
+     `UNPLACED` ("could reach a pinned path, but the text does not place it on one") is for
+     everything the text cannot settle, and its message says what WAS measured: a word that
+     spells the NAME but resolves elsewhere (`/app/aitelier-gate-imports`, or
+     `aitelier-gate-imports` under `WORKDIR /app` - the same place, the same ground, and the
+     message prints it), a name in a stage with no WORKDIR this file can read, a `..` the
+     kernel resolves after it follows a symlink, a glob the shell completes from a literal
+     head (printed as the HEAD, with that sentence, never as the path), a path the shell
+     supplies part of, or a `COPY`/`ADD` SOURCE, which Docker reads from the build context
+     or another stage and never against this stage's WORKDIR. An instruction is refused
+     once, on its strongest ground. The refusal stays a refusal either way; only the claim
+     changes, and `test_a_refusal_prints_the_ground_it_measured` and
+     `test_every_refusal_states_only_what_it_measured` measure both directions.
 
-     Only a PATH-LIKE word is ever placed: one with a `/` in it and no leading `-`, or a
-     word that spells one of the two NAMES. A bare word is otherwise a command (`chmod`), a
-     flag (`-m`) or a symbolic mode (`+x`, `u+s`), and counting one as a relative path is
-     what refused `chmod -x /usr/local/bin/tool` - F1 of the third review. A bare FILE name
-     (`__init__.py`) is the stated cost of that, and `_placed_path` says so where the
-     decision is made.
+     Only a PATH-LIKE word is ever placed: one with a `/` in it and no leading `-`, the
+     directory `.` itself, the `=value` of a `--flag=value` when that value is one of those,
+     or a word that spells one of the two NAMES. A bare word is otherwise a command
+     (`chmod`), a flag (`-m`) or a symbolic mode (`+x`, `u+s`), and counting one as a
+     relative path is what refused `chmod -x /usr/local/bin/tool` - F1 of the third review.
+     The stated costs of that, pinned as ACCEPTED in
+     `test_the_declared_non_claims_are_still_accepted`: under `WORKDIR
+     /opt/aitelier-gate-imports`, a bare FILE name (`chmod 0700 __init__.py`) and a bare
+     glob (`chmod 0700 *`) name nothing this file can place, and a short flag with its
+     value glued on (`install -t/opt/aitelier-gate-imports/docker` is refused for the name,
+     `-t/opt` is not) is not split - only `--flag=value` is. `.` and `./` are NOT a cost:
+     both are placed, and refused when they land on or above the tree.
 
 That is deliberately NOT a model of `chmod`, `install` or `COPY`: five review rounds
 each taught the parser the next shell spelling (a recursive `chmod`, an `install` into
@@ -171,9 +185,18 @@ What it cannot decide, and does not claim to
     operands are now placed against the stage `WORKDIR`: `_placed_path` refuses to place a
     word carrying a `..` component, because the kernel resolves one AFTER following a
     symlink (`/var/run/../opt` is `/run/../opt` under a symlinked `/var/run`), so `..` is
-    the one relative spelling the text does not settle. None of them is decidable from the
+    the one relative spelling the text does not settle. (An ABSOLUTE `..` word whose text
+    fold lands on or above the tree, `/opt/x/..`, or any `..` word that spells a name, is
+    still refused - `UNPLACED`, saying the `..` is why.) None of them is decidable from the
     text without running a shell, and running one is what five rounds proved is the wrong
     trade;
+  * the WORKDIR an EXTERNAL base image brings. Every `FROM` starts its stage at its base's
+    working directory: when the base is an earlier stage of this file, that stage's WORKDIR
+    is tracked and inherited; when it is an image, its WORKDIR is not in this file, so the
+    stage starts UNKNOWN. What that leaves unplaced is a relative word in such a stage
+    before its own `WORKDIR` - `FROM some/image` whose WORKDIR is the tree, then `RUN chmod
+    0700 docker/godot/__init__.py`, is read. A relative word that spells a NAME there is
+    still refused, saying the stage has no WORKDIR this file can read;
   * a bash ANSI-C quoted slash after an explicit `SHELL ["/bin/bash","-c"]`:
     `$'\\x2fopt'` reduces to `$x2fopt`, which spells no path this file can judge. The
     brace list that used to sit next to it (`{/opt,/opt}` reduced to a brace-free blob) is
@@ -541,50 +564,59 @@ def _has_parent_component(word: str) -> bool:
     return ".." in word.split("/")
 
 
+def _is_path_like(word: str) -> bool:
+    """True when a bare operand is read as a PATH: a `/` in it, or the directory `.` itself.
+
+    Anything else without a `/` is a command (`chmod`), a symbolic mode (`+x`, `u+s`) or a
+    file name, and a word with a leading `-` is a flag (its `=value`, if any, is judged on
+    its own - see `_operand`).
+    """
+    return not word.startswith("-") and ("/" in word or word == ".")
+
+
 def _placed_path(word: str, workdir: str | None, bare: bool = False) -> str | None:
-    """The absolute path `word` denotes in a stage whose WORKDIR is `workdir`, or None.
+    """The EXACT absolute path `word` denotes in a stage whose WORKDIR is `workdir`, or None.
 
     None is the honest answer whenever the text does not settle where the word lands, and
-    every None below is a word this file either refuses on the NAME it reads anyway or
-    reads because it names nothing pinned:
+    every None below is a word this file either refuses on what it CAN measure (the name it
+    spells, a literal head, a `..` fold) or reads because it names nothing pinned:
 
       * the word carries a `..` component, which the kernel resolves after following a
         symlink (`_has_parent_component`);
-      * the shell supplies part of it - a `$`, a backtick or a glob - so only the literal
-        head is in the text (an empty head means the shell supplies the whole path);
-      * it is RELATIVE and this stage has no `WORKDIR` of its own: the base image's is not
+      * the shell supplies part of it - a `$`, a backtick, a glob or a leading `~` - so the
+        path is not in the text at all; a glob's literal HEAD is judged by `_refusal`, which
+        says the shell completes it and never prints the head as the path;
+      * it is RELATIVE and this stage has no `WORKDIR` it can read: the base image's is not
         in this file, so the text does not say what the word is resolved against;
-      * it is not PATH-LIKE - no `/` in it, or a leading `-` - unless the caller says the
-        word is a path by construction (`bare`: a `WORKDIR` operand, which has nowhere else
-        to be, and a word that spells one of the two NAMES, which no command and no flag
-        does). A bare word is a command (`chmod`), a flag (`-m`) or a
-        symbolic mode (`+x`, `u+s`), and counting one as a relative path is exactly what
-        refused `chmod -x /usr/local/bin/tool` and `install -m 0755 scripts/tool
-        /usr/local/bin/tool` - F1 and F2 of the third non-author review. A bare FILE name
-        is therefore a stated cost of this rule, not an oversight: `WORKDIR
-        /opt/aitelier-gate-imports` plus `RUN chmod 0700 __init__.py` names nothing this
-        file can place, while the same WORKDIR plus `docker/godot/__init__.py` is refused.
+      * it is not PATH-LIKE (`_is_path_like`) unless the caller says the word is a path by
+        construction (`bare`: a `WORKDIR` operand, which has nowhere else to be, and a word
+        that spells one of the two NAMES, which no command and no flag does). A bare word is
+        a command (`chmod`), a flag (`-m`) or a symbolic mode (`+x`, `u+s`), and counting
+        one as a relative path is exactly what refused `chmod -x /usr/local/bin/tool` and
+        `install -m 0755 scripts/tool /usr/local/bin/tool` - F1 and F2 of the third
+        non-author review. A bare FILE name is therefore a stated cost of this rule, not an
+        oversight: `WORKDIR /opt/aitelier-gate-imports` plus `RUN chmod 0700 __init__.py`
+        names nothing this file can place, while the same WORKDIR plus
+        `docker/godot/__init__.py`, `./` or `.` is refused.
 
-    Where it CAN be placed is the case the round-11 brief names: `WORKDIR
+    An ABSOLUTE word is never joined to the WORKDIR: it is its own placement. Where a
+    relative word CAN be placed is the case the round-11 brief names: `WORKDIR
     /opt/aitelier-gate-imports` followed by `RUN chmod 0700
     docker/godot/godot_harness.py` re-modes the pinned client with a word that spells no
     part of its path, and `docker/godot/__init__.py` - which spells neither the tree's name
     nor the client's - is green without this join.
     """
-    literal = _build_time_path(word)
-    if literal is None:
-        literal = word
-    elif not literal:
+    if not word or _build_time_path(word) is not None or word.startswith("~"):
         return None
-    if _has_parent_component(literal):
+    if _has_parent_component(word):
         return None
-    if literal.startswith("/"):
-        return _normalised(literal)
-    if not bare and ("/" not in literal or literal.startswith("-")):
+    if word.startswith("/"):
+        return _normalised(word)
+    if not bare and not _is_path_like(word):
         return None
     if workdir is None:
         return None
-    return _normalised(posixpath.join(workdir, literal))
+    return _normalised(posixpath.join(workdir, word))
 
 
 def _build_time_path(token: str) -> str | None:
@@ -783,18 +815,52 @@ def _words(
     it is ASSIGNED, so a chain (`D=/op` then `E=${D}t`) is judged as the path it becomes, and
     the legacy two-word `ENV NAME VALUE` form is read as the same assignment.
     """
+    return _with_assigned_values(_written_words(arguments), known or {}, keyword)
+
+
+def _written_words(arguments: str) -> list[str]:
+    """The words of one instruction as written, before any assignment is read into them."""
     text = arguments.strip()
-    words: list[str] | None = None
     if text.startswith("[") and text.endswith("]"):
         try:
             parsed = json.loads(text)
         except ValueError:
             parsed = None
         if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
-            words = [word for item in parsed for word in _split_words(item)]
-    if words is None:
-        words = _split_words(text)
-    return _with_assigned_values(words, known or {}, keyword)
+            return [word for item in parsed for word in _split_words(item)]
+    return _split_words(text)
+
+
+def _copy_sources(arguments: str, known: dict[str, str]) -> set[str]:
+    """The SOURCE words of a `COPY`/`ADD`, as written and as `_words` expands them.
+
+    Every operand but the last is a source, and Docker reads a source from the build
+    context (or from the stage or image its `--from` names) - never against this stage's
+    WORKDIR. Joining one to the WORKDIR invents a path in this image that the instruction
+    never touches (`WORKDIR /opt/aitelier-gate-imports` + `COPY docker/godot/__init__.py
+    /tmp/x` reads the CONTEXT's file and writes `/tmp/x`). The destination is excluded
+    even when a source is spelled the same way, because the destination is the word that
+    decides where a mode lands.
+    """
+    operands = [word for word in _written_words(arguments)
+                if _word(word) and not _word(word).startswith("-")]
+    if len(operands) < 2:
+        return set()
+    destination = {operands[-1], _expand_with(operands[-1], known)}
+    sources = {form for word in operands[:-1] for form in (word, _expand_with(word, known))}
+    return sources - destination
+
+
+def _stage_of(arguments: str) -> tuple[str, str | None]:
+    """`FROM [--platform=...] <image> [AS <name>]` as (image, name), both lowercased.
+
+    Docker matches a stage name case-insensitively, and a `FROM` that names an EARLIER
+    stage starts from that stage's filesystem and its WORKDIR.
+    """
+    tokens = [token for token in arguments.split() if not token.startswith("--")]
+    image = tokens[0].lower() if tokens else ""
+    name = tokens[2].lower() if len(tokens) >= 3 and tokens[1].upper() == "AS" else None
+    return image, name
 
 
 
@@ -810,10 +876,18 @@ def _word(raw: str) -> str:
 
 #: The two grounds a refusal may rest on. They are kept apart because a message that
 #: claims the stronger one without measuring it teaches the next author to disbelieve the
-#: guard: `NAMES` says the word, PLACED, IS a pinned path; `UNPLACED` says only that it
-#: could reach one, which is all a name or a shell-supplied path supports.
+#: guard: `NAMES` says the word's MEASURED placement IS a pinned path - the export tree, a
+#: path inside it (the client among them) or an ancestor whose mode decides whether it can
+#: be reached; `UNPLACED` says only that the word could reach one, which is all a name, a
+#: literal head, a `..`, a `COPY` source or a shell-supplied path supports.
 NAMES = "names a pinned path"
-UNPLACED = "cannot be placed"
+UNPLACED = "not placed on a pinned path"
+
+#: The sentence every `UNPLACED` reason opens with, followed by what WAS measured.
+COULD_REACH = "could reach a pinned path, but the text does not place it on one"
+
+#: What a name-spelling word is refused for when its placement is not the tree.
+_SPELLS_NAME = "it spells the name of the export tree or of the client"
 
 
 class _Refusal(NamedTuple):
@@ -823,48 +897,98 @@ class _Refusal(NamedTuple):
     reason: str
 
 
-def _unplaced_detail(operand: str, workdir: str | None, placed: str | None) -> str:
-    """Why this NAME-spelling word could not be placed on the tree.
+def _operand(word: str) -> tuple[str, str | None]:
+    """(the part of `word` that can be a path, the flag it is attached to or None).
 
-    One sentence per reason the text fails to settle it, so the message says which one
-    fired instead of asserting a ground it did not measure.
+    An ASSIGNMENT is judged by its VALUE: `ENV D=/opt` puts an absolute path in a word
+    whose own spelling starts with the variable's name, and joining `D=/opt` to a WORKDIR
+    would invent a path (`<workdir>/D=/opt`) that is not in the text. A FLAG is judged by
+    the value glued to it with `=` - `--target-directory=/opt/aitelier-gate-imports/docker`
+    and `--reference=/opt/aitelier-gate-imports` carry a path, `--chmod=0644` and
+    `--from=build` carry a word that is no path - and a flag with no `=` carries nothing
+    this file places. A short flag with its value glued on (`-t/opt`) is not split: only
+    the `--flag=value` spelling is read, which is a stated cost.
     """
-    if _has_parent_component(operand):
-        return (" - a `..` component is resolved by the kernel after it follows a symlink, "
-                "so the text does not say where it lands")
-    if _build_time_path(operand):
-        return " - the shell supplies the rest of it, so only its literal head is in the text"
-    if placed is not None:
-        return (f" - against the stage WORKDIR {workdir} it becomes {placed}, which is "
-                f"not {EXPORT} or a path under it")
-    return (" - this stage has no WORKDIR of its own (the base image's is not in this file), "
-            "so the text does not say what it resolves against")
+    assignment = _ASSIGNMENT.match(word)
+    if assignment:
+        return assignment.group(1), None
+    if word.startswith("-"):
+        flag, equals, value = word.partition("=")
+        return (value if equals else ""), flag
+    return word, None
 
 
-def _refusal(word: str, workdir: str | None = None) -> _Refusal | None:
+def _pinned(path: str) -> str | None:
+    """What a MEASURED absolute placement is to the pinned tree, or None when it is nothing.
+
+    This is the only place the `NAMES` ground is earned: the export tree, a path inside it
+    (the pinned client is one), or an ancestor whose mode decides whether it is reachable.
+    """
+    if path == TARGET:
+        return f"the pinned client {TARGET}"
+    if path == EXPORT:
+        return f"the export tree {EXPORT}"
+    if _inside_export(path):
+        return f"{path}, a path inside the export tree this image pins"
+    if _decides_reachability(path):
+        return (f"{path}, an ancestor of the export tree, whose mode decides whether it can "
+                "be reached")
+    return None
+
+
+def _head_relation(head: str) -> str | None:
+    """How a glob's placed literal HEAD points at the pinned tree, or None when it does not.
+
+    The head may be the tree's own beginning rather than one of its directories:
+    `/opt/aitelier-gate-import[[:alpha:]]` and `/opt/aitelier-gate-{imports,x}` both spell
+    everything up to the first character the shell supplies.
+    """
+    if head == EXPORT:
+        return "is the export tree itself"
+    if _inside_export(head):
+        return "lies inside the export tree"
+    if _decides_reachability(head):
+        return "is an ancestor of the export tree"
+    if EXPORT.startswith(head):
+        return f"is the start of the export tree's own path {EXPORT}"
+    return None
+
+
+def _refusal(word: str, workdir: str | None = None, source: bool = False) -> _Refusal | None:
     """Why this one WORD makes its instruction one this file cannot allow, or None.
 
-    Six questions, all about the text of the word (`_word` has already taken the shell's
-    quoting and word separators off it), and the answer carries the GROUND it rests on:
-      * does it spell the export tree or the client's file name? (`NAMES` when the word is
-        an ABSOLUTE path or the stage WORKDIR puts it on the tree; an absolute word names
-        the tree through whatever alias it walks - `/proc/self/root/opt/...` IS
-        `/opt/...` - so the claim holds)
-      * does it build a path out of a shell variable (`$DIR/x`, `${D}/..`)? (`UNPLACED`:
-        the path is not in the text at all)
-      * does its literal head, before the expansion, already point at the tree or at an
-        ancestor of it (`/opt/*`, `/opt/aitelier-gate-{imports,x}`, `/*/..`)? (`NAMES`)
-      * is it, plainly, one of the two ancestors (`/opt`, `/`)? (`NAMES`)
-      * does it spell only the NAME of the tree or of the client, in a RELATIVE word?
-        Then it is refused as something that COULD REACH a pinned path but CANNOT BE
-        PLACED: a relative name is not a path, and `WORKDIR /app` makes
-        `aitelier-gate-imports` into `/app/aitelier-gate-imports`, not into the tree.
-        Refusing it is still right - this file reads a name wherever it appears - but
-        saying it NAMES the tree claims a ground the text does not carry. (`UNPLACED`)
-      * does it PLACE, against this stage's WORKDIR, on the tree or under it? Then it is
-        refused as naming the RESOLVED path, which the message prints: `WORKDIR
-        /opt/aitelier-gate-imports` plus `RUN chmod 0700 docker/godot/__init__.py` names
-        no pinned path AS WRITTEN and re-modes a pinned marker all the same. (`NAMES`)
+    Every question is about the text of the word (`_word` has already taken the shell's
+    quoting and word separators off it), and every answer says what was MEASURED. The word
+    is first reduced to the part that can be a path (`_operand`: an assignment's value, a
+    `--flag=`'s value), then sorted by KIND:
+
+      * a `COPY`/`ADD` SOURCE (`source`) is read from the build context or another stage,
+        never against this stage's WORKDIR, so it is never placed. It is refused - as
+        `UNPLACED` - only when, read as a path of this image, the word would be refused
+        anyway (it spells a name, `/`, `/opt`, a literal head into the tree);
+      * a word the SHELL supplies part of - a `$`, a backtick, a leading `~` - has no path
+        in the text: refused `UNPLACED` when it spells a name, or when it builds a PATH out
+        of the expansion (`${DIR}/x`, `/opt/venv/bin:$PATH` - the stated costs); a bare
+        `$TOOL` is read;
+      * a word the shell COMPLETES - a glob or a brace - has only its literal HEAD in the
+        text. The head is placed (an absolute head as written, a relative one against the
+        WORKDIR) and the word is refused `UNPLACED` when the head points at, into or above
+        the tree, with a sentence that says the shell completes it: `/opt/aitelier-gate-
+        imports/*` is never reported as the path `/opt/aitelier-gate-imports`;
+      * a word with a `..` component is not placed, because the kernel resolves `..` after
+        following a symlink. It is refused `UNPLACED` when it spells a name, or when it is
+        absolute and its TEXT fold lands on or above the tree (`/opt/x/..`); a relative
+        `..` that spells no name is the declared cwd-relative non-claim;
+      * anything else is placed EXACTLY (`_placed_path`): an absolute word as itself, a
+        path-like relative word (`docker/x`, `./`, `.`) against this stage's WORKDIR. Only
+        here is `NAMES` claimed, and only when the placement IS the tree, a path inside it
+        or an ancestor (`_pinned`); the message then prints the path it resolved to.
+        A word that spells the tree's or the client's NAME but places elsewhere
+        (`/app/aitelier-gate-imports`, or `aitelier-gate-imports` under `WORKDIR /app`) is
+        refused `UNPLACED`, saying where it resolved and that the place is not the tree:
+        the name is refused wherever it appears, because the text cannot say whether that
+        place is an alias of the tree (`/proc/self/root/opt/...` IS one; this file does not
+        resolve aliases, so it does not claim it).
 
     Costs are stated rather than hidden, and every one is pinned by
     `test_the_documented_false_refusal_is_refused_on_purpose`: a word that STARTS with an
@@ -877,62 +1001,111 @@ def _refusal(word: str, workdir: str | None = None) -> _Refusal | None:
     text there. That is the price of judging text instead of running a shell, and the
     module docstring names it.
     """
-    named = NAME in word or CLIENT in word
-    # An ASSIGNMENT is placed by its VALUE: `ENV D=/opt` puts an absolute path in a word
-    # whose own spelling starts with the variable's name, and joining `D=/opt` to a WORKDIR
-    # would invent a path (`<workdir>/D=/opt`) that is not in the text.
-    assignment = _ASSIGNMENT.match(word)
-    operand = assignment.group(1) if assignment else word
-    # A word that spells one of the two NAMES is placed even when it is bare: a name is a
-    # path-candidate by the very rule that refuses it, while no command word and no flag
-    # spells either name - so `bare=True` here cannot revive the F1/F2 false refusal.
-    placed = _placed_path(operand, workdir, bare=named)
-    if named:
-        if operand.startswith("/") or (placed is not None and _inside_export(placed)):
-            return _Refusal(
-                NAMES,
-                "names the export tree or the client this image pins"
-                + (f", as {placed} - {operand!r} as written, placed against the stage "
-                   f"WORKDIR {workdir}"
-                   if placed is not None and placed != _normalised(operand) else ""))
+    operand, flag = _operand(word)
+    named = NAME in operand or CLIENT in operand
+    if flag is not None and (NAME in flag or CLIENT in flag):
         return _Refusal(
             UNPLACED,
-            "could reach a pinned path, but cannot be placed: it spells the name of the "
-            "export tree or of the client, and a relative name is not a path"
-            + _unplaced_detail(operand, workdir, placed))
-    head = _build_time_path(word)
-    if head is None:
-        if _decides_reachability(word):
-            return _Refusal(
-                NAMES,
-                "names an ancestor of the export tree, whose mode decides whether it can "
-                "be reached")
-    elif not head:
-        # A word that STARTS with the expansion: the whole path is supplied by the shell.
-        # A bare `$CMD` with no slash is a command name, which is not this file's subject.
-        if ("$" in word or "`" in word) and "/" in word:
-            return _Refusal(
-                UNPLACED,
-                "cannot be placed: it builds a path out of a shell variable, so the path is "
-                "not in the text")
+            f"{COULD_REACH}: it spells the name of the export tree or of the client in the "
+            f"flag {flag!r} itself, which is not a path")
+    if not operand:
         return None
-    elif "/" in head:
-        if "$" in word or "`" in word:
+    carried = f"passes {operand!r} as the value of its flag {flag!r}, and that value "
+    if source:
+        as_path = _refusal(operand)
+        if as_path is None:
+            return None
+        if named:
+            measured = _SPELLS_NAME
+        elif as_path.ground == NAMES:
+            measured = f"read as a path of this image, it {as_path.reason}"
+        else:
+            measured = ("read as a path of this image, "
+                        + as_path.reason.removeprefix(f"{COULD_REACH}: "))
+        return _Refusal(
+            UNPLACED,
+            f"{COULD_REACH}: it is a COPY/ADD source, which Docker reads from the build "
+            "context (or from the stage its --from names), never against this stage's "
+            f"WORKDIR, so its place in this image cannot be settled from the text - and "
+            f"{measured}")
+    head = _build_time_path(operand)
+    if (head is not None and ("$" in operand or "`" in operand)) or operand.startswith("~"):
+        if named:
             return _Refusal(
                 UNPLACED,
-                "cannot be placed: it builds a path out of a shell variable, so the path "
-                "is not in the text")
-        # The head may be the tree's own beginning rather than one of its directories:
-        # `/opt/aitelier-gate-import[[:alpha:]]` and `/opt/aitelier-gate-{imports,x}` both
-        # spell everything up to the last character the shell supplies.
-        if _decides_reachability(head) or EXPORT.startswith(posixpath.normpath(head)):
-            return _Refusal(NAMES, f"can expand to {EXPORT} or to a path above it")
-    if placed is not None and _inside_export(placed) and placed != _normalised(operand):
+                f"{COULD_REACH}: {_SPELLS_NAME}, and the shell supplies part of it (a `$`, a "
+                "backtick or a leading `~`), so the path it builds is not in the text")
+        # The literal head is read on the WHOLE word, as written, exactly as before flags
+        # and assignments were split: an assignment's value is judged again EXPANDED, as its
+        # own word, and any word the file's own assignments fill is judged again filled
+        # (`_with_assigned_values`). So `E=${D}/data` and `--prefix=${P}/lib` are not refused
+        # for a `/` the expansion may supply, while `PATH=/opt/venv/bin:$PATH` is - its
+        # literal head already carries a `/`.
+        written = _build_time_path(word) or ""
+        if "/" in written or (not written and "/" in word and not word.startswith("~")):
+            return _Refusal(
+                UNPLACED,
+                f"{COULD_REACH}: it builds a path out of a shell variable, so the path is not "
+                "in the text")
+        return None
+    if head is not None:
+        placed_head = None
+        if head.startswith("/") and not _has_parent_component(head):
+            placed_head = _normalised(head)
+        elif head and _is_path_like(head) and not _has_parent_component(head) and workdir:
+            placed_head = _normalised(posixpath.join(workdir, head))
+        relation = _head_relation(placed_head) if placed_head else None
+        where = ("" if placed_head is None or head.startswith("/")
+                 else f" ({placed_head} against the stage WORKDIR {workdir})")
+        if relation:
+            return _Refusal(
+                UNPLACED,
+                f"{COULD_REACH}: the shell completes it from its literal head {head!r}{where}, "
+                f"which {relation}, so the exact path is not in the text")
+        if named:
+            return _Refusal(
+                UNPLACED,
+                f"{COULD_REACH}: {_SPELLS_NAME}, and the shell completes it from its literal "
+                f"head {head!r}{where}, so the exact path is not in the text")
+        return None
+    if _has_parent_component(operand):
+        fold = _normalised(operand) if operand.startswith("/") else None
+        folded = _pinned(fold) if fold else None
+        if not named and not folded:
+            return None
         return _Refusal(
-            NAMES,
-            f"is {operand!r} as written and {placed} in this stage: placed against the "
-            f"stage WORKDIR {workdir}, the word lands on a path this image pins")
-    return None
+            UNPLACED,
+            f"{COULD_REACH}: " + (f"{_SPELLS_NAME}, and " if named else "")
+            + "it carries a `..` component, which the kernel resolves after it follows a "
+            "symlink, so where it lands is not decidable from the text"
+            + (f" (folded as text, ignoring symlinks, it would read {fold})" if folded else ""))
+    placed = _placed_path(operand, workdir, bare=named)
+    pinned = _pinned(placed) if placed is not None else None
+    if pinned:
+        if operand.startswith("/"):
+            # An absolute word is its own placement; it is never joined to the WORKDIR.
+            what = (f"names {pinned}" if _inside_export(placed) else
+                    "names an ancestor of the export tree, whose mode decides whether it can "
+                    "be reached" + (f" - {operand!r} is {placed}" if placed != operand else ""))
+            return _Refusal(NAMES, (carried + what) if flag else what)
+        landed = (f"is {operand!r} as written and {placed} in this stage: placed against the "
+                  f"stage WORKDIR {workdir}, it lands on {pinned}")
+        return _Refusal(NAMES, (carried + landed) if flag else landed)
+    if not named:
+        return None
+    if placed is not None:
+        where = (f"it is the absolute path {placed}" if operand.startswith("/")
+                 else f"against the stage WORKDIR {workdir} it becomes {placed}")
+        return _Refusal(
+            UNPLACED,
+            f"{COULD_REACH}: {_SPELLS_NAME}, but {where}, which is not {EXPORT}, a path under "
+            "it or one of its ancestors - the name is refused wherever it appears, because "
+            f"the text cannot say whether {placed} is an alias of the tree")
+    return _Refusal(
+        UNPLACED,
+        f"{COULD_REACH}: {_SPELLS_NAME}, and it is relative while this stage has no WORKDIR "
+        "this file can read (the base image's is not in this file), so the text does not say "
+        "what it resolves against")
 
 
 def _next_workdir(words: list[str], workdir: str | None) -> str | None:
@@ -940,8 +1113,8 @@ def _next_workdir(words: list[str], workdir: str | None) -> str | None:
 
     A relative `WORKDIR` is resolved against the one before it, as Docker does, and a
     `WORKDIR` this file cannot place leaves the stage's working directory UNKNOWN rather
-    than guessing: a later operand that could reach the tree is then refused as something
-    that cannot be placed, which is the honest ground.
+    than guessing: a later operand that spells a name is then refused as `UNPLACED`, saying
+    the stage has no WORKDIR this file can read, which is the honest ground.
     """
     operands = [word for word in words if _word(word)]
     if not operands:
@@ -957,43 +1130,66 @@ def _problems(text: str) -> list[str]:
     found: list[str] = []
     known: dict[str, str] = {}
     workdir: str | None = None
+    #: The WORKDIR each NAMED stage has reached, so a later `FROM <that stage>` starts there.
+    stage_workdirs: dict[str, str | None] = {}
+    stage: str | None = None
     for keyword, arguments in _directives(text):
         canonical = _canonical(keyword, arguments)
+        upper = keyword.upper()
+        sources = _copy_sources(arguments, known) if upper in ("COPY", "ADD") else set()
         words, known = _words(arguments, known, keyword)
         # The instruction's own words are judged against the WORKDIR BEFORE it - a relative
         # `WORKDIR` is resolved against the previous one - and the stage keeps what the
         # author wrote whether or not this file refuses the instruction: what the next RUN
         # resolves against is his text, not this file's opinion of it.
         previous = workdir
-        if keyword.upper() == "WORKDIR":
+        if upper == "WORKDIR":
             workdir = _next_workdir(words, workdir)
-        elif keyword.upper() == "FROM":
-            # Docker RESETS the working directory to the base image's at every stage, and
-            # that image's is not in this file's text: the next stage starts where nothing
-            # can be placed, so no operand is resolved against the PREVIOUS stage.
-            previous = workdir = None
+        elif upper == "FROM":
+            # Every stage starts at its BASE's working directory. A base that is an EARLIER
+            # stage of this file brings the WORKDIR that stage reached, which is tracked; an
+            # external image brings one this file's text does not carry, so the stage starts
+            # where nothing relative can be placed (None) and no operand is ever resolved
+            # against the PREVIOUS stage. What that leaves unplaced is stated in the module
+            # docstring: a relative word in a stage built on an external image that sets a
+            # WORKDIR of its own.
+            image, stage = _stage_of(arguments)
+            previous = None
+            workdir = stage_workdirs.get(image)
+        if stage is not None:
+            stage_workdirs[stage] = workdir
         if canonical in EXPECTED:
             found.append(canonical)
             continue
         # The KEYWORD is not an operand: placing it against the stage's WORKDIR would say
         # `RUN` resolves to `<workdir>/RUN` and, when the WORKDIR is the tree, refuse an
         # instruction for a ground about its own name rather than about what it does.
+        # One refusal per instruction, on its STRONGEST ground: the first word whose
+        # placement IS a pinned path, else the first word that could reach one - so
+        # `COPY --from=build / /` is reported on the destination `/` it writes, not on the
+        # source `/` it reads from another stage.
+        chosen: tuple[str, str, _Refusal] | None = None
         for index, raw in enumerate([keyword, *words]):
             word = _word(raw)
-            refusal = _refusal(word, None if index == 0 else previous)
-            if refusal:
-                written = "" if word == raw else f" (a shell word: {word!r})"
-                shown = canonical if len(canonical) <= 160 else canonical[:157] + "..."
-                problems.append(
-                    f"{keyword.upper()} carries {raw!r}{written}, which {refusal.reason}. "
-                    "This file reads exactly two instructions:\n  " + "\n  ".join(EXPECTED)
-                    + "\nand refuses every other instruction whose operands name a pinned "
-                    "path, or could reach one that the text cannot place. Got:\n  "
-                    f"{shown}\n"
-                    "If one of the two really changed, change EXPECTED here deliberately and "
-                    "say why in the commit message - do not teach this file to read a shell: "
-                    "six review rounds each found the next spelling.")
-                break
+            refusal = _refusal(word, None if index == 0 else previous,
+                               source=index > 0 and raw in sources)
+            if refusal and (chosen is None or refusal.ground == NAMES):
+                chosen = (raw, word, refusal)
+                if refusal.ground == NAMES:
+                    break
+        if chosen:
+            raw, word, refusal = chosen
+            written = "" if word == raw else f" (a shell word: {word!r})"
+            shown = canonical if len(canonical) <= 160 else canonical[:157] + "..."
+            problems.append(
+                f"{upper} carries {raw!r}{written}, which {refusal.reason}. "
+                "This file reads exactly two instructions:\n  " + "\n  ".join(EXPECTED)
+                + "\nand refuses every other instruction whose operands name a pinned "
+                "path, or could reach one that the text cannot place. Got:\n  "
+                f"{shown}\n"
+                "If one of the two really changed, change EXPECTED here deliberately and "
+                "say why in the commit message - do not teach this file to read a shell: "
+                "six review rounds each found the next spelling.")
     for expected in EXPECTED:
         if expected not in found:
             problems.append(
@@ -1619,18 +1815,22 @@ def test_a_command_that_is_not_chmod_and_names_the_tree_is_refused():
     a pinned path. The old rule needed a command word for each of them; the mention rule
     needs none, which is why it holds for a command this file has never seen.
 
-    The first row is refused on `godot_harness.py`, its SOURCE word, and not on its
-    destination: naming the client is refused wherever the name appears, so the source is
-    the first word that closes it. That is the contract, and it is why this row expects
-    the file name rather than the path printed under it - before `_names` read only the
-    first line, this row was green for the pinned path quoted in the message tail, which
-    is exactly the vacuity the round-6 review measured.
+    The first row is reported on its DESTINATION, the pinned client itself: an instruction
+    is refused once, on its strongest ground, and a word whose placement IS the client
+    outranks a relative SOURCE word that only spells its name. The second row keeps the
+    other half of the contract measured - naming the client is refused wherever the name
+    appears, so the same source with a destination outside the tree is still refused on
+    `godot_harness.py`. Both rows expect the file name in the FIRST line rather than the
+    path printed under it - before `_names` read only the first line, this row was green
+    for the pinned path quoted in the message tail, which is exactly the vacuity the
+    round-6 review measured.
     """
     shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
     for line, expected in (
         ("RUN cp -p docker/godot/godot_harness.py "
          "/opt/aitelier-gate-imports/docker/godot/godot_harness.py",
          "godot_harness.py"),
+        ("RUN cp -p docker/godot/godot_harness.py /tmp/client.py", "godot_harness.py"),
         ("RUN cp -p /usr/local/bin/tool /opt/aitelier-gate-imports/docker/godot/tool",
          "/opt/aitelier-gate-imports/docker/godot/tool"),
         ("RUN mv /opt/aitelier-gate-imports/docker /tmp/d && mv /tmp/d "
@@ -1669,6 +1869,22 @@ NON_CLAIMS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: The placement costs the module docstring states, each measured in the stage CONTEXT that
+#: makes it a cost: `(name, context appended to the shipped text first, the line)`. The
+#: context is part of the control, so a `WORKDIR` on the tree - refused on its own line - does
+#: not make every row red for a reason that is not the row's.
+PLACEMENT_COSTS: tuple[tuple[str, str, str], ...] = (
+    ("a bare FILE name under a WORKDIR on the tree",
+     f"WORKDIR {EXPORT}", "RUN chmod 0700 __init__.py"),
+    ("a bare glob under a WORKDIR on the tree",
+     f"WORKDIR {EXPORT}", "RUN chmod 0700 *"),
+    ("a short flag with its value glued on",
+     "", "RUN install -d -t/opt /tmp/x"),
+    ("a relative word in a stage built on an EXTERNAL image, whose WORKDIR is not in the text",
+     "FROM python:3.12-slim", "RUN chmod 0700 docker/godot/__init__.py"),
+)
+
+
 def test_the_declared_non_claims_are_still_accepted():
     """The boundary the docstring declares, measured rather than assumed.
 
@@ -1691,6 +1907,14 @@ def test_the_declared_non_claims_are_still_accepted():
     # The ASSIGNMENT half of E3 was closed by the round-8 review's own finding: an
     # instruction that puts a pinned path into a variable is refused on the VALUE, so what
     # is left of the non-claim is a variable whose value the text never carries at all.
+    # The placement costs, each in the context that makes it one.
+    for name, context, line in PLACEMENT_COSTS:
+        text = f"{shipped}\n{context}" if context else shipped
+        added = _added_problems(text, line)
+        assert not added, (
+            f"{name} is a declared COST of placing operands and must still be accepted - if "
+            f"closing it is intended, move the row and say why in the commit message:\n"
+            f"{context}\n{line}\n" + "\n".join(added))
     for line in ("ENV D=/opt", "ARG D=/opt", "RUN D=/opt; chmod 0700 $D"):
         added = _added_problems(shipped, line)
         assert added, (
@@ -1852,11 +2076,12 @@ def test_the_three_instructions_the_round11_brief_calls_false_grounds_are_read()
 
 #: The two grounds a refusal may print, and the one sentence each must carry:
 #: `NAMES_GROUND` claims the word, PLACED, IS a pinned path; `UNPLACED_GROUND` claims only
-#: that it could reach one. The split is the round-11 brief's real subject, and every row
+#: that it could reach one (it is `COULD_REACH`, written out so a reworded constant cannot
+#: carry the test with it). The split is the round-11 brief's real subject, and every row
 #: below is a word this file ALREADY refused at 18638499bcc0 - the ground changes, never
 #: the refusal.
 NAMES_GROUND = "names the export tree"
-UNPLACED_GROUND = "could reach a pinned path, but cannot be placed"
+UNPLACED_GROUND = "could reach a pinned path, but the text does not place it on one"
 
 
 def test_a_refusal_prints_the_ground_it_measured():
@@ -1867,14 +2092,18 @@ def test_a_refusal_prints_the_ground_it_measured():
     `WORKDIR /app` places it at `/app/aitelier-gate-imports` - so saying it "names the
     export tree" asserts something the text does not say. It must still be refused (this
     file reads the NAME wherever it appears, and the tree could be anywhere a WORKDIR puts
-    it), and the refusal must say the operand could reach a pinned path but cannot be
-    placed, naming the path its stage's WORKDIR gives it.
+    it), and the refusal must say the operand could reach a pinned path but the text does
+    not place it on one, naming the path its stage's WORKDIR gives it.
 
     The other rows are the shapes the same sentence has to cover - a RELATIVE word carrying
-    a `..` the kernel resolves after a symlink, and a stage with no WORKDIR of its own -
-    plus the direction that must NOT soften: a word that IS the client's path, an ancestor,
-    an absolute path that reaches the tree through an alias or a `..`, or a relative word
-    the WORKDIR lands on the tree, keeps the pinned-path ground.
+    a `..` the kernel resolves after a symlink, a stage with no WORKDIR of its own, and the
+    two ABSOLUTE words the round-3 review of this change measured claiming `NAMES` for a
+    placement the classifier never computed: `/proc/self/root/opt/...` (an alias this file
+    does not resolve - its measured placement is `/proc/self/root/...`, not the tree) and
+    `/var/run/../opt/...` (a `..` is never placed). Both stay REFUSED, on the name they
+    spell. The direction that must NOT soften: a word whose measured placement IS the
+    client's path, an ancestor, or a path a relative word lands on under the stage WORKDIR,
+    keeps the pinned-path ground.
     """
     unplaced = _refusal("aitelier-gate-imports", "/app")
     assert unplaced is not None, (
@@ -1901,19 +2130,26 @@ def test_a_refusal_prints_the_ground_it_measured():
         relative_parent.reason)
     assert UNPLACED_GROUND in relative_parent.reason, relative_parent.reason
 
+    for word, measured in (("/proc/self/root/opt/aitelier-gate-imports",
+                            "it is the absolute path /proc/self/root/opt/aitelier-gate-imports"),
+                           ("/var/run/../opt/aitelier-gate-imports", "`..`")):
+        refusal = _refusal(word, None)
+        assert refusal is not None and refusal.ground == UNPLACED, (
+            f"{word!r} spells the tree's name and must stay refused, on the ground the "
+            f"classifier measured rather than a placement it never computed: {refusal}")
+        assert UNPLACED_GROUND in refusal.reason and measured in refusal.reason, (
+            refusal.reason)
+        assert NAMES_GROUND not in refusal.reason, refusal.reason
+
     for word, workdir in ((TARGET, None), ("/opt", None), ("/", None),
                           ("//opt/aitelier-gate-imports", None),
-                          # Absolute, so the name IS a path: the alias and the `..` detour
-                          # both land on the tree, and neither is a "could reach" case.
-                          ("/proc/self/root/opt/aitelier-gate-imports", None),
-                          ("/var/run/../opt/aitelier-gate-imports", None),
                           ("docker/godot/godot_harness.py", EXPORT),
                           ("docker/godot/__init__.py", EXPORT)):
         refusal = _refusal(word, workdir)
         assert refusal is not None, f"{word!r} names a pinned path and must be refused"
         assert refusal.ground == NAMES, (
             f"{word!r} against WORKDIR {workdir!r} IS a pinned path (or an ancestor of the "
-            f"tree), so the ground is the pinned one, not 'cannot be placed': {refusal}")
+            f"tree), so the ground is the pinned one, not {UNPLACED!r}: {refusal}")
         assert UNPLACED_GROUND not in refusal.reason, refusal.reason
 
 
@@ -1990,3 +2226,135 @@ def test_a_workdir_places_a_relative_operand_on_the_pinned_tree():
         assert _refusal(relative, "/app") is None, (
             f"{relative!r} is a cwd-relative spelling the docstring declares out of reach: "
             f"{_refusal(relative, '/app')}")
+
+
+#: The round-3 review of the WORKDIR change, as rows: every shape it measured printing a
+#: ground or a path the classifier never computed, with what the FIRST line of the refusal
+#: must and must not say. `(rule, context appended to the shipped text first, line, ground,
+#: must contain, must not contain)`; ground `None` means the line must be READ. The context is
+#: part of the control: a `WORKDIR` on the tree is refused on its own line, so it sits in the
+#: text `_added_problems` measures against and only the row's own line is judged.
+MEASURED_GROUND_CASES: tuple[tuple[str, str, str, str | None, tuple[str, ...],
+                                   tuple[str, ...]], ...] = (
+    # 1. A COPY/ADD source is read from the build context, never against the WORKDIR.
+    ("1 a context source under a WORKDIR on the tree writes /tmp, not the tree",
+     f"WORKDIR {EXPORT}", "COPY docker/godot/__init__.py /tmp/x", None, (), ()),
+    ("1 a source that spells the client's name is not joined to the shipped /app",
+     "", "COPY docker/godot/godot_harness.py /tmp/x", UNPLACED,
+     ("COPY/ADD source", "build context", UNPLACED_GROUND), ("/app/", NAMES_GROUND)),
+    ("1 the destination outranks a source, and is placed against the WORKDIR",
+     "WORKDIR /opt/aitelier-gate-imports/docker/godot",
+     "COPY --chmod=0600 docker/godot/godot_harness.py ./", NAMES,
+     ("'./'", "/opt/aitelier-gate-imports/docker/godot"), (UNPLACED_GROUND,)),
+    # 2. An absolute word is its own placement.
+    ("2 an absolute word under a WORKDIR on the tree is not joined to it",
+     f"WORKDIR {EXPORT}", "RUN chmod 0700 /app/aitelier-gate-imports", UNPLACED,
+     ("the absolute path /app/aitelier-gate-imports",),
+     ("WORKDIR", f"{EXPORT}/app", NAMES_GROUND)),
+    ("2 an absolute ancestor names itself, with no WORKDIR in the message",
+     f"WORKDIR {EXPORT}", "RUN chmod 0700 /opt", NAMES, ("names an ancestor",), ("WORKDIR",)),
+    # 3. A flag's `=value` is placed when it is a path, and the message says which value.
+    ("3 --target-directory= carries the tree's directory",
+     "", "RUN install -m 0700 --target-directory=/opt/aitelier-gate-imports/docker /tmp/x",
+     NAMES, ("'--target-directory'", "'/opt/aitelier-gate-imports/docker' as the value",
+             "inside the export tree"), (UNPLACED_GROUND, "/app/")),
+    ("3 --reference= carries the tree itself",
+     "", "RUN chmod --reference=/opt/aitelier-gate-imports 0700 /tmp/x", NAMES,
+     ("'--reference'", f"the export tree {EXPORT}"), (UNPLACED_GROUND, "/app/")),
+    ("3 a flag value outside the tree is read",
+     "", "RUN install -d --target-directory=/srv/data /tmp/x", None, (), ()),
+    # 4. A glob is completed by the shell: its literal head is printed as a HEAD.
+    ("4 an absolute glob is not reported as the tree it starts in",
+     "", "RUN chmod 0700 /opt/aitelier-gate-imports/*", UNPLACED,
+     ("the shell completes it from its literal head '/opt/aitelier-gate-imports/'",),
+     (NAMES_GROUND, "WORKDIR")),
+    ("4 a relative glob under a WORKDIR on the tree prints its placed head as a head",
+     f"WORKDIR {EXPORT}", "RUN chmod 0700 docker/godot/godot_h*", UNPLACED,
+     ("the shell completes it from its literal head 'docker/godot/godot_h'",
+      f"{EXPORT}/docker/godot/godot_h against the stage WORKDIR {EXPORT}"), ("lands on",)),
+    # 5. NAMES only for a measured placement; a name elsewhere is one ground, both spellings.
+    ("5 the absolute spelling of a name outside the tree",
+     "", "RUN chmod 0700 /app/aitelier-gate-imports", UNPLACED,
+     ("/app/aitelier-gate-imports", f"which is not {EXPORT}"), (NAMES_GROUND,)),
+    ("5 its relative twin under the shipped WORKDIR /app",
+     "", "RUN chmod 0700 aitelier-gate-imports", UNPLACED,
+     ("/app/aitelier-gate-imports", f"which is not {EXPORT}"), (NAMES_GROUND,)),
+    ("5 an alias this file does not resolve",
+     "", "RUN chmod 0700 /proc/self/root/opt/aitelier-gate-imports", UNPLACED,
+     ("the absolute path /proc/self/root/opt/aitelier-gate-imports",), (NAMES_GROUND,)),
+    # 6. `.` and `./` are placed words.
+    ("6 `.` under a WORKDIR inside the tree",
+     "WORKDIR /opt/aitelier-gate-imports/docker/godot", "RUN chmod -R 0700 .", NAMES,
+     ("/opt/aitelier-gate-imports/docker/godot", "inside the export tree"), ()),
+    ("6 `./` under a WORKDIR on an ancestor",
+     "WORKDIR /opt", "RUN chmod 0700 ./", NAMES, ("/opt", "an ancestor of the export tree"),
+     ()),
+    ("6 `.` under the shipped WORKDIR /app is read",
+     "", "RUN chmod -R 0755 .", None, (), ()),
+    # 7. `FROM <earlier stage>` inherits that stage's WORKDIR - matched case-insensitively.
+    ("7 a stage built on an earlier stage starts at its WORKDIR",
+     f"FROM python:3.12-slim AS tree\nWORKDIR {EXPORT}\nFROM TREE AS next",
+     "RUN chmod 0700 docker/godot/__init__.py", NAMES,
+     (f"{EXPORT}/docker/godot/__init__.py", f"against the stage WORKDIR {EXPORT}"), ()),
+    ("7 the inherited WORKDIR is carried down a chain of stages",
+     f"FROM python:3.12-slim AS tree\nWORKDIR {EXPORT}\nFROM tree AS mid\nFROM mid",
+     "RUN chmod 0700 docker/godot/__init__.py", NAMES,
+     (f"{EXPORT}/docker/godot/__init__.py",), ()),
+    # 8. A `..` word: the name (or the text fold) is measured, the placement is not.
+    ("8 an absolute `..` detour that spells the name",
+     "", "RUN chmod 0700 /var/run/../opt/aitelier-gate-imports", UNPLACED,
+     ("`..`", "not decidable from the text"), (NAMES_GROUND,)),
+    ("8 an absolute `..` whose text fold is an ancestor says it is a fold",
+     "", "RUN chmod 0700 /opt/x/..", UNPLACED,
+     ("`..`", "folded as text, ignoring symlinks, it would read /opt"), ("names an ancestor",)),
+)
+
+
+def test_every_refusal_states_only_what_it_measured():
+    """Eight rules, one per kind of word, each pinned by the round-3 review's own shapes.
+
+    The WORKDIR change made the guard print grounds it did not compute: a `COPY` source
+    joined to the WORKDIR (Docker reads it from the build context), a glob's literal head
+    printed as the path, `--target-directory=/opt/...` read as a RELATIVE name and joined to
+    `/app`, `/app/aitelier-gate-imports` claimed as NAMES while its relative twin at the same
+    place was UNPLACED, `/var/run/../opt/...` claimed as NAMES although a `..` is never
+    placed, and `.`/`./` never placed at all. Each row is measured through `_added_problems`
+    on the shipped text, with the stage context a row needs placed BEFORE the measured line.
+
+    The refusal set is not what changed: every line refused before this change is still
+    refused (the rows that are READ are the context source, which the old join refused for a
+    path the instruction never touches, and two controls). What changed is that the FIRST
+    line - the only one `_names` reads - says what was measured and nothing more.
+    """
+    shipped = (ROOT / "Dockerfile").read_text().rstrip("\n")
+    for rule, context, line, ground, must, must_not in MEASURED_GROUND_CASES:
+        text = f"{shipped}\n{context}" if context else shipped
+        added = _added_problems(text, line)
+        if ground is None:
+            assert not added, f"rule {rule}: this line must be READ:\n{line}\n" + "\n".join(added)
+            continue
+        assert len(added) == 1, f"rule {rule}: expected one refusal of {line!r}:\n" + "\n".join(added)
+        first = added[0].splitlines()[0]
+        if ground == UNPLACED:
+            assert UNPLACED_GROUND in first, f"rule {rule}: not reported as UNPLACED:\n{first}"
+        else:
+            assert UNPLACED_GROUND not in first, f"rule {rule}: not reported as NAMES:\n{first}"
+        for text_part in must:
+            assert text_part in first, f"rule {rule}: missing {text_part!r}:\n{first}"
+        for text_part in must_not:
+            assert text_part not in first, f"rule {rule}: must not say {text_part!r}:\n{first}"
+
+    # Rule 5 at the classifier: the two spellings of one place get ONE ground.
+    absolute = _refusal("/app/aitelier-gate-imports", "/app")
+    relative = _refusal("aitelier-gate-imports", "/app")
+    assert absolute is not None and relative is not None
+    assert absolute.ground == relative.ground == UNPLACED, (absolute, relative)
+    # Rule 3 at the classifier: a flag with no path in its value carries no ground.
+    for flag in ("-m", "-x", "--chmod=0644", "--from=build", "--no-cache-dir", "--omit=dev"):
+        assert _refusal(flag, EXPORT) is None, (flag, _refusal(flag, EXPORT))
+    # Rule 6 at the classifier: `.` and `./` are the WORKDIR itself.
+    for dot in (".", "./"):
+        refusal = _refusal(dot, EXPORT)
+        assert refusal is not None and refusal.ground == NAMES, (dot, refusal)
+        assert _refusal(dot, "/app") is None, (dot, _refusal(dot, "/app"))
+        assert _refusal(dot, None) is None, (dot, _refusal(dot, None))

@@ -2599,6 +2599,88 @@ def test_the_round12_review_shapes_state_what_was_measured():
     _assert_measured_grounds(ROUND12_REVIEW_CASES)
 
 
+#: The OTHER spelling Docker accepts after a `RUN` flag: an exec-form JSON array in place of a
+#: shell command. The guard maps a mount source BY POSITION (`_build_context_sources`), so the
+#: spelling makes no difference to it - measured, at this base, and these rows pin that so the
+#: mapping cannot lose it silently. They are the exec twins of the shell spellings the F3 rows
+#: above pin (the client's name, a mount source from another stage whose text is an ancestor,
+#: the `src=` alias), of `source=/opt` with no `from=` the guard refused while no row pinned it,
+#: of the two READ controls in BOTH spellings, and of the two shapes where a `--mount=` is
+#: Docker's own argv and not a mount flag.
+RUN_MOUNT_SPELLING_CASES: tuple[tuple[str, str, str, str | None, tuple[str, ...],
+                                   tuple[str, ...]], ...] = (
+    # The refusals the mount mapping owns, in the exec spelling: the client's name and the `src=`
+    # alias, which the F3 rows above pin in shell form, and `source=/opt` with no `from=`, which
+    # the guard already refused and no row pinned.
+    ("a mount source that spells the client's name, in the exec spelling",
+     "", 'RUN --mount=type=bind,source=docker/godot/godot_harness.py,target=/tmp/x '
+     '["cat","/tmp/x"]', UNPLACED, ("a RUN --mount source", _SPELLS_NAME),
+     (COULD_REACH, "/app/")),
+    ("a mount source read as a path of this image, in the exec spelling",
+     "", 'RUN --mount=type=bind,source=/opt,target=/x ["cat","/x"]', UNPLACED,
+     ("a RUN --mount source", "read as a path of this image, names an ancestor"),
+     (COULD_REACH,)),
+    ("the `src=` alias of a client-naming source, in the exec spelling",
+     "", 'RUN --mount=type=bind,src=docker/godot/godot_harness.py,target=/x ["cat","/x"]',
+     UNPLACED, ("a RUN --mount source", _SPELLS_NAME), (COULD_REACH, "/app/")),
+    # The READ controls, in BOTH spellings: a build-context marker that lives in the tree's own
+    # directory (read on purpose by the F3 row above), and an unrelated context path. A guard
+    # that refused either would buy nothing here and would refuse more.
+    ("the build-context marker is read, in the shell spelling",
+     f"WORKDIR {EXPORT}",
+     "RUN --mount=type=bind,source=docker/godot/__init__.py,target=/tmp/x cat /tmp/x",
+     None, (), ()),
+    ("the build-context marker is read, in the exec spelling",
+     f"WORKDIR {EXPORT}",
+     'RUN --mount=type=bind,source=docker/godot/__init__.py,target=/tmp/x ["cat","/tmp/x"]',
+     None, (), ()),
+    ("an unrelated build-context source is read, in the shell spelling",
+     f"WORKDIR {EXPORT}",
+     "RUN --mount=type=bind,source=scripts/tool,target=/x cat /x", None, (), ()),
+    ("an unrelated build-context source is read, in the exec spelling",
+     f"WORKDIR {EXPORT}",
+     'RUN --mount=type=bind,source=scripts/tool,target=/x ["cat","/x"]', None, (), ()),
+    # A `--mount=` inside or after the JSON array is Docker's own argv, not a mount flag: the
+    # refusal must be the non-mount name ground, and must NOT claim a build-context source.
+    ("a mount flag inside the JSON array is a command argument",
+     "", 'RUN ["echo","--mount=type=bind,source=docker/godot/godot_harness.py,target=/x"]',
+     UNPLACED, (COULD_REACH, _SPELLS_NAME), (SOURCE_GROUND, "a RUN --mount source")),
+    ("a mount flag after the JSON array is a command argument Docker rejects anyway",
+     "", 'RUN ["cat","/x"] '
+     '--mount=type=bind,source=docker/godot/godot_harness.py,target=/x', UNPLACED,
+     (COULD_REACH, _SPELLS_NAME), (SOURCE_GROUND, "a RUN --mount source")),
+)
+
+
+def test_the_mount_source_mapping_reads_the_exec_spelling_too():
+    """The exec spelling was ALREADY read/refused identically at this base - measured, not assumed.
+
+    `_build_context_sources` finds a mount's source BY POSITION in the instruction's words, and
+    `_written_words` reads an exec-form JSON array as the argv Docker reads it, so
+    `RUN --mount=type=bind,source=... ["cat","/x"]` was already refused on the same ground and
+    read on the same ground as the shell spelling. Nothing about the guard changed here: not one
+    verdict moved. What was missing was COVERAGE - no row in this file spelled an exec-form
+    command after a mount flag, so a regression that dropped exec-form support (the mapping
+    skipping a text that starts an argv, say) would have left the whole suite green.
+
+    So this change PINS the spelling: the three exec refusals above must carry the mount ground's
+    own words on their first line - "a RUN --mount source" plus what it measured - and must NOT
+    carry the non-mount "could reach a pinned path" wording; the mutation that makes these rows
+    load-bearing is `and "[" not in arguments` on the `--mount=` branch of
+    `_build_context_sources`, which reddens these three rows on their ground assertion and turns
+    the two exec READ controls into refusals, while every shell spelling keeps its byte-identical
+    first line.
+
+    The READ controls are the two `source=docker/godot/__init__.py` rows and the two
+    `source=scripts/tool` rows: a build-context marker inside the tree's own directory and an
+    unrelated context path, in both spellings, so this coverage cannot be bought by refusing
+    more. The last two rows are the other direction: a `--mount=` written inside or after the
+    JSON array is an operand of the command, refused on the non-mount name ground with the mount
+    ground explicitly absent.
+    """
+    _assert_measured_grounds(RUN_MOUNT_SPELLING_CASES)
+
+
 #: The grammar the property below generates its words from: an absolute PREFIX (several carry
 #: `..` or `.`, the class round 12 dropped), an optional STEM, and a glob TAIL the shell
 #: completes. No row here is an expectation - the test computes that itself.

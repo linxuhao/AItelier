@@ -109,6 +109,25 @@ def test_the_report_rule_reads_the_plan_so_it_refuses_even_without_a_workspace(t
     assert caught.value.code == "invalid_plan" and "/etc/hostname" in caught.value.reason
 
 
+def test_a_report_that_is_not_a_nonempty_string_is_refused_by_the_plan_not_by_the_audit(tmp_path):
+    """The audit holds ONE report value, so the plan's type check is what keeps a list out of it.
+
+    `check_declared_paths` judges the report with a single `_relative` call and holds no
+    element-wise loop, which is sound only while `report` is a non-empty string: `_relative` judges
+    `PurePosixPath(str(value))`, so a list would arrive as its own repr - the repr of
+    `["../x"]` splits on `/` into `"['.."` and `"x']"`, so no component is `..` and containment
+    would pass. The refusal therefore has to happen in the plan, and this test puts it there:
+    `TodoPlan.from_json` raises BEFORE the audit is reachable. Loosening the type check to admit a
+    list fails here first.
+    """
+    for bad in (["a.json", "b.json"], ["../outside/x.json"], 7, None, ""):
+        with pytest.raises(Refusal) as caught:      # the PLAN refuses; `check_declared_paths` never runs
+            TodoPlan.from_json(plan_data(tmp_path / "ws", [command_exit(report=bad)]), builtin_library())
+        assert caught.value.code == "invalid_plan", caught.value.reason
+        assert "command_exit.report" in caught.value.reason, "the refusal must name the binding"
+        assert "wrong type or is empty" in caught.value.reason, caught.value.reason
+
+
 # -- accepted: the audit must not narrow a legitimate plan -----------------------------------
 
 def test_a_relative_report_path_in_the_workspace_is_accepted(tmp_path):

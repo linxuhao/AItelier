@@ -1180,6 +1180,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   // workspace-write coding bridge, so a resumed host session never asks the
   // provider for a tool this runtime does not register.
   try {
+    // The predicate that decides the registration is `hostExecution` (lines 861
+    // and 864): `env.AITELIER_DSH_EXECUTION === 'host'`, and `project_work` is
+    // registered only when `!hostExecution`. The host prompt (line 881) declares
+    // that bridge not mounted. A persisted envelope may predate that predicate,
+    // so this retirement compares recorded names with the offered registry rather
+    // than re-testing the boolean.
     const retired = retireStaleToolEnvelope(agent.session, ctx.tools.schemas(agent));
     if (retired.length > 0) ctx.logger.info(`recorded request envelope retired ${retired.join(', ')}: not offered by this runtime`);
   } catch (error) {

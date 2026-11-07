@@ -5,6 +5,8 @@ from copy import deepcopy
 from functools import wraps
 from datetime import datetime, timezone
 import json
+import re
+import sqlite3
 import unicodedata
 from uuid import UUID, uuid4
 
@@ -44,8 +46,7 @@ CREATE TABLE IF NOT EXISTS state_director_messages (
     reply_to_delivery_id TEXT,
     delivery_mode TEXT NOT NULL DEFAULT 'transient'
         CHECK(delivery_mode IN ('transient','standing')),
-    FOREIGN KEY(sender_project_id) REFERENCES state_projects(project_id),
-    FOREIGN KEY(reply_to_delivery_id) REFERENCES state_director_deliveries(delivery_id)
+    FOREIGN KEY(sender_project_id) REFERENCES state_projects(project_id)
 );
 CREATE TABLE IF NOT EXISTS state_director_deliveries (
     delivery_id TEXT PRIMARY KEY,
@@ -123,6 +124,93 @@ def _row_delivery(row):
         "delivery_id", "message_id", "target_project_id", "delivery_seq", "status", "version")}
 
 
+_MESSAGES_TABLE = "state_director_messages"
+
+
+def _messages_has_reply_fk(conn) -> bool:
+    """Whether ``state_director_messages`` still carries the inline FK that made a
+    reply to a driver-inbox delivery impossible (see ``_drop_reply_fk``)."""
+    return any(row["table"] == "state_director_deliveries" and row["from"] == "reply_to_delivery_id"
+               for row in conn.execute(f"PRAGMA foreign_key_list({_MESSAGES_TABLE})"))
+
+
+def _drop_reply_fk(conn) -> None:
+    """Rebuild ``state_director_messages`` without the reply FK, keeping every row.
+
+    Only runs while the FK is present, and re-reads it inside the caller's
+    ``BEGIN IMMEDIATE`` so a concurrent opener that already rebuilt the table is
+    a no-op. Every column of the live table is carried over by name (the copy is
+    refused on any missing column), the row count is compared, and every index
+    and trigger on the table is recreated verbatim from sqlite_master.
+    """
+    if not _messages_has_reply_fk(conn):
+        return
+    before = [row["name"] for row in conn.execute(f"PRAGMA table_info({_MESSAGES_TABLE})")]
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                       (_MESSAGES_TABLE,)).fetchone()[0]
+    scratch = _MESSAGES_TABLE + "_rebuild"
+    # Take the live DDL and strip only the reply FK clause: the rest of the
+    # table (columns, CHECKs, the sender FK, defaults) is preserved as written.
+    body = ddl[ddl.index("(") + 1:ddl.rindex(")")]
+    columns_part, constraints_part = [], []
+    for part in _split_top_level(body):
+        # Compare with ALL whitespace removed: the stored text reads
+        # "FOREIGN KEY(x)", and removing spaces turns that into "FOREIGNKEY(x)".
+        squashed = re.sub(r"\s+", "", part).upper()
+        if squashed.startswith("FOREIGNKEY(REPLY_TO_DELIVERY_ID)"):
+            continue
+        # ALTER TABLE ADD COLUMN can leave a column after table constraints in the
+        # stored text; a column may not follow a constraint, so reorder.
+        if squashed.startswith(("FOREIGNKEY", "PRIMARYKEY", "UNIQUE", "CHECK", "CONSTRAINT")):
+            constraints_part.append(part.strip())
+        else:
+            columns_part.append(part.strip())
+    scratch_ddl = f"CREATE TABLE {scratch} ({', '.join(columns_part + constraints_part)})"
+    custom = conn.execute("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') "
+                          "AND sql IS NOT NULL", (_MESSAGES_TABLE,)).fetchall()
+    conn.execute(scratch_ddl)
+    columns = ",".join('"' + name + '"' for name in before)
+    conn.execute(f"INSERT INTO {scratch}({columns}) SELECT {columns} FROM {_MESSAGES_TABLE}")
+    old_count = conn.execute(f"SELECT COUNT(*) FROM {_MESSAGES_TABLE}").fetchone()[0]
+    new_count = conn.execute(f"SELECT COUNT(*) FROM {scratch}").fetchone()[0]
+    if old_count != new_count:
+        raise sqlite3.IntegrityError(f"{_MESSAGES_TABLE} migration count mismatch")
+    conn.execute(f"DROP TABLE {_MESSAGES_TABLE}")
+    conn.execute(f"ALTER TABLE {scratch} RENAME TO {_MESSAGES_TABLE}")
+    for row in custom:
+        conn.execute(row[0])
+
+
+def _split_top_level(body: str):
+    """Split a CREATE TABLE column/constraint list on commas outside parentheses."""
+    depth, start = 0, 0
+    for index, char in enumerate(body):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            yield body[start:index]
+            start = index + 1
+    yield body[start:]
+
+
+def _migrate_reply_fk(db) -> None:
+    """Drop the reply FK from an existing database, once, under BEGIN IMMEDIATE."""
+    with db.get_connection() as conn:
+        if not _messages_has_reply_fk(conn):
+            return
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _drop_reply_fk(conn)
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def initialize(db) -> None:
     """Create the mailbox tables on a real handle (the leaf's own, or the one
     an untrusted store runs ``initialize_state_schema`` on before dropping it)."""
@@ -148,6 +236,9 @@ def initialize(db) -> None:
         if migrate_acks:
             conn.execute("INSERT OR IGNORE INTO state_director_legacy_acks SELECT delivery_id FROM state_director_deliveries WHERE status IN ('acknowledged','resolved')")
         conn.commit()
+    # Runs on its own connection after the one above has closed: the rebuild takes
+    # BEGIN IMMEDIATE and must not overlap an open transaction on this handle.
+    _migrate_reply_fk(db)
 
 
 class SQLiteDirectorMessaging:
@@ -197,6 +288,18 @@ class SQLiteDirectorMessaging:
     def _project(conn, project_id):
         if conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (project_id,)).fetchone() is None:
             raise DirectorMessageError("unknown_project")
+
+    def _cited_driver_delivery(self, conn, delivery_id):
+        """The driver-inbox delivery ``delivery_id`` when it is addressed to THIS
+        driver, else None. Matches the calling driver only, so a delivery to any
+        other driver, or an id in no inbox, stays unknown to this caller."""
+        if not self.driver_id:
+            return None
+        return conn.execute(
+            "SELECT m.project_id,m.thread_id FROM driver_inbox_deliveries d "
+            "JOIN driver_inbox_messages m ON m.message_id=d.message_id "
+            "WHERE d.delivery_id=? AND d.target_driver_id=?",
+            (delivery_id, self.driver_id)).fetchone()
 
     def _dedupe(self, conn, scope, operation, request_key, payload_json):
         row = conn.execute(
@@ -345,11 +448,28 @@ class SQLiteDirectorMessaging:
                     "SELECT d.target_project_id,m.sender_project_id,m.thread_id "
                     "FROM state_director_deliveries d JOIN state_director_messages m ON m.message_id=d.message_id "
                     "WHERE d.delivery_id=?", (reply_to_delivery_id,)).fetchone()
-                if cited is None or cited["target_project_id"] != sender_project_id:
-                    raise DirectorMessageError("unknown_delivery")
-                self._project(conn, cited["sender_project_id"])
-                targets = [cited["sender_project_id"]]
-                thread_id = cited["thread_id"]
+                if cited is not None:
+                    if cited["target_project_id"] != sender_project_id:
+                        raise DirectorMessageError("unknown_delivery")
+                    self._project(conn, cited["sender_project_id"])
+                    targets = [cited["sender_project_id"]]
+                    thread_id = cited["thread_id"]
+                else:
+                    # A delivery in the CALLING driver's own driver inbox. Only that
+                    # addressee may cite it: an id addressed to another driver, or
+                    # in no inbox, is still unknown_delivery, so the selector does
+                    # not widen. Replies go to the cited message's project.
+                    cited = self._cited_driver_delivery(conn, reply_to_delivery_id)
+                    if cited is None:
+                        raise DirectorMessageError("unknown_delivery")
+                    if cited["project_id"] is None:
+                        raise DirectorMessageError(
+                            "invalid_request", self.reply_schema,
+                            message="reply_to_delivery_id: the cited driver-inbox message names no "
+                                    "project to reply to; answer it with send_driver_message")
+                    self._project(conn, cited["project_id"])
+                    targets = [cited["project_id"]]
+                    thread_id = cited["thread_id"]
 
             from core.director_messaging_quorum import members
             if self.v3 and ack_mode == "at_least_n" and any(ack_quorum > len(members(conn,t)) for t in targets):

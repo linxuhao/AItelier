@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS } from './runtime.mjs';
+import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS, staleRecordedTools, retireStaleToolEnvelope } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
@@ -738,4 +738,64 @@ test('a scan that cannot reach the end of the matches says so instead of guessin
     'a truncated scan carries the newest of the slice it saw, not of the match set');
   assert.equal(digest.page.has_more, true);
   assert.equal(digest.items[0].delivery_id, 'dlv_0100', 'newest of what the scan could see');
+});
+
+/**
+ * The recorded envelope of a workspace-write session, as DSH persists it: the
+ * routed config, its adapter-default markers and the tool schemas of the last
+ * request. `project_work` is in it because that mode registers the coding
+ * bridge; a host-mode restart does not.
+ */
+const recordedEnvelope = () => ({
+  config: { provider: 'fixture', model: 'fixture-model', maxTokens: 1024 }, adapterDefaults: { maxTokens: true },
+  tools: [{ name: 'bash', description: 'shell', parameters: { type: 'object' } },
+    { name: 'project_work', description: 'coding bridge', parameters: { type: 'object', properties: { action: { type: 'string' } } } },
+    { name: 'state_read', description: 'State', parameters: { type: 'object' } }],
+});
+const hostOffer = () => [{ name: 'bash', description: 'shell', parameters: { type: 'object' } },
+  { name: 'state_read', description: 'State', parameters: { type: 'object' } }];
+
+test('a resumed host session retires the coding bridge the previous mode recorded', () => {
+  const appended = [];
+  const session = { requestHeader: recordedEnvelope, append: (type, data) => { appended.push({ type, data }); } };
+  assert.deepEqual(staleRecordedTools(session.requestHeader(), hostOffer()), ['project_work'],
+    'the recorded envelope advertises a tool this runtime does not offer');
+  assert.deepEqual(retireStaleToolEnvelope(session, hostOffer()), ['project_work']);
+  assert.equal(appended.length, 1, 'exactly one envelope repair');
+  assert.equal(appended[0].type, 'request/header');
+  assert.equal(appended[0].data.reason, 'change', 'a repaired envelope is a change, like the loop\'s own tool change');
+  // Everything except the retired entry is untouched, so the replay stays as
+  // close to the previous request as a retirement allows.
+  assert.deepEqual(appended[0].data.header.config, recordedEnvelope().config);
+  assert.deepEqual(appended[0].data.header.adapterDefaults, { maxTokens: true });
+  assert.deepEqual(appended[0].data.header.tools, hostOffer(), 'the surviving schemas keep their order and their fields');
+  assert.ok(!JSON.stringify(appended[0].data.header).includes('project_work'));
+});
+
+test('a recorded envelope that already agrees is not rewritten, and no envelope is no repair', () => {
+  const append = () => assert.fail('an agreeing envelope must not be rewritten');
+  assert.deepEqual(retireStaleToolEnvelope({ requestHeader: () => ({ config: {}, tools: hostOffer() }), append }, hostOffer()), []);
+  assert.deepEqual(retireStaleToolEnvelope({ requestHeader: () => undefined, append }, hostOffer()), []);
+  assert.deepEqual(retireStaleToolEnvelope({ requestHeader: () => ({ config: {} }), append }, hostOffer()), []);
+  assert.deepEqual(staleRecordedTools({ config: {} }, hostOffer()), []);
+});
+
+test('a retired-name set that empties the envelope omits the tool field instead of writing an empty one', () => {
+  const appended = [];
+  const session = { requestHeader: () => ({ config: { provider: 'p', model: 'm' }, tools: [{ name: 'project_work' }] }),
+    append: (type, data) => appended.push({ type, data }) };
+  assert.deepEqual(retireStaleToolEnvelope(session, []), ['project_work']);
+  assert.equal(Object.hasOwn(appended[0].data.header, 'tools'), false,
+    'DSH refuses a request-header whose tools list is empty: the field is absent, not empty');
+  assert.deepEqual(appended[0].data.header.config, { provider: 'p', model: 'm' }, 'the route survives with no tools left');
+});
+
+test('retiring by name is not a schema filter: a recorded schema the runtime still offers is kept verbatim', () => {
+  const changed = { name: 'bash', description: 'an older description', parameters: { type: 'object', properties: {} } };
+  const appended = [];
+  const session = { requestHeader: () => ({ config: { provider: 'p', model: 'm' }, tools: [changed, { name: 'project_work' }] }),
+    append: (type, data) => appended.push({ type, data }) };
+  retireStaleToolEnvelope(session, [{ name: 'bash', description: 'a newer description', parameters: { type: 'object' } }]);
+  assert.deepEqual(appended[0].data.header.tools, [changed],
+    'only a tool this runtime does not offer is retired; a stale schema for an offered tool is the engine\'s cache prefix to keep');
 });

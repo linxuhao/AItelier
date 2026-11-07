@@ -766,6 +766,61 @@ export class DriverRuntime {
   close() { this.controller.abort(new Error('Driver stopped')); }
 }
 
+/**
+ * The tool names a resumed session's recorded request envelope still advertises
+ * but this process does not offer.
+ *
+ * `request/header` records the envelope of the LAST request DSH routed for that
+ * session. A restart may boot into a different execution mode or a different
+ * runtime build, so the recorded envelope can name a tool this process
+ * deliberately never registers - on the host, the workspace-write coding bridge
+ * (`project_work`). Nothing here can intervene at the call that consumes it:
+ * DSH's compaction backend replays the recorded envelope VERBATIM as the
+ * cacheable prefix of its summarization request (`buildSummarizationInput` in
+ * @deepseek-ai/dsh-compaction-basic, `...header?.tools`), and that request is
+ * the first model call of a resumed session - it runs from `agent/pre-step`
+ * before the loop ever writes a fresh envelope. So the runtime has to retire
+ * the tool from the RECORD, not from the registry: see
+ * retireStaleToolEnvelope.
+ * @param recorded - the folded `request/header` of the session, if any.
+ * @param offered - the tool schemas this process offers the agent.
+ * @returns the retired names, deduplicated, in recorded order.
+ */
+export function staleRecordedTools(recorded, offered = []) {
+  const tools = recorded?.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+  const names = new Set(offered.map(tool => tool?.name));
+  return [...new Set(tools.map(tool => tool?.name).filter(name => !names.has(name)))];
+}
+
+/**
+ * Retire those tools from the session's recorded request envelope.
+ *
+ * Everything else is kept byte for byte - same config, same adapter defaults,
+ * same schemas in the same order - because the point of the recorded envelope
+ * is a genuine prefix of the conversation for provider cache reuse, and only
+ * the retired entries are a claim about capabilities this process does not
+ * have. The removed schema breaks that prefix either way; leaving it in ALSO
+ * asks the provider to expose a tool the driver cannot call.
+ *
+ * Appends one `request/header` with reason `change`, which is exactly what the
+ * loop appends for a tool change; the fold keeps the last one in force.
+ * @param session - the resumed DSH session.
+ * @param offered - the tool schemas this process offers the agent.
+ * @returns the retired names; empty when the envelope already agrees.
+ */
+export function retireStaleToolEnvelope(session, offered = []) {
+  const recorded = session?.requestHeader?.();
+  const stale = staleRecordedTools(recorded, offered);
+  if (stale.length === 0) return [];
+  const retired = new Set(stale);
+  const header = { ...recorded, tools: recorded.tools.filter(tool => !retired.has(tool?.name)) };
+  // An empty tool list is not a header field: DSH refuses the event.
+  if (header.tools.length === 0) delete header.tools;
+  session.append('request/header', { header, reason: 'change' });
+  return stale;
+}
+
 export async function boot(ctx, { env = process.env, request: suppliedRequest } = {}) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
@@ -1118,6 +1173,26 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: env.AITELIER_DSH_SESSION })
     : await ctx.agents.create({ ...options, sessionId: env.AITELIER_DSH_SESSION, meta: { cwd: process.cwd() } });
   agent = handle.agent;
+  // A restart boots with whatever the previous process recorded, and the first
+  // model call of the resumed session replays that record verbatim (see
+  // retireStaleToolEnvelope). Before the agent can take a step, make the record
+  // agree with what this process actually offers: on the host that retires the
+  // workspace-write coding bridge, so a resumed host session never asks the
+  // provider for a tool this runtime does not register.
+  try {
+    // The predicate that decides the registration is `hostExecution` (lines 861
+    // and 864): `env.AITELIER_DSH_EXECUTION === 'host'`, and `project_work` is
+    // registered only when `!hostExecution`. The host prompt (line 881) declares
+    // that bridge not mounted. A persisted envelope may predate that predicate,
+    // so this retirement compares recorded names with the offered registry rather
+    // than re-testing the boolean.
+    const retired = retireStaleToolEnvelope(agent.session, ctx.tools.schemas(agent));
+    if (retired.length > 0) ctx.logger.info(`recorded request envelope retired ${retired.join(', ')}: not offered by this runtime`);
+  } catch (error) {
+    // Never take the driver down over a repair: the next routed request writes
+    // a fresh envelope anyway, which is what makes the stale record vanish.
+    ctx.logger.warn('recorded request envelope not retired: ' + String(error).slice(0, 300));
+  }
   idleReview = new IdleReview({ agent, goals: ctx.goals, continuation,
     canContinue: () => !completionError,
     ask: async () => {

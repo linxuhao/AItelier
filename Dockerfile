@@ -78,7 +78,14 @@ COPY --from=frontend-build /app/web/dist /srv/web_dist
 ENV AITELIER_WEB_DIST=/srv/web_dist
 # Install the exact reviewed public engine from PyPI, not a mutable host
 # checkout or an old image layer.
-RUN pip install --no-cache-dir -e .
+# The versions come from requirements.lock, through `-c` (constraints), not
+# from PyPI at build time: without it two builds of the SAME pyproject.toml
+# installed 11 of 95 distributions at different versions (measured 2026-11-06,
+# images e0f264d4cf2e vs 42b962ad54). A constraint file rather than
+# `-r requirements.lock` keeps pyproject.toml the single place that decides
+# WHICH distributions the project declares; the lock only decides which
+# version each declared-and-transitively-needed one resolves to.
+RUN pip install --no-cache-dir -c requirements.lock -e .
 RUN python -c "from core.output_migration import require_output_engine; require_output_engine()"
 # Fail the build if a tool-calling litellm completion cannot run (2026-10-28 litellm 1.106.5 incident).
 RUN LITELLM_LOCAL_MODEL_COST_MAP=True python -c 'import litellm; r = litellm.completion(model="anthropic/claude-sonnet-5-5", messages=[{"role": "user", "content": "hi"}], tools=[{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {}}}}], mock_response="ok"); assert r.choices[0].message.content == "ok"'

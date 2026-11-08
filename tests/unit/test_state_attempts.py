@@ -513,6 +513,62 @@ async def test_director_recovery_failure_does_not_return_cached_paused(system, t
     assert attempts.get(a["attempt_id"])["status"] == "paused"
 
 
+@pytest.mark.asyncio
+async def test_director_first_observation_outlives_the_caller_budget(system, tmp_path, monkeypatch):
+    # Seam: _wait_for_state_change resolves `recover_page` by module global name
+    # on every observation cycle, so monkeypatching it stalls exactly the FIRST
+    # page. The stall is injected here, not produced by a slow database, so the
+    # witness does not depend on machine load.
+    # Pinned decision (47255f489c): the first cycle is deliberately UNBOUNDED.
+    # timeout_seconds bounds how long a wait waits for a change, not whether the
+    # measurement that decides the answer completed. Re-bounding that call with
+    # asyncio.wait_for(..., timeout=remaining) turns this into events: [] with
+    # timed_out: True. Do not "fix" the first cycle back to a deadline-bounded call.
+    import threading
+    import time
+    from core import state_changes
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    sf.pause_run(rid)
+    attempts.reconcile(a["attempt_id"], sf)
+    cursor = store.events("game")[-1]["seq"]
+    sf.resume_run(rid)
+    sf.advance_run(rid)
+    claimed = sf.claim_next_step(rid)
+    assert claimed is not None
+    sf.confirm_step(claimed.token, StepResult(outputs={"implementation": "candidate"}))
+    sf.advance_run(rid)
+    assert sf.get_run(rid)["status"] == "completed"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    original = state_changes.recover_page
+    first_page_done = threading.Event()
+
+    def stalled_first_page(*args, **kwargs):
+        time.sleep(0.4)  # four times the caller's 0.1 s budget
+        try:
+            return original(*args, **kwargs)
+        finally:
+            first_page_done.set()
+
+    monkeypatch.setattr(state_changes, "recover_page", stalled_first_page)
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
+    try:
+        result = await service.wait_for_state_change("game", after=cursor,
+            return_when_idle=True, timeout_seconds=.1)
+        assert result["events"] and result["events"][-1]["payload"]["status"] == "candidate", result
+        assert result["timed_out"] is False, result
+        assert "reason" not in result
+    finally:
+        # A re-bounded mutant returns before the stalled page finishes. Let it
+        # finish here so its database write cannot land after fixture teardown.
+        first_page_done.wait(5)
+    assert attempts.get(a["attempt_id"])["status"] == "candidate"
+
+
 # ── relay: continue_from a failed attempt ────────────────────────────
 
 def _fail(system, request="first"):

@@ -256,6 +256,61 @@ def test_the_shell_fallback_is_spelled_like_no_answer(tmp_path):
         "unambiguous while the tool cannot produce it")
 
 
+def _platform_assignment():
+    """The one line in gate_run.sh that asks for the platform verdict, verbatim."""
+    text = GATE_RUN.read_text()
+    lines = [line.strip() for line in text.splitlines()
+             if line.strip().startswith('platform="$(') and '|| platform="' in line]
+    assert len(lines) == 1, f"expected exactly one platform assignment line: {lines}"
+    return lines[0]
+
+
+def test_the_platform_assignment_falls_back_only_when_the_tool_could_not_answer(tmp_path):
+    """The shell half is executed, not inferred from a string scan.
+
+    The static test above proves the tool cannot print the fallback sentence and
+    that every unreadable class exits non-zero. That is a different claim from
+    "the line substitutes the fallback exactly when the call fails": the `||` is
+    shell, so only running it measures it. This drives the real assignment out of
+    `tools/gate_run.sh` under bash twice, with a stub binding tool that fails once
+    (one stderr line, empty stdout) and answers once, and reads `platform` back.
+    """
+    fallback = _fallback_literal()
+    line = _platform_assignment()
+    assert f'platform="{fallback}"' in line, line
+    stub = tmp_path / "stub_tool.py"
+    stub.write_text(
+        "import os, sys\n"
+        "with open(os.environ['STUB_CALLS'], 'a') as handle:\n"
+        "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ['STUB_MODE'] == 'fail':\n"
+        "    print('stub: no platform record could be read', file=sys.stderr)\n"
+        "    raise SystemExit(3)\n"
+        "print(os.environ['STUB_ANSWER'])\n")
+    script = line + "\nprintf '%s' \"$platform\"\n"
+    outcomes = {}
+    for mode in ("fail", "answer"):
+        calls = tmp_path / f"{mode}.calls"
+        log = tmp_path / f"{mode}.log"
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+               "STUB_CALLS": str(calls), "STUB_MODE": mode, "STUB_ANSWER": "reviewed",
+               "BINDING_TOOL": str(stub), "REPORTS": str(tmp_path),
+               "SUFFIX": "run", "BINDING_SHA256": "a" * 64, "LOG": str(log)}
+        result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                text=True, env=env, cwd=str(tmp_path))
+        # The assignment line itself never fails: `||` absorbs the tool's status.
+        assert result.returncode == 0, (mode, result.stderr, result.stdout)
+        assert calls.exists() and calls.read_text().strip(), (
+            f"the stub tool never ran in the {mode!r} case, so the line proves nothing")
+        outcomes[mode] = result.stdout
+    assert outcomes["answer"] == "reviewed", outcomes
+    assert outcomes["fail"] == fallback, outcomes
+    # The failing call's stderr really reached $LOG, i.e. the tool's own line was
+    # made available to the gate record instead of only its exit status.
+    assert "no platform record could be read" in (tmp_path / "fail.log").read_text()
+    assert "no platform record could be read" not in (tmp_path / "answer.log").read_text()
+
+
 def test_every_unreadable_class_exits_non_zero_so_the_fallback_fires_only_there(tmp_path):
     binding_path, digest, record, receipt = _rig(tmp_path)
     directory = tmp_path / "dir"

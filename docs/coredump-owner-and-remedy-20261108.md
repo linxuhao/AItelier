@@ -298,9 +298,9 @@ is not, and this document does not substitute a guess for it.
   continues after it — the failure survives a container start.
 - The container looks healthy throughout *because* gunicorn respawns the worker. "Healthy" is not
   counter-evidence; it is the reason nobody noticed.
-- The recurrence also has a kernel-side and a container-side half, both measured: **all 46** apport
-  events have a `GPU reset` of their own within **2 s** (42 of them within 1 s, indices 89…138), and
-  the container log names the GPU Hang (§5.2).
+- The recurrence also has a kernel-side and a container-side half, both measured: **all 46
+  serving-worker** apport events have a `GPU reset` of their own within **2 s** (42 of them within 1 s,
+  indices 89…138), and the container log names the GPU Hang (§5.2).
 
 What would show it had stopped: no new apport line naming that command line, and no new core write,
 for longer than the whole observed span — **≥ 8.5 days of quiet, i.e. through ~2026-11-17** — with the
@@ -316,9 +316,10 @@ inside the failing period.
   substance: 127,859,322,880 used / 73,218,023,424 available, still 69 G / 64 %. Headroom is not
   tight: the artifacts are **~8 % of the volume** (16.76 GB = 15.61 GiB of 210.78 GB = 196.3 GiB) and
   **~23 % of what is currently free** — both kinds together are 15.61 GiB against 68.19 GiB free
-  (73,219,416,064 B at 20:28:10Z), i.e. 22.9 %. The cores alone are 16.07 GB = 14.97 GiB, i.e. 21.9 %
-  of free. The two units are given together because `df -h` prints GiB while the file sizes below are
-  decimal bytes; mixing them is how the earlier draft got 8.5 %.
+  (73,219,416,064 B at 20:28:10Z), i.e. 22.9 %. The cores alone are 16,068,284,416 B = 16.07 GB =
+  14.96 GiB (§2.1 rounds the same bytes the same way), i.e. 21.9 % of free. The two units are given
+  together because `df -h` prints GiB while the file sizes below are decimal bytes; mixing them is how
+  the earlier draft got 8.5 %.
 - Kernel core handler: `sysctl` is **not installed** (`bash: sysctl: command not found`, exit 127,
   20:28:10Z), so the value was read from `/proc/sys/kernel/core_pattern`:
   `|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E` — every core on this
@@ -713,14 +714,38 @@ statement) and raised two defects. Both were real, both were re-measured before 
    03:05:41 → reset(108) at −11 s, 03:05:45 → reset(108) at −15 s, 03:08:00 → reset(109) at +1 s,
    03:59:36 → reset(113) at 0 s, 13:08:44 → reset(120) at +1 s, 23:40:27 → reset(121) at +1 s. So
    **two** of the six have no reset within 2 s and **one** of those has none within 11 s; indices
-   109 and 120 are claimed by no serving-worker event, which is why the journal's four unclaimed
-   indices (107, 109, 112, 120) are two apport events once the prepare pass is counted. §1.3 now
-   places all six and §4/§5.2 say "two ... with no reset within 2 s, one of those with none within
-   11 s". The round-2 item above is left as it was written and this item corrects it.
+   109 and 120 are claimed by no serving-worker event, which is why two of the journal's four
+   unclaimed indices (107, 109, 112, 120) are the prepare events' own resets and the other two (107,
+   112) belong to no apport event at all. §1.3 now places all six and §4/§5.2 say "two ... with no
+   reset within 2 s, one of those with none within 11 s". Fourth-pass item 2 above was edited in this
+   pass (it named the wrong unpaired event and said "one"); the correction is here rather than
+   silently in place, so the round-3 text and this one can be compared line for line in
+   `diff-v4-v5.patch`.
 9. **A percentage mixed GB with GiB.** §3 said the artifacts are "~8.5 % of the volume (16.76 GB of
    197 GB)". 197 G is `df -h`'s GiB figure and 16.76 GB is decimal bytes, so the ratio is not
    16.76/197: against `df -B1`'s 210,779,168,768 B the same two kinds are 16,762,990,592 B =
    **7.95 %**, and against 196.3 GiB they are 15.61 GiB, also 7.95 % — i.e. **~8 %, not 8.5 %**. The
    free-space share (22.9 % of 73,219,416,064 B, 21.9 % for the cores alone) was already computed in
    matching units and is unchanged; §3 now prints both units for every figure and says why.
+
+### Sixth pass — the review's fourth round (director, 2026-11-08T21:52Z, read-only)
+
+The same reviewer confirmed both round-3 defects fixed, every earlier resolution intact and all six
+criterion clauses still met, and found one false sentence of this document's own making plus three
+residuals. All four were fixed in the commit that carries this record:
+
+10. **Item 8 said fourth-pass item 2 was "left as it was written". It was not** — this pass edited it,
+    which `diff-v4-v5.patch` shows directly. A correction log that misdescribes its own edits is worse
+    than one that silently edits, so the sentence now says item 2 was edited here, names what changed
+    (the unpaired event and the count) and points at the diff.
+11. **Item 8's own clause was garbled.** "the four unclaimed indices are two apport events once the
+    prepare pass is counted" read as if all four became two. It now says the opposite half explicitly:
+    two of the four (109, 120) are the prepare events' own resets, the other two (107, 112) belong to
+    no apport event at all.
+12. **§2.4 said "all 46 apport events"** where the reset pairing is established for the 46
+    *serving-worker* events only; the six `sessions.prepare` events are exactly what §1.3 had to
+    account for separately. It now says "all 46 serving-worker apport events".
+13. **§3 wrote the cores as 14.97 GiB while §2.1 writes 14.96 GiB** for the same bytes: 16,068,284,416 B
+    is 14.9648 GiB, and 14.97 came from rounding 16.07 GB first. §3 now prints the byte count and
+    14.96 GiB, the same rounding §2.1 uses.
 

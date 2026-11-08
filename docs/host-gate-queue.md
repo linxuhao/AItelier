@@ -2,8 +2,9 @@
 
 `scripts/gate_queue.py` is the single-file host FIFO in front of the existing
 launcher. No official package provides this host-owned disposition protocol.
-Source review, installation, native execution and deployment are separate.
-This change installs nothing and does not retrofit existing unbound tickets.
+Source review, installation, native execution and deployment are separate:
+installing the reviewed bytes is `tools/install_gate_queue.py` (below), and no
+part of this protocol retrofits existing unbound tickets.
 
 Ordinary `submit` requires a registration file and a purpose. One exact Source,
 controller and ordered registration batch produce one physical ticket, including
@@ -39,8 +40,77 @@ the existing `GATE_RUN_SH` and `GATE_BINDING_FILE` assignments and their meaning
 The launcher receives the pre-client-import environment with the four recipe
 identity variables removed; client `.env` additions do not reach the child.
 Before installation the same recipe can name the reviewed checkout's
-`scripts/gate_queue.py`. Copying reviewed bytes into the host bin is a separate
-authorized operation, after the old daemon and gate have settled.
+`scripts/gate_queue.py`.
+
+### Installing the reviewed bytes is a tool, not a copy
+
+`tools/install_gate_queue.py` is the only supported way to put reviewed bytes into
+the host bin. It is stdlib-only and uses absolute paths:
+
+```sh
+REPO="$HOME/AItelier"          # any checkout holding the reviewed commit
+env GATE_QUEUE_DIR="$HOME/.AItelier/gate-queue" "$PY" "$REPO/tools/install_gate_queue.py" \
+  --commit 7e9f53a8c114c8f5d7cc7523f126d52aa8d76faf \
+  --sha256 409f0779a8b32ca929f85bfbd0045c12df2f09955e5fbb0bca0fd993fc808e43
+# drift report, never a write:
+env GATE_QUEUE_DIR="$HOME/.AItelier/gate-queue" "$PY" "$REPO/tools/install_gate_queue.py" \
+  --check --commit 7e9f53a8c114c8f5d7cc7523f126d52aa8d76faf \
+  --sha256 409f0779a8b32ca929f85bfbd0045c12df2f09955e5fbb0bca0fd993fc808e43
+```
+
+It reads the bytes with `git -C <repo> show <commit>:scripts/gate_queue.py` --
+never the working tree, so a dirty checkout cannot install itself -- and writes
+only when those bytes hash to the explicitly supplied `--sha256`. The write is a
+temp file in the target directory followed by `os.replace`, mode 0644, into
+`<dest>/gate_queue.py` (`<dest>` defaults to `~/.AItelier/bin`, `--repo` to the
+checkout the tool lives in). `--check` never writes: it exits 0 only when the
+installed bytes equal the named reviewed bytes, and otherwise exits 1 after
+printing both sha256 values and the commit it compared against. Exit codes: 0
+installed/match, 1 `--check` drift, 2 refusal (usage, unreadable commit, sha256
+pin, unsettled queue, filesystem). Every refusal names what it measured and says
+nothing was written.
+
+The two settle conditions are executable, not prose, and each refusal names the
+blocker:
+
+1. **No live daemon.** The probe uses the queue's own markers, not a guess: the
+   daemon holds an exclusive flock on `<queue>/daemon.lock` for its whole
+   lifetime and publishes its pid in `<queue>/daemon.pid` (`cmd_daemon`). A held
+   lock, or a pid that is live, not a zombie, and whose `/proc/<pid>/cmdline` is
+   this queue, is a live daemon. During the write the installer takes that same
+   lifetime lock itself, so no daemon can start halfway through and mixed
+   generations cannot meet in flight.
+2. **Every ticket terminal.** The probe reads `<queue>/tickets/*/ticket.json`:
+   `done`, `failed` and `cancelled` are terminal; `queued`, `running`, `held`
+   (and a `ticket.json` it cannot parse) are not, and the refusal lists their
+   ticket ids and states.
+
+`--daemon-probe CMD` / `--ticket-probe CMD` replace one probe with a command that
+receives the queue directory and exits 0 when its blocker is present; its first
+stdout line is quoted in the refusal. `tests/unit/test_gate_queue_installer.py`
+drives both the real markers (including a genuinely running
+`scripts/gate_queue.py daemon`) and that seam, both ways.
+
+**Measured on this host, 2026-11-08.** The installed copy was sha256
+`95b1255073bd09bbb8f77f69ad3c8113e6e8ee8ed43cda58c1164343e9fae7e6` (70521 B,
+mtime 2026-10-20) -- **superseded**. Its provenance is identified by digest
+equality, not by a remembered commit: those exact bytes are
+`35b20a1431:scripts/gate_queue.py`. `8a755972cc` is **not** their source. It is
+the exact 8a755 Source the C01–C06 controls below retain as their pinned
+baseline; its `scripts/gate_queue.py` is 24804 B, sha256
+`57752cb17ee37df089c9b1c4d641a5ebb81edf8f15c4b9bb347c781f86f2ea9c`, and the same
+suite measures **17 failed / 47 passed** against it (the director's 2026-11-08
+re-measurement, `director-remeasure.log` section D) -- so no reader may take it
+as this host's installed provenance. The reviewed
+`7e9f53a8c1:scripts/gate_queue.py` is sha256
+`409f0779a8b32ca929f85bfbd0045c12df2f09955e5fbb0bca0fd993fc808e43` (73630 B).
+Before installing, the settle measurement was: no live daemon (`daemon.lock`
+unlocked, no `daemon.pid`, no `gate_queue.py daemon` process) and 196 tickets, all
+terminal (150 `done`, 23 `failed`, 23 `cancelled`). The host-gate-queue suite run
+in a disposable container with `GATE_QUEUE_SOURCE` pointed at the installed file
+measured **3 failed / 61 passed** against the superseded bytes and **64 passed /
+0 failed** against the reviewed ones; `--check` reports `match` afterwards. Those
+two numbers, not this paragraph, are the claim.
 
 `status TICKET --json` reads the full ticket without importing the client.
 The readback includes binding digest, ticket revision, immutable contexts,

@@ -328,7 +328,14 @@ def test_after_sidecar_observation_cannot_authorize_cleanup(tmp_path, monkeypatc
     fx = _build(tmp_path, monkeypatch, _final_script(), after=after)
     result = _run(fx)
     assert result.returncode == 69, result.stderr
-    state = "mismatch" if after == "mismatch" else "unknown"
+    # A re-observation that could not be ASKED keeps its own spelling: `unknown`
+    # here would report the platform identity's answer for a question its tool
+    # never got to put. Read from the launcher's bytes, so a revert goes red.
+    spelled = {line.split('identity="', 1)[1].split('"', 1)[0]
+               for line in _final_script().splitlines()
+               if 'identity="unanswered:' in line and "sidecar" in line}
+    assert len(spelled) == 1, spelled
+    state = "mismatch" if after == "mismatch" else spelled.pop()
     assert (fx["reports"] / "owned.gate.exit").read_text().startswith(
         f"{state}-platform-identity; real rc was 23;")
     assert (fx["reports"] / "owned.platform-identity.json").read_text() == fx["raw_receipt"]

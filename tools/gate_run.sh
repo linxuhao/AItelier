@@ -18,9 +18,12 @@ SNAP="$SNAPROOT/$SUFFIX-$$"
 # "Could not ask" is not the answer "unknown". gate_binding.py ANSWERS `unknown`
 # (and `unknown <why>`) with exit 0 when it judged readable bytes, so a `||`
 # fallback spelled with a word the tool itself prints leaves the gate's record
-# unable to tell an answer from a call that never happened. The two values below
-# are not answers -- a test reads them out of this file's bytes and requires
-# every exit-0 answer of the tool to differ from them
+# unable to tell an answer from a call that never happened. All three values in
+# this file (`unanswered:receipt-tool-failed`, `unanswered:platform-tool-failed`
+# and `unanswered:sidecar-tool-failed` -- the last one stands in for a failed
+# re-observation, not for a `||` fallback) are not answers: a test reads them out
+# of this file's bytes and requires every exit-0 answer of the tool, in all three
+# answering modes, to differ from them
 # (tests/unit/test_gate_binding_modes_and_usage.py).
 
 # A suffix names one invocation. Refuse prior evidence without altering it.
@@ -127,7 +130,12 @@ sidecar_rc=$?
 if [ "$sidecar_rc" -eq 70 ]; then
   identity=mismatch
 elif [ "$sidecar_rc" -ne 0 ] && [ "$identity" != "mismatch" ]; then
-  identity=unknown
+  # The re-observation could not be ASKED. That is the same class as the two
+  # `||` substitutions above and is spelled the same way, NOT `unknown`: the
+  # receipt has already answered here (`unchanged` is how this branch is
+  # reachable), so calling it `unknown` would report the platform identity's
+  # answer for a call the platform identity's tool never got to make.
+  identity="unanswered:sidecar-tool-failed"
 fi
 if [ "$identity" != "unchanged" ]; then
   # An ANSWER keeps its spelling: `unknown` means the receipt WAS read and does

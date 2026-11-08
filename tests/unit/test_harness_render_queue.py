@@ -487,6 +487,34 @@ def test_a_caller_gone_after_ownership_releases_the_row_unrendered(rig):
                                  "the render started")], rows
 
 
+# ── postlock-wait: the post-ownership waits are bounded by their own constants ──
+# The two waits a request meets AFTER it owns the render row (the process lock,
+# then the effect flock) are bounded by RENDER_PROCESS_LOCK_WAIT_SEC and
+# RENDER_EFFECT_LOCK_WAIT_SEC, not by render_wait_timeout_sec. The behavior is
+# driven in test_harness_render_lock.py; this pins that a request with NO queue
+# limit still owns the render under the production defaults, so the new bounds
+# cannot refuse ordinary work.
+
+
+def test_the_post_ownership_bounds_default_to_generous_values(rig):
+    gh = rig.gh
+    assert gh.RENDER_PROCESS_LOCK_WAIT_SEC >= 600, (
+        "the process-lock bound must be generous enough not to refuse a legitimate render")
+    assert gh.RENDER_EFFECT_LOCK_WAIT_SEC >= 600, (
+        "the effect-lock bound must be generous enough not to refuse a legitimate render")
+
+
+def test_a_free_lock_is_taken_under_the_default_post_ownership_bounds(rig):
+    """Default bounds, no queue limit, free locks: the render still runs."""
+    thread, out = rig.post_in_thread("/script", rig.payload("op-default-bounds"))
+    thread.join(15)
+    assert out.get("code") == 200, out
+    assert rig.rendered == [("/script", "op-default-bounds")], rig.rendered
+    assert [(r["operation_id"], r["status"], r["reason"] or "")
+            for r in rig.settled_snapshot()] == [
+        ("op-default-bounds", "released", "completed")]
+
+
 def test_a_limit_reached_after_ownership_releases_the_row_unrendered(rig):
     effect = _hold_effect_lock(rig.gh)
     try:

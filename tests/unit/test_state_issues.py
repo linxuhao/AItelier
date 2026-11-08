@@ -244,10 +244,12 @@ def test_legacy_resolutions_reject_receipt_fields_and_refuse_without_mutation(sv
     # The two provenance fields are refused separately since `observed`: it accepts
     # an artifact but never a receipt, so one shared message would hide which field
     # was wrong and let a caller believe `observed` can be closed with a receipt.
+    # `moot` (which also takes an artifact) joined the accepted list, so the message
+    # names every resolution that takes one.
     with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
         execute(svc, "resolve_issue", base | {"receipt_id": "receipt-legacy"}, allow_write=True)
     with pytest.raises(StateGraphError,
-                       match="artifact is only accepted for the fixed and observed resolutions"):
+                       match="artifact is only accepted for the fixed, observed and moot resolutions"):
         execute(svc, "resolve_issue", base | {"artifact": "f" * 40}, allow_write=True)
     # Both at once: the receipt refusal fires first, before anything is read.
     with pytest.raises(StateGraphError, match="receipt_id is only accepted for the fixed resolution"):
@@ -460,7 +462,7 @@ def test_observed_refuses_a_receipt_and_fixed_still_requires_one(svc):
 
 def test_other_resolutions_still_refuse_an_artifact(svc):
     issue = _report(svc)
-    with pytest.raises(StateGraphError, match="artifact is only accepted for the fixed and observed"):
+    with pytest.raises(StateGraphError, match="artifact is only accepted for the fixed, observed and moot"):
         execute(svc, "resolve_issue", {"project_id": "p", "issue_id": issue["issue_id"],
                                        "expected_version": 1, "resolution": "rejected",
                                        "reason": "not a defect", "director_identity": "wuxia",

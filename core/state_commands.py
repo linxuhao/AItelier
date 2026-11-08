@@ -697,7 +697,7 @@ class IssueRef(Project):
 
 
 class ListIssues(Project):
-    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "fixed", "observed", "rejected"]] | None = Field(
+    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "fixed", "observed", "rejected", "moot"]] | None = Field(
         default=None, min_length=1)
     kinds: list[Literal["defect", "gap", "handoff", "question"]] | None = Field(default=None, min_length=1)
     node_key: str | None = None
@@ -718,7 +718,7 @@ class LinkIssue(IssueRef):
 
 class ResolveIssue(IssueRef):
     expected_version: int = Field(ge=1)
-    resolution: Literal["absorbed", "promoted", "duplicate", "fixed", "observed", "rejected"] = Field(description=(
+    resolution: Literal["absorbed", "promoted", "duplicate", "fixed", "observed", "rejected", "moot"] = Field(description=(
         "absorbed: node_key+node_revision of a revision created after the report; "
         "promoted: node_key of a node created after the report; "
         "duplicate: exactly one of duplicate_of (issue) or node_key; "
@@ -727,7 +727,14 @@ class ResolveIssue(IssueRef):
         "created, revised or verified by this closure); "
         "observed: artifact only - the fix is present in a shipped artifact and was observed "
         "directly, but no State node ever carried it (use this instead of fixed, which would "
-        "claim a receipt that does not exist); rejected: reason only."))
+        "claim a receipt that does not exist); "
+        "rejected: reason only; "
+        "moot: artifact only - the subject object was measurably absent at the named artifact; "
+        "the observation is retained verbatim and cannot be re-measured (a report about a "
+        "directory, commit or report dir that is gone: no node can absorb it and no shipped "
+        "artifact carries a fix, so fixed and observed would both be false). Requires the "
+        "artifact at which the absence was measured; refuses node_key, node_revision, "
+        "duplicate_of and receipt_id."))
     reason: str = Field(min_length=1, max_length=4000)
     director_identity: str = Field(min_length=1, max_length=320)
     node_key: str | None = None
@@ -736,7 +743,8 @@ class ResolveIssue(IssueRef):
     receipt_id: str | None = Field(default=None, max_length=128, description=(
         "fixed only: an existing acceptance receipt (state_acceptances.receipt_id) in this project."))
     artifact: str | None = Field(default=None, max_length=128, description=(
-        "fixed only: the receipt's exact artifact_ref."))
+        "fixed: the receipt's exact artifact_ref; observed: the shipped artifact the fix was seen in; "
+        "moot: the exact artifact or HEAD at which the subject object was measured absent."))
 
 
 class Attempt(Request):

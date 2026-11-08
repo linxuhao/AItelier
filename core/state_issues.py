@@ -15,6 +15,13 @@ it, so "fixed" is checkable rather than asserted:
              its exact artifact and reason; no node is created, revised or
              verified by this closure, and the receipt metadata is a structural
              reference only (semantic relevance stays the director's call);
+- observed:  the fix is in a shipped artifact and was seen there, but no State
+             node ever carried it, so there is no receipt to name;
+- moot:      the SUBJECT OBJECT of the report (a directory, a commit, a report
+             dir) is measurably absent at the named artifact: no node can absorb
+             it and no shipped artifact carries a fix, so `fixed` and `observed`
+             would both be false. The body is retained verbatim and the absence
+             cannot be re-measured later;
 - rejected:  a reason only.
 
 An OPEN defect linked to a VERIFIED or CANDIDATE node contradicts that
@@ -29,7 +36,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound, cano
 from core.state_privacy import UntrustedDatabase
 
 KINDS = ("defect", "gap", "handoff", "question")
-RESOLUTIONS = ("absorbed", "promoted", "duplicate", "fixed", "observed", "rejected")
+RESOLUTIONS = ("absorbed", "promoted", "duplicate", "fixed", "observed", "rejected", "moot")
 MAX_LINKS = 20
 
 SCHEMA = """
@@ -42,7 +49,7 @@ CREATE TABLE IF NOT EXISTS state_issues (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     source TEXT,
-    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','fixed','observed','rejected')),
+    status TEXT NOT NULL CHECK(status IN ('open','absorbed','promoted','duplicate','fixed','observed','rejected','moot')),
     version INTEGER NOT NULL CHECK(version > 0),
     resolution_json TEXT,
     reported_by_actor TEXT NOT NULL,
@@ -72,19 +79,20 @@ def _issues_table_template() -> str:
 
 
 def _widen_status_check(conn) -> None:
-    """Add the ``fixed`` status to an existing table's CHECK, preserving rows.
+    """Add the newest status to an existing table's CHECK, preserving rows.
 
-    ``fixed`` widens a CHECK constraint, which SQLite cannot alter in place, so
-    a pre-existing database is rebuilt with the same preserving helper the
-    attempt tables use: every row, index and trigger survives and a damaged
-    table fails the copy instead of being normalized. A fresh table already
-    carries ``fixed`` and skips this.
+    ``observed`` (and now ``moot``) widens a CHECK constraint, which SQLite cannot
+    alter in place, so a pre-existing database is rebuilt with the same preserving
+    helper the attempt tables use: every row, index and trigger survives and a
+    damaged table fails the copy instead of being normalized. A fresh table
+    already carries the newest value and skips this.
     """
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='state_issues'").fetchone()
     # Keyed on the NEWEST value, not on the oldest missing one: a database that
-    # already carries `fixed` but predates `observed` still needs this rebuild, and
-    # checking for the older value would silently skip it.
-    if row and "'observed'" not in (row["sql"] or ""):
+    # already carries `observed` but predates `moot` still needs this rebuild, and
+    # checking for the older value would silently skip it — leaving a CHECK that
+    # refuses to close a moot issue.
+    if row and "'moot'" not in (row["sql"] or ""):
         from core.state_attempt_schema import _rebuild
         conn.execute("PRAGMA foreign_keys=OFF")
         try:
@@ -287,23 +295,26 @@ class StateIssues:
         reason = text(reason, "reason", 4000)
         director_identity = text(director_identity, "director_identity", 320)
         # receipt_id is the fixed resolution's provenance only. artifact is accepted
-        # by both terminal "it is really done" resolutions, because both name what
-        # was shipped; a legacy resolution naming either field is refused before
+        # by the terminal resolutions that name a shipped artifact (fixed, observed)
+        # and by moot, which names the artifact at which the subject was measured
+        # absent; a resolution that accepts neither naming field is refused before
         # anything is read.
         if receipt_id is not None and resolution != "fixed":
             raise StateGraphError("receipt_id is only accepted for the fixed resolution")
-        if artifact is not None and resolution not in ("fixed", "observed"):
+        if artifact is not None and resolution not in ("fixed", "observed", "moot"):
             raise StateGraphError(
-                "artifact is only accepted for the fixed and observed resolutions")
-        #  exists because a real fix often ships without a State node: the
-        # gate-imports permission fix, a comment that named the wrong mechanism, a
-        # reclaim guard. Those can be closed honestly against the shipped artifact,
-        # but they must NOT be labelled , which means "a node was accepted and
-        # here is its receipt" - conflating the two is how a receipt requirement
-        # turns into a list of issues that can never be closed.
+                "artifact is only accepted for the fixed, observed and moot resolutions")
+        # `observed`/`moot` exist because a real fix often ships without a State node
+        # (the gate-imports permission fix, a comment that named the wrong mechanism,
+        # a reclaim guard), and because some subjects stop existing altogether (a
+        # directory, commit or report dir that is measurably gone). Those can be
+        # closed honestly against a named artifact, but they must NOT be labelled
+        # `fixed`, which means "a node was accepted and here is its receipt" -
+        # conflating them is how a receipt requirement turns into a list of issues
+        # that can never be closed.
         shape = {"absorbed": {"node_key", "node_revision"}, "promoted": {"node_key"},
                  "fixed": {"receipt_id", "artifact"}, "observed": {"artifact"},
-                 "rejected": set()}.get(resolution)
+                 "moot": {"artifact"}, "rejected": set()}.get(resolution)
         given = {n for n, v in (("node_key", node_key), ("node_revision", node_revision),
                                 ("duplicate_of", duplicate_of), ("receipt_id", receipt_id),
                                 ("artifact", artifact)) if v is not None}
@@ -311,6 +322,13 @@ class StateIssues:
             if given not in ({"duplicate_of"}, {"node_key"}):
                 raise StateGraphError("duplicate takes exactly one of duplicate_of (an issue) or node_key")
         elif given != shape:
+            if resolution == "moot" and artifact is None:
+                # The shape check alone says "moot takes exactly: artifact" without
+                # saying what the artifact IS; a moot closure without one is a claim
+                # nobody can re-check, so name the requirement.
+                raise StateGraphError(
+                    "moot requires artifact: the exact artifact or HEAD at which the subject object "
+                    "was measured absent; moot takes exactly: artifact")
             raise StateGraphError(f"{resolution} takes exactly: {', '.join(sorted(shape)) or 'reason only'}")
         with self.store.transaction(write=True) as conn:
             row = self._open_for_write(conn, project_id, issue_id, expected_version)
@@ -354,9 +372,11 @@ class StateIssues:
                 record["node_revision"] = receipt["node_revision"]
                 conn.execute("INSERT OR IGNORE INTO state_issue_nodes VALUES(?,?,?)",
                              (row["issue_id"], project_id, receipt["node_key"]))
-            if resolution == "observed":
+            if resolution in ("observed", "moot"):
                 # No node and no receipt: the artifact IS the whole claim, so it is
-                # recorded verbatim and the reason has to carry the rest.
+                # recorded verbatim and the reason has to carry the rest. For `moot`
+                # the artifact is where the subject was measured ABSENT; the body is
+                # never rewritten, which is the only record of what was reported.
                 record["artifact_ref"] = text(artifact, "artifact", 200)
             if duplicate_of is not None:
                 if duplicate_of == row["issue_id"]:

@@ -32,8 +32,12 @@ or the binding bytes named by GATE_BINDING_FILE cannot be read as the records th
 were named to be, so the process exits 3 and prints ONE line on stderr naming the
 path and the failure kind, with nothing on stdout. Until 2026-11-08 both ended in
 the same answer string -- `unknown platform record unavailable` -- which the
-launcher's own `||` fallback (`gate_run.sh:139`) still spells, so a reader could
-not tell "the tool answered unknown" from "the tool could not be asked".
+launcher's own `||` fallback (`gate_run.sh:139`) spelled too, so a reader could
+not tell "the tool answered unknown" from "the tool could not be asked". The two
+fallbacks in `tools/gate_run.sh` now spell a value this tool never prints
+(`unanswered:receipt-tool-failed`, `unanswered:platform-tool-failed`), and
+`tests/unit/test_gate_binding_modes_and_usage.py` reads those literals out of the
+launcher's bytes and fails if any answer below equals one.
 """
 import argparse
 import hashlib
@@ -572,11 +576,27 @@ def write_observation(binding_path, output, expected_sha256):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+The positional arguments mean different things per mode. argparse can only name
+a positional once, so this list is the authority:
+  source, image, sha256
+               the positional is the binding (the reviewed record itself).
+  run          the positional is the binding; the second is the receipt to write.
+  sidecar      the positional is the sidecar record to WRITE; the second is the
+               earlier record it is compared against.
+  receipt      the positional is the gate's own receipt; the second is the
+               stage's recorded raw exit.
+  platform     the positional is the gate's own receipt -- the file
+               tools/gate_run.sh wrote as $REPORTS/<suffix>.platform-identity.json.
+               The reviewed binding is read from GATE_BINDING_FILE (frozen by the
+               launcher before dispatch), never from the positional.
+""")
     parser.add_argument("mode", choices=("source", "image", "sha256", "run", "sidecar",
                                          "receipt", "platform"))
-    parser.add_argument("binding")
-    parser.add_argument("output", nargs="?")
+    parser.add_argument("binding", metavar="RECEIPT_OR_BINDING")
+    parser.add_argument("output", nargs="?", metavar="OUTPUT_OR_RAW_EXIT")
     parser.add_argument("--binding-sha256")
     parser.add_argument("--observe")
     args = parser.parse_args()

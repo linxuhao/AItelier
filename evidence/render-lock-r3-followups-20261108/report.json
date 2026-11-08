@@ -1,0 +1,465 @@
+{
+  "schema": "render-lock-r3-followups/1",
+  "measured_at": "2026-11-08T13:14:59Z (first tree read) .. 2026-11-08T13:25Z (last container arm)",
+  "issue": {
+    "project_id": "aitelier",
+    "issue_id": "iss-c2da59d15e45440c",
+    "version": 2,
+    "kind": "gap",
+    "r3_candidate": "62639cc6a8293068ec7fa7f071b3ad0fcf6fb169",
+    "r3_receipt": "receipt-5a8874ebc23c41149e5967e7f2b3a299",
+    "note": "Six follow-ups from the 2026-09-24 independent review. Items 1-5 are re-measured here; item 6 is cross-repo and only recorded."
+  },
+  "tree": {
+    "worktree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/c8-renderlock-r3-20261108",
+    "head": "be6d8db2aeeab613c4ca52129b562fe9e7ab5df0",
+    "detached_from": "main be6d8db2",
+    "candidate_is_ancestor": "git merge-base --is-ancestor 62639cc6 HEAD -> true",
+    "product_code_changed_by_this_card": "none (evidence/ only)"
+  },
+  "environment": {
+    "pytest_arm": "docker run -d --name <unique> --network none --cpus 2 --memory 2g --init -u 1000:1000 -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v <tree>:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider <ids>",
+    "never_run_on_host_or_production_container": true,
+    "max_containers_alive": 2,
+    "mutants": "rsync copies of the worktree under /tmp/rqmut/<name> with ONE edit to docker/godot/godot_harness.py (mutate.py in this directory); the worktree itself was never mutated",
+    "runner": "run_tests.sh in this directory produced every logs/*.txt file"
+  },
+  "linked_nodes": [
+    {
+      "node_key": "harness.a-busy-render-lock-queues-instead-of-refusing",
+      "revision": 2,
+      "status": "VERIFIED",
+      "receipt": "receipt-5a8874ebc23c41149e5967e7f2b3a299",
+      "artifact": "62639cc6a8293068ec7fa7f071b3ad0fcf6fb169",
+      "evidence_ids": [
+        "lq3-queue",
+        "lq3-lost",
+        "lq3-charge",
+        "lq3-heartbeat",
+        "lq3-suite",
+        "lq3-bound"
+      ],
+      "what_its_criteria_assert": "Six criteria: a live `active` owner makes /playtest,/script,/x11_input_smoke QUEUE and then render (not 409); owner_lost and heartbeat-stale active still block and the refusal names the kind+owner_id; a request that ends while queued is reported as gate-not-run (unmeasured), never gate_timeout/known_failure/passed:false and never routed to 5_vision; a few failed heartbeats do not make a live render stale; the suite is green and mutants R4/R5/R10 each redden a named test; and `the-wait-is-bounded-by-the-callers-own-timeout` asserts the caller's own disconnect or render_wait_timeout_sec is re-checked BOTH before and after ownership, and takes effect before the render starts.",
+      "covers_which_items": "None of items 1-5 on its own. Criterion 6 is the nearest neighbour of P6 but it bounds the OWNER-ROW queue wait and requires a re-check after ownership; it says nothing about the two lock waits a request meets after it owns the row. At this artifact those waits were plain blocking acquires (62639cc6 docker/godot/godot_harness.py:2754 `self._RENDER_LOCK.acquire()` and :2755 `effect_lock = _acquire_render_effect_lock()`), so the receipt cannot have covered P6's unbounded post-ownership block. The single report hash 415274ef... is shared by all six evidence rows."
+    },
+    {
+      "node_key": "harness.a-zero-render-wait-limit-does-not-refuse-a-free-render-20261108",
+      "revision": 1,
+      "status": "VERIFIED",
+      "receipt": "receipt-3aee8b682af74aac872b86940b236e7d",
+      "artifact": "4dd17111093d259fe3719b580f15bc53982e9c9f",
+      "evidence_ids": [
+        "ev-w7-default-path-unchanged-20261108",
+        "ev-w7-held-lock-refuses-fast-and-truthfully-20261108",
+        "ev-w7-scope-20261108",
+        "ev-w7-zero-limit-renders-on-a-free-lock-20261108"
+      ],
+      "what_its_criteria_assert": "Four criteria, this card's item 5 exactly: `zero-limit-renders-on-a-free-lock` (render_wait_timeout_sec 0 AND a negative value against a FREE lock is admitted and the render RUNS, driven through the harness's own request path); `held-lock-refuses-fast-and-truthfully` (held lock: refused without waiting a poll interval, body says the request may not queue because of its own limit, does NOT claim a queued wait behind an owner it never queued behind and does NOT claim it took ownership and gave it up, asserted field by field); `default-path-unchanged` (absent limit keeps the ordinary bounded queue, existing render-lock and render-queue tests pass unchanged); `scope` (only docker/godot/godot_harness.py plus the render-lock/render-queue test files changed).",
+      "covers_which_items": "item 5 (P7) — directly and field by field.",
+      "also_listed_by": "iss-b859d7478c524da1 (gate-not-run r3 leftovers) for 'null queue wait'"
+    },
+    {
+      "node_key": "harness.the-render-owner-failure-paths-are-witnessed-20261108",
+      "revision": 1,
+      "status": "VERIFIED",
+      "receipt": "receipt-795f7500b90c41449255dfae99e4a9ac",
+      "artifact": "7de3a09249292e6907a57dad40199197cb05dac7",
+      "evidence_ids": [
+        "ev-w5-harness-unchanged-20261108",
+        "ev-w5-heartbeat-retries-after-two-failures-20261108",
+        "ev-w5-heartbeat-stops-when-the-row-is-not-active-20261108",
+        "ev-w5-waiter-raises-on-a-non-locked-error-20261108"
+      ],
+      "what_its_criteria_assert": "Four criteria: `heartbeat-retries-after-two-failures` (a test makes heartbeat_render_owner raise sqlite3.OperationalError twice in a row and then succeed; asserts the beat thread is STILL RUNNING after both failures and that heartbeat_at advanced on the success, and that narrowing the retry to give up after the second consecutive failure makes that test fail); `waiter-raises-on-a-non-locked-error` (a sqlite error whose text does not contain 'locked' surfaces to the caller instead of being treated as retryable contention, and swallowing that branch makes the test fail); `heartbeat-stops-when-the-row-is-not-active` (the owner row is taken away from a held render; the heartbeat thread must stop rather than loop, observed by heartbeat_at no longer advancing); `harness-unchanged` (docker/godot/godot_harness.py byte-identical to the base, so only tests were added).",
+      "covers_which_items": "items 3 and 4 (V1, V5, V6) — criterion by criterion, and each criterion names the mutation that must go red, which is exactly what the old '0 ignitions' claim denied."
+    },
+    {
+      "node_key": "harness.a-post-ownership-lock-wait-is-bounded-20261108",
+      "revision": 1,
+      "status": "VERIFIED",
+      "receipt": "receipt-3b5c8a82bbec400aa8d8d780a0a0ae56",
+      "artifact": "6c15c0cf91b8a69b23b10b79ba6e11f28b3af4be",
+      "evidence_ids": [
+        "ev-w9-process-lock",
+        "ev-w9-effect-lock",
+        "ev-w9-scope",
+        "ev-w9-prose"
+      ],
+      "not_linked_on_the_issue": "created 2026-11-08 from this same P6 text; it is the node that actually answers item 1",
+      "what_its_criteria_assert": "`process-lock-wait-after-ownership-is-bounded` (a request that already holds the owner row and cannot take the process render lock ENDS WITHIN A BOUND instead of waiting indefinitely; the bound is a module-level setting a test can set small; on expiry the answer is 4xx/5xx saying nothing was rendered and what blocked it, the owner row is released with a not-rendered reason, and no render body runs; the test drives the real _Handler.do_POST with the lock held in another thread); `effect-lock-wait-after-ownership-is-bounded` (same for the cross-process effect flock, held through a second descriptor); `scope-and-green`; `the-timeout-prose-matches-the-code` (every statement in aitelier/tools/godot_playtest/impl.py about when the caller's socket can expire names the two post-ownership waits and their bound, and no statement claims such a wait is unbounded).",
+      "covers_which_items": "item 1's mechanism (unbounded post-ownership wait) and item 1's prose half. It does NOT assert any relation between the bound and the caller's socket timeout, so it does not cover the residual exposure computed under exposure.p6."
+    }
+  ],
+  "items": [
+    {
+      "item": 1,
+      "id": "P6",
+      "title": "After the request takes ownership, a held render-effect lock or in-process render lock blocks it with no disconnect/limit check",
+      "disposition": "fixed",
+      "receipt": "receipt-3b5c8a82bbec400aa8d8d780a0a0ae56 (node harness.a-post-ownership-lock-wait-is-bounded-20261108 r1, artifact 6c15c0cf91b8a69b23b10b79ba6e11f28b3af4be)",
+      "what_changed_since_the_report": "both post-ownership acquires are bounded by module constants and refuse truthfully instead of hanging; the false prose the report cited is gone",
+      "file_lines": [
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "162-163",
+          "text": "RENDER_PROCESS_LOCK_WAIT_SEC = 3600.0  # postlock-wait: bound on the process lock after ownership / RENDER_EFFECT_LOCK_WAIT_SEC = 3600.0   # postlock-wait: bound on the effect flock after ownership"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7456-7471",
+          "text": "post_started = time.monotonic(); with _RenderLockWait(): process_locked = self._RENDER_LOCK.acquire(timeout=RENDER_PROCESS_LOCK_WAIT_SEC) ... effect_lock = _acquire_render_effect_lock(timeout=RENDER_EFFECT_LOCK_WAIT_SEC)"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7472-7488",
+          "text": "except _PostOwnershipWaitTimedOut as exc: ... release_reason = (f\"not rendered: waited {exc.waited_sec:.2f}s for {exc.blocked_by} (bound {exc.bound:.0f}s)\") ... return self._send(409, _post_ownership_wait_refusal(...))"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7508-7517",
+          "text": "_publish_request_abandon(self._render_client_abandoned) ... if self._render_client_abandoned(): release_reason = (\"not rendered: the caller disconnected before the render started\")",
+          "note": "the disconnect is re-checked AFTER both locks are held, not polled during those waits — the remnant of 'no disconnect check'"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7601-7607",
+          "text": "finally: _stop_owner_heartbeat(heartbeat); _release_render_effect_lock(effect_lock); self._RENDER_LOCK.release(); release_render_owner(...)",
+          "note": "locks are released BEFORE the owner row, so this code does not produce a held lock with no active owner row"
+        },
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "681-690",
+          "text": "A request that gets past that queue owns the render row, and then waits on the sidecar for the process render lock and then the cross-process render-effect lock (postlock-wait). Each of those waits is bounded by its own sidecar constant, RENDER_PROCESS_LOCK_WAIT_SEC and RENDER_EFFECT_LOCK_WAIT_SEC, not by render_wait_timeout_sec. ... Only if our socket expires before that bound does the caller see gate_timeout while nothing has rendered"
+        },
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "733-748",
+          "text": "refusal = _render_owner_refusal(e) ... because = ('render_owner_wait_timed_out' if refusal.get('error') == 'render owner wait timed out' ...) ... return {\"passed\": True, ..., \"gate_skipped\": True, \"skipped_because\": because, ...}",
+          "note": "a post-ownership bound refusal is mapped to the gate-did-not-run shape (gate_skipped), not to gate_timeout"
+        }
+      ],
+      "false_prose_the_report_cited": {
+        "at_r3_candidate": "aitelier/tools/godot_playtest/impl.py:292 (at 62639cc6) = 'Our socket therefore times out only after the render started, and that stays a measured gate_timeout.'",
+        "today": "that sentence does not exist at be6d8db2 (grep for it returns nothing); the site is impl.py:641-690 and it now names both post-ownership waits and both bounds"
+      },
+      "demonstrating": {
+        "kind": "tests, run at be6d8db2 in a disposable container",
+        "test_ids": [
+          "tests/unit/test_harness_render_lock.py::test_a_held_process_render_lock_is_bounded_and_answers_not_rendered",
+          "tests/unit/test_harness_render_lock.py::test_a_held_render_effect_lock_is_bounded_and_answers_not_rendered",
+          "tests/unit/test_harness_render_queue.py::test_a_caller_gone_after_ownership_releases_the_row_unrendered",
+          "tests/unit/test_harness_render_queue.py::test_a_limit_reached_after_ownership_releases_the_row_unrendered",
+          "tests/unit/test_harness_render_queue.py::test_a_free_lock_is_taken_under_the_default_post_ownership_bounds",
+          "tests/unit/test_harness_render_queue.py::test_the_post_ownership_bounds_default_to_generous_values"
+        ],
+        "green_run": "logs/rq-baseline-families-20261108.txt — 39 passed, bare exit code 0",
+        "mutation": "logs/rq-mutant-p6-20261108.txt — making the process-lock wait unbounded again (`self._RENDER_LOCK.acquire()` with no timeout) reddens test_a_held_process_render_lock_is_bounded_and_answers_not_rendered: 'the request did not answer while the process render lock was held (15.0s): this is the unbounded wait'; 1 ignition of the replaced line; bare exit code 1. The effect-lock test stays green under that mutant because it was not the mutated branch.",
+        "what_the_receipt_actually_asserts_here": "bounded wait + not-rendered release + truthful 4xx/5xx + no render body + prose matches; it does NOT assert the bound is below the caller's socket"
+      },
+      "residual_still_real": "The bound (3600 s per lock, the two waits sequential) is NOT derived from the caller's socket: 3600 + 3600 = 7200 s > post_playtest's 4200 s socket and > the 5_compile step's 3900 s budget. With both locks wedged the caller's socket still expires first and the tool still reports a timed-out gate for a render that never started — the exact consequence the item names — and with one lock wedged that happens whenever the queue wait w > 600 s (4200 - 3600) or w > 300 s (3900 - 3600). Reachability of a wedge is unchanged: the only holders of the effect flock in this file are the do_POST render path (:7466) and /lifecycle/reconcile (:692, non-blocking, released before its UPDATE returns), and reconcile requires an owner_lost row that would itself have refused admission — so the reviewer's 'no production path' still holds for the described state, and what remains is arithmetic, not an observed event.",
+      "exposure": "see exposure.p6"
+    },
+    {
+      "item": 2,
+      "id": "P5",
+      "title": "The 0.5xT queue share leaves T-w socket time after a wait w, so a render that fits alone can become a measured failure after a wait",
+      "disposition": "still-real",
+      "reason": "nothing in the tree bounds the render's own wall time against the socket time left after the queue share; the share is still 0.5 and the socket is now 4200 s. The old 'no exposure at the default T=1800 s' conclusion was drawn from a 45.9 s peak that is not in any retained report, and today's largest retained render is 3471.2921 s — larger than the 2100 s the share leaves.",
+      "file_lines": [
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "48-52",
+          "text": "RENDER_QUEUE_SHARE = 0.5 — 'The share of post_playtest's own timeout that a request may spend queued behind another render (sent as render_wait_timeout_sec). The rest is left for the render itself.'"
+        },
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "53-58",
+          "text": "AUTHORED_SCENARIO_CEILING_SEC = 3600 — ceiling on one authored scenario's caller budget, 'Deliberately NOT the socket timeout: post_playtest's default socket timeout was raised 3600 -> 4200 s'"
+        },
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "641-648",
+          "text": "'# 4200 s, not 3600 s. The largest harness-measured render retained anywhere is 3471.2921 s of wall time: ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/ playtest.json, field timing.wall_sec (schema playtest-timing/1)' ... def post_playtest(payload: dict, timeout: int = 4200) -> dict:"
+        },
+        {
+          "path": "aitelier/tools/godot_playtest/impl.py",
+          "lines": "678-695",
+          "text": "'The queue wait is declared as render_wait_timeout_sec = RENDER_QUEUE_SHARE x timeout (0.5 x 4200 = 2100s at the default)' ... payload.setdefault(\"timeout\", authored_caller_timeout(...min(timeout, AUTHORED_SCENARIO_CEILING_SEC))) ... payload.setdefault(\"render_wait_timeout_sec\", round(timeout * RENDER_QUEUE_SHARE, 3))"
+        },
+        {
+          "path": "configs/addons/game_harness.yaml",
+          "lines": "66-71",
+          "text": "'# the real budget lives in post_playtest (3600s) plus the sidecar's 120s per scenario' ... id: \"5_compile\" ... timeout_seconds: 3900",
+          "note": "the outer step budget is 3900 s — BELOW the 4200 s socket — and the comment still says 3600 s"
+        },
+        {
+          "path": "configs/addons/game_harness.yaml",
+          "lines": "121",
+          "text": "timeout_seconds: 3600 (5_vision; per-scenario budgets, not the play-test socket)"
+        }
+      ],
+      "demonstrating": {
+        "kind": "run (pins today's constants) + arithmetic over retained reports + a search showing no guard exists",
+        "test_id": "tests/unit/test_playtest_caller_budget.py::test_ordinary_request_grants_180_without_rewriting_contract[split|monolith] — asserts socket_timeout == 4200 and payload['render_wait_timeout_sec'] == 2100",
+        "green_run": "logs/rq-caller-budget-20261108.txt — 41 passed, bare exit code 0",
+        "no_guard_for_the_exposure": "grep -rn RENDER_QUEUE_SHARE tests/ matches one COMMENT (tests/unit/test_playtest_caller_budget.py:114); no test relates the queue share (or T-w) to a render's wall time, and no retained report field is asserted against it",
+        "largest_real_render": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/playtest.json, field timing.wall_sec = 3471.2921 (schema playtest-timing/1, 166 scenarios, harness_finished_at 2026-09-18T12:19:12Z)",
+        "observed_queue_waits": "51 retained playtest.json files carry timing.render_owner_wait_sec; the maximum is 0.9283 s (/home/linxuhao/.AItelier/gate-reports/gq-20261018T063105Z-c0f7c750/playtest.json). 56 carry timing.render_lock_wait_sec, max 0.0003 s.",
+        "not_reproducible_old_basis": "no retained playtest.json has timing.wall_sec anywhere in 40..50 s (n=56, min 1276.8302 at gq-20260920T090413Z-c0a3286f, max 3471.2921). The 2026-09-24 retained report wuxia-godot-gate-bo9wv3ye/playtest.json has timing.wall_sec = 1567.8691 with timing.by_class_sec.process = 45.5067 — the only ~45 s figure in it. The issue's 'live renders peaked at 45.9 s' therefore cannot be reproduced from retained gate reports, and on that same day the request's own wall was already 1567.9 s."
+      },
+      "exposure": "see exposure.p5",
+      "verdict_on_the_2026_09_24_conclusion": "Does NOT still hold. At the report's own constants (T=1800 s, share 900 s) the headroom after a full-share wait was 900 s, and the reported 45.9 s peak fitted — but the retained 2026-09-24 report shows a 1567.8691 s request, which did not. Today (T=4200 s, share 2100 s) the headroom after a full-share wait is 2100 s and the largest retained render is 3471.2921 s: any queue wait above 728.7079 s turns that render into a measured failure, and above 428.7079 s against the 3900 s step budget. The exposure is reachable by construction and not observed in the retained data (max observed wait 0.9283 s)."
+    },
+    {
+      "item": 3,
+      "id": "V1",
+      "title": "A heartbeat that gives up on its 2nd consecutive failure passes all 146 worker tests; the code survives 3 (probe P8)",
+      "disposition": "fixed",
+      "receipt": "receipt-795f7500b90c41449255dfae99e4a9ac (node harness.the-render-owner-failure-paths-are-witnessed-20261108 r1, artifact 7de3a09249292e6907a57dad40199197cb05dac7; criterion heartbeat-retries-after-two-failures, evidence ev-w5-heartbeat-retries-after-two-failures-20261108)",
+      "code": [
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "580-589",
+          "text": "def beat() -> None: while not stop.wait(RENDER_OWNER_HEARTBEAT_INTERVAL_SEC): try: heartbeat_render_owner(owner_id, generation) except sqlite3.OperationalError as exc: print(f\"[harness] render owner heartbeat failed, retrying: {exc}\", flush=True) except Exception as exc: print(f\"[harness] render owner heartbeat stopped: {exc}\", flush=True); return",
+          "note": "OperationalError has no counter and no exit — the loop retries for as long as the render runs; only a non-OperationalError exception stops it"
+        }
+      ],
+      "test": {
+        "id": "tests/unit/test_harness_render_queue.py::test_two_locked_beats_in_a_row_still_beat (line 657)",
+        "asserts": "heartbeat_render_owner raises sqlite3.OperationalError twice in a row then succeeds; after the SECOND failure the beat thread must still be alive and must then beat successfully, with heartbeat_at advanced past the stale value it was set to; outcomes[:3] == ['locked','locked','ok']"
+      },
+      "demonstrating": {
+        "green_run": "logs/rq-baseline-families-20261108.txt — 39 passed, bare exit code 0",
+        "mutation": "logs/rq-mutant-v1-20261108.txt — the beat gives up after the 2nd consecutive OperationalError (the mutant the issue says passed the suite): test_two_locked_beats_in_a_row_still_beat RED with 'the beat thread ended after two locked beats in a row: ['locked','locked']'; bare exit code 1",
+        "ignitions": "2 (IGNITION-V1 consecutive_operational_failures=1, then =2) — the second-consecutive-failure branch is entered, so the claim is exercised rather than assumed"
+      }
+    },
+    {
+      "item": 4,
+      "id": "V5+V6",
+      "title": "0 ignitions: 'the waiter still raises on any sqlite error other than locked' and 'the heartbeat thread stops once its row is no longer active'",
+      "disposition": "fixed",
+      "receipt": "receipt-795f7500b90c41449255dfae99e4a9ac (node harness.the-render-owner-failure-paths-are-witnessed-20261108 r1, artifact 7de3a09249292e6907a57dad40199197cb05dac7; criteria waiter-raises-on-a-non-locked-error / heartbeat-stops-when-the-row-is-not-active, evidence ev-w5-waiter-raises-on-a-non-locked-error-20261108 / ev-w5-heartbeat-stops-when-the-row-is-not-active-20261108)",
+      "claims": [
+        {
+          "claim": "V5 — the waiter still raises on any sqlite error other than locked",
+          "code": {
+            "path": "docker/godot/godot_harness.py",
+            "lines": "413-415",
+            "text": "except sqlite3.OperationalError as exc: if \"locked\" not in str(exc): raise"
+          },
+          "test_id": "tests/unit/test_harness_render_queue.py::test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire (line 706)",
+          "test_asserts": "two 'database is locked' errors are waited out (3 acquire attempts, row returned); then 'database is malformed' escapes after exactly ONE attempt as sqlite3.OperationalError carrying that text",
+          "measurement": "mutant that treats every OperationalError as retryable contention: logs/rq-mutant-v5-20261108.txt RED — 'a non-locked sqlite error was retried instead of propagated', assert 51 == 1 attempts; 53 ignitions of the swallowed-branch line (2 locked + 51 malformed retries); bare exit code 1"
+        },
+        {
+          "claim": "V6 — the heartbeat thread stops once its row is no longer active",
+          "code": {
+            "path": "docker/godot/godot_harness.py",
+            "lines": "611-618",
+            "text": "def heartbeat_render_owner(...): UPDATE render_owners SET heartbeat_at=? WHERE owner_id=? AND generation=? AND status='active' ... if updated != 1: raise RuntimeError(\"render owner is no longer active\")",
+            "second_site": "docker/godot/godot_harness.py:587-589 — `except Exception as exc: print(... stopped ...); return` is what turns that RuntimeError into the thread stopping"
+          },
+          "test_id": "tests/unit/test_harness_render_queue.py::test_the_heartbeat_stops_once_its_row_is_no_longer_active (line 748)",
+          "test_asserts": "the row is released under a live heartbeat; a beat must see the released row, the thread must then be dead, no further beat may occur in the next 0.1 s (ten 0.01 s intervals), heartbeat_at must stay frozen, and beats.count('gone') == 1",
+          "measurement": "mutant that keeps beating when the row is no longer active: logs/rq-mutant-v6-20261108.txt RED — 'no beat saw the released row: ['ok' x N]', assert False; 465 ignitions of the not-active branch (470 and 471 on two earlier runs of the same arm — the count is interval-driven because the interval is 0.01 s; the red is not); bare exit code 1"
+        }
+      ],
+      "why_this_is_a_measurement": "each claim is a branch in the tree, named with file:line, plus a test id that goes red when exactly that branch is mutated, plus the number of times the branch ran. That replaces the old '0 ignitions' statement, which was an absence and not a measurement."
+    },
+    {
+      "item": 5,
+      "id": "P7",
+      "title": "On a free lock, render_wait_timeout_sec 0 or 0.001 is refused with a 409 whose detail is false; base renders",
+      "disposition": "fixed",
+      "receipt": "receipt-3aee8b682af74aac872b86940b236e7d (node harness.a-zero-render-wait-limit-does-not-refuse-a-free-render-20261108 r1, artifact 4dd17111093d259fe3719b580f15bc53982e9c9f; criteria zero-limit-renders-on-a-free-lock + held-lock-refuses-fast-and-truthfully, evidence ev-w7-zero-limit-renders-on-a-free-lock-20261108 / ev-w7-held-lock-refuses-fast-and-truthfully-20261108)",
+      "what_the_receipt_asserts": "a 0 (and a negative) limit against a FREE lock is admitted and the render runs, driven through the harness's own request path; a held lock refuses at once with a body that says the request may not queue because of its own limit, names the holder in the way (owner_id/blocking_owner_ids), keeps queue_allowed=false and queued_for_owner_ids=[], and does NOT borrow the queue vocabulary ('waited_for_owner_ids' and 'waited_sec' absent, 'took ownership only after the limit' absent); an absent/null limit keeps the ordinary bounded queue",
+      "file_lines": [
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "396-398",
+          "text": "if wait_timeout is not None and wait_timeout <= 0: return _acquire_render_owner_without_queuing(project_id, run_id, operation_id, wait_timeout=wait_timeout)"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "480-520",
+          "text": "_acquire_render_owner_without_queuing — 'Exactly ONE admission attempt, tried without blocking on the deployment-admission fence ... Nothing is polled and nothing is slept'"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "523-568",
+          "text": "_may_not_queue_refusal — 'queue_allowed': False, 'queued_for_owner_ids': [], detail '<holder> is rendering; this request's own render_wait_timeout_sec (N) allows no queue wait at all, so it may not queue behind it: nothing was rendered and no owner row was made'"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7526",
+          "text": "if wait_timeout is not None and wait_timeout > 0 and elapsed > wait_timeout:",
+          "note": "the post-ownership re-check now charges only a POSITIVE limit — the line whose unconditional form refused a zero-limit request holding a free lock"
+        },
+        {
+          "path": "docker/godot/godot_harness.py",
+          "lines": "7424-7427",
+          "text": "'A negative request value clamps to 0 ... 0 is therefore the one value the no-queue path sees.' — wait_timeout = None if wait_timeout is None else max(0.0, float(wait_timeout))"
+        }
+      ],
+      "demonstrating": {
+        "kind": "tests, run at be6d8db2 in a disposable container",
+        "test_ids": [
+          "tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_renders_on_a_free_render_lock[0|0.0|-3] (line 93)",
+          "tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue (line 115)",
+          "tests/unit/test_harness_render_lock.py::test_an_absent_or_null_limit_keeps_the_ordinary_bounded_queue[absent|None] (line 274)"
+        ],
+        "green_run": "logs/rq-baseline-families-20261108.txt — 39 passed, bare exit code 0",
+        "mutation": "logs/rq-mutant-p7-20261108.txt — restore the pre-fix shape (non-positive limit no longer takes the no-queue path and the re-check charges any limit): 4 RED — test_a_non_positive_limit_renders_on_a_free_render_lock[0], [0.0], [-3] and test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue; 4 ignitions; bare exit code 1. The mutant's refusal body reproduces the item's false detail verbatim: {'error': 'render owner wait timed out', ... 'waited_sec': 0.0377, 'wait_timeout_sec': 0.0, 'detail': 'queued 0.04s behind the render lock; the request's own render_wait_timeout_sec (0.0) ran out: it took ownership only after the limit, so its owner row was released and nothing was rendered'} for a lock that was free and nothing was queued."
+      }
+    }
+  ],
+  "exposure": {
+    "constants_today": {
+      "post_playtest_socket_timeout_sec": {
+        "value": 4200,
+        "at": "aitelier/tools/godot_playtest/impl.py:648 (def post_playtest(payload: dict, timeout: int = 4200))"
+      },
+      "render_queue_share": {
+        "value": 0.5,
+        "at": "aitelier/tools/godot_playtest/impl.py:52"
+      },
+      "declared_render_wait_timeout_sec": {
+        "value": 2100,
+        "at": "aitelier/tools/godot_playtest/impl.py:695 (round(timeout * RENDER_QUEUE_SHARE, 3)); pinned by tests/unit/test_playtest_caller_budget.py:116"
+      },
+      "authored_scenario_ceiling_sec": {
+        "value": 3600,
+        "at": "aitelier/tools/godot_playtest/impl.py:58; payload timeout = min(4200, 3600) = 3600 by default (:693-694)"
+      },
+      "step_budget_5_compile_sec": {
+        "value": 3900,
+        "at": "configs/addons/game_harness.yaml:71 (the step that runs godot_compile -> post_playtest)"
+      },
+      "step_budget_5_vision_sec": {
+        "value": 3600,
+        "at": "configs/addons/game_harness.yaml:121"
+      },
+      "step_budget_5_final_test_sec": {
+        "value": 4200,
+        "at": "configs/addons/game_harness.yaml:481"
+      },
+      "renders_release_both_locks_before_the_owner_row": {
+        "value": true,
+        "at": "docker/godot/godot_harness.py:7599-7609"
+      }
+    },
+    "p5": {
+      "question": "after a queue wait w, is there enough socket left for a render that fits alone?",
+      "arithmetic": [
+        "declared queue share = 0.5 x 4200 = 2100 s (so w <= 2100 s by construction)",
+        "socket left after a full-share wait = 4200 - 2100 = 2100 s",
+        "largest retained render R_max = 3471.2921 s (wuxia-godot-gate-7kf51nvv/playtest.json, timing.wall_sec) > 2100 s",
+        "a render of R_max survives only while w <= 4200 - 3471.2921 = 728.7079 s",
+        "against the 3900 s step budget it survives only while w <= 3900 - 3471.2921 = 428.7079 s",
+        "second largest retained render = 3382.5028 s (gq-20260918T135757Z-aa402ef0/playtest.json) -> its limit is w <= 817.4972 s (socket) / 517.4972 s (step)"
+      ],
+      "verdict": "the exposure window is w in (728.7079, 2100] against the tool's socket and (428.7079, 2100] against the step budget, for a largest-class render; the constants allow it, nothing in the tree forbids it, and no test or report field bounds it",
+      "observed": "max timing.render_owner_wait_sec over 51 retained reports = 0.9283 s (gq-20261018T063105Z-c0f7c750/playtest.json); max timing.render_lock_wait_sec over 56 = 0.0003 s — so the window was never entered in the retained data",
+      "old_conclusion": "'no exposure at the default T=1800 s' does NOT still hold: the 45.9 s peak is not in any retained playtest.json (n=56; none between 40 and 50 s), while the 2026-09-24 retained request was 1567.8691 s of wall"
+    },
+    "p6": {
+      "question": "can a request that owns the row still lose its caller's socket on a held lock?",
+      "arithmetic": [
+        "bound per wait = 3600 s (RENDER_PROCESS_LOCK_WAIT_SEC, RENDER_EFFECT_LOCK_WAIT_SEC), the two waits are sequential -> 7200 s worst case",
+        "7200 s > 4200 s (tool socket) and > 3900 s (5_compile step): with both locks wedged the socket always expires first, with no queue wait needed",
+        "with ONE lock wedged the refusal arrives at w + 3600, so it beats the socket only while w <= 600 s (4200 - 3600) or w <= 300 s (3900 - 3600)"
+      ],
+      "verdict": "the unbounded block is gone (a receipt covers the bound), but the bound is not derived from the caller's socket, so the outcome the item names — socket expires, gate reported timed out although nothing rendered — is still reachable by arithmetic when both post-ownership locks are wedged, or when one is wedged after a queue wait above 600 s (300 s against the step budget). No event of this shape exists in the retained reports: none of the 69 retained playtest.json files carries timing.post_ownership_wait_sec at all, and the 51 that carry timing.render_owner_wait_sec never exceed 0.9283 s.",
+      "disconnect_during_the_wait": "not polled: docker/godot/godot_harness.py:7456-7471 has no should_abort check, the check happens only after both locks are held (:7512)"
+    }
+  },
+  "out_of_scope": [
+    {
+      "item": 6,
+      "title": "Cross-repo: the wuxia game gate tools/godot_gate.py (master 5603e3c8) sends no render_wait_timeout_sec and reports a socket timeout as unreachable",
+      "status": "recorded only, not measured",
+      "why": "different repository (wuxia-myth), filed separately on that project; nothing in this tree can demonstrate it"
+    }
+  ],
+  "commands": [
+    {
+      "what": "read the issue and the five linked nodes",
+      "command": "state_graph_read(action=get_issue|get_node|get_receipt, project_id=aitelier, ...)"
+    },
+    {
+      "what": "candidate is an ancestor of this tree",
+      "command": "git merge-base --is-ancestor 62639cc6 HEAD"
+    },
+    {
+      "what": "what changed in the four relevant files since the r3 candidate",
+      "command": "git log --oneline 62639cc6..HEAD -- docker/godot/godot_harness.py aitelier/tools/godot_playtest/impl.py tests/unit/test_harness_render_lock.py tests/unit/test_harness_render_queue.py"
+    },
+    {
+      "what": "the old false prose",
+      "command": "git show 62639cc6:aitelier/tools/godot_playtest/impl.py | grep -n 'Our socket therefore times out only after the render started'"
+    },
+    {
+      "what": "the r3 candidate's post-ownership acquires",
+      "command": "git show 62639cc6:docker/godot/godot_harness.py | grep -n '_RENDER_LOCK.acquire\\|_acquire_render_effect_lock('"
+    },
+    {
+      "what": "largest retained render",
+      "command": "python3 -c \"json scan of ~/.AItelier/gate-reports/*/playtest.json on timing.wall_sec\""
+    },
+    {
+      "what": "observed queue waits",
+      "command": "python3 -c \"json scan of ~/.AItelier/gate-reports/*/playtest.json on timing.render_owner_wait_sec and timing.render_lock_wait_sec\""
+    },
+    {
+      "what": "no test couples the share to a render wall",
+      "command": "grep -rn RENDER_QUEUE_SHARE tests/"
+    },
+    {
+      "what": "mutant trees",
+      "command": "python3 mutate.py v1|v5|v6|p6|p7   (rsync copy of the worktree + one edit to docker/godot/godot_harness.py)"
+    },
+    {
+      "what": "every pytest arm",
+      "command": "bash run_tests.sh"
+    }
+  ],
+  "logs": {
+    "dir": "evidence/render-lock-r3-followups-20261108/logs",
+    "files": {
+      "rq-baseline-families-20261108.txt": "39 passed, exit 0 — test_harness_render_lock.py + test_harness_render_queue.py at be6d8db2",
+      "rq-caller-budget-20261108.txt": "41 passed, exit 0 — test_playtest_caller_budget.py (socket 4200 / share 2100)",
+      "rq-mutant-v1-20261108.txt": "1 failed, exit 1, 2 ignitions",
+      "rq-mutant-v5-20261108.txt": "1 failed, exit 1, 53 ignitions",
+      "rq-mutant-v6-20261108.txt": "1 failed, exit 1, 465 ignitions",
+      "rq-mutant-p6-20261108.txt": "1 failed 1 passed, exit 1, 1 ignition",
+      "rq-mutant-p7-20261108.txt": "4 failed, exit 1, 4 ignitions"
+    }
+  },
+  "not_measured": [
+    {
+      "what": "an actual P5 exposure event",
+      "why": "no retained gate report ever recorded a queue wait above 0.9283 s; the exposure is stated as arithmetic over today's constants instead"
+    },
+    {
+      "what": "the issue's '45.9 s peak'",
+      "why": "not reproducible: no retained playtest.json has timing.wall_sec in 40..50 s; the only ~45 s figure on 2026-09-24 is timing.by_class_sec.process = 45.5067 s in wuxia-godot-gate-bo9wv3ye/playtest.json"
+    },
+    {
+      "what": "the deployed godot sidecar's behaviour",
+      "why": "the live aitelier-godot container was not touched (no HTTP, no exec, no restart); every arm ran the harness in-process inside a disposable container"
+    },
+    {
+      "what": "the whole tests/ suite",
+      "why": "not needed for these five items and not requested; the render-lock and render-queue families plus the caller-budget file were run instead"
+    },
+    {
+      "what": "item 6 (cross-repo wuxia gate)",
+      "why": "different repository, explicitly out of scope"
+    },
+    {
+      "what": "P6's residual under both-locks-wedged",
+      "why": "reachable by arithmetic but no production path to a wedged lock without an owner row was found (the only other effect-flock holder is /lifecycle/reconcile, which cannot overlap an admitted render), so it is reported as a bound-vs-socket gap, not as an observed event"
+    }
+  ]
+}

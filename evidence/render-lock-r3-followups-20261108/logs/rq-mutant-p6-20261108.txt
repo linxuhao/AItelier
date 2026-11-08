@@ -1,0 +1,69 @@
+# arm: rq-mutant-p6-20261108
+# tree: /tmp/rqmut/p6
+# date: 2026-11-08T13:26:12Z
+# host: linxuhaserver  image: aitelier:latest
+# command: docker run -d --name rq-mutant-p6-20261108 --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+#   -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v /tmp/rqmut/p6:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_harness_render_lock.py::test_a_held_process_render_lock_is_bounded_and_answers_not_rendered tests/unit/test_harness_render_lock.py::test_a_held_render_effect_lock_is_bounded_and_answers_not_rendered
+93c5f33ddfd08f26d54736801221be05cde8a1b786ed3214e09ae078685e35ab
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+[harness] /script waited 15s for the render lock
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+_____ test_a_held_process_render_lock_is_bounded_and_answers_not_rendered ______
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7bc7eff4fec0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7bc7eff560c0>
+
+    def test_a_held_process_render_lock_is_bounded_and_answers_not_rendered(rig, monkeypatch):
+        """Process lock held by another thread; the request owns the row, then gives up."""
+        gh = rig.gh
+        monkeypatch.setattr(gh, "RENDER_PROCESS_LOCK_WAIT_SEC", 0.3)
+        # Hold the process render lock from another thread, with no owner row, so
+        # the request's own owner acquisition succeeds and it reaches the
+        # process-lock wait.
+        gate = threading.Event()
+        held = threading.Event()
+    
+        def hold():
+            gh._Handler._RENDER_LOCK.acquire()
+            held.set()
+            gate.wait(30)
+            gh._Handler._RENDER_LOCK.release()
+    
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        assert held.wait(10), "the test could not take the process render lock"
+        started = time.monotonic()
+        try:
+            thread, out = rig.post_in_thread(
+                "/script", rig.payload("op-bounded"), timeout=20)
+            thread.join(15)
+            elapsed = time.monotonic() - started
+        finally:
+            gate.set()
+            holder.join(10)
+>       assert not thread.is_alive(), (
+            f"the request did not answer while the process render lock was held "
+            f"({elapsed:.1f}s): this is the unbounded wait")
+E       AssertionError: the request did not answer while the process render lock was held (15.0s): this is the unbounded wait
+E       assert not True
+E        +  where True = is_alive()
+E        +    where is_alive = <Thread(Thread-3 (go), started daemon 136098626754240)>.is_alive
+
+tests/unit/test_harness_render_lock.py:230: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-P6 unbounded_process_lock_acquire
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_lock.py::test_a_held_process_render_lock_is_bounded_and_answers_not_rendered
+1 failed, 1 passed, 1 warning in 16.97s
+# exit_code: 1
+# ignition_lines: 1

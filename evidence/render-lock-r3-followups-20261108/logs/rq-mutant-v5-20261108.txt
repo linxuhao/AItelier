@@ -1,0 +1,122 @@
+# arm: rq-mutant-v5-20261108
+# tree: /tmp/rqmut/v5
+# date: 2026-11-08T13:25:54Z
+# host: linxuhaserver  image: aitelier:latest
+# command: docker run -d --name rq-mutant-v5-20261108 --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+#   -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v /tmp/rqmut/v5:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_harness_render_queue.py::test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire
+b665566c6bdae3708030b9289712636dedf44755d519aaed2875befbd941f7f9
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______ test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_non_locked_sqlite_error0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7a3e256a4890>
+
+    def test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire(tmp_path, monkeypatch):
+        gh = _load(tmp_path, monkeypatch)
+        real_acquire = gh.acquire_render_owner
+        attempts: list[str] = []
+    
+        def locked_then_free(project_id, run_id, operation_id, **kwargs):
+            attempts.append("locked")
+            if len(attempts) <= 2:
+                raise sqlite3.OperationalError("database is locked")
+            return real_acquire(project_id, run_id, operation_id, **kwargs)
+    
+        monkeypatch.setattr(gh, "acquire_render_owner", locked_then_free)
+        row = gh._acquire_render_owner_waiting_inner(
+            "p-wait", "r-wait", "op-locked", wait_timeout=5)
+        assert len(attempts) == 3, (
+            "a locked table at the acquire was not waited out", attempts)
+        assert row["operation_id"] == "op-locked" and row["waited_for_owner_ids"] == [], row
+        gh.release_render_owner(row["owner_id"], row["generation"], "test finished")
+    
+        malformed: list[str] = []
+    
+        def corrupt(project_id, run_id, operation_id, **kwargs):
+            malformed.append(operation_id)
+            raise sqlite3.OperationalError("database is malformed")
+    
+        monkeypatch.setattr(gh, "acquire_render_owner", corrupt)
+        escaped: list[BaseException] = []
+        try:
+            gh._acquire_render_owner_waiting_inner(
+                "p-wait", "r-wait", "op-corrupt", wait_timeout=1)
+        except BaseException as exc:
+            escaped.append(exc)
+>       assert len(malformed) == 1, (
+            "a non-locked sqlite error was retried instead of propagated", malformed, escaped)
+E       AssertionError: ('a non-locked sqlite error was retried instead of propagated', ['op-corrupt', 'op-corrupt', 'op-corrupt', 'op-corrupt... "owner_id": null, "owner_kind": "active", "wait_timeout_sec": 1, "waited_for_owner_ids": [], "waited_sec": 1.0091}')])
+E       assert 51 == 1
+E        +  where 51 = len(['op-corrupt', 'op-corrupt', 'op-corrupt', 'op-corrupt', 'op-corrupt', 'op-corrupt', ...])
+
+tests/unit/test_harness_render_queue.py:738: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-V5 swallowed_non_locked=OperationalError('database is locked')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is locked')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+IGNITION-V5 swallowed_non_locked=OperationalError('database is malformed')
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_a_non_locked_sqlite_error_propagates_from_the_waiting_acquire
+1 failed, 1 warning in 1.39s
+# exit_code: 1
+# ignition_lines: 53

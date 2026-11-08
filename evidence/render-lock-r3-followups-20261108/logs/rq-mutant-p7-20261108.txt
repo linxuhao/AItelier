@@ -1,0 +1,134 @@
+# arm: rq-mutant-p7-20261108
+# tree: /tmp/rqmut/p7
+# date: 2026-11-08T13:26:34Z
+# host: linxuhaserver  image: aitelier:latest
+# command: docker run -d --name rq-mutant-p7-20261108 --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+#   -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v /tmp/rqmut/p7:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_renders_on_a_free_render_lock tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue
+eae294a110e47475ea8f7d4ce5a9bb53037dfe8c29ae2891039aea96431cd977
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+__________ test_a_non_positive_limit_renders_on_a_free_render_lock[0] __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7e20409d6900>
+limit = 0
+
+    @pytest.mark.parametrize("limit", [0, 0.0, -3])
+    def test_a_non_positive_limit_renders_on_a_free_render_lock(rig, limit):
+        """`0` is "do not queue", never "do not render": the free lock runs it."""
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-zero", render_wait_timeout_sec=limit))
+        thread.join(15)
+>       assert out.get("code") == 200, (
+            f"render_wait_timeout_sec={limit!r} against a FREE render lock was not "
+            f"admitted: {out!r}")
+E       AssertionError: render_wait_timeout_sec=0 against a FREE render lock was not admitted: {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], 'deployment_fence_held': False, 'needs_reconciliation': False, 'waited_sec': 0.0434, 'wait_timeout_sec': 0.0, 'detail': "queued 0.04s behind the render lock; the request's own render_wait_timeout_sec (0.0) ran out: it took ownership only after the limit, so its owner row was released and nothing was rendered"}}
+E       assert 409 == 200
+E        +  where 409 = <built-in method get of dict object at 0x7e20405dc800>('code')
+E        +    where <built-in method get of dict object at 0x7e20405dc800> = {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], ...}}.get
+
+tests/unit/test_harness_render_lock.py:98: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-P7 recheck elapsed=0.0434 limit=0.0
+_________ test_a_non_positive_limit_renders_on_a_free_render_lock[0.0] _________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7e20409d4dd0>
+limit = 0.0
+
+    @pytest.mark.parametrize("limit", [0, 0.0, -3])
+    def test_a_non_positive_limit_renders_on_a_free_render_lock(rig, limit):
+        """`0` is "do not queue", never "do not render": the free lock runs it."""
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-zero", render_wait_timeout_sec=limit))
+        thread.join(15)
+>       assert out.get("code") == 200, (
+            f"render_wait_timeout_sec={limit!r} against a FREE render lock was not "
+            f"admitted: {out!r}")
+E       AssertionError: render_wait_timeout_sec=0.0 against a FREE render lock was not admitted: {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], 'deployment_fence_held': False, 'needs_reconciliation': False, 'waited_sec': 0.0171, 'wait_timeout_sec': 0.0, 'detail': "queued 0.02s behind the render lock; the request's own render_wait_timeout_sec (0.0) ran out: it took ownership only after the limit, so its owner row was released and nothing was rendered"}}
+E       assert 409 == 200
+E        +  where 409 = <built-in method get of dict object at 0x7e20403e9b40>('code')
+E        +    where <built-in method get of dict object at 0x7e20403e9b40> = {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], ...}}.get
+
+tests/unit/test_harness_render_lock.py:98: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-P7 recheck elapsed=0.0171 limit=0.0
+_________ test_a_non_positive_limit_renders_on_a_free_render_lock[-3] __________
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7e20409e6450>
+limit = -3
+
+    @pytest.mark.parametrize("limit", [0, 0.0, -3])
+    def test_a_non_positive_limit_renders_on_a_free_render_lock(rig, limit):
+        """`0` is "do not queue", never "do not render": the free lock runs it."""
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-zero", render_wait_timeout_sec=limit))
+        thread.join(15)
+>       assert out.get("code") == 200, (
+            f"render_wait_timeout_sec={limit!r} against a FREE render lock was not "
+            f"admitted: {out!r}")
+E       AssertionError: render_wait_timeout_sec=-3 against a FREE render lock was not admitted: {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], 'deployment_fence_held': False, 'needs_reconciliation': False, 'waited_sec': 0.0356, 'wait_timeout_sec': 0.0, 'detail': "queued 0.04s behind the render lock; the request's own render_wait_timeout_sec (0.0) ran out: it took ownership only after the limit, so its owner row was released and nothing was rendered"}}
+E       assert 409 == 200
+E        +  where 409 = <built-in method get of dict object at 0x7e2040341380>('code')
+E        +    where <built-in method get of dict object at 0x7e2040341380> = {'code': 409, 'body': {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': None, 'waited_for_owner_ids': [], ...}}.get
+
+tests/unit/test_harness_render_lock.py:98: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-P7 recheck elapsed=0.0356 limit=0.0
+____ test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue ____
+
+rig = <tests.unit.test_harness_render_queue._Rig object at 0x7e2040b99670>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7e20409e7440>
+
+    def test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue(
+            rig, monkeypatch):
+        """Held lock + `0`: refused in one admission attempt, body says why."""
+        holder_id = rig.start_holder()
+        gh = rig.gh
+        # The production poll interval: burning even one of them would be visible.
+        gh.RENDER_OWNER_WAIT_POLL_SEC = 0.25
+        attempts: list[str] = []
+        real_acquire = gh.acquire_render_owner
+    
+        def counted(project_id, run_id, operation_id, **kwargs):
+            attempts.append(operation_id)
+            return real_acquire(project_id, run_id, operation_id, **kwargs)
+    
+        monkeypatch.setattr(gh, "acquire_render_owner", counted)
+        started = time.monotonic()
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-zero", render_wait_timeout_sec=0))
+        thread.join(10)
+        elapsed = time.monotonic() - started
+        rig.release.set()
+        rig.holder[0].join(30)
+        assert out.get("code") == 409, out
+        body = out["body"]
+        # The body states that THIS request may not queue because of its own limit,
+        # not that a queue wait ran out.
+>       assert body["error"] == "render owner exists", body
+E       AssertionError: {'error': 'render owner wait timed out', 'owner_kind': 'active', 'owner_id': 'a79354ddf7fe4f0198fc7b01c5f6086b', 'waited_for_owner_ids': ['a79354ddf7fe4f0198fc7b01c5f6086b'], ...}
+E       assert 'render owner wait timed out' == 'render owner exists'
+E         
+E         - render owner exists
+E         + render owner wait timed out
+
+tests/unit/test_harness_render_lock.py:141: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-P7 recheck elapsed=0.0546 limit=None
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_renders_on_a_free_render_lock[0]
+FAILED tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_renders_on_a_free_render_lock[0.0]
+FAILED tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_renders_on_a_free_render_lock[-3]
+FAILED tests/unit/test_harness_render_lock.py::test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue
+4 failed, 1 warning in 2.46s
+# exit_code: 1
+# ignition_lines: 4

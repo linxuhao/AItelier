@@ -1,0 +1,532 @@
+# arm: rq-mutant-v6-20261108
+# tree: /tmp/rqmut/v6
+# date: 2026-11-08T13:26:00Z
+# host: linxuhaserver  image: aitelier:latest
+# command: docker run -d --name rq-mutant-v6-20261108 --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+#   -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v /tmp/rqmut/v6:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_harness_render_queue.py::test_the_heartbeat_stops_once_its_row_is_no_longer_active
+7fec66b40b98c9a6a3e685d5150f39c898ba5805d3507b19b45d98a78b5765dd
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_the_heartbeat_stops_once_its_row_is_no_longer_active ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_heartbeat_stops_once_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7532d7261ac0>
+
+    def test_the_heartbeat_stops_once_its_row_is_no_longer_active(tmp_path, monkeypatch):
+        gh = _load(tmp_path, monkeypatch)
+        monkeypatch.setattr(gh, "RENDER_OWNER_HEARTBEAT_INTERVAL_SEC", 0.01)
+        owner = gh.acquire_render_owner("p-gone", "r-gone", "op-gone")
+        real_beat = gh.heartbeat_render_owner
+        beats: list[str] = []
+        live = threading.Event()
+        gone = threading.Event()
+    
+        def beat(owner_id, generation):
+            try:
+                real_beat(owner_id, generation)
+            except RuntimeError:
+                beats.append("gone")
+                gone.set()
+                raise
+            beats.append("ok")
+            live.set()
+    
+        monkeypatch.setattr(gh, "heartbeat_render_owner", beat)
+        heartbeat = gh._start_owner_heartbeat(owner["owner_id"], owner["generation"])
+        thread = heartbeat[1]
+    
+        def heartbeat_at() -> float:
+            return next(r for r in gh.render_owner_snapshot()
+                        if r["owner_id"] == owner["owner_id"])["heartbeat_at"]
+    
+        try:
+            assert live.wait(5), "the heartbeat never beat while its row was active"
+            gh.release_render_owner(owner["owner_id"], owner["generation"], "released by test")
+>           assert gone.wait(5), f"no beat saw the released row: {beats}"
+E           AssertionError: no beat saw the released row: ['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok']
+E           assert False
+E            +  where False = wait(5)
+E            +    where wait = <threading.Event at 0x7532d725a630: unset>.wait
+
+tests/unit/test_harness_render_queue.py:778: AssertionError
+----------------------------- Captured stdout call -----------------------------
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+IGNITION-V6 row_is_no_longer_active
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_harness_render_queue.py::test_the_heartbeat_stops_once_its_row_is_no_longer_active
+1 failed, 1 warning in 5.34s
+# exit_code: 1
+# ignition_lines: 465

@@ -8,9 +8,15 @@
 # The three numbers, each asserted and each named in the failure message:
 #
 #   * gate runs per step invocation  == 1        (was 3 after round 5)
-#   * single-step worst-case hold    <= 5400 s   (was 3 x 5400 + 2 x 60)
+#   * single-step worst-case hold    <= core.gate_deferral.episode_max_seconds()
+#     (the budget is the episode ceiling, read off the module — not a literal;
+#     was 3 x 5400 + 2 x 60)
 #   * the poll interval stays inside the valve   (540 s cannot re-arm it
 #     before the episode ceiling ends the run)
+#
+# The containment invariant — the whole-gate deadline must fit inside the
+# episode ceiling, REPO_GATE_TIMEOUT <= episode_max_seconds() — is asserted
+# below by test_the_whole_gate_deadline_fits_inside_the_episode_ceiling.
 #
 # Every assertion names the NUMBER it is about, because round 5's real defect
 # was not that these grew — it was that NOTHING WAS WATCHING THEM, so the next
@@ -29,12 +35,17 @@ def _worst_case_hold(*, gate_timeout, attempts, retry_delay):
 
 
 def _step_budget_violations(*, gate_timeout, attempts, retry_delay,
-                            previous_main_line=5400.0, max_runs_per_step=1):
+                            previous_main_line=None, max_runs_per_step=1):
     """The names of the numbers that are out of budget — empty means green.
 
-    Returns names, not a bool, because a red that does not say WHICH number
-    moved is the failure mode this file exists to avoid.
+    The hold budget defaults to the episode ceiling read off
+    `core.gate_deferral` at call time, so the budget moves with the module and
+    is never a stale literal here. Returns names, not a bool, because a red
+    that does not say WHICH number moved is the failure mode this file exists
+    to avoid.
     """
+    if previous_main_line is None:
+        previous_main_line = gd.episode_max_seconds()
     out = []
     if attempts > max_runs_per_step:
         out.append(f"gate runs per step={attempts} > {max_runs_per_step}")
@@ -60,7 +71,25 @@ def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
     assert _worst_case_hold(
         gate_timeout=rt.REPO_GATE_TIMEOUT,
         attempts=rt.REPO_GATE_UNMEASURED_ATTEMPTS,
-        retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS) <= 5400
+        retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS) <= gd.episode_max_seconds()
+
+
+def test_the_whole_gate_deadline_fits_inside_the_episode_ceiling():
+    """The containment invariant, read off the REAL constants.
+
+    A gate may run to its whole-gate deadline (`REPO_GATE_TIMEOUT`); the
+    deferral that waits for it may end at `episode_max_seconds()`. If the
+    deadline is above the ceiling, a gate that runs its full length outlives
+    the episode meant to contain it. Neither number is restated here: the
+    test reads both, so it moves with them and goes red by naming both.
+    """
+    from aitelier.tools.run_tests import impl as rt
+
+    ceiling = gd.episode_max_seconds()
+    assert rt.REPO_GATE_TIMEOUT <= ceiling, (
+        f"containment broken: REPO_GATE_TIMEOUT={rt.REPO_GATE_TIMEOUT}s > "
+        f"episode_max_seconds()={ceiling}s — a whole gate can outlive the "
+        "deferral that waits for it")
 
 
 @pytest.mark.parametrize("attempts,expect_name", [
@@ -309,28 +338,29 @@ def test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures():
     assert restarted.episode_count("run-1") == 1
 
 
-def test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded():
+def test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded():
     """G2 / G2b reader that does NOT touch the constants it guards.
 
-    The r7 reader monkeypatched `GATE_DEFERRAL_EPISODE_MAX_SECONDS` to 10800
-    and then asserted 10800 — it overwrote the very value it claimed to check,
-    so a module that loaded `1e9` stayed green while the effective episode
-    ceiling silently doubled. This reads the module exactly as it is loaded:
+    The r7 reader monkeypatched `GATE_DEFERRAL_EPISODE_MAX_SECONDS` to the
+    default and then asserted the default — it overwrote the very value it
+    claimed to check, so a module that loaded `1e9` stayed green while the
+    effective episode ceiling silently doubled. This reads the module exactly
+    as it is loaded:
 
     * G2 (the seconds constant becomes 1e9) is caught by the effective
-      `episode_max_seconds()` and by the constant itself, and BOTH name 10800;
+      `episode_max_seconds()` and by the constant itself, and BOTH name 12600;
     * G2b (the ceiling constant becomes 1e9) is caught by the ceiling constant
       itself — the hardcoded absolute clip still holds the runtime value, so
       this is the one reader that sees it.
     """
     import importlib
     loaded = importlib.reload(gd)
-    assert loaded.episode_max_seconds() == 10800.0, (
+    assert loaded.episode_max_seconds() == 12600.0, (
         f"as-loaded effective episode ceiling is "
-        f"{loaded.episode_max_seconds()}, not 10800 s (G2 widened the bound)")
-    assert loaded.GATE_DEFERRAL_EPISODE_MAX_SECONDS == 10800.0, (
+        f"{loaded.episode_max_seconds()}, not 12600 s (G2 widened the bound)")
+    assert loaded.GATE_DEFERRAL_EPISODE_MAX_SECONDS == 12600.0, (
         f"GATE_DEFERRAL_EPISODE_MAX_SECONDS={loaded.GATE_DEFERRAL_EPISODE_MAX_SECONDS}"
-        ", expected 10800")
+        ", expected 12600")
     assert loaded.GATE_DEFERRAL_EPISODE_MAX_CEILING == 6 * 3600, (
         f"GATE_DEFERRAL_EPISODE_MAX_CEILING={loaded.GATE_DEFERRAL_EPISODE_MAX_CEILING}"
         ", expected 21600 (6 * 3600) — G2b widened the ceiling constant")
@@ -350,11 +380,11 @@ def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
         f"episode_max_seconds()={gd.episode_max_seconds()} exceeds "
         f"_ABSOLUTE_EPISODE_CEILING={gd._ABSOLUTE_EPISODE_CEILING} — "
         "G2: the wall-clock bound is silently disabled")
-    # Pole 2: restore defaults — must be at the default (10800s < ceiling).
+    # Pole 2: restore defaults — must be at the default (12600s < ceiling).
     monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 6 * 3600)
-    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 10800)
-    assert gd.episode_max_seconds() == 10800.0, (
-        "the default episode is not 10800s")
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 12600)
+    assert gd.episode_max_seconds() == 12600.0, (
+        "the default episode is not 12600s")
 
 
 def test_no_environment_can_raise_the_episode_ceiling_past_six_hours(

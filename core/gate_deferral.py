@@ -46,8 +46,17 @@ GATE_DEFERRAL_WAIT_SECONDS = float(
 # `_positive_seconds` refuses a non-positive value (a zero ceiling would end
 # every absence instantly) and the ceiling is enforced by `expired`, so a
 # caller cannot get an unbounded episode by raising the number alone.
+#
+# The effective value is `episode_max_seconds()`, never this raw setting: it is
+# clipped to the absolute cap below. The containment invariant is
+# `aitelier.tools.run_tests.impl.REPO_GATE_TIMEOUT <= episode_max_seconds()`,
+# so a gate that runs to its full deadline is still inside the episode it
+# waits in. Raised from 10800 to 12600 (the `REPO_GATE_TIMEOUT` value of
+# 2026-11-08, which is ~2x the largest retained passing gate, 6476.1 s; see the
+# comment there). Tests:
+# tests/unit/test_gate_deferral_execution_points.py.
 GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(
-    os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", "10800"))
+    os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", "12600"))
 
 # Absolute ceilings on the two knobs above. Both are read from the
 # environment, and both are things a caller could "fix" a stuck run by
@@ -96,7 +105,7 @@ def episode_max_seconds() -> float:
     ceiling = max(1.0, min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_CEILING,
                                              6 * 3600.0),
                            _ABSOLUTE_EPISODE_CEILING))
-    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),
+    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 12600.0),
                ceiling)
 
 

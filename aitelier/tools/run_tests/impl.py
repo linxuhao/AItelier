@@ -1286,7 +1286,24 @@ REPO_GATE_SCRIPT = "run_tests.sh"
 # therefore a FLOOR for a clean tree, not the figure. 900 was a
 # placeholder and would have failed every gate as a timeout, which is the
 # worst kind of red: one that has nothing to do with the code.
-REPO_GATE_TIMEOUT = 5400
+# Whole-gate deadline, enforced on the gate script's whole run and reused as
+# the admission relay's upstream socket timeout (`upstream_timeout=` below).
+# Raised from 5400 on 2026-11-08 because retained gates ran past it. Measured
+# from the manifests under ~/.AItelier/gate-reports/ (depth-1 gate manifests):
+#   * largest passing whole gate, 6476.1 s:
+#       gate-reports/gq-20261021T194832Z-38efe5f5/manifest.json
+#     (started 2026-10-21T19:49:00Z, finished 21:36:56Z)
+#   * largest whole gate of any status, 6570.9 s (aborted):
+#       gate-reports/wuxia-godot-gate-o_fr2y_w/manifest.json
+#   * 21 of the 112 depth-1 gate manifests with timestamps ran past 5400 s
+#   * per-stage maxima for one gate: python 3000.1 s
+#       (gate-reports/gq-20261020T163942Z-40015a4e), compile 31.5 s, playtest
+#       6559.6 s (wuxia-godot-gate-o_fr2y_w), script 1637.0 s; sum 11228.2 s
+# 12600 s is about 2x the largest passing gate. It must stay <=
+# core.gate_deferral.episode_max_seconds(): a deadline above the episode
+# ceiling lets one gate outlive the deferral meant to wait for it. Asserted by
+# tests/unit/test_gate_deferral_execution_points.py.
+REPO_GATE_TIMEOUT = 12600
 
 
 # inotify(7) constants (linux/inotify.h).

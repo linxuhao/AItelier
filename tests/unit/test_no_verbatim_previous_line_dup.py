@@ -62,6 +62,11 @@ TEST_INTENTIONAL_REPEATS = [
     ("tests/unit/test_route_rotation.py", 'assert table.resolve("plain", rotate=True) == ["a/m1", "payg/m9"]', 1),
     ("tests/unit/test_route_rotation.py", 'assert table.resolve("solo", rotate=True) == ["a/m1", "payg/m9"]', 1),
     ("tests/unit/test_run_isolation_lifecycle.py", "await sc.poll_and_execute()", 2),
+    # Two refusal CASES with two different argument shapes (`node_key`, then
+    # `duplicate_of`) that the resolver answers with the same sentence; the
+    # expected-messages list quotes one line per case, so the repeat is the
+    # point, not a splice.
+    ("tests/unit/test_state_issue_moot_resolution.py", '"moot takes exactly: artifact",', 1),
     ("tests/unit/test_tick_log.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
     ("tests/unit/test_waiting_tick_log_coalescing.py", 'await tick("p1")', 1),
     ("tests/writing_bench/test_early_semantic_refusal.py", 'adapter.publish_review_materials(bench, "run1", "literary", out)', 1),
@@ -108,7 +113,7 @@ def test_named_test_repeats_are_pinned_and_current():
         f"only-in-tree={sorted(set(derived) - set(listed))} "
         f"only-in-list={sorted(set(listed) - set(derived))} "
         f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
-    assert len(TEST_INTENTIONAL_REPEATS) == 20
+    assert len(TEST_INTENTIONAL_REPEATS) == 21
 
 
 

@@ -42,7 +42,8 @@
     }
   },
   "measured_at": "2026-11-08T13:50:00Z",
-  "artifact": "evidence/gate-not-run-r3-remeasure-20261108/report.json (this file); raw logs raw-*.log beside it; pre-fix probe trees under probe-trees/ (git archive, not committed product code)",
+  "artifact": "evidence/gate-not-run-r3-remeasure-20261108/report.json (this file); raw logs raw-<arm>-<slug>.log beside it; probes.json beside it carries, per arm A-G, the exact docker run argv, the pytest/command argv, the selection, the mounted tree, the exit code and the log filename, all captured from the invocation that wrote the committed log. Pre-fix probe trees were disposable /tmp copies built with `git archive <sha> | tar -x -C /tmp/<dir>` (the base commit is recorded in probes.json tree_base); they are not committed.",
+  "probes": "evidence/gate-not-run-r3-remeasure-20261108/probes.json",
   "verdicts": {
     "1": "not-measurable-here",
     "2": "already-fixed",

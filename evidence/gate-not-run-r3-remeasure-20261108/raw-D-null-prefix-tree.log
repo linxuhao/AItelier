@@ -2,20 +2,11 @@
 The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
 
   warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
-============================= test session starts ==============================
-platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
-rootdir: /w
-configfile: pytest.ini
-plugins: platformdirs-4.14.5, asyncio-1.4.1.post1, anyio-4.16.0
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 1 item
-
-tests/unit/test_repo_gate_admission.py F                                 [100%]
-
+F                                                                        [100%]
 =================================== FAILURES ===================================
 _________________ test_a_gate_that_sends_its_own_wait_keeps_it _________________
 
-rig = <tests.gate_fixture.HarnessRig object at 0x76ae1524dee0>
+rig = <tests.gate_fixture.HarnessRig object at 0x758995ada0f0>
 tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_gate_that_sends_its_own0')
 
     def test_a_gate_that_sends_its_own_wait_keeps_it(rig, tmp_path):
@@ -59,4 +50,4 @@ tests/unit/test_repo_gate_admission.py:140: AssertionError
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
 FAILED tests/unit/test_repo_gate_admission.py::test_a_gate_that_sends_its_own_wait_keeps_it
-========================= 1 failed, 1 warning in 1.44s =========================
+1 failed, 1 warning in 1.22s

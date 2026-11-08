@@ -9,4 +9,4 @@ The event loop scope for asynchronous fixtures will default to the "fixture" cac
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-44 passed, 8 deselected, 1 warning in 18.39s
+44 passed, 8 deselected, 1 warning in 21.84s

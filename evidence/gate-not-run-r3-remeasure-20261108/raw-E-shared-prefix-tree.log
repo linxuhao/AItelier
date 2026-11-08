@@ -2,20 +2,11 @@
 The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
 
   warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
-============================= test session starts ==============================
-platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
-rootdir: /w
-configfile: pytest.ini
-plugins: platformdirs-4.14.5, asyncio-1.4.1.post1, anyio-4.16.0
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 8 items
-
-tests/unit/test_gate_admission_shared_operation_id.py FFFF..FF           [100%]
-
+FFFF..FF                                                                 [100%]
 =================================== FAILURES ===================================
 _ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-a-arrives-first] _
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554498e0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255449580>, 'http://127.0.0.1:34717')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f5751c0>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f5748f0>, 'http://127.0.0.1:45719')
 owner = 'first-to-arrive', arrival = 'a-then-b'
 
     @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
@@ -95,7 +86,7 @@ E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq
 tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
 _ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-b-arrives-first] _
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554491f0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458f80>, 'http://127.0.0.1:34033')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f574bf0>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f57b050>, 'http://127.0.0.1:37267')
 owner = 'first-to-arrive', arrival = 'b-then-a'
 
     @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
@@ -175,7 +166,7 @@ E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq
 tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
 _ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-a-arrives-first] _
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e4255458aa0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458da0>, 'http://127.0.0.1:34769')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f581af0>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f581700>, 'http://127.0.0.1:44835')
 owner = 'second-to-arrive', arrival = 'a-then-b'
 
     @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
@@ -255,7 +246,7 @@ E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq
 tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
 _ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-b-arrives-first] _
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554597f0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e425545be60>, 'http://127.0.0.1:39619')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f581520>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f583470>, 'http://127.0.0.1:45689')
 owner = 'second-to-arrive', arrival = 'b-then-a'
 
     @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
@@ -335,7 +326,7 @@ E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq
 tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
 ________ test_another_requests_shared_id_does_not_suppress_a_unique_one ________
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e4255459e50>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458650>, 'http://127.0.0.1:34145')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f584320>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f585e80>, 'http://127.0.0.1:45413')
 
     def test_another_requests_shared_id_does_not_suppress_a_unique_one(rig):
         """The rule is per operation_id: a third request with its own id is admitted.
@@ -380,7 +371,7 @@ E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq
 tests/unit/test_gate_admission_shared_operation_id.py:508: AssertionError
 _________ test_a_request_in_flight_when_the_relay_stops_claims_no_row __________
 
-rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554495e0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e425545bda0>, 'http://127.0.0.1:33115')
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x734c0f584770>, <aitelier.gate_admission.AdmissionRelay object at 0x734c0f587a10>, 'http://127.0.0.1:38931')
 
     def test_a_request_in_flight_when_the_relay_stops_claims_no_row(rig):
         """A row that appears while the relay stops is credited to nobody.
@@ -459,4 +450,4 @@ FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_reque
 FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-b-arrives-first]
 FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_another_requests_shared_id_does_not_suppress_a_unique_one
 FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_a_request_in_flight_when_the_relay_stops_claims_no_row
-=================== 6 failed, 2 passed, 1 warning in 28.64s ====================
+6 failed, 2 passed, 1 warning in 29.01s

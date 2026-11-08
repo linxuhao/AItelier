@@ -50,6 +50,12 @@ _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 # behind another render (sent as render_wait_timeout_sec). The rest is left for
 # the render itself.
 RENDER_QUEUE_SHARE = 0.5
+# Ceiling on one authored scenario's caller budget (authored_caller_timeout).
+# Deliberately NOT the socket timeout: post_playtest's default socket timeout
+# was raised 3600 -> 4200 s, and this stays at 3600 s so that raising the
+# socket does not grow any authored scenario budget. Explicit callers below
+# 3600 s are unaffected (post_playtest takes the min).
+AUTHORED_SCENARIO_CEILING_SEC = 3600
 
 SPEC_DIR = "playtest"
 SPEC_FILE = "playtest_spec.yaml"
@@ -632,7 +638,14 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
                 f"smoke-tested.")}
 
 
-def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+#
+# 4200 s, not 3600 s. The largest harness-measured render retained anywhere is
+# 3471.2921 s of wall time: ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/
+# playtest.json, field timing.wall_sec (schema playtest-timing/1). With the old
+# 3600 s socket that left 128.7 s of headroom, so a slightly slower render was
+# orphaned and reported as not run. 4200 s leaves 728.7 s. The queue declaration
+# is derived from this number at RENDER_QUEUE_SHARE (2100 s, was 1800 s).
+def post_playtest(payload: dict, timeout: int = 4200) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 
     Two failure shapes, and they are NOT the same outcome:
@@ -649,8 +662,10 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     the number alone only moves the cliff; a deadline of ours must never read
     as a verdict of the game's.
 
-    3600s, not 1200: this bounds the SUITE independently of the per-scenario
-    caller ceiling carried in the payload. Undeclared scenarios retain 120s.
+    4200s, not 1200: this bounds the SUITE independently of the per-scenario
+    caller ceiling carried in the payload. The per-scenario ceiling is
+    AUTHORED_SCENARIO_CEILING_SEC (3600s), a separate number: raising this
+    socket default does not raise it. Undeclared scenarios retain 120s.
     jinyong-spine, 2026-08-23 (24 scripts/11 scenarios -> 55/20): the builder
     log shows the exception on wfile.write(body) while sending the 200 — the run
     had FINISHED and the answer had nowhere to go. That is the shape this now
@@ -661,7 +676,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     ran -> gate_skipped under its own skipped_because, like the first shape.
 
     The queue wait is declared as render_wait_timeout_sec = RENDER_QUEUE_SHARE
-    x timeout, so the sidecar gives up on the queue before our socket expires.
+    x timeout (0.5 x 4200 = 2100s at the default), so the sidecar gives up on
+    the queue before our socket expires.
     A request that gets past that queue owns the render row, and then waits on
     the sidecar for the process render lock and then the cross-process
     render-effect lock (postlock-wait). Each of those waits is bounded by its own sidecar
@@ -674,7 +690,8 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
     render that starts after waiting w seconds has timeout - w seconds left.
     """
     payload = dict(payload)
-    payload.setdefault("timeout", authored_caller_timeout(payload.get("spec"), timeout))
+    payload.setdefault("timeout", authored_caller_timeout(
+        payload.get("spec"), min(timeout, AUTHORED_SCENARIO_CEILING_SEC)))
     payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
     body = json.dumps(payload).encode("utf-8")
     caller_key = _caller_key(payload)

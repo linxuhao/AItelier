@@ -1,0 +1,30 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F...........                                                             [100%]
+=================================== FAILURES ===================================
+__________ test_one_step_holds_the_scheduler_for_at_most_one_gate_run __________
+
+    def test_one_step_holds_the_scheduler_for_at_most_one_gate_run():
+        """The budget itself, read off the REAL constants rather than restated."""
+        from aitelier.tools.run_tests import impl as rt
+    
+>       assert rt.REPO_GATE_UNMEASURED_ATTEMPTS == 1, (
+            "gate runs per step moved: "
+            f"{rt.REPO_GATE_UNMEASURED_ATTEMPTS} (the scheduler parks the absence "
+            "now, so a step does not pay for the wait)")
+E       AssertionError: gate runs per step moved: 3 (the scheduler parks the absence now, so a step does not pay for the wait)
+E       assert 3 == 1
+E        +  where 3 = <module 'aitelier.tools.run_tests.impl' from '/w/aitelier/tools/run_tests/impl.py'>.REPO_GATE_UNMEASURED_ATTEMPTS
+
+tests/unit/test_gate_deferral_execution_points.py:63: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run
+1 failed, 11 passed, 1 warning in 0.26s

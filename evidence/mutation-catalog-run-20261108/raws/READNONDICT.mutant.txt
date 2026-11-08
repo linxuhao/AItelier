@@ -1,0 +1,202 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.FFFF..............                                                      [100%]
+=================================== FAILURES ===================================
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload0] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o0')
+ledger = DeferralLedger(episodes={}), payload = []
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o0/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        `repo_gate_absent` is that flag. A report that carries it as false names a
+        gate that measured nothing next to a failure that WAS measured, and that
+        run goes back to the implementer, so it is not waited on here.
+        `repo_gate_unmeasured` is read only from a report that has no
+        `repo_gate_absent` key at all.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+        absent = (data.get("repo_gate_absent") if "repo_gate_absent" in data
+>                 else data.get("repo_gate_unmeasured"))
+                       ^^^^^^^^
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:436: AttributeError
+_______ test_a_report_that_is_not_an_object_states_no_absence[payload1] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o1')
+ledger = DeferralLedger(episodes={}), payload = ['repo_gate_absent']
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o1/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        `repo_gate_absent` is that flag. A report that carries it as false names a
+        gate that measured nothing next to a failure that WAS measured, and that
+        run goes back to the implementer, so it is not waited on here.
+        `repo_gate_unmeasured` is read only from a report that has no
+        `repo_gate_absent` key at all.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       absent = (data.get("repo_gate_absent") if "repo_gate_absent" in data
+                  ^^^^^^^^
+                  else data.get("repo_gate_unmeasured"))
+E       AttributeError: 'list' object has no attribute 'get'
+
+core/gate_deferral.py:435: AttributeError
+________ test_a_report_that_is_not_an_object_states_no_absence[absent] _________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o2')
+ledger = DeferralLedger(episodes={}), payload = 'absent'
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o2/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        `repo_gate_absent` is that flag. A report that carries it as false names a
+        gate that measured nothing next to a failure that WAS measured, and that
+        run goes back to the implementer, so it is not waited on here.
+        `repo_gate_unmeasured` is read only from a report that has no
+        `repo_gate_absent` key at all.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+        absent = (data.get("repo_gate_absent") if "repo_gate_absent" in data
+>                 else data.get("repo_gate_unmeasured"))
+                       ^^^^^^^^
+E       AttributeError: 'str' object has no attribute 'get'
+
+core/gate_deferral.py:436: AttributeError
+___________ test_a_report_that_is_not_an_object_states_no_absence[3] ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o3')
+ledger = DeferralLedger(episodes={}), payload = 3
+
+    @pytest.mark.parametrize("payload", [[], ["repo_gate_absent"], "absent", 3])
+    def test_a_report_that_is_not_an_object_states_no_absence(tmp_path, ledger,
+                                                              payload):
+        """Kills READNONDICT: a `test_report.json` that parses but is not a JSON
+        object carries no flag of its own, so it states no absence, and the tick
+        that reads it must get `none`, not an exception."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+>       assert gd.read_absence(path) is None
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_gate_deferral_is_accounted.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+report_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_is_not_an_o3/test_report.json')
+
+    def read_absence(report_path) -> dict | None:
+        """The absence a `test_report.json` states, or None if it states none.
+    
+        Only the report's OWN flag counts: a report that says the run was graded
+        and the code failed states no absence, whatever else it mentions in prose.
+        `repo_gate_absent` is that flag. A report that carries it as false names a
+        gate that measured nothing next to a failure that WAS measured, and that
+        run goes back to the implementer, so it is not waited on here.
+        `repo_gate_unmeasured` is read only from a report that has no
+        `repo_gate_absent` key at all.
+        """
+        from pathlib import Path
+        if not report_path:
+            return None
+        try:
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        pass
+>       absent = (data.get("repo_gate_absent") if "repo_gate_absent" in data
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+                  else data.get("repo_gate_unmeasured"))
+E       TypeError: argument of type 'int' is not iterable
+
+core/gate_deferral.py:435: TypeError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]
+4 failed, 15 passed, 1 warning in 0.24s

@@ -1,0 +1,455 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+..FFF.FF.....FF.....                                                     [100%]
+=================================== FAILURES ===================================
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46d760830>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+        _assert_test_row_untouched(sf, run_id)
+    
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        assert "expired" not in outcomes, outcomes
+>       assert "silent" in outcomes, outcomes
+E       AssertionError: ['none', 'none', 'none', 'none', 'none', 'none', ...]
+E       assert 'silent' in ['none', 'none', 'none', 'none', 'none', 'none', ...]
+
+tests/skillflow/test_coding_impl_gate_absence.py:343: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+__________ test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence __________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_c_a_tiny_ceiling_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46da887d0>
+
+    def test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence(
+            tmp_path, monkeypatch):
+        """(C′) ceiling tiny, and small enough to be HONORED (unlike 0, which is a
+        mis-set knob), observed past the ceiling. Review measured this pole on the
+        r4 candidate as `implement_runs=4` + `Cycle limit exceeded`.
+    
+        It must now be `implement_runs == 1` and a terminal status whose reason
+        names the absence.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=3)
+>       _assert_test_row_untouched(sf, run_id, run_status="failed")
+
+tests/skillflow/test_coding_impl_gate_absence.py:366: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sf = <core.skillflow_host.AItelierSkillFlow object at 0x7fa46da88c50>
+run_id = 'f0dae561-89a8-4959-9c45-252ec771dcd4', run_status = 'failed'
+
+    def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
+        """Assert the row invariants while the gate is silent.
+        Called from every pole so no hold-breaking mutation passes unnoticed.
+    
+        The four step-row assertions the criterion names: the `test` row is
+        `completed`, its `retry_count` is 0, its `release_count` is 0, and every
+        step instance was claimed exactly once (`claim_epoch == 1` on the `test`
+        row, and one `claimed` trace event per instance).
+    
+        Then the RUN row. Measured in round 10: a hold that lets the run advance
+        ends the run through the absence gate's only transition and writes no step
+        row at all — every step row is identical to the held run's, and the
+        `test_gate_absent` row stays `pending` — so no step-row assertion can see
+        that break. The run row can: while the gate is silent it is `running` and
+        parked at `test_gate_absent`; at the expiring pole it is `failed` there.
+        """
+        rows = _rows_by_step(sf, run_id)
+        test_row = rows["test"]
+        assert test_row["status"] == "completed", (
+            f"test row status drifted: {test_row['status']}")
+        assert test_row["retry_count"] == 0, (
+            f"deferral charged a retry: {test_row['retry_count']}")
+        assert test_row["release_count"] == 0, (
+            f"deferral released the claim: {test_row['release_count']}")
+        assert test_row["claim_epoch"] == 1, (
+            f"step re-claimed during deferral: {test_row['claim_epoch']}")
+        claims = _claims_per_instance(sf, run_id)
+        reclaimed = {key: n for key, n in claims.items() if n != 1}
+        assert claims and reclaimed == {}, (
+            f"an instance was claimed more than once: {reclaimed}")
+        run = sf.get_run(run_id)
+>       assert (run["status"], run["current_node"]) == (
+            run_status, "test_gate_absent"), (
+            f"the run row moved while the gate was silent: "
+            f"status={run['status']} node={run['current_node']}")
+E       AssertionError: the run row moved while the gate was silent: status=running node=test_gate_absent
+E       assert ('running', '..._gate_absent') == ('failed', 'test_gate_absent')
+E         
+E         At index 0 diff: 'running' != 'failed'
+E         Use -v to get more diff
+
+tests/skillflow/test_coding_impl_gate_absence.py:460: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____________ test_a_gate_that_finally_answers_clears_the_deferral _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_gate_that_finally_answe0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46d2e27e0>
+
+    def test_a_gate_that_finally_answers_clears_the_deferral(tmp_path, monkeypatch):
+        """The other pole: the deferral is not a one-way door. Once a report that
+        GRADED the code exists, the run advances again and the absence is cleared.
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        _prime_ledger(sf, run_id)
+        _drive(sf, run_id, monkeypatch, ticks=8, clock_step=1)
+>       assert gate_deferral.hold_blocks_advance(run_id)
+E       AssertionError: assert False
+E        +  where False = <function hold_blocks_advance at 0x7fa46d898180>('1c0e5dba-49bb-4956-bb2c-c81fcdda4767')
+E        +    where <function hold_blocks_advance at 0x7fa46d898180> = gate_deferral.hold_blocks_advance
+
+tests/skillflow/test_coding_impl_gate_absence.py:388: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46d2ea6f0>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched, and
+        each wait that runs out (`reacquire`) must re-run the gate step exactly
+        once — one gate call per re-acquisition, never an implement cycle.
+        """
+        from tests.gate_fixture import assert_repo_gate_calls
+        observations = []
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL,
+                           gate_observations=observations)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        _assert_test_row_untouched(sf, run_id)
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+>       first = outcomes.index("silent")
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: 'silent' is not in list
+
+tests/skillflow/test_coding_impl_gate_absence.py:517: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_host_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46d610b30>
+
+    def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The HOST hold (`AItelierSkillFlow.advance_run`) measured on its own.
+        The tick is handed a `none` answer, so its early return is out, while the
+        REAL `observe_run` still records the episode in the ledger the host reads.
+        Every tick then walks on into `advance_run`, and the host's refusal alone
+        must keep the run parked at `test_gate_absent` with the rows untouched
+        while the wait runs, and let it through only to re-run the gate step once
+        per wait that ran out (`due`).
+        """
+        from tests.gate_fixture import assert_repo_gate_calls
+        observations = []
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL,
+                           gate_observations=observations)
+        real_observe = gate_deferral.observe_run
+        seen = []
+    
+        def _observe_but_answer_none(sf_, run_id_, **kw):
+            seen.append(real_observe(sf_, run_id_, **kw)["state"])
+            return {"state": "none", "remaining": 0.0, "gate": "", "reason": ""}
+    
+        monkeypatch.setattr(gate_deferral, "observe_run", _observe_but_answer_none)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        _assert_test_row_untouched(sf, run_id)
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+>       first = seen.index("silent")
+                ^^^^^^^^^^^^^^^^^^^^
+E       ValueError: 'silent' is not in list
+
+tests/skillflow/test_coding_impl_gate_absence.py:553: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+___________ test_the_tick_refuses_to_claim_while_the_gate_is_silent ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa467745790>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_tick_refuses_to_claim0')
+
+    def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
+                                                                tmp_path):
+        """Kills S1 (delete the deferral skip inside the tick; 0/33 in review).
+    
+        Driven at the CALL SITE — `core/scheduler._run_skillflow_tick` — with the
+        REAL `observe_run` reading a REAL report off disk. Both poles are measured:
+        with the absence the tick must not claim; with a GRADED report the tick
+        must. One pole alone would pass for a tick that never claims anything.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+>       assert sf.claims == 0, "the tick claimed a step for a gate that never spoke"
+E       AssertionError: the tick claimed a step for a gate that never spoke
+E       assert 1 == 0
+E        +  where 1 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x7fa467744e00>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:237: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+_______ test_during_a_deferral_hold_the_step_claim_is_held_not_released ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa46766fd40>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_during_a_deferral_hold_th0')
+
+    def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
+                                                                         tmp_path):
+        """While an absence is live the tick neither claims the step nor advances
+        it. This stub measures exactly two things: `claims == 0` across three
+        silent ticks, and the ledger holding the episode (3 absences, remaining
+        hold > 0). The step-STATE claims this file used to make in prose —
+        retry_count / release_count staying put — are measured on REAL step rows
+        in `test_coding_impl_gate_absence.py`, not here: a stub with no step row
+        cannot see a counter it does not model.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        # Drive multiple ticks: each returns without claiming.
+        for _ in range(3):
+            asyncio.run(scheduler._run_skillflow_tick("p", None))
+    
+>       assert sf.claims == 0, (
+            "the deferral tick claimed a step — retry_count or release would move")
+E       AssertionError: the deferral tick claimed a step — retry_count or release would move
+E       assert 3 == 0
+E        +  where 3 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x7fa46766fc50>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:270: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released
+7 failed, 13 passed, 1 warning in 263.13s (0:04:23)

@@ -1,0 +1,39 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______ test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures ______
+
+    def test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures():
+        """Round 5's unreviewed corner, stated as a measurable property.
+    
+        The episode ledger is PROCESS-LOCAL, so after a server restart the ceiling
+        restarts with it. On a deployment that restarts daily the 3-hour wall
+        clock is therefore unreachable — that is a real limitation, and it is
+        recorded here rather than left in prose nobody runs. What must hold in
+        spite of it: the ledger keeps no durable state, so a fresh process cannot
+        inherit a stale hold, and the FIRST tick after a restart re-derives the
+        episode from the report on disk instead of trusting a remembered instant.
+        """
+        first = gd.DeferralLedger()
+        first.note_absence("run-1", now=1000.0)
+        assert first.episode_count("run-1") == 1
+    
+        restarted = gd.DeferralLedger()
+>       assert restarted.episode_count("run-1") == 0
+E       AssertionError: assert 1 == 0
+E        +  where 1 = episode_count('run-1')
+E        +    where episode_count = DeferralLedger(episodes={'run-1': _Episode(started_at=1000.0, last_absence_at=1000.0, absences=1, gate='', report_key=None, gate_runs=1)}).episode_count
+
+tests/unit/test_gate_deferral_execution_points.py:329: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures
+1 failed, 1 warning in 0.20s

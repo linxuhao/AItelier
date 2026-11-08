@@ -1,0 +1,30 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_a_bounded_fragment_is_not_a_record_on_its_own ______________
+
+    def test_a_bounded_fragment_is_not_a_record_on_its_own():
+        """A gate handed to this reader as a FRAGMENT (a report read back off disk,
+        a replayed gate) proves nothing about a line that may have been cut in
+        half. Kills M2 (deleting the `output_truncated` branch): the fragment
+        below reads as a declaration the moment the branch is gone."""
+        gate = {"returncode": 3, "output_truncated": True,
+                "output": DECLARED + "\n" + "=" * 2000}
+>       assert rt._repo_gate_declares_unmeasured(gate) is False
+E       assert True is False
+E        +  where True = <function _repo_gate_declares_unmeasured at 0x70f60a4dbe20>({'returncode': 3, 'output_truncated': True, 'output': 'AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"godo...====================================================================================================================='})
+E        +    where <function _repo_gate_declares_unmeasured at 0x70f60a4dbe20> = rt._repo_gate_declares_unmeasured
+
+tests/unit/test_run_tests_unmeasured_declaration.py:148: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own
+1 failed, 1 warning in 0.26s

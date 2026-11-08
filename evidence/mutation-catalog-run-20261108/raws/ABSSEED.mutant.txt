@@ -1,0 +1,60 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+..................................F...                                   [100%]
+=================================== FAILURES ===================================
+___ test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative ___
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_declared_absence_never_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b58a60dc260>
+
+    def test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative(
+            tmp_path, monkeypatch):
+        """The card's first criterion, end to end through the REAL tool.
+    
+        Four CONSECUTIVE declarations of absence, on a repo that has never had a
+        baseline taken. Every pass must report `passed_relative: false`, and the
+        baseline file must never be written: the seed is taken from this run's
+        `failures[]`, whose only entry here says the gate produced NO VERDICT, so
+        writing it would record a gate that never spoke as this repo's standing
+        known-red — and the NEXT real red from that gate would be forgiven by it.
+    
+        The r5 candidate did the opposite on this exact shape: review measured
+        `passed_relative: true`, `baseline_state: seeded`, and
+        `run_tests_baseline.json` written, on every pole.
+        """
+        install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
+        repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
+        state = tmp_path / "state"
+        baseline = _baseline_file(state, repo)
+    
+        for attempt in range(1, 5):
+            out = tmp_path / f"out-{attempt}"
+            result = rt.run_tests(project_root=str(repo), out_dir=str(out),
+                                  state_dir=str(state))
+            report = _report(out)
+            where = f"pass {attempt}"
+            assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED, where
+            assert result["repo_gate_absent"] is True, where
+            assert report["passed_relative"] is False, where
+            assert result["passed_relative"] is False, where
+>           assert report["baseline_state"] == "unmeasured", (
+                f"{where}: an absence with no baseline behind it is not a "
+                f"measurement — got {report['baseline_state']!r}")
+E           AssertionError: pass 1: an absence with no baseline behind it is not a measurement — got 'seeded'
+E           assert 'seeded' == 'unmeasured'
+E             
+E             - unmeasured
+E             + seeded
+
+tests/unit/test_run_tests_unmeasured_declaration.py:558: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative
+1 failed, 37 passed, 1 warning in 16.34s

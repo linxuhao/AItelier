@@ -1606,6 +1606,25 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
     return _unmeasured_declaration(str(gate.get("output", ""))) is not None
 
 
+# The smallest recorded wait this block calls contention when the queue named
+# no owner. `render_owner_wait_sec` starts counting when the request begins
+# TAKING ownership, so an uncontended acquisition still records one owner-table
+# round trip: measured 0.0115s through the real harness (`tests/gate_fixture`,
+# `docker/godot/godot_harness.py:acquire_render_owner_waiting`). Treating any
+# `> 0` as a wait made every clean run report `state: "waited"` and print a
+# contention sentence — a surface that cries wolf on the runs it exists to
+# certify. The harness itself only logs a wait above 1.0s, so the same second
+# is the floor here. An OWNER id named by the queue is contention whatever the
+# seconds: the request really did queue behind a live owner.
+RENDER_CONTENTION_WAIT_FLOOR_SEC = 1.0
+
+# The state of a report whose gate result never got the block at all: no
+# measurement of the render queue was folded in. It is deliberately NOT
+# `none` — `none` is a measured absence of contention, and reading the two the
+# same way is the fail-open this whole block exists to prevent.
+RENDER_CONTENTION_UNREPORTED = "unreported"
+
+
 def _render_contention(admission: dict) -> dict:
     """What the admission relay's own records say this gate waited behind.
 
@@ -1614,9 +1633,13 @@ def _render_contention(admission: dict) -> dict:
     requests, and `render_owner_wait_sec` is their summed wait. Nothing is read
     from the engine's lifecycle or from prose. A run that waited behind nobody
     is `owners: []`, `wait_sec: 0.0`, `state: "none"`. The state is `waited`
-    whenever an owner was named or any wait was recorded. Outcome
-    classification never reads this block: it names the contention, nothing
-    more.
+    when the queue named an owner, or when the recorded wait reaches
+    `RENDER_CONTENTION_WAIT_FLOOR_SEC` (an uncontended acquisition records a
+    few milliseconds, and reporting those as a wait made every clean run read
+    as contended). `wait_sec` is the wait this block attributes to contention —
+    `0.0` when nothing was contended; the raw recorded number stays in
+    `admission.render_owner_wait_sec` either way. Outcome classification never
+    reads this block: it names the contention, nothing more.
     """
     admission = admission or {}
     owners = list(dict.fromkeys(str(owner) for owner in admission.get("queued_behind") or []))
@@ -1624,8 +1647,8 @@ def _render_contention(admission: dict) -> dict:
         wait = float(admission.get("render_owner_wait_sec") or 0.0)
     except (TypeError, ValueError):
         wait = 0.0
-    waited = bool(owners) or wait > 0
-    return {"owners": owners, "wait_sec": round(wait, 3),
+    waited = bool(owners) or wait >= RENDER_CONTENTION_WAIT_FLOOR_SEC
+    return {"owners": owners, "wait_sec": round(wait, 3) if waited else 0.0,
             "state": "waited" if waited else "none"}
 
 
@@ -1706,6 +1729,12 @@ def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None, *, run_id: str = "
     again instead. Only the verdict it finally gets is folded in. `attempts`
     stays on the returned dict so a reviewer can see that the reading cost two
     runs rather than one.
+
+    The same boundary applies to `render_contention`: only the FINAL attempt's
+    gate result is returned, so a wait spent in an earlier attempt is dropped
+    and the block reports the final attempt's reading (the earlier results are
+    not kept anywhere, so no wait across attempts is summed here) — pinned by
+    `test_retry_first_attempt_waited_final_attempt_did_not_reports_the_final_attempts_reading`.
     """
     run_gate = (lambda root: _run_repo_gate(root, run_id=run_id)) if run_gate is None else run_gate
     sleep = time.sleep if sleep is None else sleep
@@ -3418,19 +3447,42 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         gate = _acquire_repo_gate(repo, run_id=run_id)
         if gate is not None:
             report["repo_gate"] = gate
-            # The block is always present on a report that has a gate result,
-            # clean or not: `state: "none"` is a measured absence of contention,
-            # not a missing key. Only the summary line depends on it.
-            contention = gate.get("render_contention") or _render_contention({})
-            report["render_contention"] = contention
-            if contention.get("state") == "waited":
-                # Named in the summary a reader sees, not only in the JSON. The
-                # sentence leads whatever summary there is; with none, it IS the
-                # summary, so the report never reads as empty (a malformed report
-                # to `coding_impl_outcome`, and a contention a reader cannot see).
+            # The block is written at the GATE site (`_run_repo_gate`, from the
+            # relay's own admission records). It is never defaulted here: a
+            # gate result that never got the block is the ABSENCE of that
+            # measurement, and the old `or _render_contention({})` read it as
+            # `state: "none"` — a measured clean run — which is the fail-open
+            # this block exists to prevent. The absence is named separately and
+            # is never `none`.
+            measured_contention = gate.get("render_contention")
+            if isinstance(measured_contention, dict) and measured_contention.get("state"):
+                contention = measured_contention
+                report["render_contention"] = contention
+            else:
+                contention = None
+                report["render_contention"] = {
+                    "owners": [], "wait_sec": None,
+                    "state": RENDER_CONTENTION_UNREPORTED}
+                report["render_contention_absent"] = (
+                    "the repository gate result carried no render_contention "
+                    "block: nothing measured this run's render queue")
+            if contention is not None and contention.get("state") == "waited":
+                # Named in the summary a reader sees, not only in the JSON.
                 sentence = _contention_sentence(contention)
-                report["summary"] = (sentence + "\n\n" + report["summary"]
-                                     if report.get("summary") else sentence)
+                if report.get("summary"):
+                    report["summary"] = sentence + "\n\n" + report["summary"]
+                else:
+                    # NOT made to stand alone. The contention sentence is not a
+                    # summary of a measurement, and an absent/empty summary is
+                    # what `core/coding_impl_outcome.py` reads as a malformed
+                    # report; leading it with this sentence would turn a report
+                    # that recorded nothing into a well-formed one and change
+                    # that classification as a side effect. The summary stays
+                    # empty, the classification stays exactly what it was
+                    # before this block existed, and the reason is named.
+                    report["render_contention_summary_absent"] = (
+                        "this report recorded no summary: the render contention "
+                        "is named in render_contention only")
             report["gate_coverage"] = gate.get("gate_coverage")
             if (isinstance(report["gate_coverage"], dict)
                     and report["gate_coverage"].get("purpose") == PROVISIONAL_PURPOSE):

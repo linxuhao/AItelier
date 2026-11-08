@@ -9,8 +9,14 @@ Every test here serves the real harness: a real ThreadingHTTPServer running the
 real `_Handler.do_POST`, the real `run_script` / `_playtest_spec` sweep bodies and
 the real owner table in a temp sqlite. The only stand-in is the ENGINE process
 boundary — `_run` for /script and `_run_probe` for /playtest — which records every
-entry it is asked to run. For the first entry it blocks until the test has
-closed the client socket, so the abandonment lands exactly at a real boundary.
+entry it is asked to run. With `hold_first` the FIRST entry does not return until
+THIS request has OBSERVED the caller's departure — the request's own peer
+predicate, the same one the sweep consults at its next boundary — so the boundary
+is decided by the test's ordering and never by the scheduler. (The first version
+held for a fixed 30 s and then let the sweep continue, and the sweep's check raced
+the FIN: a relay that forwards the client's departure 50 ms late reproduced the
+exact 2026-11-07 payload, both entries run. See
+evidence/sweep-determinism-20261108/.)
 """
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ import json
 import socket
 import subprocess
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -52,15 +59,22 @@ def _script_project(tmp_path: Path, n_entries: int) -> Path:
 class _Engine:
     """The engine process boundary: records each entry it is asked to run.
 
-    When `hold_first` is set, the FIRST entry blocks until the test releases it,
-    which is the window in which the test closes the client socket.
+    When `hold_first` is set, the FIRST entry does not return until this request
+    has observed the caller's departure, so the sweep's next boundary check
+    reads an EOF that is already queued instead of one still in flight. The
+    deadline is what keeps a predicate that never fires (a mutant, a broken
+    product) a RED rather than a hung suite; `hold_lapsed` records it.
     """
 
-    def __init__(self):
+    HOLD_DEADLINE_SEC = 20.0
+    POLL_SEC = 0.005
+
+    def __init__(self, harness):
+        self.gh = harness
         self.ran: list[str] = []
         self.first_running = threading.Event()
-        self.release_first = threading.Event()
         self.hold_first = False
+        self.hold_lapsed = False
         self._lock = threading.Lock()
 
     def enter(self, label: str) -> None:
@@ -69,13 +83,18 @@ class _Engine:
             first = len(self.ran) == 1
         if first and self.hold_first:
             self.first_running.set()
-            self.release_first.wait(30)
+            deadline = time.monotonic() + self.HOLD_DEADLINE_SEC
+            while not self.gh._request_client_abandoned():
+                if time.monotonic() >= deadline:
+                    self.hold_lapsed = True
+                    return
+                time.sleep(self.POLL_SEC)
 
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
     gh = _load(tmp_path, monkeypatch)
-    engine = _Engine()
+    engine = _Engine(gh)
 
     def fake_run(args, timeout, extra_env=None, render=False, **_kw):
         # /script: `godot --path <copy> -s res://tests/<file>`; the sweep's own loop
@@ -108,9 +127,13 @@ def harness(tmp_path, monkeypatch):
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
     yield gh, engine, base, server
-    engine.release_first.set()
     server.shutdown()
     server.server_close()
+    # A hold that timed out means the stand-in let the sweep continue while the
+    # caller was still connected: the test measured the scheduler, not the sweep.
+    assert not engine.hold_lapsed, (
+        "the engine stand-in's hold expired after %.0fs without the request ever "
+        "observing the caller's departure" % engine.HOLD_DEADLINE_SEC)
 
 
 def _send(port: int, route: str, payload: dict) -> socket.socket:
@@ -137,7 +160,6 @@ def _read_response(sock: socket.socket) -> dict:
 
 def _await_release(gh, timeout: float = 10.0) -> None:
     """Wait until the handler's finally has released the render owner row."""
-    import time
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not any(r["status"] == "active" for r in gh.render_owner_snapshot()):
@@ -157,7 +179,6 @@ def test_an_abandoned_script_sweep_never_starts_the_second_entry(harness, tmp_pa
         "operation_id": "op-abandon-script", "render": False, "timeout": 60})
     assert engine.first_running.wait(15), "entry 1 never reached the engine"
     sock.close()  # the caller is gone while entry 1 is still running
-    engine.release_first.set()
     _await_release(gh)
 
     # (a) the second entry never reached the engine — only the first did.
@@ -183,7 +204,6 @@ def test_an_abandoned_script_sweep_says_so_and_is_not_a_pass(harness, tmp_path, 
         "operation_id": "op-abandon-script-verdict", "render": False, "timeout": 60})
     assert engine.first_running.wait(15)
     sock.close()
-    engine.release_first.set()
     _await_release(gh)
 
     report = seen["report"]
@@ -244,7 +264,6 @@ def test_an_abandoned_playtest_never_starts_the_second_scenario(harness, tmp_pat
         "operation_id": "op-abandon-playtest", "spec": _SPEC, "timeout": 60})
     assert engine.first_running.wait(15), "scenario alpha never reached the engine"
     sock.close()
-    engine.release_first.set()
     _await_release(gh)
 
     # (a) the second scenario never reached the engine.

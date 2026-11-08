@@ -125,6 +125,9 @@ async def _wait_for_state_change(service, project_id, after=0, node_keys=None, a
     deadline = loop.time() + args.timeout_seconds
     cursor = after
     recovery_after = 0
+    # The first observation cycle is unconditional: the caller's deadline bounds
+    # the wait for a change, not the measurement that decides whether one exists.
+    observed = False
     # Subscribe BEFORE reading: a commit between the read and sleep sets this
     # event. Clear BEFORE the next read, never after it.
     with subscribe(service.db.db_path) as signal:
@@ -147,14 +150,22 @@ async def _wait_for_state_change(service, project_id, after=0, node_keys=None, a
                 # One bounded page per observation cycle; rotated to prevent
                 # starvation. No executor is composed for State-only deployments.
                 recovery_ok = None  # Pending until this wait observes a recovery page.
-                remaining = deadline - loop.time()
-                if remaining > 0:
-                    try:
-                        recovery_after, recovery_ok = await asyncio.wait_for(asyncio.to_thread(
-                            recover_page, service, project_id, recovery_after, node_keys,
-                            attempt_ids, filter_mode), timeout=remaining)
-                    except asyncio.TimeoutError:
-                        return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
+                if not observed:
+                    # Not bounded by the deadline: a stored paused status must be
+                    # refreshed before any idle decision, however small the budget.
+                    recovery_after, recovery_ok = await asyncio.to_thread(
+                        recover_page, service, project_id, recovery_after, node_keys,
+                        attempt_ids, filter_mode)
+                else:
+                    remaining = deadline - loop.time()
+                    if remaining > 0:
+                        try:
+                            recovery_after, recovery_ok = await asyncio.wait_for(asyncio.to_thread(
+                                recover_page, service, project_id, recovery_after, node_keys,
+                                attempt_ids, filter_mode), timeout=remaining)
+                        except asyncio.TimeoutError:
+                            return {"events": [], "next_after": cursor, **({"next_inbox_after": inbox_after, "driver_inbox": inbox["messages"]} if include_driver_inbox else {}), "timed_out": True}
+            observed = True
 
             if args.return_when_idle and recovery_ok is False:
                 # Recovery failures cannot authorize a decision from cached state.

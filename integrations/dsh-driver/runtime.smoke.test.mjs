@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import { join, dirname, resolve, sep } from 'node:path';
@@ -338,7 +339,15 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   }
 });
 
-test('real pinned DSH default host adapter calls the authenticated completion bridge', { timeout: 20000 }, async (t) => {
+// This scenario is bounded by the progress it observes, not by the clock either
+// (see progress.mjs): the waits below watch the signals the child itself
+// produces - the activity phases it posts, the completions that reach this
+// server, the inbox cursor it persists - so a loaded host cannot red a runtime
+// that is still moving, while a runtime whose watched progress stops (or one
+// that dies) still reds, naming the milestone that never arrived. There is
+// deliberately no harness timeout: a second wall budget over the whole scenario
+// would re-create exactly the hazard the watches remove.
+test('real pinned DSH default host adapter calls the authenticated completion bridge', async (t) => {
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
   const directory = await mkdtemp(join(tmpdir(), 'dsh-host-model-'));
@@ -393,52 +402,82 @@ test('real pinned DSH default host adapter calls the authenticated completion br
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
     }) });
     proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
-    const deadline = Date.now() + 15000;
-    while (Date.now() < deadline && proc.exitCode === null && !activity.some(a => a.phase === 'waiting')) await new Promise(resolve => setTimeout(resolve, 100));
-    assert.ok(activity.some(a => a.phase === 'waiting'), output + JSON.stringify(activity));
-    assert.ok(completions.some(c => c.session_id === 'host-root' && c.tools.some(t => t.function.name === 'state_read')), JSON.stringify(completions));
+    // The watched signals, all of them the child's own: the activity phases it
+    // posts, the completions that reach this server, the cursor it persists for
+    // itself. A model failure is a MILESTONE in this scenario (the fixture fails
+    // one completion on purpose), so `failed` is deliberately never passed - a
+    // reported failure must not cut a watch short.
+    const watch = (what, milestones) => watchProgress({ what, milestones, running: () => proc.exitCode === null });
+    const says = text => activity.some(a => a.event?.text.includes(text));
+    const connectionErrorAt = () => activity.findIndex(a => a.error?.includes('AItelier event subscription: fetch failed'));
+    const driverTurns = () => completions.filter(c => c.tools?.some(t => t.function.name === 'state_read')).length;
+    const persistedInbox = () => { try { return JSON.parse(readFileSync(join(directory, 'cursor.json'), 'utf8')).inboxAfter; } catch { return null; } };
+    // A red names the milestone that never arrived, the last progress observed,
+    // and what the driver itself printed - never merely how long it waited.
+    const red = watched => `${watched.message}\n` + output + JSON.stringify(activity.slice(-6));
+
+    const booted = await watch('the host adapter to boot onto the completion bridge and arm its subscription', [
+      { name: 'the driver reported itself waiting on activity', met: () => activity.some(a => a.phase === 'waiting') },
+      { name: 'the root model call carried the driver toolset', met: () => completions.some(c => c.session_id === 'host-root' && c.tools?.some(t => t.function.name === 'state_read')) },
+      { name: 'the dropped subscription was diagnosed', met: () => connectionErrorAt() >= 0 },
+      { name: 'a successful empty subscription reply cleared the connection error', met: () => connectionErrorAt() >= 0 && activity.slice(connectionErrorAt() + 1).some(a => !a.error && a.phase === 'waiting') },
+      { name: 'the runtime parked its combined State and inbox wait', met: () => Boolean(inboxWait) },
+    ]);
+    // A red names the watch that expired and the last progress it saw, so a
+    // child that DIED says that rather than only printing its output.
+    assert.ok(booted.done, red(booted));
+    assert.equal(proc.exitCode, null, output);
     assert.ok(completions.filter(c => c.session_id === 'host-root').every(c => c.reasoning_effort === 'max'), 'root completions must ask for max: ' + JSON.stringify(completions.map(c => [c.session_id, c.reasoning_effort])));
-    while (Date.now() < deadline && !inboxWait) await new Promise(resolve => setTimeout(resolve, 50));
-    const errorIndex = activity.findIndex(a => a.error?.includes('AItelier event subscription: fetch failed'));
-    assert.ok(errorIndex >= 0, 'transport error was not diagnosed');
-    assert.ok(activity.slice(errorIndex + 1).some(a => !a.error && a.phase === 'waiting'), 'successful empty response did not clear connection error');
+    // Not a bound on progress: a quiescence window, so an idle active goal that
+    // WOULD have spun an immediate continuation has the chance to do it.
     await new Promise(resolve => setTimeout(resolve, 400));
-    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'state_read')).length, 1, 'idle active goal must not generate an immediate continuation');
+    assert.equal(driverTurns(), 1, 'idle active goal must not generate an immediate continuation');
     assert.ok(inboxWait, 'combined runtime wait missing');
     const firstWait = inboxWait;
     inboxWait.setHeader('content-type', 'application/json');
     inboxWait.end(JSON.stringify({timed_out: false, next_after: 1, next_inbox_after: 1,
       driver_inbox: [{body: 'HUMAN_MESSAGE_MARKER', status: 'unread'}]}));
-    const busyDeadline = Date.now() + 4000;
-    while (Date.now() < busyDeadline && (!heldCompletion || inboxWait === firstWait)) await new Promise(resolve => setTimeout(resolve, 25));
-    assert.ok(heldCompletion && inboxWait !== firstWait, 'model call was not held while the subscription re-armed');
+    // Two signals, both inside the runtime: the human turn reached the model, and
+    // the subscription was re-armed WHILE that completion is still held. The 4 s
+    // clock that used to bound this expired on a loaded host doing exactly this.
+    const heldOpen = await watch('the held human turn to re-arm the subscription while its completion is in flight', [
+      { name: 'the human message reached the model and its reply was held', met: () => Boolean(heldCompletion) },
+      { name: 'the runtime re-armed its combined wait during the held completion', met: () => inboxWait !== firstWait },
+    ]);
+    assert.ok(heldOpen.done, red(heldOpen));
+    assert.equal(proc.exitCode, null, output);
     inboxWait.setHeader('content-type', 'application/json');
     inboxWait.end(JSON.stringify({timed_out: false, next_after: 1, next_inbox_after: 2,
       driver_inbox: [{body: 'HUMAN_SECOND_MESSAGE', status: 'unread'}]}));
-    let queued = false;
-    while (Date.now() < busyDeadline && !queued) {
-      try { queued = JSON.parse(await readFile(join(directory, 'cursor.json'), 'utf8')).inboxAfter === 2; } catch {}
-      if (!queued) await new Promise(resolve => setTimeout(resolve, 25));
-    }
-    assert.ok(queued, 'second inbox message was not persisted during active generation');
+    // The runtime persists the queued message for itself before it can act on it;
+    // that persisted cursor is the signal, not a 4 s poll window.
+    const persisted = await watch('the busy-time inbox message to be persisted during the active generation', [
+      { name: 'the runtime persisted the queued inbox message in its cursor', met: () => persistedInbox() >= 2 },
+    ]);
+    assert.ok(persisted.done, red(persisted));
     heldCompletion();
-    const replyDeadline = Date.now() + 8000;
-    while (Date.now() < replyDeadline && !activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY'))) await new Promise(resolve => setTimeout(resolve, 50));
+    const consumed = await watch('the queued busy-time message to be consumed on the next step', [
+      { name: 'the first human reply landed on activity', met: () => says('HUMAN_REPLY_MARKER') },
+      { name: 'the busy-time message was consumed on the next step', met: () => says('HUMAN_SECOND_REPLY') },
+    ]);
+    assert.ok(consumed.done, red(consumed));
     assert.ok(replied, 'inbox message never reached the native model');
-    assert.ok(activity.some(a => a.event?.text.includes('HUMAN_REPLY_MARKER')), output + JSON.stringify(activity));
-    assert.ok(activity.some(a => a.event?.text.includes('HUMAN_SECOND_REPLY')), 'busy-time input was not consumed on the next step');
+    // Quiescence window again, never a bound: it exists so a model turn the
+    // runtime should NOT have taken has time to show up in the count below.
     await new Promise(resolve => setTimeout(resolve, 400));
-    assert.equal(completions.filter(c => c.tools?.some(t => t.function.name === 'state_read')).length, 3, 'ordinary transport timeouts caused extra model turns');
+    assert.equal(driverTurns(), 3, 'ordinary transport timeouts caused extra model turns');
     // A new project issue wakes an agent that has ALREADY finished its turn.
     const issueWait = inboxWait;
     issueWait.setHeader('content-type', 'application/json');
     issueWait.end(JSON.stringify({timed_out:false,next_after:2,next_inbox_after:2,
       events:[{seq:2,project_id:'alpha',event_type:'issue_reported',payload:{issue_id:'iss-new',kind:'defect',title:'ISSUE_NOTIFICATION_MARKER'}}]}));
-    const issueDeadline=Date.now()+5000;
-    while(Date.now()<issueDeadline && !activity.some(a=>a.event?.text.includes('ISSUE_HANDLED_MARKER'))) await new Promise(resolve=>setTimeout(resolve,25));
-    assert.ok(activity.some(a=>a.event?.text.includes('ISSUE_HANDLED_MARKER')),'new issue did not wake an idle driver');
+    const woken = await watch('a project issue to wake the finished driver', [
+      { name: 'the issue notification produced a handled reply', met: () => says('ISSUE_HANDLED_MARKER') },
+    ]);
+    assert.ok(woken.done, red(woken));
+    assert.equal(proc.exitCode, null, output);
     await new Promise(resolve=>setTimeout(resolve,100));
-    assert.equal(completions.filter(c=>c.tools?.some(t=>t.function.name==='state_read')).length,4,'issue notification caused an idle spin');
+    assert.equal(driverTurns(), 4, 'issue notification caused an idle spin');
     const stateEvents = activity.filter(a => a.event?.type === 'user/message' && JSON.parse(a.event.text).source?.kind === stateInjectionSource);
     assert.equal(stateEvents.length, 1, 'ordinary inbox messages duplicated the initial State snapshot');
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity));
@@ -448,21 +487,26 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     inboxWait.setHeader('content-type','application/json');
     inboxWait.end(JSON.stringify({timed_out:false,next_after:3,next_inbox_after:2,
       events:[{seq:3,event_type:'node_revised',payload:{reason:'trigger one failed completion'}}]}));
-    const failedBy=Date.now()+4000;
-    while(Date.now()<failedBy&&!activity.some(a=>a.phase==='failed'&&a.error?.includes('fixture completion failure')))await new Promise(resolve=>setTimeout(resolve,25));
-    assert.ok(activity.some(a=>a.phase==='failed'&&a.error?.includes('fixture completion failure')),'model failure was not reported');
+    const reported = await watch('the failed completion to be reported instead of hidden', [
+      { name: 'the runtime reported the model failure on activity', met: () => activity.some(a => a.phase === 'failed' && a.error?.includes('fixture completion failure')) },
+    ]);
+    assert.ok(reported.done, red(reported));
     await new Promise(resolve=>setTimeout(resolve,100));
     assert.equal(activity.at(-1).phase,'failed','idle event hid a model failure');
     const oldWait=inboxWait;
     oldWait.setHeader('content-type','application/json');oldWait.end(JSON.stringify({timed_out:true,next_after:3,next_inbox_after:2}));
-    while(Date.now()<failedBy&&inboxWait===oldWait)await new Promise(resolve=>setTimeout(resolve,25));
+    const rearmed = await watch('the runtime to re-arm after an empty subscription reply', [
+      { name: 'an empty subscription reply re-armed the combined wait', met: () => inboxWait !== oldWait },
+    ]);
+    assert.ok(rearmed.done, red(rearmed));
     assert.equal(activity.at(-1).phase,'failed','an empty subscription reply hid the model failure');
     inboxWait.setHeader('content-type','application/json');
     inboxWait.end(JSON.stringify({timed_out:false,next_after:4,next_inbox_after:2,
       events:[{seq:4,event_type:'issue_reported',payload:{issue_id:'iss-recover',title:'RECOVERY_NOTIFICATION_MARKER'}}]}));
-    const recoveredBy=Date.now()+4000;
-    while(Date.now()<recoveredBy&&!activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')))await new Promise(resolve=>setTimeout(resolve,25));
-    assert.ok(activity.some(a=>a.event?.text.includes('RECOVERED_REPLY_MARKER')),'later notification did not recover the idle failed agent');
+    const recovered = await watch('a later notification to recover the idle failed agent', [
+      { name: 'the recovery notification produced a reply from the previously failed agent', met: () => says('RECOVERED_REPLY_MARKER') },
+    ]);
+    assert.ok(recovered.done, red(recovered));
     await new Promise(resolve=>setTimeout(resolve,100));
     assert.ok(activity.some(a=>a.phase==='running'&&a.error?.includes('fixture completion failure')),'retry was not shown as running with its previous failure');
     assert.equal(activity.at(-1).phase,'waiting');assert.equal(activity.at(-1).error,'');

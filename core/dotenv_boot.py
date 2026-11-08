@@ -76,8 +76,13 @@ def parse_dotenv(text: str) -> dict[str, str]:
     on newline sequences — and, under universal newlines, hands back each line
     WITHOUT its trailing "\\r", which is why exactly one is stripped here.
 
-    One residual difference: a LONE "\\r" (the old-Mac separator) also broke a
-    line under universal newlines and does not break one here.
+    Residual difference, for RAW text only: a LONE "\\r" (the old-Mac separator)
+    also broke a line under universal newlines, and does not break one here.
+    Through load_repo_dotenv there is no such difference: Path.read_text() opens
+    in text mode, which translates a lone "\\r" to "\\n" before this function
+    sees the text, so the loader keeps the old behaviour. The difference exists
+    only when raw text is handed to parse_dotenv directly; in this repository
+    that is done by tests only.
     """
     values: dict[str, str] = {}
     for line in text.split("\n"):

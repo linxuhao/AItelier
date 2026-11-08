@@ -14,10 +14,12 @@ Three things are pinned here, each because it was previously asserted nowhere:
    `_DEFAULT_PORT` / `_DEFAULT_URL` from os.environ, so `load_repo_dotenv()`
    MUST run before those constants are built; `cli/client.py` likewise. Nothing
    failed if the call moved below the constant that consumes it — the port just
-   silently stayed 4444. The witness imports each boot entry in a SUBPROCESS
-   pointed at a temporary copy of the tree whose root `.env` sets
+   silently stayed 4444. The witness imports each boot entry in its OWN
+   SUBPROCESS, pointed at a temporary copy of the tree whose root `.env` sets
    AITELIER_PORT to a non-default port, so the file the loader reads is the
-   fixture and no assertion here touches this process's environment.
+   fixture and no assertion here touches this process's environment. One child
+   per entry, because importing one entry applies the `.env` to its process,
+   and a shared child would let the second entry borrow the first one's load.
 
 3. TOLERANCES vs the docstring. Missing path, a directory and an unreadable
    file return None (OSError is swallowed); a file that exists and opens but
@@ -89,7 +91,13 @@ def _child_env() -> dict:
 
 
 def _run_child(tree: Path, body: str) -> dict:
-    """Run `body` in a child interpreter pointed at `tree`; return its RESULT."""
+    """Run `body` in a child interpreter pointed at `tree`; return its RESULT.
+
+    The child lives NEXT TO the tree, never inside it: python-dotenv's
+    find_dotenv() walks up from the running script, so a child inside the tree
+    root would have its `.env` applied by the tooling, not by the loader under
+    test.
+    """
     workdir = tree.parent / "probe"
     workdir.mkdir(parents=True, exist_ok=True)
     script = workdir / "child.py"
@@ -112,53 +120,68 @@ def _run_child(tree: Path, body: str) -> dict:
 # ── 1. load order through the real boot entries ──────────────────────────
 
 
-def test_boot_entry_constants_carry_the_env_file_port(boot_tree):
-    """`cli.server` / `cli.client` must build their URL constants AFTER the load.
+# The module-level constants each boot entry builds from os.environ, and the
+# value the fixture `.env` must give them. Each entry is imported ALONE, so a
+# constant can only carry the fixture port if that entry's own loader call ran
+# before the constant was built.
+ENTRY_CONSTANTS = {
+    "cli.server": {
+        "_DEFAULT_PORT": FIXTURE_PORT,
+        "_DEFAULT_URL": f"http://localhost:{FIXTURE_PORT}",
+    },
+    "cli.client": {
+        "_DEFAULT_URL": f"http://localhost:{FIXTURE_PORT}",
+    },
+}
 
-    Moving `load_repo_dotenv()` below `_DEFAULT_PORT` in cli/server.py changes
-    nothing that used to be asserted: the server would dial the default port
-    while the fixture `.env` names another one, and every CLI request would go
-    to the wrong place. This test imports the boot entries for real, in a child
-    whose tree root holds that `.env`.
+
+@pytest.mark.parametrize("entry", sorted(ENTRY_CONSTANTS))
+def test_boot_entry_constants_carry_the_env_file_port(boot_tree, entry):
+    """Each boot entry builds its URL constants AFTER its own loader call.
+
+    Moving `load_repo_dotenv()` below the constant that consumes it changes
+    nothing else that is asserted: the entry would dial the default port while
+    the fixture `.env` names another one. Each entry gets its OWN child process,
+    and AITELIER_PORT is asserted ABSENT before the import, so the port can only
+    arrive through this entry's loader call. (One shared child would not do:
+    importing cli.server applies the `.env` to that process, and cli.client
+    would then read the port from the environment whether or not its own loader
+    call had run.)
     """
-    result = _run_child(boot_tree, """
+    names = sorted(ENTRY_CONSTANTS[entry])
+    result = _run_child(boot_tree, f"""
+        _before_port = os.environ.get("AITELIER_PORT")
         import core.dotenv_boot as db
         loader_path = str(db.DOTENV_PATH)
-        import cli.server as server
-        import cli.client as client
-        _result = {
+        import importlib
+        boot = importlib.import_module({entry!r})
+        _result = {{
+            "entry_file": getattr(boot, "__file__", None),
             "loader_file": loader_path,
-            "server_file": getattr(server, "__file__", None),
-            "client_file": getattr(client, "__file__", None),
+            "before_port": _before_port,
             "env_port": os.environ.get("AITELIER_PORT"),
-            "server_port": server._DEFAULT_PORT,
-            "server_url": server._DEFAULT_URL,
-            "client_url": client._DEFAULT_URL,
-        }
+            "constants": {{name: getattr(boot, name) for name in {names!r}}},
+        }}
     """)
 
     # Positive control: the fixture IS the file the loader reads, and it is the
     # copy's, not this checkout's. Without this the assertions below could pass
     # against the real repo or an inherited environment.
     assert result["loader_file"] == str(boot_tree / ".env"), result["loader_file"]
-    assert result["server_file"] == str(boot_tree / "cli" / "server.py")
-    assert result["client_file"] == str(boot_tree / "cli" / "client.py")
+    assert result["entry_file"] == str(boot_tree / Path(*entry.split(".")).with_suffix(".py"))
+    assert result["before_port"] is None, (
+        f"AITELIER_PORT was already set before {entry} was imported, so this "
+        f"child cannot show the loader supplied it: {result}")
     assert result["env_port"] == FIXTURE_PORT, (
-        f"AITELIER_PORT did not reach the child's environment from the fixture "
-        f".env: {result}")
+        f"AITELIER_PORT did not reach {entry}'s process from the fixture .env: "
+        f"{result}")
 
-    assert result["server_port"] == FIXTURE_PORT, (
-        f"cli.server._DEFAULT_PORT is {result['server_port']!r}, not the "
-        f"{FIXTURE_PORT!r} the fixture .env names: load_repo_dotenv() in "
-        f"cli/server.py runs after the constant that consumes it")
-    assert result["server_url"] == f"http://localhost:{FIXTURE_PORT}", (
-        f"cli.server._DEFAULT_URL is {result['server_url']!r}, not "
-        f"'http://localhost:{FIXTURE_PORT}': load_repo_dotenv() in cli/server.py "
-        f"runs after _DEFAULT_PORT/_DEFAULT_URL are built")
-    assert result["client_url"] == f"http://localhost:{FIXTURE_PORT}", (
-        f"cli.client._DEFAULT_URL is {result['client_url']!r}, not "
-        f"'http://localhost:{FIXTURE_PORT}': load_repo_dotenv() in cli/client.py "
-        f"runs after _DEFAULT_URL is built")
+    for name, expected in ENTRY_CONSTANTS[entry].items():
+        got = result["constants"][name]
+        assert got == expected, (
+            f"{entry}.{name} is {got!r}, not {expected!r} the fixture .env names: "
+            f"load_repo_dotenv() in {entry.replace('.', '/')}.py runs after "
+            f"{name} is built")
 
 
 # ── 2. the parser matches the file iteration it replaced ─────────────────
@@ -209,6 +232,21 @@ def test_parse_dotenv_keeps_every_other_grammar_rule():
     assert parse_dotenv('# C=3\nD="quoted"\nE=\'single\'\n') == {"D": "quoted", "E": "single"}
     assert parse_dotenv("=orphan\n  = spaced\nOK_KEY=1\n") == {"OK_KEY": "1"}
     assert parse_dotenv("no_equals_here\n\n   \nF=1=2\n") == {"F": "1=2"}
+
+
+def test_parse_dotenv_raw_text_lone_cr_is_not_a_separator():
+    """The residual difference, pinned on RAW text (the only place it exists).
+
+    parse_dotenv splits on "\\n" alone, so a lone "\\r" inside a line stays in the
+    value: `A=1\\rB=2\\r` is one assignment, A = "1\\rB=2" (the trailing "\\r" is
+    the line's own and is stripped). The replaced file loop (universal newlines)
+    would have split it. The loader path does not see this difference, because
+    read_text() has already translated the lone "\\r": see
+    test_load_repo_dotenv_lone_cr_still_separates_assignments.
+    """
+    from core.dotenv_boot import parse_dotenv
+
+    assert parse_dotenv("A=1\rB=2\r") == {"A": "1\rB=2"}
 
 
 # ── 3. the tolerances the docstring states ──────────────────────────────
@@ -269,6 +307,26 @@ def test_load_repo_dotenv_raises_on_a_file_it_cannot_decode(tmp_path):
         load_repo_dotenv(path=dotenv, environ=env)
     assert env == {}, ("a file that cannot be decoded must apply nothing — "
                        f"the read fails before any assignment: {env}")
+
+
+def test_load_repo_dotenv_lone_cr_still_separates_assignments(tmp_path):
+    """Through the loader, a lone "\\r" still separates two assignments.
+
+    The file holds b'A=1\\rB=2\\r'. read_text() opens in text mode (universal
+    newlines), which translates the lone "\\r" to "\\n", so parse_dotenv sees two
+    lines and both keys land. This pins the loader path that production uses,
+    so the docstring's claim that there is no lone-CR difference through
+    load_repo_dotenv is checked, not merely stated.
+    """
+    from core.dotenv_boot import load_repo_dotenv
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"A=1\rB=2\r")
+
+    env: dict[str, str] = {}
+    assert load_repo_dotenv(path=dotenv, environ=env) == dotenv
+    assert env == {"A": "1", "B": "2"}, (
+        f"a lone CR no longer separates assignments on the loader path: {env}")
 
 
 def test_load_repo_dotenv_applies_the_file_and_existing_keys_win(tmp_path):

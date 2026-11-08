@@ -84,17 +84,38 @@ class Backend:
         # plain HTTP client that carries no Access JWT. With the host's
         # AITELIER_CF_TEAM_DOMAIN/_AUD exported (they are, on a host that fronts
         # AItelier with Access), the write gate correctly answers
-        # "Not signed in" to those calls — correct for the deployed origin, but
-        # it would make THIS test about the write gate instead of about
-        # shutdown, claim recovery and stale-claim fencing. The gate stays
-        # configured nowhere in this fixture's backend, exactly like a dev box;
-        # the auth boundary is asserted in test_web_api_auth.py.
+        # "Not signed in" to a credential-less call — correct for the deployed
+        # origin, but it would make THIS test about the write gate instead of
+        # about shutdown, claim recovery and stale-claim fencing. The auth
+        # boundary is asserted in test_web_api_auth.py; this fixture states the
+        # mode it needs and then establishes its OWN identity, so neither the
+        # host environment nor the tree's `.env` decides what this test proves.
         for key in ("DPE_DB_PATH", "SKILLFLOW_DB_PATH", "DPE_WS_PATH",
                     "DPE_PROJECTS_PATH", "AITELIER_SCHEDULER_LOCK",
-                    "AITELIER_INSTANCE_LOCK", "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN",
-                    "AITELIER_CF_TEAM_DOMAIN", "AITELIER_CF_AUD",
-                    "AITELIER_WRITERS"):
+                    "AITELIER_INSTANCE_LOCK", "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN"):
             self.env.pop(key, None)
+        # PINNED, not popped: api/main.py re-injects `<repo root>/.env` for every
+        # key that is MISSING from os.environ, and it does that before importing
+        # core.cf_access, whose _TEAM_DOMAIN/_AUD are read once at import. A
+        # popped key therefore comes straight back from the deployment's own
+        # .env in the tree root and configures this fixture's gate — measured
+        # 2026-11-08: the child answered 403 write_denied_not_authenticated to
+        # the credential-less POST /api/projects on a host checkout that has a
+        # .env, while the same tests passed in a worktree that has none. An
+        # empty value is present, so .env is skipped and the mode is the one
+        # stated here, in every tree.
+        self.env["AITELIER_CF_TEAM_DOMAIN"] = ""
+        self.env["AITELIER_CF_AUD"] = ""
+        self.env["AITELIER_WRITERS"] = ""
+        self.env["AITELIER_DRIVER_IDENTITY"] = ""
+        # ...and this fixture's OWN writer identity, which is what the test uses
+        # from here on. A plain (non-Cloudflare) client presenting it is a writer
+        # whether or not the gate above is configured: with the gate off nothing
+        # is checked at all (api/authz.py:220-221), with it on the token decides
+        # for a non-Cloudflare caller (:222-225). So the write calls no longer
+        # inherit the deployment's admin token either way.
+        self.token = f"shutdown-fixture-{entry}-{os.getpid()}"
+        self.env["AITELIER_ADMIN_TOKEN"] = self.token
         self.observations = []
         self.process = None
         self.generation = 0
@@ -106,6 +127,11 @@ class Backend:
         with (self.root / "observations.jsonl").open("a") as f:
             f.write(json.dumps(row, default=str, sort_keys=True) + "\n")
         print(json.dumps(row, default=str, sort_keys=True), flush=True)
+
+    def writer(self):
+        """The credential this fixture's backend accepts as a writer."""
+        from api.authz import ADMIN_TOKEN_HEADER
+        return {ADMIN_TOKEN_HEADER: self.token}
 
     def start(self):
         self.generation += 1
@@ -342,15 +368,32 @@ async def test_real_backend_shutdown_restart_and_recovery(backend_factory, entry
     backend.start()
     async with httpx.AsyncClient(timeout=5) as client:
         await backend.healthy(client)
+        # State the precondition instead of assuming it: the rest of this test
+        # writes through the same gate a browser would hit, and until 2026-11-08
+        # this died 40 lines later with a bare 403 on a tree whose root holds a
+        # .env (that causation is inferred from the code, not yet measured from a
+        # child's environment; what IS asserted here is the mode itself).
+        # gate_enabled is asserted, not merely recorded: with the gate ON this
+        # fixture's token is still accepted (api/authz.py:222-225), so can_write
+        # alone passes in either mode and would not name the one the fixture is
+        # written for.
+        me = await client.get(backend.url + "/api/me", headers=backend.writer())
+        assert me.status_code == 200, me.text
+        assert me.json()["can_write"] is True, me.text
+        assert me.json()["gate_enabled"] is False, me.text
+        backend.record("identity_established", gate_enabled=me.json()["gate_enabled"],
+                       identity_token_present=True, can_write=True)
         project = await client.post(backend.url + "/api/projects", json={
-            "project_id": "shutdown-fixture", "repo_type": "none"})
+            "project_id": "shutdown-fixture", "repo_type": "none"},
+            headers=backend.writer())
         assert project.status_code == 201, project.text
         paused = await client.patch(backend.url + "/api/projects/shutdown-fixture",
-                                    params={"status": "paused"})
+                                    params={"status": "paused"}, headers=backend.writer())
         assert paused.status_code == 200, paused.text
         assert paused.json()["status"] == "paused"
         task = await client.post(backend.url + "/api/tasks", json={
-            "project_id": "shutdown-fixture", "prompt": "Keep this committed task across restart"})
+            "project_id": "shutdown-fixture", "prompt": "Keep this committed task across restart"},
+            headers=backend.writer())
         assert task.status_code == 200, task.text
         task_id = task.json()["id"]
         backend.record("http_task_created", task=task.json(), project=project.json())

@@ -330,16 +330,28 @@ def _acquire_render_owner_waiting_inner(project_id: str, run_id: str, operation_
                                         should_abort=None) -> dict:
     """Take render ownership, queuing behind a live owner until it releases.
 
-    Raises RenderOwnerConflict at once for a holder that needs reconciliation,
-    RenderOwnerConflict ("render owner wait timed out") when the request's own
-    `wait_timeout` runs out, and RenderWaitAbandoned when `should_abort()`
-    turns true. The last two leave no owner row behind. Both are checked on
-    every poll, including polls that find the deployment-admission fence held
-    (the fence is tried without blocking) or the owner table locked. The
-    returned row carries `waited_sec` and `waited_for_owner_ids` (every live
-    holder this request queued behind, in order). do_POST checks both
-    conditions again once it owns the render, before the render starts.
+    `wait_timeout` is the request's own `render_wait_timeout_sec`, and it bounds
+    the QUEUE WAIT -- so a NON-POSITIVE one means "this request may not queue at
+    all" and never reaches the queue below: it is decided by one non-blocking
+    admission attempt (`_acquire_render_owner_without_queuing`), which either
+    hands it a free render lock or refuses it at once. Refusing a request whose
+    lock was free because a few milliseconds had passed would be measuring
+    something the limit never spoke about.
+
+    A positive or absent limit keeps the ordinary queue: RenderOwnerConflict at
+    once for a holder that needs reconciliation, RenderOwnerConflict ("render
+    owner wait timed out") when the request's own `wait_timeout` runs out, and
+    RenderWaitAbandoned when `should_abort()` turns true. The last two leave no
+    owner row behind. Both are checked on every poll, including polls that find
+    the deployment-admission fence held (the fence is tried without blocking) or
+    the owner table locked. The returned row carries `waited_sec` and
+    `waited_for_owner_ids` (every live holder this request queued behind, in
+    order). do_POST checks both conditions again once it owns the render, before
+    the render starts.
     """
+    if wait_timeout is not None and wait_timeout <= 0:
+        return _acquire_render_owner_without_queuing(
+            project_id, run_id, operation_id, wait_timeout=wait_timeout)
     started = time.monotonic()
     waited_for: list[str] = []
     fence_held = False
@@ -394,6 +406,97 @@ def _wait_timed_out(elapsed: float, wait_timeout: float, waited_for: list,
             "waited_sec": round(elapsed, 4), "wait_timeout_sec": wait_timeout,
             "detail": (f"queued {elapsed:.2f}s behind {where}; the request's own "
                        f"render_wait_timeout_sec ({wait_timeout}) ran out: {tail}")}
+
+
+def _acquire_render_owner_without_queuing(project_id: str, run_id: str,
+                                          operation_id: str, *,
+                                          wait_timeout: float) -> dict:
+    """Admission for a request whose own limit permits no queue wait at all.
+
+    Exactly ONE admission attempt, tried without blocking on the
+    deployment-admission fence: a free render lock returns the owner row this
+    request holds -- so its render RUNS -- and anything in the way (a live render
+    owner, the fence, a locked owner table) raises RenderOwnerConflict carrying
+    `_may_not_queue_refusal`. A holder that needs reconciliation keeps the
+    proven `_render_owner_conflict` refusal, which is the same one the queuing
+    path gives.
+
+    Nothing is polled and nothing is slept, so a request refused here can never
+    be charged a queue wait it was not allowed to start, and one admitted here
+    can never be refused for time it spent after taking ownership.
+    """
+    started = time.monotonic()
+    blocked_by, holder_ids = "render_owner", []
+    try:
+        owner = acquire_render_owner(project_id, run_id, operation_id,
+                                     blocking_fence=False)
+    except BlockingIOError:
+        blocked_by = "deployment_fence"
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc):
+            raise
+        blocked_by = "owner_table_locked"
+    except RenderOwnerConflict as exc:
+        if exc.payload["needs_reconciliation"]:
+            raise
+        blocked_by = "render_owner"
+        holder_ids = [exc.payload["owner_id"]]
+    else:
+        owner = dict(owner)
+        owner["waited_sec"] = round(time.monotonic() - started, 4)
+        owner["waited_for_owner_ids"] = []
+        return owner
+    raise RenderOwnerConflict(_may_not_queue_refusal(
+        wait_timeout, holder_ids, blocked_by=blocked_by,
+        waited_sec=time.monotonic() - started))
+
+
+def _may_not_queue_refusal(wait_timeout: float, holder_ids: list, *,
+                           blocked_by: str, waited_sec: float) -> dict:
+    """The refusal for a limit that forbids queueing: nothing waited, nothing ran.
+
+    `render_wait_timeout_sec` bounds the QUEUE WAIT, so a non-positive value says
+    this request may not queue AT ALL. That cannot borrow `_wait_timed_out`'s
+    wording: no wait ran out here, the request was never allowed to start one.
+    So the body says which thing is in the way, that this request's own limit did
+    not let it queue behind that thing, and that nothing was rendered.
+
+    `owner_id` / `blocking_owner_ids` name the holder IN THE WAY, and
+    `queued_for_owner_ids` is EMPTY with `queue_allowed` False, so no reader can
+    take this for a request that queued behind the holder and timed out (the
+    queue's own `waited_*` names are deliberately absent: the relay reads
+    `waited_sec` + `wait_timeout_sec` as proof of a real queue wait, and no wait
+    happened here). `admission_attempt_sec` is how long the one admission
+    attempt took, not a queue time.
+
+    The `error` spelling stays "render owner exists" because that is what is true
+    -- an owner (or the fence that admits one) is in the way -- which also keeps
+    the payload readable by `_render_owner_refusal` in the play-test tool.
+    `render_wait_timeout_sec` is the limit IN FORCE: do_POST clamps a negative
+    request value to 0 before admission, so that is what a 0 here means.
+    """
+    if blocked_by == "deployment_fence":
+        in_the_way = "the deployment-admission fence is held"
+    elif blocked_by == "owner_table_locked":
+        in_the_way = "the render-owner table is locked by another writer"
+    else:
+        in_the_way = f"live render owner {holder_ids[-1]} is rendering"
+    return {"error": "render owner exists",
+            # "active" is the established kind for a live holder (see
+            # `_render_owner_conflict`); the other two say what actually blocked
+            # an admission that saw no owner at all.
+            "owner_kind": "active" if blocked_by == "render_owner" else blocked_by,
+            "owner_id": holder_ids[-1] if holder_ids else None,
+            "blocking_owner_ids": list(holder_ids),
+            "queue_allowed": False, "queued_for_owner_ids": [],
+            "render_wait_timeout_sec": wait_timeout,
+            "admission_attempt_sec": round(max(0.0, waited_sec), 4),
+            "deployment_fence_held": blocked_by == "deployment_fence",
+            "needs_reconciliation": False,
+            "detail": (f"{in_the_way}; this request's own render_wait_timeout_sec "
+                       f"({wait_timeout}) allows no queue wait at all, so it may "
+                       f"not queue behind it: nothing was rendered and no owner "
+                       f"row was made")}
 
 
 def _start_owner_heartbeat(owner_id: str, generation: int):
@@ -7198,6 +7301,12 @@ class _Handler(BaseHTTPRequestHandler):
         # with a "not rendered" reason. A holder that needs reconciliation
         # (owner_lost, or active with a stale heartbeat) is refused at once with
         # a 409 that names its kind.
+        #
+        # N is a QUEUE wait, so N <= 0 means "may not queue at all" and is
+        # decided by one non-blocking admission attempt: a free render lock
+        # renders, and a holder in the way is refused at once with
+        # `_may_not_queue_refusal` (never with `_wait_timed_out`, whose wording
+        # is a wait that really ran out).
         held = self.path in self._RENDER_ROUTES
         # The matching finally releases the process lock and durable owner.
         # finally: _RENDER_LOCK.release()
@@ -7222,6 +7331,9 @@ class _Handler(BaseHTTPRequestHandler):
                             or uuid.uuid4().hex)
             wait_timeout = req.get("render_wait_timeout_sec")
             try:
+                # A negative request value clamps to 0: either way the limit is
+                # "at most this much queue wait", and "at most none" is the same
+                # request. 0 is therefore the one value the no-queue path sees.
                 wait_timeout = None if wait_timeout is None else max(0.0, float(wait_timeout))
             except (TypeError, ValueError):
                 return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
@@ -7278,7 +7390,15 @@ class _Handler(BaseHTTPRequestHandler):
                     print(f"[harness] {self.path} {operation_id}: {release_reason}",
                           flush=True)
                     return
-                if wait_timeout is not None and elapsed > wait_timeout:
+                # Only a POSITIVE limit is charged here. The limit bounds the
+                # QUEUE WAIT, and a non-positive one was already enforced as
+                # "may not queue at all" at admission (`owner` above): either it
+                # was handed the render lock at once -- so no queue wait ran,
+                # and the time since admission_started is the render's own
+                # setup, which this field never spoke about -- or it was refused
+                # there with `_may_not_queue_refusal`. Measuring `elapsed` here
+                # is what refused a zero-limit request holding a FREE lock.
+                if wait_timeout is not None and wait_timeout > 0 and elapsed > wait_timeout:
                     release_reason = ("not rendered: render_wait_timeout_sec ran "
                                       "out before the render started")
                     return self._send(409, _wait_timed_out(

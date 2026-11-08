@@ -15,18 +15,12 @@ from pathlib import Path
 from typing import Callable
 
 # Load .env so the CLI process picks up config (AITELIER_PORT, admin token, …).
-# The container receives .env separately via compose `env_file`.
-_env_file = Path(__file__).resolve().parent.parent / ".env"
-if _env_file.exists():
-    with open(_env_file) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _key, _val = _line.split("=", 1)
-                _key = _key.strip().removeprefix("export ")
-                _val = _val.strip().strip("\"'")
-                if _key not in os.environ:
-                    os.environ[_key] = _val
+# The container receives .env separately via compose `env_file`, and api/main.py
+# deliberately does NOT load it at import time; this module IS a boot entry, so
+# it says so explicitly (core/dotenv_boot.py holds the one parser).
+from core.dotenv_boot import load_repo_dotenv
+
+load_repo_dotenv()
 
 import httpx
 

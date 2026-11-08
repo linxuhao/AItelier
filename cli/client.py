@@ -10,17 +10,12 @@ from typing import Optional
 
 import httpx
 
+from core.dotenv_boot import load_repo_dotenv
+
 # Load .env so AITELIER_ADMIN_TOKEN (write-gate bypass for the CLI) is available.
-_env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-if os.path.exists(_env_file):
-    with open(_env_file) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                _k = _k.strip().removeprefix("export ")
-                _v = _v.strip().strip("\"'")
-                os.environ.setdefault(_k, _v)
+# This module is a boot entry and calls the shared loader explicitly;
+# api/main.py deliberately does not, so importing the app adds no env key.
+load_repo_dotenv()
 
 _DEFAULT_URL = f"http://localhost:{os.environ.get('AITELIER_PORT', '4444')}"
 

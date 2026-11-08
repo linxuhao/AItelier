@@ -177,6 +177,16 @@ def _recorded_render_wait(record: dict) -> tuple[list, float]:
     return (owners if isinstance(owners, list) else []), seconds
 
 
+def recorded_render_wait(record: dict) -> float:
+    """The seconds ONE relay record attributes to the render queue (0.0 if none).
+
+    This is the per-request quantity the render-contention block judges
+    (`impl._render_contention`). `admission_summary` sums the same numbers into
+    `render_owner_wait_sec`, which stays the total the run recorded.
+    """
+    return _recorded_render_wait(record)[1]
+
+
 def render_wait_seconds() -> float:
     """The queue window, read at call time; a bad value keeps the default."""
     raw = os.environ.get("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS")

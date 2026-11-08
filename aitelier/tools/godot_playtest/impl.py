@@ -154,7 +154,10 @@ def _read_split(repo: Path) -> tuple[dict | None, list[str]]:
 
     ``errors`` holds only the things that would SILENTLY SHRINK the contract —
     a scenario file that will not parse, one with no timeline, a name in
-    ``scenario_order`` with no file behind it. They are reported, not skipped.
+    ``scenario_order`` with no file behind it, and a ``scenarios:`` list
+    declared in the shared fragment (it would be replaced by the file-derived
+    list, so the run would cover scenarios the author did not write). They are
+    reported, not skipped.
     """
     d = repo / SPEC_DIR
     if not d.is_dir():
@@ -175,6 +178,26 @@ def _read_split(repo: Path) -> tuple[dict | None, list[str]]:
             errors.append(f"{SPEC_DIR}/_common.yaml is not a YAML mapping")
 
     order = [str(n) for n in (common.pop("scenario_order", None) or [])]
+
+    # A `scenarios:` list written in the shared fragment is REFUSED, not
+    # replaced. Every path below assembles the list from the FILES, so popping
+    # this key and assigning the assembled one leaves the author's list
+    # discarded with no error at all — they wrote which scenarios run, and a
+    # different list ran, reported green or red on scenarios they never
+    # declared. `scenario_order` is the fragment's only say in the list and it
+    # only ORDERS what the files hold; a list here has no reader. Presence is
+    # the trigger, not truthiness: `scenarios: []` is still a list written here
+    # that would be silently swapped for the files' one.
+    declared_scenarios = "scenarios" in common
+    if declared_scenarios:
+        common.pop("scenarios")
+        errors.append(
+            f"{SPEC_DIR}/_common.yaml declares `scenarios:` — the scenario list "
+            f"is assembled from the files in {SPEC_DIR}/ (`scenario_order:` only "
+            f"orders it), so this list would be discarded and the run would "
+            f"cover scenarios the author did not write. One scenario per "
+            f"{SPEC_DIR}/<name>.yaml; the shared fragment carries only what "
+            f"they share.")
 
     found: dict[str, dict] = {}
     for p in sorted(d.glob("*.yaml")):
@@ -205,6 +228,14 @@ def _read_split(repo: Path) -> tuple[dict | None, list[str]]:
     missing = [n for n in order if n not in found]
     if missing:
         errors.append(f"scenario_order names {missing} have no file in {SPEC_DIR}/.")
+
+    if declared_scenarios:
+        # Assemble nothing. The list this function would hand back is the
+        # FILES' one, and the author wrote a different one; returning it —
+        # even alongside the error — is the substitution, and a caller that
+        # ever reads `spec` without `errors` runs the wrong suite. No contract
+        # is the same answer the malformed-monolith reader gives.
+        return None, errors
 
     # scenario_order fixes the run order; anything unlisted is appended sorted,
     # so dropping in a new file is enough to have it run.

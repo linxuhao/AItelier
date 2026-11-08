@@ -11,6 +11,7 @@
 # entries that need it (cli/server.py, cli/client.py). The server container gets
 # its configuration from compose `env_file`, so nothing here needs the file.
 
+import hashlib as _hashlib
 import os as _os
 
 from contextlib import asynccontextmanager
@@ -445,10 +446,39 @@ async def write_gate(request: Request, call_next):
     return JSONResponse(authz.denial_body(code), status_code=403)
 
 
+# The godot harness the repository gate imports at run time. An authored gate's
+# subprocess imports this copy, baked into the image at build time, not the one
+# in the working tree; /health reports its identity so a stale image is visible
+# from outside. Module-level so a test can point it at a temporary file.
+GATE_EXPORT_HARNESS = _Path("/opt/aitelier-gate-imports/docker/godot/godot_harness.py")
+
+
+def _gate_harness_identity() -> dict:
+    """SHA-256 of the gate export's bytes, read at request time.
+
+    Deliberately NOT cached: a value kept across calls can outlive a rewritten
+    file, and the probe is cheap next to a request. A missing or unreadable file
+    is declared (null digest plus a reason naming the path), never raised.
+    """
+    path = _Path(GATE_EXPORT_HARNESS)
+    try:
+        digest = _hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        return {"path": str(path), "sha256": None,
+                "reason": f"could not read {path}: {type(exc).__name__}"}
+    return {"path": str(path), "sha256": digest, "reason": None}
+
+
 @app.get("/health")
 def health_check():
-    """系统探针"""
-    return {"status": "ok", "engine": "DPE SOTA v3.0"}
+    """系统探针
+
+    `gate_harness` identifies the harness the repository gate imports (see
+    GATE_EXPORT_HARNESS). An absent export is declared in that field; the probe
+    still answers 200 with `status` and `engine` unchanged.
+    """
+    return {"status": "ok", "engine": "DPE SOTA v3.0",
+            "gate_harness": _gate_harness_identity()}
 
 
 @app.get("/api/me")

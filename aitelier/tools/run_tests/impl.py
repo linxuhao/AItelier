@@ -1452,10 +1452,26 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
     # The contention, named at the top level so a reader of the gate result
     # sees the wait without opening admission.json. Additive: the outcome below
     # is decided by `admission.state` and the exit code, never by this block.
-    # A gate that sent NO engine request (refused before it ran) was never
-    # measured against the render queue: that is the named absence, never
-    # `none` — the same fabricated-clean shape as the early return above.
-    if admission.get("state") == "no_engine_request":
+    # Zero engine requests is NOT, by itself, an absence. A gate that really
+    # EXECUTED and simply never needed the render queue (it measured a verdict
+    # without asking the engine anything) has a genuine clean `none`, and that
+    # is what `_render_contention` reports. The queue went untouched because
+    # nothing needed it, not because nothing was measured.
+    #
+    # The named absence applies only when the gate command itself did not run:
+    # the executor refused it or killed it. That is `runner_error` /
+    # `timed_out`, set only by `_run_node_cmd` and the early return above, never
+    # on a normal exit. Only then was no measurement of the queue possible, and
+    # `none` there would be a fabricated clean queue.
+    #
+    # `gate_admission.NOT_RUN_STATES` is deliberately NOT used here. It names the
+    # outcome of the LAST engine request, and a gate refused before it ran has no
+    # engine request at all, so no state in that set can apply to it. Inside this
+    # branch (`state == "no_engine_request"`) it would also be dead, since that
+    # state is not in the set.
+    did_not_run = (result.get("runner_error") is True
+                   or result.get("timed_out") is True)
+    if admission.get("state") == "no_engine_request" and did_not_run:
         result["render_contention"] = {"owners": [], "wait_sec": None,
                                        "state": RENDER_CONTENTION_UNREPORTED}
     else:

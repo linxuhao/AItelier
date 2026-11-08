@@ -727,6 +727,77 @@ def test_a_gate_refused_before_it_ran_is_not_a_measured_clean_queue(
     assert "render owner" not in report["summary"].lower()
 
 
+# A gate that really EXECUTED, measured a red, and never asked the engine
+# anything. It is the clean pole of the zero-request case: the queue was not
+# touched because nothing needed it, so `none` is the honest reading. It is a
+# real subprocess through the real executor entry. It retains its own report
+# under GATE_REPORT_DIR, the same way `early_contract_red` does (a directory as
+# the first entry, holding a manifest that names this repo and a measured
+# failure), then exits 1, and it never contacts the relay.
+_EXECUTED_RED_GATE = r"""
+import json, os, sys, tempfile
+from pathlib import Path
+repo = Path.cwd()
+parent = Path(os.environ["GATE_REPORT_DIR"])
+d = Path(tempfile.mkdtemp(prefix="executed-red-", dir=parent))
+manifest = {"repo": str(repo), "status": "failed",
+            "outcome": "measured_fail", "exit_code": 1, "stages": {}}
+(d / "manifest.json").write_text(json.dumps(manifest))
+print("gate: executed and measured a red without any engine request", flush=True)
+sys.exit(1)
+"""
+
+
+def test_a_gate_that_executed_and_never_touched_the_queue_stays_a_clean_none(
+        tmp_path, monkeypatch):
+    """WITNESS for the narrowed branch. The gate REALLY RAN (a real `run_tests.sh`
+    subprocess exited 1, so the measured verdict is `measured_fail`) and made
+    ZERO engine requests, so its admission record is `no_engine_request`.
+
+    The broad branch named that run `unreported`, which claimed nothing measured
+    its queue even though the run executed and simply never needed the queue.
+    The narrowed branch must keep the honest clean `none` here, with `wait_sec`
+    0.0 and no contention sentence. This pins the clean pole the broad branch
+    broke.
+
+    REAL PATH, NO GATE DICT: `run_tests` -> `_acquire_repo_gate` -> the REAL
+    `_run_repo_gate` and REAL relay, with a real executed gate that never
+    contacts the engine. Nothing is refused and nothing times out, so
+    `runner_error` and `timed_out` are both unset.
+    """
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    install_entry_executor(monkeypatch)
+    repo = _repo(tmp_path)
+    (repo / "gate.py").write_text(_EXECUTED_RED_GATE, encoding="utf-8")
+    script = repo / "run_tests.sh"
+    script.write_text("#!/bin/sh\nexec python3 gate.py\n", encoding="utf-8")
+    script.chmod(0o755)
+    out = tmp_path / "out"
+
+    rt.run_tests(project_root=str(repo), out_dir=str(out), run_id="executed-red")
+    report = _report(out)
+
+    gate = report["repo_gate"]
+    # It really executed: not refused, not killed, and it exited with a verdict.
+    assert gate.get("runner_error") is not True and gate.get("timed_out") is not True
+    assert gate["returncode"] == 1
+    assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+    # It made zero engine requests, which is the case the broad branch broke.
+    assert gate["admission"]["requests"] == []
+    assert gate["admission"]["state"] == "no_engine_request"
+    # The honest clean pole: the queue was not touched, so `none`, not a
+    # fabricated `unreported`, with no wait and no sentence.
+    assert gate["render_contention"] == {
+        "owners": [], "wait_sec": 0.0, "state": "none"}, gate["render_contention"]
+    assert report["render_contention"] == {
+        "owners": [], "wait_sec": 0.0, "state": "none"}, report["render_contention"]
+    assert "render_contention_absent" not in report
+    assert "contention" not in report["summary"].lower()
+    assert "render owner" not in report["summary"].lower()
+    # ...and it is still the measured red it was.
+    assert report["passed"] is False
+
+
 # ── the summary edge case: an empty summary is not repaired ────────────────
 
 class _EmptyPytestRun:

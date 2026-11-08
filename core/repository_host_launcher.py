@@ -43,6 +43,19 @@ MAX_REQUEST_BYTES = 1 << 20
 # JSON may escape each permitted output byte as six ASCII bytes.
 CODING_SHELL_OUTPUT_LIMIT = 12_000
 CODING_SHELL_WIRE_LIMIT = 6 * CODING_SHELL_OUTPUT_LIMIT + 4096
+# The longest deadline the host accepts for one launch, in seconds. It bounds
+# how long one of the four CPU test slots is held, so it must stay finite. It
+# must be at least the longest deadline any caller declares: the repository
+# gate's whole-gate deadline, aitelier/tools/run_tests/impl.py REPO_GATE_TIMEOUT
+# (12600 s since bf274721a7; the largest measured passing gate is 6476.1 s).
+# tests/unit/test_gate_deferral_execution_points.py pins that relation. Nothing
+# on the wire is derived from this number: the client's socket timeout
+# (repository_executor._launch_via_host) and the container deadline (_run_docker)
+# both come from the request's own timeout.
+MAX_LAUNCH_TIMEOUT_SECONDS = 12600
+# The coding shell's own ceiling. It is a separate tool contract (core/coding_shell.py
+# refuses above it too), so it does not follow the repository gate's deadline.
+MAX_CODING_SHELL_TIMEOUT_SECONDS = 7200
 
 
 class LaunchRefused(ValueError):
@@ -131,6 +144,13 @@ _FORBIDDEN_CHARS = set("\0\n\r;|&`$><\\\"'")
 
 
 
+def _check_timeout(timeout, maximum: int) -> int:
+    """Refuse anything but an int from 1 to ``maximum`` (``bool`` is not an int here)."""
+    if type(timeout) is not int or not 1 <= timeout <= maximum:
+        raise LaunchRefused(f"timeout must be an integer within 1..{maximum}")
+    return timeout
+
+
 def _check_token(token: str) -> str:
     if not isinstance(token, str) or not token:
         raise LaunchRefused("command tokens must be non-empty strings")
@@ -155,8 +175,7 @@ def validate_request(cfg: dict, request: dict) -> dict:
         raise LaunchRefused("repo does not match the existing run's owned repository")
     if request.get("profile") == "coding_shell":
         from core.coding_shell import validate_host_grant
-        if type(request.get("timeout")) is not int or not 1 <= request["timeout"] <= 7200:
-            raise LaunchRefused("timeout must be an integer within1..7200")
+        _check_timeout(request.get("timeout"), MAX_CODING_SHELL_TIMEOUT_SECONDS)
         return validate_host_grant(cfg, request, repo, project_id, LaunchRefused)
     if "coding_grant" in request:
         raise LaunchRefused("coding grant is only valid for the closed coding shell profile")
@@ -175,9 +194,7 @@ def validate_request(cfg: dict, request: dict) -> dict:
                                              cfg.get("node_executor_image") or "")
         except (NodeRefused, OSError) as exc:
             raise LaunchRefused(str(exc)) from exc
-        timeout = request.get("timeout")
-        if type(timeout) is not int or not 1 <= timeout <= 7200:
-            raise LaunchRefused("timeout must be an integer within 1..7200")
+        timeout = _check_timeout(request.get("timeout"), MAX_LAUNCH_TIMEOUT_SECONDS)
         return {**node, "repo": str(repo), "timeout": timeout, "writable_dirs": [node["ticket"]],
                 "relay_socket": "", "import_module": "", "pytest_timeout": False,
                 "report_dir": "", "run_id": request["run_id"], "project_id": project_id}
@@ -224,9 +241,7 @@ def validate_request(cfg: dict, request: dict) -> dict:
         raise LaunchRefused("args must be a non-empty list")
     args = [_check_token(a) for a in raw_args]
     _validate_command_form(repo, args, request)
-    timeout = request.get("timeout")
-    if type(timeout) is not int or not 1 <= timeout <= 7200:
-        raise LaunchRefused("timeout must be an integer within 1..7200")
+    timeout = _check_timeout(request.get("timeout"), MAX_LAUNCH_TIMEOUT_SECONDS)
     module = request.get("import_module", "")
     if not isinstance(module, str) or module and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module):
         raise LaunchRefused("import_module must be a dotted module name")

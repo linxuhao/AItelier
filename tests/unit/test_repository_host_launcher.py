@@ -121,6 +121,36 @@ def test_rejects_out_of_range_timeout(tmp_path):
         launcher.validate_request(_fixture(tmp_path), _request(tmp_path, timeout=0))
 
 
+@pytest.mark.parametrize("timeout", [0, -1, True, 1.5, "60", None,
+                                     launcher.MAX_LAUNCH_TIMEOUT_SECONDS + 1])
+def test_launch_timeout_refusals_name_the_bound(tmp_path, timeout):
+    """The bound is a real bound: over-maximum, non-integer and zero are refused.
+
+    The refusal names the accepted maximum, so the message says what the
+    number is, not just that it was wrong.
+    """
+    with pytest.raises(launcher.LaunchRefused) as refusal:
+        launcher.validate_request(_fixture(tmp_path), _request(tmp_path, timeout=timeout))
+    assert f"within 1..{launcher.MAX_LAUNCH_TIMEOUT_SECONDS}" in str(refusal.value)
+
+
+def test_launch_bound_is_the_named_maximum_and_accepts_it(tmp_path):
+    """The maximum is a module constant, and the bound is inclusive at that value."""
+    assert launcher.MAX_LAUNCH_TIMEOUT_SECONDS == 12600
+    fields = launcher.validate_request(
+        _fixture(tmp_path), _request(tmp_path, timeout=launcher.MAX_LAUNCH_TIMEOUT_SECONDS))
+    assert fields["timeout"] == launcher.MAX_LAUNCH_TIMEOUT_SECONDS
+
+
+def test_coding_shell_timeout_keeps_its_own_bound(tmp_path):
+    """The coding shell's ceiling is its own contract and did not move with the gate's."""
+    assert launcher.MAX_CODING_SHELL_TIMEOUT_SECONDS == 7200
+    with pytest.raises(launcher.LaunchRefused) as refusal:
+        launcher.validate_request(_fixture(tmp_path), _request(
+            tmp_path, profile="coding_shell", timeout=7201))
+    assert "within 1..7200" in str(refusal.value)
+
+
 def test_docker_command_pins_image_and_bounds(tmp_path, monkeypatch):
     cfg = _fixture(tmp_path)
     fields = launcher.validate_request(cfg, _request(tmp_path))

@@ -92,6 +92,32 @@ def test_the_whole_gate_deadline_fits_inside_the_episode_ceiling():
         "deferral that waits for it")
 
 
+def test_the_repository_gate_deadline_fits_the_host_launcher_bound():
+    """The gate's declared deadline must be launchable through the host.
+
+    `REPO_GATE_TIMEOUT` is passed verbatim to the host launcher, which refuses
+    any launch above `MAX_LAUNCH_TIMEOUT_SECONDS`. Raising the deadline past
+    that bound made every repository-gate launch refused (LaunchRefused:
+    timeout must be an integer within 1..7200) while the constants still read
+    fine, so neither side's own test noticed. This reads both real values, so
+    the drift that happened is the one that goes red.
+    """
+    from aitelier.tools.run_tests import impl as rt
+    from core import repository_host_launcher as launcher
+
+    assert rt.REPO_GATE_TIMEOUT <= launcher.MAX_LAUNCH_TIMEOUT_SECONDS, (
+        f"repository gate deadline REPO_GATE_TIMEOUT={rt.REPO_GATE_TIMEOUT}s exceeds "
+        f"the host launcher's accepted maximum MAX_LAUNCH_TIMEOUT_SECONDS="
+        f"{launcher.MAX_LAUNCH_TIMEOUT_SECONDS}s: every repository-gate launch "
+        "would be refused")
+    # The gate's largest measured passing whole gate (6476.1 s) must still fit,
+    # so a lower launcher bound cannot quietly cut the case that motivated it.
+    largest_passing_gate_seconds = 6476.1
+    assert launcher.MAX_LAUNCH_TIMEOUT_SECONDS >= largest_passing_gate_seconds, (
+        f"the launcher accepts at most {launcher.MAX_LAUNCH_TIMEOUT_SECONDS}s, "
+        f"below the largest retained passing gate ({largest_passing_gate_seconds} s)")
+
+
 @pytest.mark.parametrize("attempts,expect_name", [
     (3, "gate runs per step=3 > 1"),
     (4, "gate runs per step=4 > 1"),

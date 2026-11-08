@@ -346,6 +346,12 @@ def _last_trace_at(sf, run_id: str) -> str | None:
     return None
 
 
+def _utc_now():
+    """The one clock the liveness rule reads. A seam for tests, nothing else."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
 def _seconds_since(ts: str | None) -> float | None:
     """Seconds since `ts` (a skillflow UTC timestamp), or None if unreadable.
 
@@ -360,7 +366,7 @@ def _seconds_since(ts: str | None) -> float | None:
             dt = datetime.strptime(str(ts).strip(), fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+        return max(0.0, (_utc_now() - dt).total_seconds())
     return None
 
 
@@ -368,6 +374,39 @@ def _human(sec: float) -> str:
     m, s = divmod(int(sec), 60)
     h, m = divmod(m, 60)
     return "%dh%02dm" % (h, m) if h else ("%dm%02ds" % (m, s) if m else "%ds" % s)
+
+
+def run_liveness(sf, run: dict) -> dict:
+    """THE liveness rule. Both `summarise_run` and `GET /api/runs` call this, so
+    the per-run verdict and the list row cannot disagree about the same run.
+
+    Trace-first: the newest trace row's timestamp is the activity clock, because
+    `skillflow_runs.updated_at` only moves when a STEP completes. The run row is
+    the fallback for a run that has written no trace. `stalled` is the same
+    comparison against `_STALL_HINT_S` that the per-run verdict has always made.
+
+    Reads the trace exactly once (`_last_trace_at`) per call.
+
+    The returned keys are the vocabulary of both surfaces:
+      idle_seconds      float seconds since the activity clock, or None
+      liveness_from     'trace' | 'run_row' | 'none'
+      stalled           True iff idle_seconds is not None and >= _STALL_HINT_S
+      updated_at        the timestamp the idle figure was taken from
+      run_row_updated_at the run row's own updated_at (or None)
+    """
+    run_id = run.get("id") or ""
+    row_ts = (run.get("updated_at") or "") or None
+    trace_ts = _last_trace_at(sf, run_id) if run_id else None
+    updated_at = trace_ts or row_ts
+    liveness_from = "trace" if trace_ts else ("run_row" if row_ts else "none")
+    idle_s = _seconds_since(updated_at)
+    return {
+        "idle_seconds": idle_s,
+        "liveness_from": liveness_from,
+        "stalled": idle_s is not None and idle_s >= _STALL_HINT_S,
+        "updated_at": updated_at,
+        "run_row_updated_at": row_ts,
+    }
 
 
 
@@ -603,11 +642,11 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
     # on that row while its trace is writing a turn every 2-3 minutes. I read the
     # run row, called it stalled, and restarted a healthy step. The trace is
     # per-TURN, which is the granularity a liveness claim needs.
-    row_ts = (run.get("updated_at") or "") or None
-    trace_ts = _last_trace_at(sf, run_id)
-    updated_at = trace_ts or row_ts
-    liveness_from = "trace" if trace_ts else ("run_row" if row_ts else "none")
-    idle_s = _seconds_since(updated_at)
+    live = run_liveness(sf, run)
+    updated_at = live["updated_at"]
+    liveness_from = live["liveness_from"]
+    idle_s = live["idle_seconds"]
+    row_ts = live["run_row_updated_at"]
     if status == "completed":
         verdict = "completed"
     elif status == "failed":
@@ -617,7 +656,7 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
     elif idle_s is None:
         verdict = ("in-progress (no updated_at on the run row — cannot tell "
                    "advancing from stalled)")
-    elif idle_s < _STALL_HINT_S:
+    elif not live["stalled"]:
         verdict = ("in-progress (last advanced %s ago, liveness from %s)"
                    % (_human(idle_s), liveness_from))
     else:
@@ -633,6 +672,7 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         "updated_at": updated_at,
         "idle_seconds": idle_s,
         "liveness_from": liveness_from,
+        "stalled": live["stalled"],
         "run_row_updated_at": row_ts,
         "steps": per_step, "first_failure": first_failure,
         # Kept out of `first_failure` and out of every failure count on purpose:

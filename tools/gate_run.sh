@@ -15,6 +15,14 @@ HEADF="$REPORTS/$SUFFIX.gate.head"
 SNAPROOT="/home/linxuhao/.AItelier/gate-snapshots"
 SNAP="$SNAPROOT/$SUFFIX-$$"
 
+# "Could not ask" is not the answer "unknown". gate_binding.py ANSWERS `unknown`
+# (and `unknown <why>`) with exit 0 when it judged readable bytes, so a `||`
+# fallback spelled with a word the tool itself prints leaves the gate's record
+# unable to tell an answer from a call that never happened. The two values below
+# are not answers -- a test reads them out of this file's bytes and requires
+# every exit-0 answer of the tool to differ from them
+# (tests/unit/test_gate_binding_modes_and_usage.py).
+
 # A suffix names one invocation. Refuse prior evidence without altering it.
 # Checked before anything is observed or written, so a second invocation cannot
 # overwrite the record of the first.
@@ -113,7 +121,7 @@ docker run --rm --init --name "$NAME" --network aitelier_default -u 1000:1000 \
   -v /home/linxuhao/.AItelier:/home/linxuhao/.AItelier \
   -w "$SNAP" "$PLATFORM_IMAGE" python3 /app/tools/gate_binding.py --binding-sha256 "$BINDING_SHA256" run "$BINDING" "$REPORTS/$SUFFIX.platform-identity.json" > "$LOG" 2>&1
 rc=$?
-identity="$(python3 "$BINDING_TOOL" receipt "$REPORTS/$SUFFIX.platform-identity.json" "$rc" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || identity=unknown
+identity="$(python3 "$BINDING_TOOL" receipt "$REPORTS/$SUFFIX.platform-identity.json" "$rc" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || identity="unanswered:receipt-tool-failed"
 python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-after.json" "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG" 2>&1
 sidecar_rc=$?
 if [ "$sidecar_rc" -eq 70 ]; then
@@ -122,7 +130,14 @@ elif [ "$sidecar_rc" -ne 0 ] && [ "$identity" != "mismatch" ]; then
   identity=unknown
 fi
 if [ "$identity" != "unchanged" ]; then
-  [ "$identity" = "mismatch" ] || identity=unknown
+  # An ANSWER keeps its spelling: `unknown` means the receipt WAS read and does
+  # not settle, `mismatch` means it moved while the gate ran. A call that never
+  # answered carries `unanswered:...` and must not be flattened into `unknown`
+  # here -- that flattening is what made the two indistinguishable.
+  case "$identity" in
+    mismatch|unknown|unanswered:*) ;;
+    *) identity="unanswered:receipt-tool-failed" ;;
+  esac
   echo "$identity-platform-identity; real rc was $rc; snapshot retained; see $SUFFIX.platform-identity.json" > "$EXITF"
   # A client exit alone does not settle consumers of this exact snapshot.
   exit 69
@@ -136,7 +151,7 @@ fi
 #   unreviewed/unknown  -> the real stage exit stays the verdict, and the flag
 #                          sits on the line after it: a MEASUREMENT, not
 #                          release evidence (owner ruling, 2026-11-04).
-platform="$(python3 "$BINDING_TOOL" platform "$REPORTS/$SUFFIX.platform-identity.json" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || platform="unknown platform record unavailable"
+platform="$(python3 "$BINDING_TOOL" platform "$REPORTS/$SUFFIX.platform-identity.json" --binding-sha256 "$BINDING_SHA256" 2>> "$LOG")" || platform="unanswered:platform-tool-failed"
 
 # The snapshot is unreachable by the round, so a change here would mean the gate
 # itself moved the tree. Still checked: an unverified assumption is how the last

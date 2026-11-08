@@ -1,9 +1,36 @@
 from pathlib import Path
+import importlib
+import importlib.util
+import sys
 import pytest
 from dataclasses import replace
 from aitelier.writing_bench import bench as implementation
 from aitelier.writing_bench.storage import BenchError, decode
 from test_bench import bench, request, RULES, CONTRACTS, observed_verdict
+
+def loaded_copy(monkeypatch, tmp_path, module):
+    """Load a writable copy of ``module`` as the code this process runs.
+
+    The suite runs from a read-only /app mount, so a disk-edit test cannot write
+    the file its loader came from. Here the copy is executed under the module's
+    own name and installed in sys.modules, so the identity check and every
+    loaded-code read see the copy, and disk edits made to the copy are the edits
+    the product would see on a deployed file. monkeypatch restores the original
+    module object at teardown. Returns (loaded module, copy path).
+    """
+    directory = tmp_path / "loaded"
+    directory.mkdir(exist_ok=True)
+    target = directory / Path(module.__file__).name
+    target.write_bytes(Path(module.__file__).read_bytes())
+    loaded = _execute_copy(module.__name__, target)
+    monkeypatch.setitem(sys.modules, module.__name__, loaded)
+    return loaded, target
+
+def _execute_copy(name, target):
+    spec = importlib.util.spec_from_file_location(name, target)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
 
 def reviewed(bench):
     bench.freeze(request(bench), "run1", RULES, CONTRACTS)
@@ -13,18 +40,15 @@ def reviewed(bench):
     bench.literary("run1", value, proof=proof)
     return observed_verdict(bench, "run1", "ledger")
 
-def test_disk_only_change_preserves_reviewed_stage(bench):
+def test_disk_only_change_preserves_reviewed_stage(tmp_path, monkeypatch, bench):
+    loaded, target = loaded_copy(monkeypatch, tmp_path, implementation)
     value, proof = reviewed(bench)
-    target = Path(implementation.__file__)
     original = target.read_bytes()
-    before = implementation.validate_ledger.__code__
-    try:
-        target.write_bytes(original + b"\n# disk-only deployment fixture\n")
-        assert implementation.validate_ledger.__code__ is before
-        stage = bench.stage("run1", value, proof=proof)
-        assert stage["requires_manual_approval"] and not stage["accepted"]
-    finally:
-        target.write_bytes(original)
+    before = loaded.validate_ledger.__code__
+    target.write_bytes(original + b"\n# disk-only deployment fixture\n")
+    assert loaded.validate_ledger.__code__ is before
+    stage = bench.stage("run1", value, proof=proof)
+    assert stage["requires_manual_approval"] and not stage["accepted"]
 
 def test_actual_policy_change_refused(bench):
     value, proof = reviewed(bench)
@@ -32,26 +56,17 @@ def test_actual_policy_change_refused(bench):
     with pytest.raises(BenchError, match="policy or implementation changed"):
         bench.stage("run1", value, proof=proof)
 
-def test_actual_loaded_module_change_refused(bench):
-    import importlib
+def test_actual_loaded_module_change_refused(tmp_path, monkeypatch, bench):
     from aitelier.writing_bench import context
+    loaded, target = loaded_copy(monkeypatch, tmp_path, context)
     value, proof = reviewed(bench)
-    target = Path(context.__file__)
-    original = target.read_bytes()
-    before = context.WINDOW
-    try:
-        target.write_bytes(original.replace(b"WINDOW = 5", b"WINDOW = 4"))
-        Path(context.__cached__).unlink(missing_ok=True)
-        importlib.invalidate_caches()
-        importlib.reload(context)
-        assert context.WINDOW == 4 and before == 5
-        with pytest.raises(BenchError, match="policy or implementation changed"):
-            bench.stage("run1", value, proof=proof)
-    finally:
-        target.write_bytes(original)
-        Path(context.__cached__).unlink(missing_ok=True)
-        importlib.invalidate_caches()
-        importlib.reload(context)
+    before = loaded.WINDOW
+    target.write_bytes(target.read_bytes().replace(b"WINDOW = 5", b"WINDOW = 4"))
+    reloaded = _execute_copy(context.__name__, target)
+    monkeypatch.setitem(sys.modules, context.__name__, reloaded)
+    assert reloaded.WINDOW == 4 and before == 5
+    with pytest.raises(BenchError, match="policy or implementation changed"):
+        bench.stage("run1", value, proof=proof)
 
 def test_actual_native_import_boundary(bench):
     import sys
@@ -66,8 +81,8 @@ def test_actual_native_import_boundary(bench):
 
 def test_graph_disk_edit_after_reviews_reaches_manual_stage(tmp_path, monkeypatch, bench):
     from test_workflow import Session
+    loaded, target = loaded_copy(monkeypatch, tmp_path, implementation)
     session = Session(tmp_path, monkeypatch, bench)
-    target = Path(implementation.__file__)
     original = target.read_bytes()
     attest = session.attest
 
@@ -77,13 +92,10 @@ def test_graph_disk_edit_after_reviews_reaches_manual_stage(tmp_path, monkeypatc
             target.write_bytes(original + b"\n# disk edit after graph reviews\n")
 
     session.attest = after_review
-    try:
-        run = session.start(request(bench))
-        assert session.drive(run) == "paused"
-        assert session.agent_calls == ["literary_review", "ledger_audit"]
-        assert not session.backup_calls
-    finally:
-        target.write_bytes(original)
+    run = session.start(request(bench))
+    assert session.drive(run) == "paused"
+    assert session.agent_calls == ["literary_review", "ledger_audit"]
+    assert not session.backup_calls
 
 
 def test_identity_stable_across_processes_and_hash_seeds():

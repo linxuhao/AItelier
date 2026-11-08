@@ -306,5 +306,6 @@ def execution_progress(request: Request, row: dict) -> dict:
               "last_update", "task_count", "completed_count", "running_count",
               "failed_count", "pending_count", "task_summary", "cache_stats",
               "has_task_loop", "is_authoring", "repo_less", "step_count",
-              "completed_steps", "failed_steps", "active_step"}
+              "completed_steps", "failed_steps", "active_step",
+              "idle_seconds", "liveness_from", "stalled"}
     return {key: value for key, value in row.items() if key in fields}

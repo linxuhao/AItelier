@@ -149,6 +149,37 @@ def list_all_runs(
     return {"runs": [execution_progress(request, row) for row in rows]}
 
 
+_LIVENESS_TERMINAL_STATUSES = {"completed", "failed", "paused"}
+
+
+def _attach_liveness(rows: list[dict], pid_to_runs: dict[str, list[dict]], sf) -> None:
+    """Attach `idle_seconds`, `liveness_from` and `stalled` to every non-terminal row.
+
+    The run is chosen the way `enrich_project_status` chooses it — the newest
+    non-completed run, else the newest run of any status — from the list the
+    caller already fetched, so no second run scan happens here. The derivation
+    is `core.run_driver.run_liveness`, the same function `summarise_run` calls,
+    so the two surfaces cannot disagree about one run. Terminal rows get none of
+    these keys: a finished run has no liveness to report.
+    """
+    from core.run_driver import run_liveness
+    for r in rows:
+        status_prefix = (r.get("status") or "").split(":", 1)[0]
+        if status_prefix in _LIVENESS_TERMINAL_STATUSES:
+            continue
+        runs = pid_to_runs.get(r["project_id"]) or []
+        run = next((x for x in runs if x.get("status") != "completed"),
+                   runs[0] if runs else None)
+        if run is None:
+            # No skillflow run for this project: nothing to measure.
+            r.update({"idle_seconds": None, "liveness_from": "none", "stalled": False})
+            continue
+        live = run_liveness(sf, run)
+        r.update({"idle_seconds": live["idle_seconds"],
+                  "liveness_from": live["liveness_from"],
+                  "stalled": live["stalled"]})
+
+
 def _list_all_runs_uncached(owner, db, registry):
     rows = db.list_projects_with_stats(owner_email=owner)
     out = []
@@ -187,11 +218,14 @@ def _list_all_runs_uncached(owner, db, registry):
     # run is an inline/coding mode run with no token_usage traces.
     sf = get_skillflow()
     pid_to_uuids: dict[str, list[str]] = {}
+    pid_to_runs: dict[str, list[dict]] = {}
     for r in out:
         pid = r["project_id"]
         runs = sf.list_runs(project_id=pid)
         if runs:
             pid_to_uuids[pid] = [run["id"] for run in runs]
+            pid_to_runs[pid] = runs
+    _attach_liveness(out, pid_to_runs, sf)
     uuid_list = [uid for uids in pid_to_uuids.values() for uid in uids]
     if uuid_list:
         batch_stats = compute_cache_stats_batch(uuid_list)

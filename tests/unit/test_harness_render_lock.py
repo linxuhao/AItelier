@@ -12,6 +12,7 @@ charged the time spent AFTER ownership to the same limit.
 """
 import ast
 import pathlib
+import threading
 import time
 
 import pytest
@@ -164,6 +165,109 @@ def test_a_non_positive_limit_is_refused_at_once_and_says_it_may_not_queue(
     assert "op-zero" not in rig.ops_with_rows(), (
         "an owner row was made for a request refused before ownership")
     assert [op for _, op in rig.rendered] == ["op-holder"], rig.rendered
+
+
+# ── a-post-ownership-lock-wait-is-bounded (postlock-wait) ───────────────────
+# Once a request OWNS the render row it still meets two waits: the process render
+# lock, then the cross-process render-effect flock. Both used to be unbounded, so
+# an owner could sit there past its caller's socket. Each bound is a module
+# constant; the tests set it small and drive the real `_Handler.do_POST` through
+# `rig`. `render_wait_timeout_sec` is deliberately absent here: that limit bounds
+# only the owner-row QUEUE wait and must not be charged for these waits.
+
+
+def _assert_post_ownership_refusal(rig, out, blocked_by):
+    """The shared truth every post-ownership bound must answer with."""
+    assert out.get("code") == 409, (
+        f"a request that owned the render and timed out on {blocked_by} must "
+        f"answer 409, not hang or render: {out!r}")
+    body = out["body"]
+    assert body["error"] == "render owner wait timed out", body
+    assert body["blocked_by"] == blocked_by, body
+    assert "nothing was rendered" in body["detail"], body
+    assert body["needs_reconciliation"] is False, body
+    # The owner row was made (the request owned the render) and then released
+    # with a reason that says it was NOT rendered -- not left active, not
+    # reported as completed.
+    rows = rig.settled_snapshot()
+    mine = [r for r in rows if r["operation_id"] == "op-bounded"]
+    assert len(mine) == 1, rows
+    assert mine[0]["status"] == "released", mine
+    assert (mine[0]["reason"] or "").startswith("not rendered"), mine
+    assert blocked_by in (mine[0]["reason"] or ""), mine[0]["reason"]
+    # No render body ran for this request.
+    assert all(op != "op-bounded" for _, op in rig.rendered), rig.rendered
+
+
+def test_a_held_process_render_lock_is_bounded_and_answers_not_rendered(rig, monkeypatch):
+    """Process lock held by another thread; the request owns the row, then gives up."""
+    gh = rig.gh
+    monkeypatch.setattr(gh, "RENDER_PROCESS_LOCK_WAIT_SEC", 0.3)
+    # Hold the process render lock from another thread, with no owner row, so
+    # the request's own owner acquisition succeeds and it reaches the
+    # process-lock wait.
+    gate = threading.Event()
+    held = threading.Event()
+
+    def hold():
+        gh._Handler._RENDER_LOCK.acquire()
+        held.set()
+        gate.wait(30)
+        gh._Handler._RENDER_LOCK.release()
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(10), "the test could not take the process render lock"
+    started = time.monotonic()
+    try:
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-bounded"), timeout=20)
+        thread.join(15)
+        elapsed = time.monotonic() - started
+    finally:
+        gate.set()
+        holder.join(10)
+    assert not thread.is_alive(), (
+        f"the request did not answer while the process render lock was held "
+        f"({elapsed:.1f}s): this is the unbounded wait")
+    assert elapsed < 10.0, f"the bound of 0.3s took {elapsed:.2f}s to answer"
+    _assert_post_ownership_refusal(rig, out, "process_render_lock")
+    assert "process render lock" in out["body"]["detail"], out["body"]
+    assert rig.rendered == [], rig.rendered
+
+
+def test_a_held_render_effect_lock_is_bounded_and_answers_not_rendered(rig, monkeypatch):
+    """Effect flock held through a SEPARATE descriptor in this process."""
+    import fcntl
+
+    gh = rig.gh
+    monkeypatch.setattr(gh, "RENDER_EFFECT_LOCK_WAIT_SEC", 0.3)
+    # flock belongs to the open file description, so a second descriptor opened
+    # in this same process conflicts with it: the bounded wait really sees a
+    # held lock. No second harness process is needed.
+    path = gh.RENDER_EFFECT_LOCK
+    holder_fd = open(path, "a+b")
+    fcntl.flock(holder_fd.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        thread, out = rig.post_in_thread(
+            "/script", rig.payload("op-bounded"), timeout=20)
+        thread.join(15)
+        elapsed = time.monotonic() - started
+    finally:
+        fcntl.flock(holder_fd.fileno(), fcntl.LOCK_UN)
+        holder_fd.close()
+    assert not thread.is_alive(), (
+        f"the request did not answer while the render-effect lock was held "
+        f"({elapsed:.1f}s): this is the unbounded flock wait")
+    assert elapsed < 10.0, f"the bound of 0.3s took {elapsed:.2f}s to answer"
+    _assert_post_ownership_refusal(rig, out, "render_effect_lock")
+    assert "render-effect lock" in out["body"]["detail"], out["body"]
+    assert rig.rendered == [], rig.rendered
+    # The process lock this request took must have been released again, or the
+    # next render would wedge behind a lock nobody holds.
+    assert not gh._Handler._RENDER_LOCK.locked(), (
+        "the process render lock was left held after the effect-lock refusal")
 
 
 @pytest.mark.parametrize("limit", ["absent", None])

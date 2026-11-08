@@ -662,9 +662,16 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
 
     The queue wait is declared as render_wait_timeout_sec = RENDER_QUEUE_SHARE
     x timeout, so the sidecar gives up on the queue before our socket expires.
-    Our socket therefore times out only after the render started, and that
-    stays a measured gate_timeout. A render that starts after waiting w seconds
-    has timeout - w seconds left.
+    A request that gets past that queue owns the render row, and then waits on
+    the sidecar for the process render lock and then the cross-process
+    render-effect lock (postlock-wait). Each of those waits is bounded by its own sidecar
+    constant, RENDER_PROCESS_LOCK_WAIT_SEC and RENDER_EFFECT_LOCK_WAIT_SEC, not
+    by render_wait_timeout_sec. If either bound runs out first, the sidecar
+    releases the owner row as not rendered and answers 409 (the request is then
+    a refusal, not a gate_timeout). Only if our socket expires before that bound
+    does the caller see gate_timeout while nothing has rendered: that is a
+    socket that outlived the sidecar's bound, not a render that started. A
+    render that starts after waiting w seconds has timeout - w seconds left.
     """
     payload = dict(payload)
     payload.setdefault("timeout", authored_caller_timeout(payload.get("spec"), timeout))

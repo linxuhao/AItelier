@@ -151,6 +151,18 @@ RENDER_OWNER_HEARTBEAT_STALE_SEC = 120.0
 # How often a queued request re-reads the durable owner table and checks that
 # its caller is still connected.
 RENDER_OWNER_WAIT_POLL_SEC = 0.25
+# The two waits a request meets AFTER it already owns the render row: the
+# process render lock, then the cross-process render-effect lock. They are
+# bounded so a request that owns the row cannot hang past its caller's socket
+# (the play-test tool then reports a gate_timeout for a render that never ran).
+# They are NOT render_wait_timeout_sec: that bounds the queue wait for the owner
+# row only, and a free lock is never charged to it. The defaults are generous
+# on purpose -- a legitimate render holds these locks for minutes -- so they
+# only bite on a genuinely wedged holder.
+RENDER_PROCESS_LOCK_WAIT_SEC = 3600.0  # postlock-wait: bound on the process lock after ownership
+RENDER_EFFECT_LOCK_WAIT_SEC = 3600.0   # postlock-wait: bound on the effect flock after ownership
+# How often a bounded post-ownership wait re-tries its lock.
+RENDER_LOCK_WAIT_POLL_SEC = 0.25
 
 
 @contextmanager
@@ -202,14 +214,32 @@ def _operation_admission_fence(*, blocking: bool = True):
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _acquire_render_effect_lock(*, blocking: bool = True):
+def _acquire_render_effect_lock(*, blocking: bool = True, timeout: float | None = None):
+    """Take the cross-process render-effect flock.
+
+    `blocking=False` raises BlockingIOError at once. `timeout=None` keeps the
+    unbounded blocking acquire. A `timeout` (seconds) polls a non-blocking
+    attempt until it succeeds or the bound runs out, then raises
+    BlockingIOError -- so a request that already owns the render row can never
+    wait on this lock forever.
+    """
     path = Path(RENDER_EFFECT_LOCK)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stream = path.open("a+b")
     os.chmod(path, 0o600)
-    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     try:
-        fcntl.flock(stream.fileno(), flags)
+        if timeout is None:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        else:
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while True:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(RENDER_LOCK_WAIT_POLL_SEC)
     except BaseException:
         stream.close()
         raise
@@ -271,6 +301,20 @@ class RenderOwnerConflict(RuntimeError):
 
 class RenderWaitAbandoned(RuntimeError):
     """The caller disconnected while queued, so its render must never start."""
+
+
+class _PostOwnershipWaitTimedOut(RuntimeError):
+    """A request that already owned the render row could not take a lock in time.
+
+    `blocked_by` is "process_render_lock" or "render_effect_lock"; `waited_sec`
+    and `bound` are what the wait actually ran and the limit it was given.
+    """
+
+    def __init__(self, blocked_by: str, waited_sec: float, bound: float):
+        super().__init__(f"{blocked_by} not acquired within {bound:.0f}s")
+        self.blocked_by = blocked_by
+        self.waited_sec = waited_sec
+        self.bound = bound
 
 
 def _render_owner_conflict(row: dict) -> dict:
@@ -406,6 +450,31 @@ def _wait_timed_out(elapsed: float, wait_timeout: float, waited_for: list,
             "waited_sec": round(elapsed, 4), "wait_timeout_sec": wait_timeout,
             "detail": (f"queued {elapsed:.2f}s behind {where}; the request's own "
                        f"render_wait_timeout_sec ({wait_timeout}) ran out: {tail}")}
+
+
+def _post_ownership_wait_refusal(blocked_by: str, waited_sec: float, bound: float) -> dict:
+    """The refusal for a request that owned the render row but could not take a lock.
+
+    Reached only AFTER the owner row was made, so the caller releases that row
+    with a "not rendered" reason before answering. `blocked_by` names which lock
+    was not taken in time: "process_render_lock" or "render_effect_lock". The
+    `error` spelling is "render owner wait timed out" -- the one the play-test
+    tool already maps to `render_owner_wait_timed_out` -- and `owner_kind` is
+    "active" because the holder in the way is a live render. The request's own
+    `render_wait_timeout_sec` is not involved, so it is not named as the limit.
+    """
+    lock_name = ("the process render lock" if blocked_by == "process_render_lock"
+                 else "the cross-process render-effect lock")
+    return {"error": "render owner wait timed out", "owner_kind": "active",
+            "owner_id": None, "waited_for_owner_ids": [],
+            "deployment_fence_held": False, "needs_reconciliation": False,
+            "blocked_by": blocked_by,
+            "post_ownership_wait_sec": round(waited_sec, 4),
+            "post_ownership_wait_bound_sec": bound,
+            "detail": (f"this request already owned the render, but waited "
+                       f"{waited_sec:.2f}s for {lock_name} (bound {bound:.0f}s) and "
+                       f"did not get it: nothing was rendered, and its owner row was "
+                       f"released as not rendered")}
 
 
 def _acquire_render_owner_without_queuing(project_id: str, run_id: str,
@@ -7357,12 +7426,47 @@ class _Handler(BaseHTTPRequestHandler):
                       f"{owner_wait['render_owner_waited_for_owner_ids']}", flush=True)
             heartbeat = _start_owner_heartbeat(owner["owner_id"], owner["generation"])
             waited = time.time()
+            process_locked = False
             try:
+                # Both post-ownership waits are BOUNDED (see
+                # RENDER_PROCESS_LOCK_WAIT_SEC / RENDER_EFFECT_LOCK_WAIT_SEC). A
+                # request that already owns the render row must answer rather
+                # than hang past its caller's socket.
+                post_started = time.monotonic()
                 with _RenderLockWait():
-                    self._RENDER_LOCK.acquire()
-                effect_lock = _acquire_render_effect_lock()
+                    process_locked = self._RENDER_LOCK.acquire(
+                        timeout=RENDER_PROCESS_LOCK_WAIT_SEC)
+                if not process_locked:
+                    raise _PostOwnershipWaitTimedOut(
+                        "process_render_lock", time.monotonic() - post_started,
+                        RENDER_PROCESS_LOCK_WAIT_SEC)
+                effect_started = time.monotonic()
+                try:
+                    effect_lock = _acquire_render_effect_lock(
+                        timeout=RENDER_EFFECT_LOCK_WAIT_SEC)
+                except BlockingIOError:
+                    raise _PostOwnershipWaitTimedOut(
+                        "render_effect_lock", time.monotonic() - effect_started,
+                        RENDER_EFFECT_LOCK_WAIT_SEC)
+            except _PostOwnershipWaitTimedOut as exc:
+                # Nothing was rendered. Release exactly what THIS request took:
+                # the process lock only if this request acquired it (a bare
+                # `.locked()` would also see another thread's hold).
+                if process_locked:
+                    self._RENDER_LOCK.release()
+                _stop_owner_heartbeat(heartbeat)
+                release_reason = (f"not rendered: waited {exc.waited_sec:.2f}s for "
+                                  f"{exc.blocked_by} (bound {exc.bound:.0f}s)")
+                try:
+                    release_render_owner(owner["owner_id"], owner["generation"],
+                                         release_reason)
+                except Exception as release_exc:
+                    print(f"[harness] render owner release failed: {release_exc}", flush=True)
+                print(f"[harness] {self.path} {operation_id}: {release_reason}", flush=True)
+                return self._send(409, _post_ownership_wait_refusal(
+                    exc.blocked_by, exc.waited_sec, exc.bound))
             except Exception as exc:
-                if self._RENDER_LOCK.locked():
+                if process_locked:
                     self._RENDER_LOCK.release()
                 _stop_owner_heartbeat(heartbeat)
                 try:

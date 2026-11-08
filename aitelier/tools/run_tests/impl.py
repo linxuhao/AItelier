@@ -1634,15 +1634,17 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
     return _unmeasured_declaration(str(gate.get("output", ""))) is not None
 
 
-# The smallest recorded wait this block calls contention when the queue named
-# no owner. `render_owner_wait_sec` starts counting when the request begins
-# TAKING ownership, so an uncontended acquisition still records one owner-table
-# round trip: measured 0.0115s through the real harness (`tests/gate_fixture`,
-# `docker/godot/godot_harness.py:acquire_render_owner_waiting`). Treating any
-# `> 0` as a wait made every clean run report `state: "waited"` and print a
-# contention sentence — a surface that cries wolf on the runs it exists to
-# certify. The harness itself only logs a wait above 1.0s, so the same second
-# is the floor here. An OWNER id named by the queue is contention whatever the
+# The smallest wait ONE request may record and still be called contention when
+# the queue named no owner. The floor is judged per request: the largest single
+# recorded wait of the run, never the sum over its requests. `render_owner_wait_sec`
+# starts counting when a request begins TAKING ownership, so an uncontended
+# acquisition still records one owner-table round trip: measured 0.0115s per
+# request through the real harness (`tests/gate_fixture`,
+# `docker/godot/godot_harness.py:acquire_render_owner_waiting`). A busy run of
+# many clean requests sums past one second without any request waiting at all,
+# so judging the sum cried wolf on the runs this block exists to certify. The
+# harness itself only logs a single wait above 1.0s, which is the same per-request
+# second used here. An OWNER id named by the queue is contention whatever the
 # seconds: the request really did queue behind a live owner.
 RENDER_CONTENTION_WAIT_FLOOR_SEC = 1.0
 
@@ -1656,18 +1658,22 @@ RENDER_CONTENTION_UNREPORTED = "unreported"
 def _render_contention(admission: dict) -> dict:
     """What the admission relay's own records say this gate waited behind.
 
-    Built ONLY from the `admission` summary (`gate_admission.admission_summary`):
+    Built ONLY from the `admission` summary (`gate_admission.admission_summary`).
     `queued_behind` names the render owners the queue reported for this run's
-    requests, and `render_owner_wait_sec` is their summed wait. Nothing is read
-    from the engine's lifecycle or from prose. A run that waited behind nobody
-    is `owners: []`, `wait_sec: 0.0`, `state: "none"`. The state is `waited`
-    when the queue named an owner, or when the recorded wait reaches
-    `RENDER_CONTENTION_WAIT_FLOOR_SEC` (an uncontended acquisition records a
-    few milliseconds, and reporting those as a wait made every clean run read
-    as contended). `wait_sec` is the wait this block attributes to contention —
-    `0.0` when nothing was contended; the raw recorded number stays in
-    `admission.render_owner_wait_sec` either way. Outcome classification never
-    reads this block: it names the contention, nothing more.
+    requests. The state is `waited` when the queue named an owner, or when ONE
+    request of the run recorded a wait of `RENDER_CONTENTION_WAIT_FLOOR_SEC` or
+    more. The floor is judged on that single request's wait, read from
+    `admission["requests"]`, never on the run's sum: a busy run of many clean
+    requests sums past the floor with no request queued at all, and calling
+    that contention is the false surface this block exists to remove. A run
+    that waited behind nobody is `owners: []`, `wait_sec: 0.0`, `state: "none"`.
+
+    `wait_sec` is, when the state is `waited`, the number `admission_summary`
+    recorded as `render_owner_wait_sec` (the run's summed wait, unmodified and
+    unrounded beyond its own rounding); it is `0.0` when nothing was contended.
+    A request REFUSED after queueing keeps its wait, since it is a record like
+    any other. Outcome classification never reads this block: it names the
+    contention, nothing more.
     """
     admission = admission or {}
     owners = list(dict.fromkeys(str(owner) for owner in admission.get("queued_behind") or []))
@@ -1675,7 +1681,11 @@ def _render_contention(admission: dict) -> dict:
         wait = float(admission.get("render_owner_wait_sec") or 0.0)
     except (TypeError, ValueError):
         wait = 0.0
-    waited = bool(owners) or wait >= RENDER_CONTENTION_WAIT_FLOOR_SEC
+    largest = 0.0
+    for record in admission.get("requests") or []:
+        if isinstance(record, dict):
+            largest = max(largest, gate_admission.recorded_render_wait(record))
+    waited = bool(owners) or largest >= RENDER_CONTENTION_WAIT_FLOOR_SEC
     return {"owners": owners, "wait_sec": round(wait, 3) if waited else 0.0,
             "state": "waited" if waited else "none"}
 

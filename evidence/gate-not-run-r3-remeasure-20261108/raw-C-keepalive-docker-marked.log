@@ -1,0 +1,70 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+____ test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_render_after_a_queue_lo0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d3f7948a870>
+
+    @pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
+    def test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered(
+            tmp_path, monkeypatch):
+        """Queue 4 s, render 1 s, client timeout 2 s."""
+        gate, elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=1.0,
+                                          queue=4.0, client_timeout=2)
+>       assert elapsed > 4.0
+E       assert 0.5028572282753885 > 4.0
+
+tests/unit/test_gate_admission_keepalive.py:60: AssertionError
+____________ test_the_client_timeout_still_bounds_the_render_itself ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_client_timeout_still_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d3f79493470>
+
+    @pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
+    def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch):
+        """Queue 1.5 s, render 3 s, client timeout 2 s: once admitted, the gate's
+        own timeout runs again, and a render longer than it is not waited out."""
+        gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=3.0,
+                                           queue=1.5, client_timeout=2)
+>       assert gate["returncode"] == 2, gate["output"]
+E       AssertionError: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused
+E       assert -1 == 2
+
+tests/unit/test_gate_admission_keepalive.py:78: AssertionError
+_______________ test_no_keepalive_when_admission_cannot_be_seen ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_no_keepalive_when_admissi0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7d3f79494a70>
+
+    @pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
+    def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _NoLifecycle)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv("GODOT_BUILDER_URL", f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "1")
+        monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.2")
+        try:
+            gate = rt._run_repo_gate(_repo(tmp_path))
+        finally:
+            server.shutdown()
+            server.server_close()
+>       assert gate["returncode"] == 2
+E       assert -1 == 2
+
+tests/unit/test_gate_admission_keepalive.py:123: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered
+FAILED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself
+FAILED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen
+3 failed, 1 deselected, 1 warning in 3.32s

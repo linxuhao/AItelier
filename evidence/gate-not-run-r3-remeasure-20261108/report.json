@@ -1,0 +1,54 @@
+{
+  "items": {
+    "1": {
+      "claim": "A render longer than its route's client timeout is still orphaned and reported as not run. 2 of the retained playtests ran past 3600 s.",
+      "verdict": "not-measurable-here",
+      "owner": "/home/linxuhao/gate-window-20261107/wtree/tools/godot_gate.py (GAME repository, not part of this repository)",
+      "owner_evidence": "game-side client socket: godot_gate.py:1822 and :1848 pass 3600 as the per-read urlopen timeout (http_transport at :246-250). Scratch copy only; the game's own tree is not readable from here.",
+      "this_repo_side": "keepalive relay: aitelier/gate_admission.py:664-672 sends 100 Continue until admission, then stops; NOT_RUN_STATES at gate_admission.py:114; orphan decision at aitelier/tools/run_tests/impl.py:1757.",
+      "retained_playtest_measurement": "70 playtest stages measured from stages.playtest.started_at/finished_at in ~/.AItelier/gate-reports/*/manifest.json (113 manifests, 0 parse failures). Over 3600 s: 1 (wuxia-godot-gate-o_fr2y_w, 6559.6 s, status=aborted). Largest answered playtest: 3476.2 s (wuxia-godot-gate-7kf51nvv, response_received). The claim's '2 playtests past 3600 s' is NOT reproduced: one aborted run, zero answered runs past the client timeout.",
+      "why_not_a_verdict_here": "Whether a render past 3600 s is cut depends on the game-side urlopen read timeout, which lives outside this repository. Relay-side admission behaviour is pinned (container A, keepalive watch), but the docker-marked end-to-end arms (test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered, ::test_the_client_timeout_still_bounds_the_render_itself) could not run in the disposable container (see raw-C).",
+      "existing_witnesses": ["tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered (docker-marked, NOT run here)", "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself (docker-marked, NOT run here)", "tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen (docker-marked, NOT run here)"],
+      "repository_fix_surface": "none in this repository for the game-side socket; the relay side is already bounded by impl.py:1306 REPO_GATE_TIMEOUT=12600 as upstream_timeout (impl.py:1426-1427)."
+    },
+    "2": {
+      "claim": "The 5400 s whole-gate timeout can still kill mid-render. With recent maximums, the worst case is 5657 s.",
+      "verdict": "already-fixed",
+      "changed_by": "bf274721a7 gate: raise the whole-gate deadline to 12600 s and contain it in the episode (2026-11-08 12:24:39 +0000)",
+      "file_line": "aitelier/tools/run_tests/impl.py:1306 REPO_GATE_TIMEOUT = 12600; impl.py:1607 REPO_GATE_UNMEASURED_ATTEMPTS = 1; core/gate_deferral.py:65 GATE_DEFERRAL_EPISODE_MAX_SECONDS default 12600 (clamped by episode_max_seconds() at :110-115).",
+      "probe_distinguishing": "container G (pre-raise tree bf274721a7^): REPO_GATE_TIMEOUT=5400, episode_max_seconds=10800.0. HEAD (container F): REPO_GATE_TIMEOUT=12600 and episode_max_seconds=12600.0 (see raw-F; tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded and ::test_the_whole_gate_deadline_fits_inside_the_episode_ceiling passed).",
+      "worst_case_arithmetic": "The claimed 5657 s does not appear anywhere in this repository (grep for 5657 returns no hit). The old per-step worst case, 3 x 5400 + 2 x 60 = 16320 s (impl.py:1597), was removed by REPO_GATE_UNMEASURED_ATTEMPTS = 1. Current per-step hold equals one gate run, bounded by REPO_GATE_TIMEOUT=12600.",
+      "still_present_outside_repo": "the game repository's own scratch copy godot_gate.py:1651 PYTHON_SUITE_TIMEOUT = 5400 (python stage, subprocess.run timeout at :1666). That is a game-side kill in a file outside this repository: not-measurable-here for that kill, not a claim about AItelier.",
+      "existing_witnesses": ["tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run", "tests/unit/test_gate_deferral_execution_points.py::test_the_whole_gate_deadline_fits_inside_the_episode_ceiling", "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"]
+    },
+    "3": {
+      "claim": "A gate that sends render_wait_timeout_sec: null has no queue limit except that 5400 s.",
+      "verdict": "already-fixed",
+      "changed_by": "87879f0b44 Relay: an explicit null render wait is 'sent none', so it gets the bound (2026-11-07 09:03:45 +0000)",
+      "file_line": "aitelier/gate_admission.py:483-486 `if payload.get(\"render_wait_timeout_sec\") is None:` injects self._render_wait and records render_wait_injected; pre-fix code at 87879f0b44^ line 287 tested `\"render_wait_timeout_sec\" not in payload`, which forwards an explicit null unchanged.",
+      "probe_distinguishing": "container D ran tests/unit/test_repo_gate_admission.py::test_a_gate_that_sends_its_own_wait_keeps_it against the PRE-FIX relay tree (probe-trees/null-prefix): FAILED with `assert None == 7` (render_wait_timeout_sec: None reached the harness). HEAD passes the same test in container A (raw-A). The test discriminates.",
+      "residual_path_check": "no other path forwards a null to the harness: the playtest tool posts with setdefault (aitelier/tools/godot_playtest/impl.py:706) and fixed payload keys (impl.py:873-886); godot_playtest_scenario posts a fixed dict (aitelier/tools/godot_playtest_scenario/impl.py:152). Harness-side, a null wait is still read as unbounded (godot_harness.py:7427) but only a caller bypassing the relay can send one, and no in-repo caller does.",
+      "existing_witnesses": ["tests/unit/test_repo_gate_admission.py::test_a_gate_that_sends_its_own_wait_keeps_it", "tests/unit/test_harness_render_lock.py::test_an_absent_or_null_limit_keeps_the_ordinary_bounded_queue[None]", "tests/unit/test_harness_render_lock.py::test_an_absent_or_null_limit_keeps_the_ordinary_bounded_queue[absent]"],
+      "repository_fix_surface": "none outstanding."
+    },
+    "4": {
+      "claim": "Two requests sharing one operation id fool the admission check.",
+      "verdict": "already-fixed",
+      "changed_by": "8eb1d8b18d gate_admission: two requests sharing one operation_id are not one admission (2026-11-07 15:24:36 +0000), hardened by 753d1c03b6 and 65fb4d887a",
+      "file_line": "aitelier/gate_admission.py:425-426 `if (self._stopping or operation in self._shared_operations or record.get(\"admission_witnessed\") is False): record[\"admission_witnessed\"] = False; return False` (inside _claim_admission at :411-437); shared-id marking in _enter_operation at :374-389.",
+      "probe_distinguishing": "container E ran tests/unit/test_gate_admission_shared_operation_id.py against the PRE-FIX tree (probe-trees/shared-prefix, 8eb1d8b18d^, which has no admission_witnessed): 6 FAILED, 2 passed. HEAD (container A, raw-A) passes all 8. Failures include test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[*] (4 arms) and test_a_request_in_flight_when_the_relay_stops_claims_no_row.",
+      "partial_boundary": "NOT fully closed. The file's own docstring (tests/unit/test_gate_admission_shared_operation_id.py:27-37) states an unwitnessed duplicate is still unbounded by the gate's client timeout; its bound is upstream_timeout plus the harness render wait. Bounding it needs a per-request nonce from the harness (docker/godot/godot_harness.py mints owner_id), which this change does not touch. That is an unbounded-wait residue, not an admission-check failure.",
+      "existing_witnesses": ["tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id", "tests/unit/test_gate_admission_shared_operation_id.py::test_a_row_this_request_alone_can_claim_is_still_admitted", "tests/unit/test_gate_admission_shared_operation_id.py::test_a_later_request_with_the_same_id_is_admitted_after_the_first_answered", "tests/unit/test_gate_admission_shared_operation_id.py::test_another_requests_shared_id_does_not_suppress_a_unique_one", "tests/unit/test_gate_admission_shared_operation_id.py::test_a_request_in_flight_when_the_relay_stops_claims_no_row"]
+    }
+  },
+  "measured_at": "2026-11-08T13:50:00Z",
+  "artifact": "evidence/gate-not-run-r3-remeasure-20261108/report.json (this file); raw logs raw-<arm>-<slug>.log beside it; probes.json beside it carries, per arm A-G, the exact docker run argv, the pytest/command argv, the selection, the mounted tree, the exit code and the log filename, all captured from the invocation that wrote the committed log. Pre-fix probe trees were disposable /tmp copies built with `git archive <sha> | tar -x -C /tmp/<dir>` (the base commit is recorded in probes.json tree_base); they are not committed.",
+  "probes": "evidence/gate-not-run-r3-remeasure-20261108/probes.json",
+  "verdicts": {
+    "1": "not-measurable-here",
+    "2": "already-fixed",
+    "3": "already-fixed",
+    "4": "already-fixed"
+  },
+  "container_form": "docker run -d --name <unique> --network none --cpus 2 --memory 2g --init -u 1000:1000 -v <worktree>:/w -v /home/linxuhao/AItelier:/app:ro -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider <selection>. Probes A,B,F ran at HEAD; D,E,G ran against probe-trees (same flags, mounted tree differs). Containers C ran -m docker and was refused by the gate's own isolation check (IsolationUnavailable), recorded as unmeasurable in raw-C."
+}

@@ -93,7 +93,15 @@ drives both the real markers (including a genuinely running
 
 **Measured on this host, 2026-11-08.** The installed copy was sha256
 `95b1255073bd09bbb8f77f69ad3c8113e6e8ee8ed43cda58c1164343e9fae7e6` (70521 B,
-installed from git `8a755972cc`, mtime 2026-10-20) -- **superseded**. The reviewed
+mtime 2026-10-20) -- **superseded**. Its provenance is identified by digest
+equality, not by a remembered commit: those exact bytes are
+`35b20a1431:scripts/gate_queue.py`. `8a755972cc` is **not** their source. It is
+the exact 8a755 Source the C01–C06 controls below retain as their pinned
+baseline; its `scripts/gate_queue.py` is 24804 B, sha256
+`57752cb17ee37df089c9b1c4d641a5ebb81edf8f15c4b9bb347c781f86f2ea9c`, and the same
+suite measures **17 failed / 47 passed** against it (the director's 2026-11-08
+re-measurement, `director-remeasure.log` section D) -- so no reader may take it
+as this host's installed provenance. The reviewed
 `7e9f53a8c1:scripts/gate_queue.py` is sha256
 `409f0779a8b32ca929f85bfbd0045c12df2f09955e5fbb0bca0fd993fc808e43` (73630 B).
 Before installing, the settle measurement was: no live daemon (`daemon.lock`

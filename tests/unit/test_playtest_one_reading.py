@@ -395,6 +395,139 @@ def test_any_name_with_a_slash_is_a_path_the_probe_refuses():
     assert "_is_path(node_name)" in _probe_func("_eval_assert")
 
 
+# ── the aim call site: a written target is never resolved by its leaf ────
+# G3 answers a written path with a search for that path's leaf: `_resolve` is
+# handed `node_name.get_file()`, or a helper does the deriving and hands back
+# the leaf. Neither adds a tree lookup (see _LOOKUP above) and neither touches
+# _is_path, so the guard has to be about the ARGUMENT. R1: every `_resolve`
+# call is given a name the spec wrote — a bare parameter name, a mapping index
+# or a str() of one — never a conditional, a call, a member access or a join.
+# R2: every string derivation the probe still keeps is named here with its
+# subject, so a new one (inside a helper as much as inline) has to be added to
+# this table before it can exist.
+
+_RESOLVE_ARG = (r"^(?:node_name|name)$",
+                r"^[A-Za-z_]\w*\[\"[^\"]*\"\]$",
+                r"^str\([A-Za-z_]\w*\[\"[^\"]*\"\]\)$")
+
+# Tokens that carve a name or a path out of a string. `replace`, `join` and the
+# predicates are not here: they never produce a name the probe then resolves,
+# and the probe keeps two JSON-text `replace`s that are not derivations.
+_DERIVATION_TOKENS = ("get_slice", "split", "substr", "path_join", "get_file",
+                      "get_basename", "get_extension", "get_base_dir",
+                      "trim_prefix", "trim_suffix", "strip_edges",
+                      "simplify_path", "to_lower", "to_upper")
+
+# (token, the expression it is called on). A chained derivation folds to its own
+# subject, so `attr.get_slice(".", 0).get_slice("[", 0)` is two rows on `attr`.
+_DERIVATIONS = frozenset((
+    ("split", 'OS.get_environment("AITELIER_PROBE_CAPTURE_AT")'),
+    ("path_join", "_capture_dir"),
+    ("substr", "txt"),
+    ("split", "spec"),
+    ("split", "t"),
+    ("get_slice", "attr"),
+))
+
+# A subject that is a node name would be a derivation whose whole point is to
+# turn the written target into something else, which is what G3 does.
+_NODE_NAME_IDENTS = frozenset(("node", "node_name", "name", "target", "leaf",
+                               "path", "w", "record", "_input_declaration"))
+
+
+def _is_spec_written_name(arg: str) -> bool:
+    import re
+    return any(re.match(p, arg) for p in _RESOLVE_ARG)
+
+
+def _resolve_calls():
+    """(probe line, argument text, source line) for every `_resolve(...)` call."""
+    import re
+    src = gh._PROBE_GD
+    out = []
+    for m in re.finditer(r"_resolve\s*\(", src):
+        line_start = src.rfind("\n", 0, m.start()) + 1
+        line_end = src.find("\n", m.start())
+        line = src[line_start:len(src) if line_end < 0 else line_end]
+        if line.strip().startswith("#"):
+            continue  # a commented-out call resolves nothing
+        if re.search(r"\bfunc\s+$", src[line_start:m.start()]):
+            continue  # the definition, not a call
+        depth, i = 1, m.end()
+        while i < len(src) and depth:
+            depth += {"(": 1, ")": -1}.get(src[i], 0)
+            i += 1
+        out.append((src.count("\n", 0, m.start()) + 1, src[m.end():i - 1].strip(),
+                    line.strip()))
+    return out
+
+
+def _derivation_subject(line: str, dot: int) -> str:
+    """The expression a derivation is called on, chained derivations folded."""
+    import re
+    start, depth = dot, 0
+    while start > 0:
+        ch = line[start - 1]
+        if ch in ")]":
+            depth += 1
+        elif ch in "([":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and not (ch.isalnum() or ch in "_."):
+            break
+        start -= 1
+    subject = line[start:dot]
+    while subject.endswith(")"):
+        depth, open_at = 0, -1
+        for i in range(len(subject) - 1, -1, -1):
+            if subject[i] == ")":
+                depth += 1
+            elif subject[i] == "(":
+                depth -= 1
+                if depth == 0:
+                    open_at = i
+                    break
+        if open_at < 0:
+            break
+        head = subject[:open_at]
+        chained = re.search(r"\.(%s)$" % "|".join(_DERIVATION_TOKENS), head)
+        if not chained:
+            break
+        subject = head[:chained.start()]
+    return subject
+
+
+def _derivations():
+    """(probe line, token, subject, source line) for every derivation."""
+    import re
+    pattern = re.compile(r"\.(%s)\s*\(" % "|".join(_DERIVATION_TOKENS))
+    out = []
+    for n, line in enumerate(gh._PROBE_GD.splitlines(), 1):
+        code = line.strip()
+        if code.startswith("#"):
+            continue
+        for m in pattern.finditer(line):
+            out.append((n, m.group(1), _derivation_subject(line, m.start()), code))
+    return out
+
+
+def test_the_probe_resolves_only_a_name_the_spec_wrote():
+    """R1: a leaf derived from the written target never reaches `_resolve`.
+    R2: the derivations the probe keeps are exactly the named ones."""
+    unspelled = [(n, arg, code) for n, arg, code in _resolve_calls()
+                 if not _is_spec_written_name(arg)]
+    assert unspelled == [], "\n".join(
+        "probe line %d hands _resolve a name the spec did not write: %s"
+        % (n, code) for n, _, code in unspelled)
+    assert not {subject for _, subject in _DERIVATIONS} & _NODE_NAME_IDENTS, (
+        "a derivation on a node name is enumerated as legitimate")
+    kept = {(token, subject) for _, token, subject, _ in _derivations()}
+    assert kept == _DERIVATIONS, (
+        "probe derivations this table does not name: %r; named but gone: %r"
+        % (sorted(kept - _DERIVATIONS), sorted(_DERIVATIONS - kept)))
+
+
 # ── shapes from the r1 review (R/battery.py, verbatim) ───────────────────
 
 from aitelier.strict_yaml import load_yaml_strict  # noqa: E402

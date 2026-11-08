@@ -138,9 +138,12 @@ The census is **scoped to that command line**. The same eight files hold **six f
 SIGABRTs** from the image's one-shot entrypoint `python -m immich_ml.sessions.prepare` — 2026-11-01 03:05:41, 03:05:45, 03:08:00 and 03:59:36, and
 2026-11-02 13:08:44 and 23:40:27 — same `/usr/bin/python3.12`, same signal 6, same core store, so the
 image's total is **52 `immich_ml` SIGABRTs across the same eight dates**. Those six do **not** each
-have a reset of their own: two sit one second before one (indices 109 at 03:08:01 and 120 at 13:08:45),
-one coincides with the serving worker's reset(113), one shares reset(121), and 2026-11-01 03:05:41 has
-no reset within 11 s. Only the 46
+have a reset of their own: 03:08:00 and 13:08:44 sit one second before reset(109) and reset(120), and
+no serving-worker event claims either of those; 03:59:36 coincides with reset(113) and 23:40:27 sits
+one second before reset(121), each of which is also the nearest reset of a serving-worker event; and
+2026-11-01 03:05:41 and 03:05:45 have **no** reset within 2 s — the nearest for both is reset(108),
+11 s and 15 s earlier — so **two** of the six fall outside the 2 s window and one of those two outside
+11 s (`verify_prepare_accounting.py`, output in `prepare-accounting.log`). Only the 46
 above serve models on port 3003; the six change the recurrence count, not the owner. A re-run that
 drops this filter reproduces 52, not 46.
 
@@ -311,9 +314,11 @@ inside the failing period.
   **197 G size, 120 G used, 69 G available, 64 % used**. `df -B1 /`: 210,779,168,768 total /
   73,219,416,064 available (127,857,930,240 used). Re-measured at 2026-11-08T21:08:36Z, unchanged in
   substance: 127,859,322,880 used / 73,218,023,424 available, still 69 G / 64 %. Headroom is not
-  tight; the artifacts are ~8.5 % of the volume (16.76 GB of 197 GB) and ~23 % of what is currently
-  free — both kinds together are 16.76 GB (15.61 GiB) against 68.2 GiB free, i.e. 22.9 %. The cores
-  alone are 16.07 GB, i.e. 21.9 % of free.
+  tight: the artifacts are **~8 % of the volume** (16.76 GB = 15.61 GiB of 210.78 GB = 196.3 GiB) and
+  **~23 % of what is currently free** — both kinds together are 15.61 GiB against 68.19 GiB free
+  (73,219,416,064 B at 20:28:10Z), i.e. 22.9 %. The cores alone are 16.07 GB = 14.97 GiB, i.e. 21.9 %
+  of free. The two units are given together because `df -h` prints GiB while the file sizes below are
+  decimal bytes; mixing them is how the earlier draft got 8.5 %.
 - Kernel core handler: `sysctl` is **not installed** (`bash: sysctl: command not found`, exit 127,
   20:28:10Z), so the value was read from `/proc/sys/kernel/core_pattern`:
   `|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E` — every core on this
@@ -339,7 +344,8 @@ inside the failing period.
 | contents of `/var/crash/_usr_bin_python3.12.0.crash` | `wc -c …` → `wc: /var/crash/_usr_bin_python3.12.0.crash: Permission denied` (2026-11-08T20:28:48Z). So apport's own stack-trace analysis is unread. |
 | any apport line dated **2026-11-03** | the retained apport logs step straight from `.5.gz` (2026-11-02) to `.4.gz` (2026-11-04): no retained file carries an 11-03 timestamp, so no apport line for that day was read. The *kernel* journal does cover it and holds **0** `GPU reset(` lines for 2026-11-03 (measured 2026-11-08T21:29Z), which fits "no crash that day" — suggestive, not proof: the reset pairing holds one-to-one for the 46
 serving-worker events but is not exclusive (50 resets against 52 `immich_ml` SIGABRTs, two reset indices
-claimed by no apport event, and one `immich_ml` event with no reset within 11 s — §1.3, §5.2). |
+claimed by no apport event, and two `immich_ml` events with no reset within 2 s, one of those with
+none within 11 s — §1.3, §5.2). |
 | the ML container's **environment**, incl. whether `MACHINE_LEARNING_MODEL_REVISION` is already set | reading `.Config.Env` is forbidden by this task's scope (environment), and so is `docker exec`. R1's applicability is therefore **unmeasured** — an owner who runs R1 must check first. |
 | the **GPU model / gfx IP** | the kernel journal names no `gfx` string; `/sys/class/drm/card0/device/{vendor,device}` give `0x1002` and `0x1900` (an AMD integrated GPU; the
 product name was **not** looked up, so no model is claimed). `gfx1103` is #32046's hardware, **not measured here**, so "matching line for line" is about the mechanism, not the silicon. |
@@ -412,8 +418,8 @@ GPU instability "both pre-dates and outlives the 46 events"; neither half is est
 retained journal begins 2026-10-30T06:13:52Z and holds **no** reset before the first event, and the
 last reset is one second after the last event. What *is* measured is the 46-to-46 pairing, which makes a reset a
 reliable **correlate** of the abort — not a proof of its cause, and not a one-way test: the journal
-also holds four reset indices that no serving-worker event claims, and at least one `immich_ml` event
-with no reset within 11 s (§1.3). The container log supplies the mechanism.
+also holds four reset indices that no serving-worker event claims, and two `immich_ml` events with no
+reset within 2 s, one of those with none within 11 s (§1.3). The container log supplies the mechanism.
 
 **Container half — the worker's own log names the abort.** `docker logs --since
 2026-11-05T00:00:00Z immich_machine_learning`, bounded by grep, shows the same three lines per event:
@@ -673,8 +679,9 @@ re-measured; all but one were real, and the worst was **arithmetic in a sentence
 2. **"a crash without a reset has not been observed" was false.** The journal holds 50 resets against
    52 `immich_ml` SIGABRTs: the 46 serving-worker events use 46 distinct indices, four further indices
    belong to no serving-worker event, and of the six `sessions.prepare` events only two have a reset of
-   their own (one shares a worker's, one shares another, and 2026-11-01 03:05:41 has no reset within
-   11 s). The pairing is strong for the 46 and *not* exclusive; the text now says that.
+   their own (2026-11-01 03:08:00 and 2026-11-02 13:08:44; the other two within 2 s share a worker's
+   reset, and two are further away — see item 8). The pairing is strong for the 46 and *not* exclusive;
+   the text now says that.
 3. the six `sessions.prepare` events are listed by timestamp instead of by hour range, and their reset
    accounting is stated.
 4. the network provenance is fixed: the comment thread behind §5.2's thread figures was read during the
@@ -689,3 +696,31 @@ re-measured; all but one were real, and the worst was **arithmetic in a sentence
    that root decides the actual effects after coordination.
 7. `reset-correlation.json` was ambiguous about its population; the text now says it holds the 46
    serving-worker events only.
+
+### Fifth pass — the review's third round (director, 2026-11-08T21:44Z, read-only)
+
+The same non-author reviewer re-read the fourth-pass text. It resolved every round-2 point (the offset
+histogram, the "crash without a reset" wording, the prepare timestamps, the network provenance, R5's
+*not verified* status, the `fileutils.py` range, the GPU gloss, "reliable correlate", the scope
+statement) and raised two defects. Both were real, both were re-measured before being edited:
+
+8. **Five of the six `sessions.prepare` events were placed, not six.** The text named the two with a
+   reset of their own, the one that coincides with a worker's reset(113) and the one that shares
+   reset(121), then said 03:05:41 has "no reset within 11 s" — silently dropping **03:05:45** and
+   leaving §4/§5.2 to say "one `immich_ml` event with no reset". `verify_prepare_accounting.py`
+   re-derives the whole table from the two raw sources (journal `GPU reset(N)` lines since 2026-10-30,
+   the six `sessions.prepare` SIGABRTs, and the indices the 46 serving events were matched to):
+   03:05:41 → reset(108) at −11 s, 03:05:45 → reset(108) at −15 s, 03:08:00 → reset(109) at +1 s,
+   03:59:36 → reset(113) at 0 s, 13:08:44 → reset(120) at +1 s, 23:40:27 → reset(121) at +1 s. So
+   **two** of the six have no reset within 2 s and **one** of those has none within 11 s; indices
+   109 and 120 are claimed by no serving-worker event, which is why the journal's four unclaimed
+   indices (107, 109, 112, 120) are two apport events once the prepare pass is counted. §1.3 now
+   places all six and §4/§5.2 say "two ... with no reset within 2 s, one of those with none within
+   11 s". The round-2 item above is left as it was written and this item corrects it.
+9. **A percentage mixed GB with GiB.** §3 said the artifacts are "~8.5 % of the volume (16.76 GB of
+   197 GB)". 197 G is `df -h`'s GiB figure and 16.76 GB is decimal bytes, so the ratio is not
+   16.76/197: against `df -B1`'s 210,779,168,768 B the same two kinds are 16,762,990,592 B =
+   **7.95 %**, and against 196.3 GiB they are 15.61 GiB, also 7.95 % — i.e. **~8 %, not 8.5 %**. The
+   free-space share (22.9 % of 73,219,416,064 B, 21.9 % for the cores alone) was already computed in
+   matching units and is unchanged; §3 now prints both units for every figure and says why.
+

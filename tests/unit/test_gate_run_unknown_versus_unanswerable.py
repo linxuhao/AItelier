@@ -1,9 +1,12 @@
 """The launcher's record must not spell a failed call like the tool's answer.
 
-``tools/gate_run.sh`` has two ``||`` fallbacks that fire when ``gate_binding.py``
-could not be ASKED: line 116 (identity) and line 139 (platform). Both used to be
-spelled with a word the tool ANSWERS with, so ``<suffix>.gate.exit`` recorded
-"unknown" whether the tool had judged readable bytes or had never run at all.
+``tools/gate_run.sh`` has three places that record a ``gate_binding.py`` call that
+could not be ASKED: the ``||`` fallbacks on the ``receipt`` and ``platform``
+calls, and the branch for a sidecar re-observation that failed. All three used to
+be spelled with a word the tool ANSWERS with (``unknown``), so
+``<suffix>.gate.exit`` recorded "unknown" whether the tool had judged readable
+bytes or had never run at all -- and a failed sidecar re-observation blamed the
+platform identity for something the receipt never reported.
 
 The real launcher body is executed here, once per side of each substitution,
 against owned Git fixtures. Only process boundaries are replaced: ``docker``, and
@@ -30,15 +33,22 @@ TREE = "2" * 40
 IMAGE = "sha256:" + "c" * 64
 SDK = "1.5.99"
 
-# The identity tool, replaced at the process boundary. Modes named in `fail` are
-# the ones that could not be asked; every other mode is the real tool's answer.
+# The identity tool, replaced at the process boundary. Entries in `fail` are the
+# calls that could not be asked; every other call is the real tool's answer. A
+# mode can be asked more than once (the launcher observes the sidecar before
+# dispatch and again after the gate), so an entry is either a bare mode -- every
+# call of it fails -- or `mode@n`, which fails only the n-th call of that mode.
 BINDING_STANDIN = '''import json, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 with open({calls!r}, "a") as f:
     f.write(json.dumps(args) + "\\n")
 fail = json.loads(Path({fail!r}).read_text())
-if args[0] in fail:
+seen = Path({seen!r})
+counts = json.loads(seen.read_text()) if seen.exists() else {{}}
+counts[args[0]] = counts.get(args[0], 0) + 1
+seen.write_text(json.dumps(counts))
+if args[0] in fail or args[0] + "@" + str(counts[args[0]]) in fail:
     sys.stderr.write("stand-in: " + args[0] + " could not be asked\\n")
     sys.exit(1)
 if args[0] == "source":
@@ -76,12 +86,16 @@ def _sha(data):
 def _substitution(mode):
     """The literal the launcher substitutes when its `mode` call could not be asked.
 
-    Read from the launcher's own ``||`` assignment in its actual bytes -- never
-    from a copy of them, and it must be a literal rather than a variable name.
+    `mode` is the ``tools/gate_binding.py`` mode whose call the substitution stands
+    in for, and each substitution spells that mode in its own name, so the value
+    is found by the name in the launcher's actual bytes -- never in a copy of
+    them -- and it must be a literal rather than a variable name. Two of them are
+    written as ``||`` fallbacks and the third as the branch that records a failed
+    sidecar re-observation, which is why this does not key on ``||``.
     """
-    used = re.findall(rf'\|\|\s*{mode}="([^"]*)"', GATE_RUN.read_text())
+    used = set(re.findall(rf'"(unanswered:{mode}-tool-failed)"', GATE_RUN.read_text()))
     assert len(used) == 1, (mode, used)
-    literal = used[0]
+    literal = used.pop()
     assert literal and "$" not in literal, (mode, literal)
     return literal
 
@@ -143,7 +157,8 @@ def _build(root, *, fail=(), receipt=None, stage=23):
     calls, fails = root / "binding-calls.jsonl", root / "fail-modes.json"
     fails.write_text(json.dumps(list(fail)))
     (bins / "gate_binding.py").write_text(BINDING_STANDIN.format(
-        calls=str(calls), fail=str(fails), source=str(SOURCE), image=IMAGE,
+        calls=str(calls), fail=str(fails), seen=str(root / "binding-calls-by-mode.json"),
+        source=str(SOURCE), image=IMAGE,
         binding_sha256=digest, observer=str(SOURCE / "tools" / "gate_binding.py")))
     fake = bins / "docker"
     fake.write_text(DOCKER_STANDIN.format(python=sys.executable,
@@ -224,8 +239,42 @@ def test_a_receipt_call_that_failed_is_not_the_answer_it_records(tmp_path):
     assert _run(failed).returncode == 69
     substituted = _exit_lines(failed)
     assert substituted[0].startswith(
-        f"{_substitution("identity")}-platform-identity; real rc was 23;")
+        f"{_substitution("receipt")}-platform-identity; real rc was 23;")
     assert substituted[0] != recorded[0]
     # ... and each spelling appears only where its own call produced it.
-    assert _substitution("identity") not in recorded[0]
+    assert _substitution("receipt") not in recorded[0]
+    assert answer not in substituted[0]
+
+
+def test_a_sidecar_call_that_failed_is_not_the_identity_answer_it_records(tmp_path):
+    """The third substitution: a re-observation that failed is not `unknown` either.
+
+    One run could not re-observe the sidecar -- its before-dispatch observation
+    succeeded, so the gate still measured and the receipt itself answered
+    `unchanged` -- while the other run's receipt answered `unknown`. Both end in
+    the same exit file with exit 69, and the file must spell the two apart, or a
+    sidecar transport failure reads as the platform identity's own answer.
+    """
+    settled = lambda record, digest: _receipt(record, digest)  # noqa: E731
+    unanswered = _build(tmp_path / "unanswered", fail=("sidecar@2",), receipt=settled)
+    assert _run(unanswered).returncode == 69
+    substituted = _exit_lines(unanswered)
+    # The receipt ANSWERED, so the failed call is the re-observation alone -- and
+    # it really was the second sidecar call (the gate ran and measured).
+    assert _ask("receipt", unanswered, "23").strip() == "unchanged"
+    modes = [json.loads(line)[0] for line in unanswered["calls"].read_text().splitlines()]
+    assert modes.count("sidecar") == 2, modes
+    assert substituted[0].startswith(
+        f"{_substitution("sidecar")}-platform-identity; real rc was 23;")
+
+    answered = _build(tmp_path / "answered",
+                      receipt=lambda record, digest: _receipt(record, digest, unsettled=True))
+    assert _run(answered).returncode == 69
+    recorded = _exit_lines(answered)
+    answer = _ask("receipt", answered, "23").strip()
+    assert answer == "unknown", answer
+    assert recorded[0].startswith(f"{answer}-platform-identity; real rc was 23;")
+    # Two spellings for two different facts, in the file the consumer reads.
+    assert substituted[0] != recorded[0]
+    assert _substitution("sidecar") not in recorded[0]
     assert answer not in substituted[0]

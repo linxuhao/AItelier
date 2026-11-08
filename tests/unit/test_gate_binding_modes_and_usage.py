@@ -1,21 +1,28 @@
 """No answer of the identity tool is spelled like the launcher's substitution.
 
-``tools/gate_run.sh`` substitutes a value when the tool could not be ASKED
-(``|| identity=`` at line 116, ``|| platform=`` at line 139). If the tool can also
-ANSWER with that value, the gate's record cannot tell the two apart -- which is
-exactly what happened until 2026-11-08, when both substitutions spelled words the
-tool prints itself. This file pins the property that makes the distinction real:
+``tools/gate_run.sh`` substitutes a value when the tool could not be ASKED: the
+``||`` fallbacks on the ``receipt`` and ``platform`` calls, and the branch that
+records a sidecar re-observation which failed. If the tool can also ANSWER with
+that value, the gate's record cannot tell the two apart -- which is exactly what
+happened until 2026-11-08, when all three substitutions spelled words the tool
+prints itself (``unknown``, twice as an answer and once as the identity verdict).
+This file pins the property that makes the distinction real:
 
-* every token the real CLI prints while exiting 0, over both answering modes and
-  their input matrix, differs from the two literals in the launcher's own bytes
-  (read from ``tools/gate_run.sh``, never from a copy); and
+* the real CLI is driven as a subprocess over every answering mode and their
+  input matrix, and every answer it gives while exiting 0 differs from every
+  literal in the launcher's own bytes (read from ``tools/gate_run.sh``, never from
+  a copy). Mode ``sidecar``'s exit-0 answer is SILENCE -- it answers by writing
+  the record it observed -- so the recorded answer there is the empty string, and
+  the matrix proves the rows are real by requiring the written record; and
 * ``--help`` says what the positional IS per mode, because argparse named every
   positional ``binding`` while mode ``platform`` reads a RECEIPT there and takes
   the reviewed binding from ``GATE_BINDING_FILE``.
 
 ``receipt_identity`` and ``platform_status`` are pure functions of the receipt and
-binding files, so the fixtures are built and the real CLI is driven as a
-subprocess: no engine, container or sidecar is involved and none is faked.
+binding files, so their fixtures are built. The one thing mode ``sidecar`` reads
+outside its own arguments is the container it observes, so ``docker inspect`` is
+replaced at the process boundary and the tool's own writing and comparison logic
+stays under test. No engine, container, sidecar or GPU is involved.
 """
 import hashlib
 import json
@@ -51,12 +58,16 @@ def _run(args, env=None):
 def _substitution(mode):
     """The literal the launcher substitutes when its `mode` call could not be asked.
 
-    Read from the launcher's own ``||`` assignment in its actual bytes -- never
-    from a copy of them, and it must be a literal rather than a variable name.
+    `mode` is the ``tools/gate_binding.py`` mode whose call the substitution stands
+    in for, and each substitution spells that mode in its own name, so the value
+    is found by the name in the launcher's actual bytes -- never in a copy of
+    them -- and it must be a literal rather than a variable name. Two of them are
+    written as ``||`` fallbacks and the third as the branch that records a failed
+    sidecar re-observation, which is why this does not key on ``||``.
     """
-    used = re.findall(rf'\|\|\s*{mode}="([^"]*)"', GATE_RUN.read_text())
+    used = set(re.findall(rf'"(unanswered:{mode}-tool-failed)"', GATE_RUN.read_text()))
     assert len(used) == 1, (mode, used)
-    literal = used[0]
+    literal = used.pop()
     assert literal and "$" not in literal, (mode, literal)
     return literal
 
@@ -107,10 +118,33 @@ def _receipt(tmp_path, record, digest, *, status="reviewed", differences=None, s
     return path
 
 
+def _sidecar_docker(tmp_path):
+    """A `docker` that answers the way the sidecar observer asks it.
+
+    Mode ``sidecar`` is the one mode that reads a container: it inspects
+    ``aitelier-godot`` for the identity it then writes (and, given an earlier
+    record, compares against). Only this process boundary is replaced, so the
+    record and the comparison stay the real tool's.
+    """
+    bins = tmp_path / "sidecar-bin"
+    bins.mkdir()
+    identity = f"{'b' * 64} {IMAGE} 123 2026-01-01T00:00:00Z running"
+    docker = bins / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "# the observer's only call: docker inspect --format ... aitelier-godot\n"
+        '[ "$1" = inspect ] || exit 9\n'
+        f'echo "{identity}"\n')
+    docker.chmod(0o755)
+    return bins
+
+
 def _answers(tmp_path):
-    """One row per input class of both answering modes: (name, argv, env, expected)."""
+    """One row per input class of the three answering modes: (name, argv, env)."""
     binding, digest, record = _binding(tmp_path)
     env = {"GATE_BINDING_FILE": str(binding)}
+    path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    sidecar_env = {"PATH": f"{_sidecar_docker(tmp_path)}:{path}"}
     reviewed = _receipt(tmp_path, record, digest, name="reviewed.json")
     differs = _receipt(tmp_path, record, digest, status="unreviewed", sdk="1.5.85", name="differs.json",
                        differences=[{"field": "sdk", "bound": SDK, "observed": "1.5.85"}])
@@ -119,6 +153,8 @@ def _answers(tmp_path):
     unsettled = _receipt(tmp_path, record, digest, unsettled=True, name="unsettled.json")
     no_record = _receipt(tmp_path, record, digest, no_record=True, name="no-record.json")
     moved = _receipt(tmp_path, record, digest, identity="mismatch", name="moved.json")
+    fresh = tmp_path / "sidecar-fresh.json"
+    observed_twice = tmp_path / "sidecar-settled.json"
     rows = [
         ("platform-reviewed", ["platform", str(reviewed), "--binding-sha256", digest], env),
         ("platform-unreviewed", ["platform", str(differs), "--binding-sha256", digest], env),
@@ -131,6 +167,12 @@ def _answers(tmp_path):
         # this is the value the launcher's identity substitution used to share.
         ("receipt-unusable-hash", ["receipt", str(settled), "23", "--binding-sha256", "no-hash"],
          env),
+        # Mode `sidecar` answers by WRITING the record it observed: a fresh
+        # observation and a settled pair both exit 0 with nothing on stdout. The
+        # `sidecar-fresh` row runs first and writes the earlier record the settled
+        # row is compared against -- the real tool produces both sides.
+        ("sidecar-fresh", ["sidecar", str(fresh)], sidecar_env),
+        ("sidecar-settled", ["sidecar", str(observed_twice), str(fresh)], sidecar_env),
     ]
     out = {}
     for name, argv, row_env in rows:
@@ -141,11 +183,10 @@ def _answers(tmp_path):
 
 
 def test_no_answer_the_tool_prints_is_spelled_like_a_substitution(tmp_path):
-    """Every exit-0 answer of both answering modes differs from both literals."""
-    literals = {"identity": _substitution("identity"),
-                "platform": _substitution("platform")}
+    """Every exit-0 answer of all three answering modes differs from every literal."""
+    literals = {mode: _substitution(mode) for mode in ("receipt", "platform", "sidecar")}
     assert all(literals.values())
-    assert literals["identity"] != literals["platform"]
+    assert len(set(literals.values())) == len(literals)
 
     answers = _answers(tmp_path)
     # The matrix is not vacuous: each input class produced its own answer.
@@ -160,10 +201,21 @@ def test_no_answer_the_tool_prints_is_spelled_like_a_substitution(tmp_path):
     assert answers["receipt-settled"] == "unchanged"
     assert answers["receipt-mismatch"] == "mismatch"
     assert answers["receipt-unusable-hash"] == "unknown"
-    assert len(set(answers.values())) == len(answers)
+    # Mode `sidecar`'s exit-0 answer is SILENCE: the verdict is the record it
+    # wrote (or exit 70 + one stderr line when the identity moved), never a word
+    # on stdout. So these rows contribute no token, and the rows are real -- the
+    # tool's own observation is in the file, five identity fields and all.
+    assert answers["sidecar-fresh"] == "" and answers["sidecar-settled"] == ""
+    for name in ("sidecar-fresh", "sidecar-settled"):
+        written = json.loads((tmp_path / f"{name}.json").read_text())
+        assert set(written) == {"cid", "image", "pid", "started_at", "status"}, (name, written)
+        assert written["status"] == "running" and written["image"] == IMAGE, (name, written)
+    # Every mode that DOES answer on stdout answers uniquely ...
+    spoken = {name: answer for name, answer in answers.items() if answer}
+    assert set(spoken) == set(answers) - {"sidecar-fresh", "sidecar-settled"}, spoken
+    assert len(set(spoken.values())) == len(spoken), spoken
 
     for name, answer in answers.items():
-        assert answer, name
         for where, literal in literals.items():
             assert answer != literal, (name, where, literal)
 

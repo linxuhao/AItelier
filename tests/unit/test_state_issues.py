@@ -1,9 +1,12 @@
 """Issues sit beside the State DAG: reporting never moves a node, and every
 resolution must name the State record that absorbed it."""
+import sqlite3
 import time
+from contextlib import contextmanager
 
 import pytest
 
+from core import state_issues
 from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
@@ -467,3 +470,139 @@ def test_other_resolutions_still_refuse_an_artifact(svc):
                                        "expected_version": 1, "resolution": "rejected",
                                        "reason": "not a defect", "director_identity": "wuxia",
                                        "artifact": "abc"}, allow_write=True)
+
+
+class _SameConnectionDB:
+    """A database handle whose ``get_connection()`` yields THE SAME connection.
+
+    ``initialize`` takes the host's database object and not a bare connection, so
+    this is how a test can hand it one it keeps owning afterwards: connection
+    state such as ``PRAGMA foreign_keys`` is only observable on the connection
+    that ran the migration, and ``StateDatabase.get_connection()`` closes it.
+    """
+
+    db_path = ":memory:"          # initialize() never reads it
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @contextmanager
+    def get_connection(self):
+        yield self._conn
+
+
+def _old_check_schema() -> str:
+    """The pre-2026-11-08 issue schema: the status CHECK without 'moot'."""
+    return state_issues.SCHEMA.replace(",'moot'", "")
+
+
+def _table_sql(conn, name="state_issues"):
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def _status_counts(conn) -> dict:
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT status, COUNT(*) FROM state_issues GROUP BY status ORDER BY status")}
+
+
+def test_widening_for_moot_leaves_this_connection_enforcing_foreign_keys(tmp_path):
+    """A migration that switches enforcement off must switch it back ON for the
+    very connection that ran it.
+
+    The defect this pins: the pragma was restored in a ``finally`` that ran while
+    the rebuild's transaction was still open, where SQLite IGNORES it — so the
+    connection committed and kept ``foreign_keys=0``, and every later write on it
+    went unchecked. ``core/state_claims._widen_status_check`` already does it in
+    the only order that works: commit, then restore.
+    """
+    conn = sqlite3.connect(str(tmp_path / "old.sqlite"))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        # The parent tables the issue tables reference.
+
+        conn.executescript("""
+            CREATE TABLE state_projects (project_id TEXT PRIMARY KEY);
+            CREATE TABLE state_nodes (
+                project_id TEXT NOT NULL,
+                node_key TEXT NOT NULL,
+                PRIMARY KEY (project_id, node_key)
+            );
+            -- Every real State database carries an AUTOINCREMENT table
+            -- (state_events), and that is what creates sqlite_sequence, which the
+            -- preserving rebuild reads for the high-water mark.
+            CREATE TABLE state_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL
+            );
+        """ + _old_check_schema())
+        old_sql = _table_sql(conn)
+        assert "'moot'" not in old_sql and "'observed'" in old_sql   # really the old shape
+
+        conn.executemany("INSERT INTO state_projects(project_id) VALUES (?)", [("p",), ("q",)])
+        conn.executemany("INSERT INTO state_nodes(project_id, node_key) VALUES (?,?)",
+                         [("p", "a"), ("p", "b"), ("q", "c")])
+        statuses = ["open", "observed", "fixed", "duplicate", "rejected", "promoted", "open"]
+        conn.executemany(
+            "INSERT INTO state_issues(issue_id, project_id, request_key, request_hash, kind, title,"
+            " body, source, status, version, resolution_json, reported_by_actor,"
+            " reported_by_director, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(f"iss-{i}", "p" if i % 2 == 0 else "q", f"r{i}", "h", "defect", f"issue {i}",
+              f"body {i}", None, status, 1, None, "alice", "wuxia",
+              f"2026-11-0{i + 1}T00:00:00Z", f"2026-11-0{i + 1}T00:00:00Z")
+             for i, status in enumerate(statuses)])
+        conn.executemany("INSERT INTO state_issue_nodes(issue_id, project_id, node_key) VALUES (?,?,?)",
+                         [("iss-0", "p", "a"), ("iss-2", "p", "b")])
+        conn.commit()
+
+        before_counts = _status_counts(conn)
+        before_rows = [tuple(r) for r in conn.execute("SELECT * FROM state_issues ORDER BY issue_id")]
+        before_links = [tuple(r) for r in conn.execute(
+            "SELECT issue_id, project_id, node_key FROM state_issue_nodes ORDER BY issue_id")]
+
+        state_issues.initialize(_SameConnectionDB(conn))
+
+        # THE REGRESSION: same connection, enforcement back on.
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        # ... and the migration really ran on this connection.
+        widened = _table_sql(conn)
+        assert "'moot'" in widened and "'observed'" in widened
+
+        # The widening preserved everything.
+        assert _status_counts(conn) == before_counts
+        assert [tuple(r) for r in conn.execute("SELECT * FROM state_issues ORDER BY issue_id")] == before_rows
+        assert [tuple(r) for r in conn.execute(
+            "SELECT issue_id, project_id, node_key FROM state_issue_nodes ORDER BY issue_id")] == before_links
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        index = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='state_issues_project'").fetchone()
+        assert index is not None and "state_issues" in index[0]
+
+        # The point of widening: a moot closure is now accepted.
+        conn.execute("UPDATE state_issues SET status='moot', updated_at='2026-11-08T00:00:00Z'"
+                     " WHERE issue_id='iss-0'")
+        conn.commit()
+        assert conn.execute("SELECT status FROM state_issues WHERE issue_id='iss-0'").fetchone()[0] == "moot"
+        mooted = dict(before_counts)
+        mooted["open"] -= 1
+        mooted["moot"] = 1
+        assert _status_counts(conn) == mooted
+
+        # A second initialize() is a no-op: no rebuild, no re-count, no data move.
+        schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        state_issues.initialize(_SameConnectionDB(conn))
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == schema_version
+        assert _table_sql(conn) == widened
+        assert _status_counts(conn) == mooted
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+        # And enforcement is behavioural, not just a reported flag: a link to an
+        # issue that does not exist is refused now that the migration finished.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO state_issue_nodes(issue_id, project_id, node_key)"
+                         " VALUES ('iss-missing','p','a')")
+        conn.rollback()
+    finally:
+        conn.close()

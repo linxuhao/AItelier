@@ -13,10 +13,15 @@ def loaded_copy(monkeypatch, tmp_path, module):
 
     The suite runs from a read-only /app mount, so a disk-edit test cannot write
     the file its loader came from. Here the copy is executed under the module's
-    own name and installed in sys.modules, so the identity check and every
-    loaded-code read see the copy, and disk edits made to the copy are the edits
-    the product would see on a deployed file. monkeypatch restores the original
-    module object at teardown. Returns (loaded module, copy path).
+    own name and installed in sys.modules, which is the object ``executing_identity``
+    resolves, so the identity check sees whatever these tests load and a disk edit
+    made to the copy is an edit to a real file. Bound names stay bound: a module
+    that did ``from .context import assemble`` holds the function object it
+    captured at import, so a swapped module is visible to identity and not to an
+    already-imported caller. These tests therefore measure identity's own
+    behaviour (a disk-only edit does not change it, a loaded-code edit does);
+    neither claims that the swapped code executes. monkeypatch restores the
+    original module object at teardown. Returns (loaded module, copy path).
     """
     directory = tmp_path / "loaded"
     directory.mkdir(exist_ok=True)
@@ -27,6 +32,12 @@ def loaded_copy(monkeypatch, tmp_path, module):
     return loaded, target
 
 def _execute_copy(name, target):
+    # A rewritten copy keeps its byte size (WINDOW = 5 -> WINDOW = 4), and CPython
+    # validates a cached .pyc by integer-second mtime plus size, so a re-exec in
+    # the same second can silently run the old bytecode. Measured on the host
+    # interpreter: without this unlink the second load still reports WINDOW == 5.
+    Path(importlib.util.cache_from_source(str(target))).unlink(missing_ok=True)
+    importlib.invalidate_caches()
     spec = importlib.util.spec_from_file_location(name, target)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
@@ -61,10 +72,15 @@ def test_actual_loaded_module_change_refused(tmp_path, monkeypatch, bench):
     loaded, target = loaded_copy(monkeypatch, tmp_path, context)
     value, proof = reviewed(bench)
     before = loaded.WINDOW
+    frozen = implementation.engine_identity()
     target.write_bytes(target.read_bytes().replace(b"WINDOW = 5", b"WINDOW = 4"))
     reloaded = _execute_copy(context.__name__, target)
     monkeypatch.setitem(sys.modules, context.__name__, reloaded)
     assert reloaded.WINDOW == 4 and before == 5
+    # Both modules execute from the same copy path, so the only difference
+    # between these identities is the edited constant: the refusal below is
+    # caused by the loaded code changing, not by a filename or a disk byte.
+    assert implementation.engine_identity() != frozen
     with pytest.raises(BenchError, match="policy or implementation changed"):
         bench.stage("run1", value, proof=proof)
 

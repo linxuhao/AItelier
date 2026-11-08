@@ -7,7 +7,8 @@ State issue pointer (not amended by this document): `iss-4f3485436afc4e8e`.
 
 Everything under "Remedy" is **PROPOSAL**. No option was applied, no container was touched, no
 core or crash file was deleted, moved or re-permissioned. Effects on a service this operator does
-not own are the owner's decision.
+not own are the owner's decision — and, as this node's contract puts it, root decides the actual
+authorized effects *after* coordination with the other work on this host.
 
 Repaired **2026-11-08T21:05Z–21:12Z** against the rotated apport logs, the kernel journal, the
 `immich_machine_learning` container log and the upstream tracker. The measurement window above and
@@ -134,9 +135,12 @@ Per date: 2026-10-31 ×17, 11-01 ×9, 11-02 ×4, 11-04 ×4, 11-05 ×3, 11-06 ×5
 /usr/src/immich_ml/gunicorn_conf.py -b [::]:3003 -w 1 …`.
 
 The census is **scoped to that command line**. The same eight files hold **six further `immich_ml`
-SIGABRTs** from the image's one-shot entrypoint `python -m immich_ml.sessions.prepare` (11-01 ×4 at
-03:05–03:59, 11-02 ×2 at 13:08 and 23:40) — same `/usr/bin/python3.12`, same signal 6, same core
-store — so the image's total is **52 `immich_ml` SIGABRTs across the same eight dates**. Only the 46
+SIGABRTs** from the image's one-shot entrypoint `python -m immich_ml.sessions.prepare` — 2026-11-01 03:05:41, 03:05:45, 03:08:00 and 03:59:36, and
+2026-11-02 13:08:44 and 23:40:27 — same `/usr/bin/python3.12`, same signal 6, same core store, so the
+image's total is **52 `immich_ml` SIGABRTs across the same eight dates**. Those six do **not** each
+have a reset of their own: two sit one second before one (indices 109 at 03:08:01 and 120 at 13:08:45),
+one coincides with the serving worker's reset(113), one shares reset(121), and 2026-11-01 03:05:41 has
+no reset within 11 s. Only the 46
 above serve models on port 3003; the six change the recurrence count, not the owner. A re-run that
 drops this filter reproduces 52, not 46.
 
@@ -173,7 +177,7 @@ What would still make it stronger (each is an owner decision I did not take):
 `apport.fileutils.clean_core_directory(report_owner.uid)` is called at `/usr/share/apport/apport:304`
 — immediately before the new file is created by `os.open(… O_CREAT | O_EXCL, mode=0o400)` at
 `apport:305-307` — i.e. **before every core write**. `clean_core_directory`
-(`fileutils.py:655-664`) fires when the directory already holds **more than**
+(`fileutils.py:655-666`) fires when the directory already holds **more than**
 `max_corefiles_per_uid - 1` files — i.e. at **five**, not at four (`if len(uid_files) >
 max_corefiles_per_uid - 1:` at `fileutils.py:663`, `os.remove` at `:665`) — so the cap that binds is
 five. The store therefore only
@@ -307,8 +311,9 @@ inside the failing period.
   **197 G size, 120 G used, 69 G available, 64 % used**. `df -B1 /`: 210,779,168,768 total /
   73,219,416,064 available (127,857,930,240 used). Re-measured at 2026-11-08T21:08:36Z, unchanged in
   substance: 127,859,322,880 used / 73,218,023,424 available, still 69 G / 64 %. Headroom is not
-  tight; the store is ~8 % of the volume (16.07 GB of 197 GB) but ~23 % of what is currently free — both
-  kinds of artifact together are 16.76 GB (15.61 GiB) against 68.2 GiB free, i.e. 22.9 %.
+  tight; the artifacts are ~8.5 % of the volume (16.76 GB of 197 GB) and ~23 % of what is currently
+  free — both kinds together are 16.76 GB (15.61 GiB) against 68.2 GiB free, i.e. 22.9 %. The cores
+  alone are 16.07 GB, i.e. 21.9 % of free.
 - Kernel core handler: `sysctl` is **not installed** (`bash: sysctl: command not found`, exit 127,
   20:28:10Z), so the value was read from `/proc/sys/kernel/core_pattern`:
   `|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E` — every core on this
@@ -332,9 +337,12 @@ inside the failing period.
 |---|---|
 | contents of any core file | `head -c 16 <13:50 core>` at 2026-11-08T20:28:48Z → `head: cannot open '…' for reading: Permission denied` (exit 1). Files are 0400 root:root; I am uid 1000. Also out of scope by instruction. |
 | contents of `/var/crash/_usr_bin_python3.12.0.crash` | `wc -c …` → `wc: /var/crash/_usr_bin_python3.12.0.crash: Permission denied` (2026-11-08T20:28:48Z). So apport's own stack-trace analysis is unread. |
-| any apport line dated **2026-11-03** | the retained apport logs step straight from `.5.gz` (2026-11-02) to `.4.gz` (2026-11-04): no retained file carries an 11-03 timestamp, so no apport line for that day was read. The *kernel* journal does cover it and holds **0** `GPU reset(` lines for 2026-11-03 (measured 2026-11-08T21:29Z), which fits "no crash that day" — suggestive, not proof, since a crash without a reset has not been observed. |
+| any apport line dated **2026-11-03** | the retained apport logs step straight from `.5.gz` (2026-11-02) to `.4.gz` (2026-11-04): no retained file carries an 11-03 timestamp, so no apport line for that day was read. The *kernel* journal does cover it and holds **0** `GPU reset(` lines for 2026-11-03 (measured 2026-11-08T21:29Z), which fits "no crash that day" — suggestive, not proof: the reset pairing holds one-to-one for the 46
+serving-worker events but is not exclusive (50 resets against 52 `immich_ml` SIGABRTs, two reset indices
+claimed by no apport event, and one `immich_ml` event with no reset within 11 s — §1.3, §5.2). |
 | the ML container's **environment**, incl. whether `MACHINE_LEARNING_MODEL_REVISION` is already set | reading `.Config.Env` is forbidden by this task's scope (environment), and so is `docker exec`. R1's applicability is therefore **unmeasured** — an owner who runs R1 must check first. |
-| the **GPU model / gfx IP** | the kernel journal names no `gfx` string; `/sys/class/drm/card0/device/{vendor,device}` give `0x1002` and `0x1900` (an AMD Phoenix-class integrated GPU). `gfx1103` is #32046's hardware, **not measured here**, so "matching line for line" is about the mechanism, not the silicon. |
+| the **GPU model / gfx IP** | the kernel journal names no `gfx` string; `/sys/class/drm/card0/device/{vendor,device}` give `0x1002` and `0x1900` (an AMD integrated GPU; the
+product name was **not** looked up, so no model is claimed). `gfx1103` is #32046's hardware, **not measured here**, so "matching line for line" is about the mechanism, not the silicon. |
 | **why 2026-11-03 has no apport file** | `/etc/logrotate.d/*` was not read, so "logrotate did not rotate because nothing logged" and "a file was rotated and expired" are not distinguished. |
 | the **true first** crash, or any event before 2026-10-31 | bounded by retention, not known: the oldest retained apport log is `.7.gz` and the journal's first line is `2026-10-30T06:13:52+00:00` (`journalctl -o short-iso \| head -1`). |
 | `coredumpctl` view of the crashes | binary **absent** (`command -v coredumpctl` → nothing, exit 1); `systemd-coredump.socket` inactive. There is no coredumpctl record to consult. |
@@ -393,7 +401,8 @@ line for line.
 Nine events, nine resets, one-to-one — and the pairing holds for **all 46** events: each has its
 own reset index (89…138, i.e. 46 distinct indices for 46 events), **42 within 1 s** and **all 46
 within 2 s** (measured 2026-11-08T21:29Z; the per-event table is `reset-correlation.json` beside this
-document's evidence). This table's earlier heading said *same second*; that is wrong for the rows
+document's evidence, and it holds the **46 serving-worker** events only — the six
+`sessions.prepare` events are accounted for in §1.3). This table's earlier heading said *same second*; that is wrong for the rows
 whose `GPU reset begin!` precedes the event by one second (12:54:10, 12:58:09) and for 13:52:19 →
 `GPU reset(138)` at 13:52:20, which is why the heading now says "reset" and the offsets are given.
 
@@ -401,8 +410,10 @@ Over the whole retained journal (`journalctl -k --since '2026-10-01'`) there are
 successes and **494** `MES failed to response` lines. The earlier version of this paragraph said the
 GPU instability "both pre-dates and outlives the 46 events"; neither half is established — the
 retained journal begins 2026-10-30T06:13:52Z and holds **no** reset before the first event, and the
-last reset is one second after the last event. What *is* measured is the 46-to-46 pairing, so a reset
-alone is not the trigger and the container log supplies that half.
+last reset is one second after the last event. What *is* measured is the 46-to-46 pairing, which makes a reset a
+reliable **correlate** of the abort — not a proof of its cause, and not a one-way test: the journal
+also holds four reset indices that no serving-worker event claims, and at least one `immich_ml` event
+with no reset within 11 s (§1.3). The container log supplies the mechanism.
 
 **Container half — the worker's own log names the abort.** `docker logs --since
 2026-11-05T00:00:00Z immich_machine_learning`, bounded by grep, shows the same three lines per event:
@@ -421,8 +432,9 @@ compile 13:31:57 → SIGABRT 13:34:09; compile 2026-11-08 13:48:00 → SIGABRT 1
 So the chain is: **MIGraphX model compile hits the GPU → the GPU hangs → the kernel resets it → the
 worker is SIGABRTed (signal 6) → apport dumps the host-side core.** The aborting *frame* is still
 unread (§4). Every link has a measurement, but the **order inside the second is not resolved**: the
-apport invocation and the reset are 0–2 s apart in either direction (42/46 at +1 s, 3 at +2 s, 3 at
-−2 s), so this is a measured correlation with a documented mechanism, not a proven sequence — and the
+apport invocation and the reset are at most 2 s apart in either direction (**40** of the 46 at +1 s,
+**2** at 0 s, **2** at +2 s and **2** at −2 s, i.e. 42 within 1 s and all 46 within 2 s), so this is a
+measured correlation with a documented mechanism, not a proven sequence — and the
 one direction that would settle it (does the abort precede the reset?) needs the core's `NT_PRPSINFO`
 or the `.crash` report, both root-only (§4).
 
@@ -473,7 +485,7 @@ below is verified — no option has been tested on this host.
 | R2 | Run ML on the **CPU image** (or force `CPUExecutionProvider`) instead of `-rocm` | **PROPOSAL** | one image change + recreate that service; ML slower on CPU | this is where the upstream reporter ended up, and it doubles as the controlled experiment the first version of this document wanted: with no GPU in the path the wedge cannot occur, so if crashes continue it falsifies the attribution. Cost is throughput, not correctness; the CPU path is measured to work upstream, not on this host. |
 | R3 | Record recurrence from the **apport log**, one `grep -c` per day of `immich_ml.main:app` events in `/var/log/apport.log*` | **PROPOSAL** | read-only; no service effect | the store cannot be the counter — it is capped at five files by apport itself (§2.1). The log census is the measurement, and its baseline is 46 events / 8 dates, last at 2026-11-08 13:52:19 (§1.3). Do this **before** R5 if the owner wants the recurrence to stay visible. |
 | R4 | Owner deletes the accumulated artifacts: 5 files in `/var/lib/apport/coredump` + `/var/crash/_usr_bin_python3.12.0.crash` | **PROPOSAL** | one `rm` as root; frees **16.76 GB** (16,068,284,416 + 694,706,176 B) | reclaims ~23 % of current free space (69 G) and is cheap *for this operator* for a reason that is now measured: the cores are `0400 root:root` and **unreadable here** (§4), and the recurrence is recorded in the apport logs, so nothing this document concludes depends on their contents. If an owner who *can* read them wants the aborting frame, capture the `.crash` report's stack first. Does not stop the crashes. |
-| R5 | Cap core dumps for that one service — `ulimits: {core: 0}` on the `immich_machine_learning` compose service, then recreate *that* container | **PROPOSAL** | one service recreate; crash behaviour unchanged | stops the growth at the source — the five cores still on disk measured 0 B, 2.15 GB, 2.65 GB, 5.48 GB and 5.79 GB (earlier events' cores were rotated out by the cap, so their sizes are unmeasured). It does remove the store-level signal, but that signal is already bounded by apport's own five-file cap (§2.1) and the recurrence stays visible in the apport log (R3). Requires editing the owner's compose file, outside this task. |
+| R5 | Cap core dumps for that one service — `ulimits: {core: 0}` on the `immich_machine_learning` compose service, then recreate *that* container | **PROPOSAL** | one service recreate; crash behaviour unchanged | stops the growth at the source — the five cores still on disk measured 0 B, 2.15 GB, 2.65 GB, 5.48 GB and 5.79 GB (earlier events' cores were rotated out by the cap, so their sizes are unmeasured). It removes the store-level signal, which is already bounded by apport's own five-file cap (§2.1). Whether the apport log line still appears with `core: 0` is **not verified here**: the line is written before the core is opened, so it should, but that is an expectation — check it after applying R5 before relying on R3 as the counter. Requires editing the owner's compose file, outside this task. |
 | R6 | Do nothing to the service; escalate to the owner with this document | **PROPOSAL** | zero | defensible on disk and health grounds (69 G free, `healthy`, `RestartCount 0`), but weaker than it looked: recurrence is now a 52-event fact over 8 dates, **all 46** serving-worker events have a kernel `GPU reset` of their own within 2 s (§5.2), and upstream has an open issue with a tested partial mitigation. The cost of waiting is up to ~5.8 GB per event plus one GPU wedge each time. |
 
 **An empty core store would prove nothing.** R4 and R5 both shrink or remove the artifacts, and R5
@@ -540,14 +552,15 @@ docker image inspect --format 'RepoTags/RepoDigests/Id/Created' <ml image> aitel
 Web (2026-11-08T20:29–20:31Z): GitHub API `releases/latest`, `releases?per_page=…`,
 release pages v3.3.4/v3.3.5, issues #27387, PR #28444, discussion #26953, and — for the
 thread-sourced figures in §5.2 (237 s vs 3.2 s, the ten OCR runs, `libamdhip64.so.7.2.70200`) —
-`https://api.github.com/repos/immich-app/immich/issues/32046/comments`, which is a *different*
-endpoint from the issue object quoted above.
+`https://api.github.com/repos/immich-app/immich/issues/32046/comments` — a *different* endpoint from
+the issue object quoted above, and read during the repair pass (21:05–21:12Z), not in the 20:29–20:31Z
+set on this line.
 
 ### Repair pass — commands actually run (2026-11-08T21:05–21:12Z, read-only)
 
 ```
 python3 (gzip/pathlib) over /var/log/apport.log.{7..2}.gz, .1 and the live file   # 46-event census
-grep -n 'max_corefiles_per_uid' /usr/lib/python3/dist-packages/apport/fileutils.py  # :36, :655-664
+grep -n 'max_corefiles_per_uid' /usr/lib/python3/dist-packages/apport/fileutils.py  # :36, :655-666 (range corrected to include os.remove at :665)
 sed -n '303,307p'  /usr/share/apport/apport        # clean_core_directory call — this window's SECOND line is :304 (read as :305 here; corrected in the second pass below), O_EXCL at :306-307
 sed -n '314,330p'  /usr/share/apport/apport        # :319 len(r["CoreDump"]), :328 unchecked os.write
 sed -n '340,350p'  /usr/share/apport/apport        # unlink-on-limit in the streamed path
@@ -570,7 +583,10 @@ curl -s https://api.github.com/repos/immich-app/immich/issues/32046   # state/st
 
 The repair pass used no `docker run`, no `docker exec`, no container restart or recreate, no
 `sudo`, deleted no core or crash file, and changed no compose file, env var or service. The only
-network access was the one GitHub API read above. The only file written is this document.
+network access was the GitHub API reads above: the release and issue objects at 20:29–20:31Z, and
+during this pass the `issues/32046` object at 21:07Z together with its **comment thread**
+(21:05–21:12Z), which is where the §5.2 thread bullets come from. The only file written is this
+document.
 
 ### Second repair pass (director, 2026-11-08T21:2xZ, read-only)
 
@@ -645,3 +661,31 @@ journalctl -k --since '2026-11-03 00:00' --until '2026-11-04 00:00' | grep -c 'G
 sed -n '650,675p' /usr/lib/python3/dist-packages/apport/fileutils.py                                # the rotation test
 ls /sys/class/drm ; cat /sys/class/drm/card0/device/{vendor,device}                                 # 0x1002 / 0x1900
 ```
+
+### Fourth pass — the review's second round (director, 2026-11-08T21:36Z, read-only)
+
+The same non-author reviewer re-read the third-pass text and returned FAIL again. Every point was
+re-measured; all but one were real, and the worst was **arithmetic in a sentence I wrote**:
+
+1. **The offset breakdown did not add up.** The text said "42/46 at +1 s, 3 at +2 s, 3 at −2 s" —
+   48 parts for 46 events. The measured histogram is 40 at +1 s, 2 at 0 s, 2 at +2 s and 2 at −2 s
+   (so 42 within 1 s, 46 within 2 s). Corrected, and the witness now recomputes the sum.
+2. **"a crash without a reset has not been observed" was false.** The journal holds 50 resets against
+   52 `immich_ml` SIGABRTs: the 46 serving-worker events use 46 distinct indices, four further indices
+   belong to no serving-worker event, and of the six `sessions.prepare` events only two have a reset of
+   their own (one shares a worker's, one shares another, and 2026-11-01 03:05:41 has no reset within
+   11 s). The pairing is strong for the 46 and *not* exclusive; the text now says that.
+3. the six `sessions.prepare` events are listed by timestamp instead of by hour range, and their reset
+   accounting is stated.
+4. the network provenance is fixed: the comment thread behind §5.2's thread figures was read during the
+   repair pass (21:05–21:12Z), not in the 20:29–20:31Z set, and the appendix entry says so.
+5. R5's "the recurrence stays visible in the apport log" is now marked **not verified** — the log line
+   is written before the core is opened, so it is expected to survive `core: 0`, but that is an
+   expectation and R3 must not be leaned on before checking it.
+6. the `fileutils.py` range now includes `os.remove` at `:665` (655-666), the GPU gloss no longer names
+   a product it did not look up, the headroom share says which numerator it uses (both artifact kinds
+   22.9 %; cores alone 21.9 %), "a reset alone is not the trigger" became "a reset is a reliable
+   correlate and not a one-way test", and the scope statement now uses the contract's own formulation
+   that root decides the actual effects after coordination.
+7. `reset-correlation.json` was ambiguous about its population; the text now says it holds the 46
+   serving-worker events only.

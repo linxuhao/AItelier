@@ -1,0 +1,2750 @@
+{
+  "base_sha": "28145a5bfb655d763395534e721db179adf9a55c",
+  "baseline": {
+    "errors": [],
+    "plans": [
+      [
+        120,
+        60
+      ]
+    ],
+    "reading": [
+      {
+        "at": 10,
+        "press": "jump"
+      },
+      {
+        "at": 20,
+        "press": "walk"
+      },
+      {
+        "at": 30,
+        "click": "X/Button +0,0"
+      },
+      {
+        "assert": [
+          {
+            "attr": "text",
+            "expr": "text == \"3\"",
+            "name": "HUD/Score.text",
+            "node": "HUD/Score"
+          }
+        ],
+        "at": 40
+      }
+    ]
+  },
+  "classes": {
+    "misread": "the reader accepted an accept-one-read row with a reading other than the one the row states",
+    "one-reading": "the reader accepted and produced exactly the reading the row states",
+    "raised": "the reader raised instead of refusing, so the request is neither read nor rejected: it becomes HTTP 500, and the tool client turns that 500 into passed=true / gate_skipped=true / spec_used=false. See `crash_consequence`",
+    "refused": "the reader refused the mutation and its message named the key that was mutated",
+    "refused-unclear": "the reader refused, but its message does not name what was refused, so the author is told 'no' without being told where",
+    "silent-default": "the reader accepted a mutation that had to be refused, and emitted a value the author did not write: a mapping's KEYS became action ids or aims, or a list element became the id. `site` names the lines that perform the substitution",
+    "unvalidated-carried": "the reader accepted and passed the written value through verbatim although the key's contract is a string, so this reader and the run's consumer disagree about what the bytes are. `site` names the consumer"
+  },
+  "contract_rows": [
+    {
+      "class": "refused",
+      "id": "contract-duplicate-key",
+      "key": "press",
+      "kind": "refuse",
+      "mutation": "a duplicate mapping key: YAML keeps the LAST value, so the first block is discarded and anything it asserted never runs",
+      "outcome": {
+        "errors": [
+          "playtest/w.yaml unreadable: DuplicateKeyError: duplicate key 'press' in /tmp/two-reading-probe/contract-duplicate-key/playtest/w.yaml: line 5 repeats line 4. YAML keeps only the LAST value, so the earlier block is discarded and anything it asserted never runs. Merge the two blocks, or give one of them its own entry."
+        ],
+        "notes": [],
+        "scenario_names": [],
+        "source": ""
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-duplicate-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "two `press:` keys in one entry"
+    },
+    {
+      "class": "silent-default",
+      "id": "contract-common-scenarios",
+      "key": "scenarios",
+      "kind": "substitute",
+      "mutation": "a `scenarios:` block written in _common.yaml is discarded: the loader replaces `scenarios` with the files it found",
+      "outcome": {
+        "errors": [],
+        "notes": [],
+        "scenario_names": [
+          "a"
+        ],
+        "site": [
+          "aitelier/tools/godot_playtest/impl.py:214"
+        ],
+        "source": "playtest/"
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-common-scenarios",
+      "should": "refuse",
+      "used_instead": "the file-derived list only (from-common vanishes)",
+      "wrote": "_common.yaml: [{name: from-common, ...}]"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-order-ghost",
+      "key": "ghost",
+      "kind": "refuse",
+      "mutation": "scenario_order names a file that does not exist",
+      "outcome": {
+        "errors": [
+          "scenario_order names ['ghost'] have no file in playtest/."
+        ],
+        "notes": [],
+        "scenario_names": [
+          "a"
+        ],
+        "source": "playtest/"
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-order-ghost",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "scenario_order: [a, ghost]"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-no-timeline",
+      "key": "timeline",
+      "kind": "refuse",
+      "mutation": "a scenario file with no timeline",
+      "outcome": {
+        "errors": [
+          "playtest/w.yaml is not a scenario (no `timeline:`). Every *.yaml here must be one scenario; shared fragments take a leading underscore."
+        ],
+        "notes": [],
+        "scenario_names": [],
+        "source": ""
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-no-timeline",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "a scenario file without `timeline:`"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-name-mismatch",
+      "key": "name",
+      "kind": "refuse",
+      "mutation": "a scenario whose `name:` disagrees with its basename",
+      "outcome": {
+        "errors": [
+          "playtest/w.yaml declares name 'other' \u2014 basename and `name:` must match."
+        ],
+        "notes": [],
+        "scenario_names": [
+          "other"
+        ],
+        "source": "playtest/"
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-name-mismatch",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "name: other in w.yaml"
+    },
+    {
+      "class": "one-reading",
+      "id": "contract-order-and-files",
+      "key": "scenario_order",
+      "kind": "accept",
+      "mutation": "scenario_order fixes the run order; unlisted files are appended sorted, so dropping a file in is enough",
+      "outcome": {
+        "errors": [],
+        "notes": [],
+        "scenario_names": [
+          "b",
+          "a"
+        ],
+        "source": "playtest/"
+      },
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-order-and-files",
+      "should": "accept-one-read",
+      "used_instead": "scenarios run as [b, a]",
+      "wrote": "[b, a]"
+    }
+  ],
+  "counts": {
+    "one-reading": 7,
+    "raised": 4,
+    "refused": 35,
+    "silent-default": 4,
+    "unvalidated-carried": 9
+  },
+  "covers": {
+    "a TAB-separated offset": [
+      "tl-click-tab-two-offsets"
+    ],
+    "a clicks: entry and its offset": [
+      "tl-clicks-mapping",
+      "tl-clicks-list",
+      "tl-click-two-offsets",
+      "tl-click-tab-two-offsets"
+    ],
+    "a duplicate key": [
+      "contract-duplicate-key"
+    ],
+    "a frames: value": [
+      "caller-frames-string",
+      "caller-frames-float",
+      "caller-frames-bool",
+      "caller-frames-zero",
+      "caller-frames-past-json-int"
+    ],
+    "a mapping where a scalar is expected": [
+      "tl-press-mapping",
+      "scn-description-mapping"
+    ],
+    "a null value": [
+      "tl-press-null",
+      "tl-assert-null",
+      "scn-timeline-null"
+    ],
+    "a scalar where a mapping is expected": [
+      "tl-assert-string",
+      "spec-actions-mapping"
+    ],
+    "a scenario list reached through _common.yaml": [
+      "contract-common-scenarios",
+      "contract-scenario-order-ghost",
+      "contract-order-and-files"
+    ],
+    "an actions: entry": [
+      "tl-actions-mapping",
+      "tl-actions-string",
+      "tl-actions-nested-list",
+      "tl-actions-int"
+    ],
+    "an empty list": [
+      "tl-actions-empty-list",
+      "tl-clicks-empty-list",
+      "spec-scenarios-empty"
+    ],
+    "an out-of-range number": [
+      "tl-at-past-the-cap",
+      "caller-frames-past-json-int"
+    ],
+    "an unknown key": [
+      "tl-unknown-key",
+      "spec-unknown-key",
+      "scn-unknown-key"
+    ]
+  },
+  "crash_consequence": {
+    "sidecar": {
+      "message": "'int' object is not iterable",
+      "raised": "TypeError"
+    },
+    "tool_client": {
+      "report": {
+        "errors": [],
+        "frames": 0,
+        "gate_skipped": true,
+        "passed": true,
+        "spec_used": false
+      },
+      "tool_returned": {
+        "passed": true,
+        "written": "playtest_report.json"
+      }
+    }
+  },
+  "mutations": [
+    {
+      "class": "refused",
+      "id": "caller-frames-string",
+      "key": "frames",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-string",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "\"120\""
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-float",
+      "key": "frames",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-float",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "120.0"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-bool",
+      "key": "frames",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-bool",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "true"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-zero",
+      "key": "frames",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-zero",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "0"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-past-json-int",
+      "key": "frames",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-past-json-int",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "9007199254740992"
+    },
+    {
+      "class": "refused",
+      "id": "spec-scenarios-mapping",
+      "key": "scenarios",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-scenarios-mapping",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{0: scenario}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-scenarios-empty",
+      "key": "scenarios",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-scenarios-empty",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "[]"
+    },
+    {
+      "class": "refused",
+      "id": "spec-unknown-key",
+      "key": "reviewer_notes",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-unknown-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{assert: {a.b: '1'}}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-actions-mapping",
+      "key": "actions",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-actions-mapping",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{jump: 1}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-surface-list",
+      "key": "surface",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-surface-list",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "[HUD/Score.text]"
+    },
+    {
+      "class": "refused",
+      "id": "scn-unknown-key",
+      "key": "reviewer_notes",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-unknown-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{assert: {a.b: '1'}}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-description-mapping",
+      "key": "description",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-description-mapping",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{a: [b]}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-repeatability-string",
+      "key": "repeatability",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-repeatability-string",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "'yes'"
+    },
+    {
+      "class": "refused",
+      "id": "scn-scene-int",
+      "key": "scene",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-scene-int",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "refused",
+      "id": "scn-timeline-mapping",
+      "key": "timeline",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-timeline-mapping",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{0: {at: 1}}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-timeline-null",
+      "key": "timeline",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-timeline-null",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "null"
+    },
+    {
+      "class": "refused",
+      "id": "scn-budget-extra-key",
+      "key": "execution_budget",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-budget-extra-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{max_frames: 200, timeout_seconds: 30, frames: 99}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-input-observation-shape",
+      "key": "input_observation",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-input-observation-shape",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{node: HUD/Score}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-string",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-string",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "'10'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-fraction",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-fraction",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "10.5"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-negative",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-negative",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "-1"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-missing",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-missing",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "(absent)"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-decreasing",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-decreasing",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-past-the-cap",
+      "key": "at",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-past-the-cap",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "5000"
+    },
+    {
+      "class": "refused",
+      "id": "tl-unknown-key",
+      "key": "presses",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-unknown-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "[jump]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-actions-mapping",
+      "key": "actions",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-mapping",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4374",
+        "docker/godot/godot_harness.py:4390"
+      ],
+      "used_instead": "press: 'jump' and press: 'crouch'",
+      "wrote": "{jump: 1, crouch: 2}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-actions-int",
+      "key": "actions",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4227",
+        "docker/godot/godot_harness.py:4390"
+      ],
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-actions-nested-list",
+      "key": "actions",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-nested-list",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4374",
+        "docker/godot/godot_harness.py:4390"
+      ],
+      "used_instead": "press: ['jump']",
+      "wrote": "[[jump]]"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-actions-empty-list",
+      "key": "actions",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-empty-list",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "one entry with `at` and no press",
+      "wrote": "[]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-clicks-mapping",
+      "key": "clicks",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-mapping",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4377",
+        "docker/godot/godot_harness.py:4392"
+      ],
+      "used_instead": "click: 'X/Button +0,0' (the key)",
+      "wrote": "{X/Button +0,0: 1}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-clicks-int",
+      "key": "clicks",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4227",
+        "docker/godot/godot_harness.py:4364"
+      ],
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-clicks-empty-list",
+      "key": "clicks",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-empty-list",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "the sibling click only",
+      "wrote": "[]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-hovers-mapping",
+      "key": "hovers",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-mapping",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4380",
+        "docker/godot/godot_harness.py:4394"
+      ],
+      "used_instead": "hover: 'HUD/Score' (the key)",
+      "wrote": "{HUD/Score: 1}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-hovers-int",
+      "key": "hovers",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4227",
+        "docker/godot/godot_harness.py:4364"
+      ],
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-int",
+      "key": "press",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2552"
+      ],
+      "used_instead": "press: 123 reaches a String-typed consumer",
+      "wrote": "123"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-mapping",
+      "key": "press",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-mapping",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2552"
+      ],
+      "used_instead": "press: {walk: 1} reaches a String-typed consumer",
+      "wrote": "{walk: 1}"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-list",
+      "key": "press",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-list",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2552"
+      ],
+      "used_instead": "press: ['walk'] reaches a String-typed consumer",
+      "wrote": "[walk]"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-null",
+      "key": "press",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-null",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2552"
+      ],
+      "used_instead": "press: null reaches a String-typed consumer",
+      "wrote": "null"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-release-list",
+      "key": "release",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-release-list",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2816"
+      ],
+      "used_instead": "release: ['walk'] reaches has_action/typed consumer",
+      "wrote": "[walk]"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-release-int",
+      "key": "release",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-release-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2816"
+      ],
+      "used_instead": "release: 7 reaches has_action/typed consumer",
+      "wrote": "7"
+    },
+    {
+      "class": "raised",
+      "id": "tl-click-int",
+      "key": "click",
+      "kind": "substitute",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-int",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4227",
+        "docker/godot/godot_harness.py:4364"
+      ],
+      "used_instead": null,
+      "wrote": "7"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-hover-list",
+      "key": "hover",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hover-list",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:2804"
+      ],
+      "used_instead": "hover: ['HUD/A', 'HUD/B'] reaches a String consumer",
+      "wrote": "[HUD/A, HUD/B]"
+    },
+    {
+      "class": "refused",
+      "id": "tl-click-two-offsets",
+      "key": "click",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-two-offsets",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "'X/Button +0,0 +0,5'"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-click-tab-two-offsets",
+      "key": "click",
+      "kind": "carry",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-tab-two-offsets",
+      "should": "refuse",
+      "site": [
+        "docker/godot/godot_harness.py:4169",
+        "docker/godot/godot_harness.py:2653",
+        "docker/godot/godot_harness.py:2733"
+      ],
+      "used_instead": "the tab joins the node name; only +0,5 is an offset",
+      "wrote": "'X/Button<TAB>+0,0 +0,5'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-string",
+      "key": "assert",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-string",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "'HUD/Score.text == \"3\"'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-null",
+      "key": "assert",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-null",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "null"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-unknown-key",
+      "key": "wait",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-unknown-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{node: HUD/Score, expr: '1 == 1', wait: 2}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-mode-and-expr",
+      "key": "mode",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-mode-and-expr",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "{mode: changed, expr: ...}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-capture-before-string",
+      "key": "capture_before",
+      "kind": "refuse",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-capture-before-string",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "'hud'"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-actions-string",
+      "key": "actions",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-string",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "press: 'jump'",
+      "wrote": "'jump'"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-at-whole-float",
+      "key": "at",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-whole-float",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "runs on frame 10",
+      "wrote": "10.0"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-clicks-list",
+      "key": "clicks",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-list",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "click: 'HUD/A +0,0' then click: 'HUD/B +1,1'",
+      "wrote": "[HUD/A +0,0, HUD/B +1,1]"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-hovers-string",
+      "key": "hovers",
+      "kind": "accept",
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-string",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "hover: 'HUD/Score'",
+      "wrote": "'HUD/Score'"
+    },
+    {
+      "class": "refused",
+      "id": "contract-duplicate-key",
+      "key": "press",
+      "kind": "refuse",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-duplicate-key",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "two `press:` keys in one entry"
+    },
+    {
+      "class": "silent-default",
+      "id": "contract-common-scenarios",
+      "key": "scenarios",
+      "kind": "substitute",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-common-scenarios",
+      "should": "refuse",
+      "site": [
+        "aitelier/tools/godot_playtest/impl.py:214"
+      ],
+      "used_instead": "the file-derived list only (from-common vanishes)",
+      "wrote": "_common.yaml: [{name: from-common, ...}]"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-order-ghost",
+      "key": "ghost",
+      "kind": "refuse",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-order-ghost",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "scenario_order: [a, ghost]"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-no-timeline",
+      "key": "timeline",
+      "kind": "refuse",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-no-timeline",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "a scenario file without `timeline:`"
+    },
+    {
+      "class": "refused",
+      "id": "contract-scenario-name-mismatch",
+      "key": "name",
+      "kind": "refuse",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-scenario-name-mismatch",
+      "should": "refuse",
+      "site": [],
+      "used_instead": null,
+      "wrote": "name: other in w.yaml"
+    },
+    {
+      "class": "one-reading",
+      "id": "contract-order-and-files",
+      "key": "scenario_order",
+      "kind": "accept",
+      "reader": "read_spec",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row contract-order-and-files",
+      "should": "accept-one-read",
+      "site": [],
+      "used_instead": "scenarios run as [b, a]",
+      "wrote": "[b, a]"
+    }
+  ],
+  "node_key": "harness.the-two-reading-shapes-are-enumerated-from-the-parser-20261108",
+  "probe": "probe.py",
+  "reproduce": {
+    "all": "python evidence/playtest-two-reading-20261108/probe.py",
+    "one": "python evidence/playtest-two-reading-20261108/probe.py --row <row id>"
+  },
+  "rows": [
+    {
+      "class": "refused",
+      "id": "caller-frames-string",
+      "key": "frames",
+      "kind": "refuse",
+      "mutation": "a quoted frame count is not a frame count",
+      "outcome": {
+        "errors": [
+          "spec has key frames of type str - it must be an integer.",
+          "spec frames must be a positive exact JSON integer (<= 2^53-1)"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-string",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "\"120\""
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-float",
+      "key": "frames",
+      "kind": "refuse",
+      "mutation": "a float frame count is not an exact JSON integer",
+      "outcome": {
+        "errors": [
+          "spec has key frames of type float - it must be an integer.",
+          "spec frames must be a positive exact JSON integer (<= 2^53-1)"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-float",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "120.0"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-bool",
+      "key": "frames",
+      "kind": "refuse",
+      "mutation": "True is an int in Python and not a frame count",
+      "outcome": {
+        "errors": [
+          "spec has key frames of type bool - it must be an integer.",
+          "spec frames must be a positive exact JSON integer (<= 2^53-1)"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-bool",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "true"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-zero",
+      "key": "frames",
+      "kind": "refuse",
+      "mutation": "0 frames is not a probe run",
+      "outcome": {
+        "errors": [
+          "spec frames must be a positive exact JSON integer (<= 2^53-1)"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-zero",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "0"
+    },
+    {
+      "class": "refused",
+      "id": "caller-frames-past-json-int",
+      "key": "frames",
+      "kind": "refuse",
+      "mutation": "a frame count past 2^53-1 is not an exact JSON integer",
+      "outcome": {
+        "errors": [
+          "spec frames must be a positive exact JSON integer (<= 2^53-1)"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row caller-frames-past-json-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "9007199254740992"
+    },
+    {
+      "class": "refused",
+      "id": "spec-scenarios-mapping",
+      "key": "scenarios",
+      "kind": "refuse",
+      "mutation": "a mapping where the scenario list belongs",
+      "outcome": {
+        "errors": [
+          "spec has key scenarios of type dict - it must be a non-empty list.",
+          "spec needs a non-empty scenarios list"
+        ],
+        "must_name": "scenarios",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-scenarios-mapping",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{0: scenario}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-scenarios-empty",
+      "key": "scenarios",
+      "kind": "refuse",
+      "mutation": "no scenarios is no request",
+      "outcome": {
+        "errors": [
+          "spec has key scenarios of type list - it must be a non-empty list.",
+          "spec needs a non-empty scenarios list"
+        ],
+        "must_name": "scenarios",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-scenarios-empty",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "[]"
+    },
+    {
+      "class": "refused",
+      "id": "spec-unknown-key",
+      "key": "reviewer_notes",
+      "kind": "refuse",
+      "mutation": "a key nothing reads, whose value can carry assert blocks",
+      "outcome": {
+        "errors": [
+          "spec has unknown top-level key(s) reviewer_notes"
+        ],
+        "must_name": "reviewer_notes",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-unknown-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{assert: {a.b: '1'}}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-actions-mapping",
+      "key": "actions",
+      "kind": "refuse",
+      "mutation": "actions must be a list of action ids, not a mapping",
+      "outcome": {
+        "errors": [
+          "spec has key actions of type dict - it must be a list of strings."
+        ],
+        "must_name": "actions",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-actions-mapping",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{jump: 1}"
+    },
+    {
+      "class": "refused",
+      "id": "spec-surface-list",
+      "key": "surface",
+      "kind": "refuse",
+      "mutation": "surface maps a node to attribute names",
+      "outcome": {
+        "errors": [
+          "spec has key surface of type list - it must be a mapping of node name to a list of strings."
+        ],
+        "must_name": "surface",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row spec-surface-list",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "[HUD/Score.text]"
+    },
+    {
+      "class": "refused",
+      "id": "scn-unknown-key",
+      "key": "reviewer_notes",
+      "kind": "refuse",
+      "mutation": "assert blocks parked under a key no reader evaluates",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has unknown key(s) reviewer_notes"
+        ],
+        "must_name": "reviewer_notes",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-unknown-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{assert: {a.b: '1'}}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-description-mapping",
+      "key": "description",
+      "kind": "refuse",
+      "mutation": "description must be a plain string",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key description of type dict - it must be a plain string."
+        ],
+        "must_name": "description",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-description-mapping",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{a: [b]}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-repeatability-string",
+      "key": "repeatability",
+      "kind": "refuse",
+      "mutation": "the gate launcher reads 'yes' as off",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key repeatability of type str - it must be true or false."
+        ],
+        "must_name": "repeatability",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-repeatability-string",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "'yes'"
+    },
+    {
+      "class": "refused",
+      "id": "scn-scene-int",
+      "key": "scene",
+      "kind": "refuse",
+      "mutation": "a scene path must be a string",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key scene of type int - it must be a string."
+        ],
+        "must_name": "scene",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-scene-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "refused",
+      "id": "scn-timeline-mapping",
+      "key": "timeline",
+      "kind": "refuse",
+      "mutation": "a mapping where the entry list belongs",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key timeline of type dict - it must be a list."
+        ],
+        "must_name": "timeline",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-timeline-mapping",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{0: {at: 1}}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-timeline-null",
+      "key": "timeline",
+      "kind": "refuse",
+      "mutation": "a null where the entry list belongs",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key timeline of type NoneType - it must be a list."
+        ],
+        "must_name": "timeline",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-timeline-null",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "null"
+    },
+    {
+      "class": "refused",
+      "id": "scn-budget-extra-key",
+      "key": "execution_budget",
+      "kind": "refuse",
+      "mutation": "a budget that also carries a frame count nothing reads",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': execution_budget requires exactly max_frames and timeout_seconds"
+        ],
+        "must_name": "execution_budget",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-budget-extra-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{max_frames: 200, timeout_seconds: 30, frames: 99}"
+    },
+    {
+      "class": "refused",
+      "id": "scn-input-observation-shape",
+      "key": "input_observation",
+      "kind": "refuse",
+      "mutation": "an observation missing half its contract",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in' has key input_observation of type dict - it must be exactly {node: nonempty string, property: identifier}."
+        ],
+        "must_name": "input_observation",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row scn-input-observation-shape",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{node: HUD/Score}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-string",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "a quoted frame number",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 0 has a non-numeric `at`: '10'. Frames are single integers -- a range or a list is not supported, write one entry per frame (`- {at: 3, ...}` \u2026 `- {at: 15, ...}`)."
+        ],
+        "must_name": "`at`",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-string",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "'10'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-fraction",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "a fractional frame runs at int() and reads as the float",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 0 has a non-integer `at`: 10.5. Frames are whole numbers; write the frame the entry should run on."
+        ],
+        "must_name": "`at`",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-fraction",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "10.5"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-negative",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "a frame before the first frame",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 0 has a negative `at`: -1"
+        ],
+        "must_name": "`at`",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-negative",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "-1"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-missing",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "an entry with no frame, which ran at 0 or never depending on its keys",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 0 has no `at`. Every entry runs on the frame its `at` names; write it (`at: 0` is the first frame)."
+        ],
+        "must_name": "`at`",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-missing",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "(absent)"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-decreasing",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "an entry written after a later frame runs before it",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 3 (at: 5) is written after entry 2 (at: 30); entries run in frame order, so `at` must not decrease in file order. Move entry 3 above entry 2, or change its frame."
+        ],
+        "must_name": "`at`",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-decreasing",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "refused",
+      "id": "tl-at-past-the-cap",
+      "key": "at",
+      "kind": "refuse",
+      "mutation": "a frame past the finite 3000-frame ceiling",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': needs 5030 frames including timeline frame(s) 5000, past the 3000-frame cap/budget; no scenario was run"
+        ],
+        "must_name": "frames",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-past-the-cap",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5000"
+    },
+    {
+      "class": "refused",
+      "id": "tl-unknown-key",
+      "key": "presses",
+      "kind": "refuse",
+      "mutation": "a near-miss key next to the real one",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 0 (at: 10) has unknown key(s) presses - allowed: actions, assert, at, capture_before, click, clicks, hover, hovers, press, release"
+        ],
+        "must_name": "presses",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-unknown-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "[jump]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-actions-mapping",
+      "key": "actions",
+      "kind": "substitute",
+      "mutation": "a mapping under actions: - its KEYS become action ids and its values vanish",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 10,
+              "press": "crouch"
+            }
+          ],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 10,
+            "press": "crouch"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:4374",
+          "docker/godot/godot_harness.py:4390"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-mapping",
+      "should": "refuse",
+      "used_instead": "press: 'jump' and press: 'crouch'",
+      "wrote": "{jump: 1, crouch: 2}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-actions-int",
+      "key": "actions",
+      "kind": "substitute",
+      "mutation": "a bare int where the action list belongs",
+      "outcome": {
+        "exception": "TypeError",
+        "message": "'int' object is not iterable",
+        "site": [
+          "docker/godot/godot_harness.py:4227",
+          "docker/godot/godot_harness.py:4390"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-actions-nested-list",
+      "key": "actions",
+      "kind": "carry",
+      "mutation": "an action id is a string, not a list",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 10,
+              "press": [
+                "jump"
+              ]
+            }
+          ],
+          "removed": [
+            {
+              "at": 10,
+              "press": "jump"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": [
+              "jump"
+            ]
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:4374",
+          "docker/godot/godot_harness.py:4390"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-nested-list",
+      "should": "refuse",
+      "used_instead": "press: ['jump']",
+      "wrote": "[[jump]]"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-actions-empty-list",
+      "key": "actions",
+      "kind": "accept",
+      "mutation": "an entry whose only key is an empty actions list delivers no input",
+      "outcome": {
+        "allowed_delta": {
+          "added": [
+            {
+              "at": 10
+            }
+          ],
+          "removed": [
+            {
+              "at": 10,
+              "press": "jump"
+            }
+          ]
+        },
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 10
+            }
+          ],
+          "removed": [
+            {
+              "at": 10,
+              "press": "jump"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-empty-list",
+      "should": "accept-one-read",
+      "used_instead": "one entry with `at` and no press",
+      "wrote": "[]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-clicks-mapping",
+      "key": "clicks",
+      "kind": "substitute",
+      "mutation": "a mapping under clicks: - its keys become aims",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 30,
+              "click": "X/Button +0,0"
+            }
+          ],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:4377",
+          "docker/godot/godot_harness.py:4392"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-mapping",
+      "should": "refuse",
+      "used_instead": "click: 'X/Button +0,0' (the key)",
+      "wrote": "{X/Button +0,0: 1}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-clicks-int",
+      "key": "clicks",
+      "kind": "substitute",
+      "mutation": "a bare int where the aim list belongs",
+      "outcome": {
+        "exception": "TypeError",
+        "message": "'int' object is not iterable",
+        "site": [
+          "docker/godot/godot_harness.py:4227",
+          "docker/godot/godot_harness.py:4364"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-clicks-empty-list",
+      "key": "clicks",
+      "kind": "accept",
+      "mutation": "an empty clicks list adds no click beside the sibling `click`",
+      "outcome": {
+        "allowed_delta": {
+          "added": [],
+          "removed": []
+        },
+        "delta_from_baseline": {
+          "added": [],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-empty-list",
+      "should": "accept-one-read",
+      "used_instead": "the sibling click only",
+      "wrote": "[]"
+    },
+    {
+      "class": "silent-default",
+      "id": "tl-hovers-mapping",
+      "key": "hovers",
+      "kind": "substitute",
+      "mutation": "a mapping under hovers:",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 40,
+              "hover": "HUD/Score"
+            }
+          ],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "at": 40,
+            "hover": "HUD/Score"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:4380",
+          "docker/godot/godot_harness.py:4394"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-mapping",
+      "should": "refuse",
+      "used_instead": "hover: 'HUD/Score' (the key)",
+      "wrote": "{HUD/Score: 1}"
+    },
+    {
+      "class": "raised",
+      "id": "tl-hovers-int",
+      "key": "hovers",
+      "kind": "substitute",
+      "mutation": "a bare int where the aim list belongs",
+      "outcome": {
+        "exception": "TypeError",
+        "message": "'int' object is not iterable",
+        "site": [
+          "docker/godot/godot_harness.py:4227",
+          "docker/godot/godot_harness.py:4364"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "5"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-int",
+      "key": "press",
+      "kind": "carry",
+      "mutation": "press must name an action, not carry a number",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": 123
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": 123
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2552"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-int",
+      "should": "refuse",
+      "used_instead": "press: 123 reaches a String-typed consumer",
+      "wrote": "123"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-mapping",
+      "key": "press",
+      "kind": "carry",
+      "mutation": "press must name one action",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": {
+                "walk": 1
+              }
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": {
+              "walk": 1
+            }
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2552"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-mapping",
+      "should": "refuse",
+      "used_instead": "press: {walk: 1} reaches a String-typed consumer",
+      "wrote": "{walk: 1}"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-list",
+      "key": "press",
+      "kind": "carry",
+      "mutation": "press names one action; a list is the plural shape `actions:`",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": [
+                "walk"
+              ]
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": [
+              "walk"
+            ]
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2552"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-list",
+      "should": "refuse",
+      "used_instead": "press: ['walk'] reaches a String-typed consumer",
+      "wrote": "[walk]"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-press-null",
+      "key": "press",
+      "kind": "carry",
+      "mutation": "a null press is not an action id",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": null
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": null
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2552"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-press-null",
+      "should": "refuse",
+      "used_instead": "press: null reaches a String-typed consumer",
+      "wrote": "null"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-release-list",
+      "key": "release",
+      "kind": "carry",
+      "mutation": "release must name one action",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": "walk",
+              "release": [
+                "walk"
+              ]
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk",
+            "release": [
+              "walk"
+            ]
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2816"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-release-list",
+      "should": "refuse",
+      "used_instead": "release: ['walk'] reaches has_action/typed consumer",
+      "wrote": "[walk]"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-release-int",
+      "key": "release",
+      "kind": "carry",
+      "mutation": "a number where an action id belongs",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 20,
+              "press": "walk",
+              "release": 7
+            }
+          ],
+          "removed": [
+            {
+              "at": 20,
+              "press": "walk"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk",
+            "release": 7
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2816"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-release-int",
+      "should": "refuse",
+      "used_instead": "release: 7 reaches has_action/typed consumer",
+      "wrote": "7"
+    },
+    {
+      "class": "raised",
+      "id": "tl-click-int",
+      "key": "click",
+      "kind": "substitute",
+      "mutation": "a bare int where the aim belongs",
+      "outcome": {
+        "exception": "TypeError",
+        "message": "'int' object is not iterable",
+        "site": [
+          "docker/godot/godot_harness.py:4227",
+          "docker/godot/godot_harness.py:4364"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-int",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "7"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-hover-list",
+      "key": "hover",
+      "kind": "carry",
+      "mutation": "hover names one aim; a list is the plural shape `hovers:`",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 30,
+              "click": "X/Button +0,0",
+              "hover": [
+                "HUD/A",
+                "HUD/B"
+              ]
+            }
+          ],
+          "removed": [
+            {
+              "at": 30,
+              "click": "X/Button +0,0"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0",
+            "hover": [
+              "HUD/A",
+              "HUD/B"
+            ]
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:2804"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hover-list",
+      "should": "refuse",
+      "used_instead": "hover: ['HUD/A', 'HUD/B'] reaches a String consumer",
+      "wrote": "[HUD/A, HUD/B]"
+    },
+    {
+      "class": "refused",
+      "id": "tl-click-two-offsets",
+      "key": "click",
+      "kind": "refuse",
+      "mutation": "two offsets in one aim - the later one wins",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 2 (at: 30): click 'X/Button +0,0 +0,5' has 2 offsets (+0,0, +0,5); an aim takes one offset"
+        ],
+        "must_name": "offset",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-two-offsets",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "'X/Button +0,0 +0,5'"
+    },
+    {
+      "class": "unvalidated-carried",
+      "id": "tl-click-tab-two-offsets",
+      "key": "click",
+      "kind": "carry",
+      "mutation": "two offsets split by a TAB - the one-offset check splits on spaces only",
+      "outcome": {
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 30,
+              "click": "X/Button\t+0,0 +0,5"
+            }
+          ],
+          "removed": [
+            {
+              "at": 30,
+              "click": "X/Button +0,0"
+            }
+          ]
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button\t+0,0 +0,5"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": [
+          "docker/godot/godot_harness.py:4169",
+          "docker/godot/godot_harness.py:2653",
+          "docker/godot/godot_harness.py:2733"
+        ]
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-click-tab-two-offsets",
+      "should": "refuse",
+      "used_instead": "the tab joins the node name; only +0,5 is an offset",
+      "wrote": "'X/Button<TAB>+0,0 +0,5'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-string",
+      "key": "assert",
+      "kind": "refuse",
+      "mutation": "an assert written as prose instead of a mapping or list",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 3 (at: 40): `assert` is a str - it must be a mapping or a list"
+        ],
+        "must_name": "assert",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-string",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "'HUD/Score.text == \"3\"'"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-null",
+      "key": "assert",
+      "kind": "refuse",
+      "mutation": "a null where the assert belongs",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 3 (at: 40): `assert` is a NoneType - it must be a mapping or a list"
+        ],
+        "must_name": "assert",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-null",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "null"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-unknown-key",
+      "key": "wait",
+      "kind": "refuse",
+      "mutation": "an assert item carrying a key nothing evaluates",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 3 (at: 40): assert item 0 has unknown key(s) wait - allowed: attr, before, expr, mode, name, node"
+        ],
+        "must_name": "wait",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-unknown-key",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{node: HUD/Score, expr: '1 == 1', wait: 2}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-assert-mode-and-expr",
+      "key": "mode",
+      "kind": "refuse",
+      "mutation": "one item that is both a delta and a comparison",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': timeline entry 3 (at: 40): assert item 0 has both `mode` and `expr`; a `mode` assert compares `attr` with frame 0 and never reads `expr`. Write two items."
+        ],
+        "must_name": "mode",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-assert-mode-and-expr",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "{mode: changed, expr: ...}"
+    },
+    {
+      "class": "refused",
+      "id": "tl-capture-before-string",
+      "key": "capture_before",
+      "kind": "refuse",
+      "mutation": "a capture written as a name instead of a record",
+      "outcome": {
+        "errors": [
+          "scenario 'walk-in': capture_before must be a list"
+        ],
+        "must_name": "capture_before",
+        "named_the_mutation": true
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-capture-before-string",
+      "should": "refuse",
+      "used_instead": null,
+      "wrote": "'hud'"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-actions-string",
+      "key": "actions",
+      "kind": "accept",
+      "mutation": "one action id as a bare string reads as actions: ['jump']",
+      "outcome": {
+        "allowed_delta": {
+          "added": [],
+          "removed": []
+        },
+        "delta_from_baseline": {
+          "added": [],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-actions-string",
+      "should": "accept-one-read",
+      "used_instead": "press: 'jump'",
+      "wrote": "'jump'"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-at-whole-float",
+      "key": "at",
+      "kind": "accept",
+      "mutation": "10.0 is a whole number and runs on frame 10",
+      "outcome": {
+        "allowed_delta": {
+          "added": [],
+          "removed": []
+        },
+        "delta_from_baseline": {
+          "added": [],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-at-whole-float",
+      "should": "accept-one-read",
+      "used_instead": "runs on frame 10",
+      "wrote": "10.0"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-clicks-list",
+      "key": "clicks",
+      "kind": "accept",
+      "mutation": "two aims on one frame read as two clicks, in file order",
+      "outcome": {
+        "allowed_delta": {
+          "added": [
+            {
+              "at": 40,
+              "click": "HUD/A +0,0"
+            },
+            {
+              "at": 40,
+              "click": "HUD/B +1,1"
+            }
+          ],
+          "removed": []
+        },
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 40,
+              "click": "HUD/A +0,0"
+            },
+            {
+              "at": 40,
+              "click": "HUD/B +1,1"
+            }
+          ],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "at": 40,
+            "click": "HUD/A +0,0"
+          },
+          {
+            "at": 40,
+            "click": "HUD/B +1,1"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-clicks-list",
+      "should": "accept-one-read",
+      "used_instead": "click: 'HUD/A +0,0' then click: 'HUD/B +1,1'",
+      "wrote": "[HUD/A +0,0, HUD/B +1,1]"
+    },
+    {
+      "class": "one-reading",
+      "id": "tl-hovers-string",
+      "key": "hovers",
+      "kind": "accept",
+      "mutation": "one aim as a bare string reads as hovers: ['HUD/Score']",
+      "outcome": {
+        "allowed_delta": {
+          "added": [
+            {
+              "at": 40,
+              "hover": "HUD/Score"
+            }
+          ],
+          "removed": []
+        },
+        "delta_from_baseline": {
+          "added": [
+            {
+              "at": 40,
+              "hover": "HUD/Score"
+            }
+          ],
+          "removed": []
+        },
+        "reading": [
+          {
+            "at": 10,
+            "press": "jump"
+          },
+          {
+            "at": 20,
+            "press": "walk"
+          },
+          {
+            "at": 30,
+            "click": "X/Button +0,0"
+          },
+          {
+            "at": 40,
+            "hover": "HUD/Score"
+          },
+          {
+            "assert": [
+              {
+                "attr": "text",
+                "expr": "text == \"3\"",
+                "name": "HUD/Score.text",
+                "node": "HUD/Score"
+              }
+            ],
+            "at": 40
+          }
+        ],
+        "site": []
+      },
+      "reader": "preflight",
+      "reproduce": "python evidence/playtest-two-reading-20261108/probe.py --row tl-hovers-string",
+      "should": "accept-one-read",
+      "used_instead": "hover: 'HUD/Score'",
+      "wrote": "'HUD/Score'"
+    }
+  ],
+  "subjects": {
+    "aitelier/tools/godot_playtest/impl.py": "0b6d6beda8996fc992842fecb575524dee1fa7f3eeb14bef89f05be0f816a778",
+    "docker/godot/godot_harness.py": "b6819e8232f09f2ec9a6f19cfc2075c30baa8ba0733f526746030e15b1566b30"
+  },
+  "total": 59
+}

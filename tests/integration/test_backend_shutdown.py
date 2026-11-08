@@ -110,8 +110,10 @@ class Backend:
         self.env["AITELIER_DRIVER_IDENTITY"] = ""
         # ...and this fixture's OWN writer identity, which is what the test uses
         # from here on. A plain (non-Cloudflare) client presenting it is a writer
-        # whether or not the gate above is configured (api/authz.py:224-225), so
-        # the write calls no longer inherit the deployment's admin token.
+        # whether or not the gate above is configured: with the gate off nothing
+        # is checked at all (api/authz.py:220-221), with it on the token decides
+        # for a non-Cloudflare caller (:222-225). So the write calls no longer
+        # inherit the deployment's admin token either way.
         self.token = f"shutdown-fixture-{entry}-{os.getpid()}"
         self.env["AITELIER_ADMIN_TOKEN"] = self.token
         self.observations = []
@@ -368,12 +370,17 @@ async def test_real_backend_shutdown_restart_and_recovery(backend_factory, entry
         await backend.healthy(client)
         # State the precondition instead of assuming it: the rest of this test
         # writes through the same gate a browser would hit, and until 2026-11-08
-        # a tree whose root holds a .env silently configured that gate and this
-        # test died 40 lines later with a bare 403. /api/me reports both facts,
-        # so a mode this fixture cannot write in is named here.
+        # this died 40 lines later with a bare 403 on a tree whose root holds a
+        # .env (that causation is inferred from the code, not yet measured from a
+        # child's environment; what IS asserted here is the mode itself).
+        # gate_enabled is asserted, not merely recorded: with the gate ON this
+        # fixture's token is still accepted (api/authz.py:222-225), so can_write
+        # alone passes in either mode and would not name the one the fixture is
+        # written for.
         me = await client.get(backend.url + "/api/me", headers=backend.writer())
         assert me.status_code == 200, me.text
         assert me.json()["can_write"] is True, me.text
+        assert me.json()["gate_enabled"] is False, me.text
         backend.record("identity_established", gate_enabled=me.json()["gate_enabled"],
                        identity_token_present=True, can_write=True)
         project = await client.post(backend.url + "/api/projects", json={

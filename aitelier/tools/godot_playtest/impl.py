@@ -655,6 +655,7 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
 # it is not covered by this socket (that gate is on the repo-gate path, where
 # the game's tools/godot_gate.py reads its own /playtest answer with a 3600 s
 # socket, inside REPO_GATE_TIMEOUT of 12600 s). 4200 is the TOOL path's bound.
+# evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
 def post_playtest(payload: dict, timeout: int = 4200) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 

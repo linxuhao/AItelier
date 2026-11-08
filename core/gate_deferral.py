@@ -59,6 +59,7 @@ GATE_DEFERRAL_WAIT_SECONDS = float(
 # is 3476.2 s (wuxia-godot-gate-7kf51nvv) and the largest of any status is
 # 6559.6 s, from an aborted gate (wuxia-godot-gate-o_fr2y_w) that never
 # completed. ~1.95x the whole gate is the thing this episode has to contain.
+# evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
 # Tests: tests/unit/test_gate_deferral_execution_points.py.
 GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(
     os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", "12600"))

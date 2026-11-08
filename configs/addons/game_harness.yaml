@@ -90,6 +90,7 @@ overlay:
         # run_tests -> run_tests.sh -> the game's tools/godot_gate.py posts
         # /playtest with its own 3600 s socket, inside REPO_GATE_TIMEOUT
         # (12600 s, aitelier/tools/run_tests/impl.py:1306).
+        # evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
         timeout_seconds: 4800
         tool_params:
           out_dir: "$STEP_DIR"
@@ -148,6 +149,7 @@ overlay:
         # a step killed mid-run leaves no file for that match to read, so the
         # run fails instead of pausing. It bounds no play-test: this step does
         # not POST /playtest at all, it reads 5_compile's captures.
+        # evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
         timeout_seconds: 3600
         tool_params:
           from_step: "5_compile"

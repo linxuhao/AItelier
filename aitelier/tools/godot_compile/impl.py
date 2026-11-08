@@ -273,6 +273,7 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
             # on the play-test leg. The step budget is now 4800 = 600 + 4200,
             # the whole of what these two sequential legs can spend, so neither
             # leg's socket can expire as a step timeout.
+            # evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
             with urllib.request.urlopen(req, timeout=600) as resp:
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,

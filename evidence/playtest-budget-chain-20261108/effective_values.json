@@ -1,0 +1,19 @@
+{
+ "post_playtest_default_timeout": 4200,
+ "RENDER_QUEUE_SHARE": 0.5,
+ "AUTHORED_SCENARIO_CEILING_SEC": 3600,
+ "derived_render_wait_timeout_sec_at_default": 2100.0,
+ "derived_payload_timeout_for_no_spec": 120,
+ "authored_caller_timeout_empty_spec_ceiling_3600": 120,
+ "authored_caller_timeout_budget_3000_ceiling_3600": 3000,
+ "authored_caller_timeout_budget_5000_ceiling_3600": 3600,
+ "godot_playtest_feedback_timeout_default_int": 600,
+ "scenario_tool_default_timeout": 900,
+ "gate_deferral_episode_max_seconds_effective": 12600.0,
+ "gate_deferral_GATE_DEFERRAL_EPISODE_MAX_SECONDS_raw": 12600.0,
+ "gate_deferral_GATE_DEFERRAL_EPISODE_MAX_CEILING_raw": 21600.0,
+ "gate_deferral_ABSOLUTE_EPISODE_CEILING": 21600.0,
+ "gate_deferral_wait_seconds": 300.0,
+ "run_tests_REPO_GATE_TIMEOUT": 12600,
+ "post_playtest_sig": "(payload: dict, timeout: int = 4200) -> dict"
+}

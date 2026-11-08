@@ -1,0 +1,1007 @@
+{
+ "playtest_json_with_timing": [
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/playtest.json",
+   "timing_wall_sec": 3471.2921,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 166,
+   "control_count": 109
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260918T135757Z-aa402ef0/playtest.json",
+   "timing_wall_sec": 3382.5028,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 166,
+   "control_count": 109
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261024T140844Z-5bc24f52/playtest.json",
+   "timing_wall_sec": 2714.2643,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 229,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T011633Z-2f0aa54c/playtest.json",
+   "timing_wall_sec": 2711.6249,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 136
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T214356Z-694d53b9/playtest.json",
+   "timing_wall_sec": 2631.3615,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T113725Z-2f1a3954/playtest.json",
+   "timing_wall_sec": 2626.3571,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T092145Z-5d6066d1/playtest.json",
+   "timing_wall_sec": 2585.4728,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T194832Z-38efe5f5/playtest.json",
+   "timing_wall_sec": 2478.3327,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 228,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T172359Z-0e58b3a8/playtest.json",
+   "timing_wall_sec": 2443.2758,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 228,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T084248Z-4104e16e/playtest.json",
+   "timing_wall_sec": 2401.4501,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T100038Z-a381a239/playtest.json",
+   "timing_wall_sec": 2401.2725,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 228,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T185810Z-0647a905/playtest.json",
+   "timing_wall_sec": 2386.4199,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T000342Z-4fd225f6/playtest.json",
+   "timing_wall_sec": 2383.1651,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T064613Z-018ee6ed/playtest.json",
+   "timing_wall_sec": 2371.7487,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T214348Z-e5ed6647/playtest.json",
+   "timing_wall_sec": 2370.4843,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T063105Z-c0f7c750/playtest.json",
+   "timing_wall_sec": 2343.5573,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T044228Z-c8ac5ad8/playtest.json",
+   "timing_wall_sec": 2335.7983,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T124508Z-a9fa4e47/playtest.json",
+   "timing_wall_sec": 2334.9709,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T042100Z-775a7d9d/playtest.json",
+   "timing_wall_sec": 2332.8972,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 228,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T182822Z-8a03f8e5/playtest.json",
+   "timing_wall_sec": 2311.9285,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T115354Z-6f1b11ef/playtest.json",
+   "timing_wall_sec": 2296.2773,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T034846Z-c26b6ef5/playtest.json",
+   "timing_wall_sec": 2272.9175,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 136
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T223151Z-4b4eb0f4/playtest.json",
+   "timing_wall_sec": 2219.4384,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T010735Z-835cce8c/playtest.json",
+   "timing_wall_sec": 2201.4311,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T010122Z-100f9afa/playtest.json",
+   "timing_wall_sec": 2177.9159,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T215050Z-cff707f0/playtest.json",
+   "timing_wall_sec": 2124.2669,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T144105Z-6bf1dee5/playtest.json",
+   "timing_wall_sec": 2124.214,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T051824Z-61b510ef/playtest.json",
+   "timing_wall_sec": 2122.5877,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 134
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261015T000737Z-b0154c78/playtest.json",
+   "timing_wall_sec": 2080.5432,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T233739Z-acda8e5c/playtest.json",
+   "timing_wall_sec": 2068.3627,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261015T020201Z-331038ea/playtest.json",
+   "timing_wall_sec": 2068.3316,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T021913Z-c7a93c50/playtest.json",
+   "timing_wall_sec": 2048.7978,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261011T201354Z-8fa68c7f/playtest.json",
+   "timing_wall_sec": 2042.5252,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T212135Z-5c44ca0d/playtest.json",
+   "timing_wall_sec": 2037.9616,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T233304Z-7c1e9c1a/playtest.json",
+   "timing_wall_sec": 1979.313,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T053631Z-6bd4e9ed/playtest.json",
+   "timing_wall_sec": 1977.859,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T113109Z-e5944052/playtest.json",
+   "timing_wall_sec": 1969.7919,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T095536Z-12b89f85/playtest.json",
+   "timing_wall_sec": 1960.9885,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T184854Z-520218a0/playtest.json",
+   "timing_wall_sec": 1927.6913,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 227,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T125907Z-54584d68/playtest.json",
+   "timing_wall_sec": 1921.558,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T045600Z-3e48f16e/playtest.json",
+   "timing_wall_sec": 1915.2707,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T165039Z-37432f0e/playtest.json",
+   "timing_wall_sec": 1907.7094,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T211650Z-864437c0/playtest.json",
+   "timing_wall_sec": 1899.8943,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261011T215936Z-7177e1f8/playtest.json",
+   "timing_wall_sec": 1883.0899,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T012124Z-f843f958/playtest.json",
+   "timing_wall_sec": 1879.1638,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T070944Z-4e706e90/playtest.json",
+   "timing_wall_sec": 1836.0704,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 135
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T203041Z-0ff9dd55/playtest.json",
+   "timing_wall_sec": 1831.6106,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T210900Z-f0b88c11/playtest.json",
+   "timing_wall_sec": 1804.8175,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 226,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-bo9wv3ye/playtest.json",
+   "timing_wall_sec": 1567.8691,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 181,
+   "control_count": 111
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T170839Z-8f626cab/playtest.json",
+   "timing_wall_sec": 1565.0006,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 225,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261009T192212Z-6dd7aa91/playtest.json",
+   "timing_wall_sec": 1525.8967,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T004428Z-d2d09e8d/playtest.json",
+   "timing_wall_sec": 1523.8051,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261004T175000Z-6619d552/playtest.json",
+   "timing_wall_sec": 1347.1774,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 221,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261009T122410Z-a3eba927/playtest.json",
+   "timing_wall_sec": 1347.0269,
+   "schema": "playtest-timing/1",
+   "passed": false,
+   "gate_timeout": null,
+   "scenario_count": 222,
+   "control_count": 0
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-0q07taba/playtest.json",
+   "timing_wall_sec": 1291.9666,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 180,
+   "control_count": 110
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260920T090413Z-c0a3286f/playtest.json",
+   "timing_wall_sec": 1276.8302,
+   "schema": "playtest-timing/1",
+   "passed": true,
+   "gate_timeout": null,
+   "scenario_count": 180,
+   "control_count": 110
+  }
+ ],
+ "manifest_playtest_stages": [
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-o_fr2y_w/manifest.json",
+   "duration_sec": 6559.563545,
+   "stage_status": "aborted",
+   "gate_status": "aborted",
+   "playtest_json_present": false
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/manifest.json",
+   "duration_sec": 3476.201487,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260916T104715Z-778d8285/manifest.json",
+   "duration_sec": 3435.235105,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260915T154913Z-2094b273/manifest.json",
+   "duration_sec": 3413.744866,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260918T135757Z-aa402ef0/manifest.json",
+   "duration_sec": 3387.527284,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260916T173218Z-67f14212/manifest.json",
+   "duration_sec": 3372.273407,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260915T153222Z-beb7dc4d/manifest.json",
+   "duration_sec": 3356.785467,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-ycfh1et9/manifest.json",
+   "duration_sec": 3355.357627,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-nskehgsw/manifest.json",
+   "duration_sec": 3353.602876,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-54tcnt39/manifest.json",
+   "duration_sec": 3330.615512,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-599ap6yj/manifest.json",
+   "duration_sec": 3322.546651,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-fepdf7t9/manifest.json",
+   "duration_sec": 3303.329305,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-5f_471lj/manifest.json",
+   "duration_sec": 3286.037187,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-o9srdqrw/manifest.json",
+   "duration_sec": 3278.361813,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261024T140844Z-5bc24f52/manifest.json",
+   "duration_sec": 2714.811747,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T011633Z-2f0aa54c/manifest.json",
+   "duration_sec": 2712.05248,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T214356Z-694d53b9/manifest.json",
+   "duration_sec": 2633.010821,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T113725Z-2f1a3954/manifest.json",
+   "duration_sec": 2628.035964,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T092145Z-5d6066d1/manifest.json",
+   "duration_sec": 2586.040184,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T194832Z-38efe5f5/manifest.json",
+   "duration_sec": 2478.864609,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T172359Z-0e58b3a8/manifest.json",
+   "duration_sec": 2443.778054,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T084248Z-4104e16e/manifest.json",
+   "duration_sec": 2401.803223,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T100038Z-a381a239/manifest.json",
+   "duration_sec": 2401.677783,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T185810Z-0647a905/manifest.json",
+   "duration_sec": 2387.104194,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T000342Z-4fd225f6/manifest.json",
+   "duration_sec": 2383.594115,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T064613Z-018ee6ed/manifest.json",
+   "duration_sec": 2372.852589,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T214348Z-e5ed6647/manifest.json",
+   "duration_sec": 2370.878714,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T063105Z-c0f7c750/manifest.json",
+   "duration_sec": 2344.852377,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T044228Z-c8ac5ad8/manifest.json",
+   "duration_sec": 2336.394169,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T124508Z-a9fa4e47/manifest.json",
+   "duration_sec": 2335.638767,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261021T042100Z-775a7d9d/manifest.json",
+   "duration_sec": 2333.287392,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T182822Z-8a03f8e5/manifest.json",
+   "duration_sec": 2312.339999,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T115354Z-6f1b11ef/manifest.json",
+   "duration_sec": 2296.672717,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T034846Z-c26b6ef5/manifest.json",
+   "duration_sec": 2273.480558,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T223151Z-4b4eb0f4/manifest.json",
+   "duration_sec": 2220.551445,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T010735Z-835cce8c/manifest.json",
+   "duration_sec": 2201.771807,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T010122Z-100f9afa/manifest.json",
+   "duration_sec": 2178.233121,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261016T215050Z-cff707f0/manifest.json",
+   "duration_sec": 2125.331505,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261020T144105Z-6bf1dee5/manifest.json",
+   "duration_sec": 2124.576228,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T051824Z-61b510ef/manifest.json",
+   "duration_sec": 2122.884357,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-ns47o858/manifest.json",
+   "duration_sec": 2099.807542,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261015T000737Z-b0154c78/manifest.json",
+   "duration_sec": 2081.056426,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261015T020201Z-331038ea/manifest.json",
+   "duration_sec": 2068.839831,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T233739Z-acda8e5c/manifest.json",
+   "duration_sec": 2068.792289,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T021913Z-c7a93c50/manifest.json",
+   "duration_sec": 2049.123539,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261011T201354Z-8fa68c7f/manifest.json",
+   "duration_sec": 2042.827223,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T212135Z-5c44ca0d/manifest.json",
+   "duration_sec": 2038.291784,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T233304Z-7c1e9c1a/manifest.json",
+   "duration_sec": 1980.003185,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T053631Z-6bd4e9ed/manifest.json",
+   "duration_sec": 1978.162618,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T113109Z-e5944052/manifest.json",
+   "duration_sec": 1970.145167,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T095536Z-12b89f85/manifest.json",
+   "duration_sec": 1961.334012,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261017T184854Z-520218a0/manifest.json",
+   "duration_sec": 1929.177102,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T125907Z-54584d68/manifest.json",
+   "duration_sec": 1922.044222,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T045600Z-3e48f16e/manifest.json",
+   "duration_sec": 1915.576501,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261014T165039Z-37432f0e/manifest.json",
+   "duration_sec": 1908.027543,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T211650Z-864437c0/manifest.json",
+   "duration_sec": 1900.200021,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261011T215936Z-7177e1f8/manifest.json",
+   "duration_sec": 1883.372214,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261012T012124Z-f843f958/manifest.json",
+   "duration_sec": 1879.468989,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T070944Z-4e706e90/manifest.json",
+   "duration_sec": 1836.335221,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261018T203041Z-0ff9dd55/manifest.json",
+   "duration_sec": 1832.146507,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261019T210900Z-f0b88c11/manifest.json",
+   "duration_sec": 1805.14903,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-bo9wv3ye/manifest.json",
+   "duration_sec": 1567.992505,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261013T170839Z-8f626cab/manifest.json",
+   "duration_sec": 1565.358884,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261009T192212Z-6dd7aa91/manifest.json",
+   "duration_sec": 1526.189595,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261010T004428Z-d2d09e8d/manifest.json",
+   "duration_sec": 1524.04774,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261004T175000Z-6619d552/manifest.json",
+   "duration_sec": 1347.344895,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20261009T122410Z-a3eba927/manifest.json",
+   "duration_sec": 1347.270801,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-0q07taba/manifest.json",
+   "duration_sec": 1292.091991,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260920T090413Z-c0a3286f/manifest.json",
+   "duration_sec": 1276.942433,
+   "stage_status": "response_received",
+   "gate_status": "passed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/gq-20260915T010225Z-d5dc1346/manifest.json",
+   "duration_sec": 9.313821,
+   "stage_status": "response_received",
+   "gate_status": "failed",
+   "playtest_json_present": true
+  },
+  {
+   "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-a2nxu35u/manifest.json",
+   "duration_sec": null,
+   "stage_status": "awaiting_response",
+   "gate_status": "incomplete",
+   "playtest_json_present": false
+  }
+ ]
+}

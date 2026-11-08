@@ -260,8 +260,20 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
             #
             # That is the failure mode worth naming: at 180s the gate does not
             # get slower as a project grows, it DISAPPEARS — and it disappears
-            # as a pass. Keep this comfortably under the 5_compile step's own
-            # timeout_seconds so the step budget, not this socket, is the bound.
+            # as a pass. This 600 s socket bounds the PARSE leg only, so keep it
+            # under the 5_compile step's own timeout_seconds (4800): a slow
+            # parse then arrives as THIS socket's gate_timeout, not as a step
+            # timeout.
+            #
+            # It does not bound the chained play-test below: that call passes no
+            # timeout, so it runs on post_playtest's default 4200 s socket
+            # (aitelier/tools/godot_playtest/impl.py:648), and 4200 is above the
+            # step budget this comment used to wave at (3900) — so the step
+            # budget, not "comfortably under" anything, was the smaller number
+            # on the play-test leg. The step budget is now 4800 = 600 + 4200,
+            # the whole of what these two sequential legs can spend, so neither
+            # leg's socket can expire as a step timeout.
+            # evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
             with urllib.request.urlopen(req, timeout=600) as resp:
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,

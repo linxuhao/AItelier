@@ -9,12 +9,22 @@ Everything under "Remedy" is **PROPOSAL**. No option was applied, no container w
 core or crash file was deleted, moved or re-permissioned. Effects on a service this operator does
 not own are the owner's decision.
 
-The re-measurement changed the story in three places, marked ⚠ below:
+Repaired **2026-11-08T21:05Z–21:12Z** against the rotated apport logs, the kernel journal, the
+`immich_machine_learning` container log and the upstream tracker. The measurement window above and
+every measured figure that is still true are unchanged by the repair; what changed, marked ⚠ below:
 
-1. the recorded signal on both 2026-11-08 events is **6 (SIGABRT)**, not SIGSEGV;
+1. the recorded signal on **every** one of the 46 retained apport events — both 2026-11-08 events
+   included — is **6 (SIGABRT)**, not SIGSEGV;
 2. the 13:50 core on disk is **578,191,360 B smaller** than the size apport logged for it;
-3. `/var/log/apport.log` was rotated at 2026-11-08 00:00:01, so no 11-06/11-07 *log* lines exist
-   in it — recurrence for those two days rests on core-file mtimes only.
+3. ⚠ **CORRECTED:** the 11-06/11-07 events *do* have log lines. `/var/log/apport.log*` rotates daily,
+   but the rotated files are `0640 root:adm` and readable by uid 1000 through group `adm`. All eight
+   retained files carry a **census of 46 `immich_ml` events across 8 dates** (2026-10-31 01:23:34 →
+   2026-11-08 13:52:19), so attribution to the ML container is **direct for every event**, not
+   pattern inference (§1.3);
+4. ⚠ the five-file core store is apport's **cap**, not a crash count (§2), and the 0-byte core has a
+   recorded cause — apport itself crashed while writing it (§2);
+5. ⚠ the crash is a **measured** correlation with a kernel GPU reset plus a matching open upstream
+   issue, #32046, not a hypothesis (§5.2). The remedy is re-ranked accordingly (§5.3).
 
 ## 1. Owner provenance
 
@@ -47,8 +57,8 @@ Fields that carry the identification, one by one:
 | config path | `/usr/src/immich_ml/gunicorn_conf.py`, `/usr/src/immich_ml/log_conf.json` — the ML image's own layout |
 | worker class | `immich_ml.config.CustomUvicornWorker` |
 | listen | `[::]:3003` (Immich ML's in-container port) |
-| signal | **6** (SIGABRT) on both events ⚠ — not SIGSEGV |
-| pids | 3844822 (13:49:39) and 4063523 (13:52:19) |
+| signal | **6** (SIGABRT) on all 46 recorded events ⚠ — not SIGSEGV |
+| pids | 3844822 (13:49:39) and 4063523 (13:52:19) in the live log; 44 more in the rotated logs (§1.3) |
 | core limit seen by apport | `18446744073709551615` (unlimited; apport logs "ignoring implausibly big core limit") |
 
 ### 1.2 The container those lines belong to
@@ -96,84 +106,194 @@ Positive evidence (measured):
   the master replaces the dead worker, the container never exits, so Docker never counts a restart
   and never marks it unhealthy. The crash is therefore invisible to the container's own health.
 
-Where the attribution is **weaker**, stated plainly:
+### 1.3 (continued) The 46-event census — attribution is direct for every event
 
-- Both apport events are 2026-11-08. The other three artifacts (11-06, two on 11-07) have no log
-  lines left to read (⚠ log rotated at 00:00:01 on 11-08), and their filenames
-  `core._usr_bin_python3_12.0.f56f3fd2-…` encode only *executable* `+ /usr/bin/python3.12` and build
-  id `f56f3fd2`. Every host python3.12 crash would produce that same name. For those three files the
-  Immich attribution is **pattern inference** (same executable, same store, same daily window),
-  not direct evidence.
-- I did not read any core, did not read any live process argv, did not `docker exec`, and did not
-  read the container's logs — all excluded by this task's read scope.
-- **Attribution strength: strong for 2026-11-08 (the log line names the service), inferential for
-  11-06/11-07.** It is not the strongest available evidence.
+The 11-06/11-07 events are **not** weaker evidence. The earlier version of this section said "no log
+line survives" for them and called their attribution `pattern inference`; both statements were
+wrong. `/var/log/apport.log` rotates daily, but the rotated files are mode `0640 root:adm`, and this
+operator is in group `adm`, so all eight retained files are readable. Reading each one (`zcat` for
+the `.gz`, plain read for `.1` and the live file) and matching apport's
+`INFO: apport (pid …) <time>: called for global pid …, signal …` header against the run of lines
+that follows it (re-measured 2026-11-08T21:06Z):
 
-What would make it stronger (each is an owner decision I did not take):
+| log file | events | first | last |
+|---|---|---|---|
+| `/var/log/apport.log.7.gz` | 17 | 2026-10-31 01:23:34 | 2026-10-31 08:10:39 |
+| `/var/log/apport.log.6.gz` | 9 | 2026-11-01 02:56:52 | 2026-11-01 05:01:10 |
+| `/var/log/apport.log.5.gz` | 4 | 2026-11-02 07:45:25 | 2026-11-02 23:42:36 |
+| `/var/log/apport.log.4.gz` | 4 | 2026-11-04 02:20:46 | 2026-11-04 03:27:57 |
+| `/var/log/apport.log.3.gz` | 3 | 2026-11-05 15:38:05 | 2026-11-05 15:42:44 |
+| `/var/log/apport.log.2.gz` | 5 | 2026-11-06 12:54:10 | 2026-11-06 20:58:25 |
+| `/var/log/apport.log.1` | 2 | 2026-11-07 13:26:18 | 2026-11-07 13:33:40 |
+| `/var/log/apport.log` (live) | 2 | 2026-11-08 13:49:39 | 2026-11-08 13:52:19 |
+| **total** | **46** | **2026-10-31 01:23:34** | **2026-11-08 13:52:19** |
 
-1. read `/var/log/apport.log.1` / `.2.gz` (or the journal) so the 11-06/11-07 events carry their
-   own command line — cheapest, no service effect;
-2. `docker logs immich_machine_learning` (read-only) to line up worker respawns with 13:26/13:34;
-3. `docker inspect` `HostConfig.Ulimits` / `Config.Cmd` to show the in-container core limit;
-4. the definitive one: the core's `NT_PRPSINFO` note records the crashed process's argv — root,
-   and it means reading a core file, which this task forbids.
+Per date: 2026-10-31 ×17, 11-01 ×9, 11-02 ×4, 11-04 ×4, 11-05 ×3, 11-06 ×5, 11-07 ×2, 11-08 ×2.
+**Every one of the 46 is signal 6**, and every one names the same command line
+`python -m gunicorn immich_ml.main:app -k immich_ml.config.CustomUvicornWorker -c
+/usr/src/immich_ml/gunicorn_conf.py -b [::]:3003 -w 1 …`.
+
+What that settles, and what it does not:
+
+- Attribution to `immich_machine_learning` is **direct for all 46 events**, not inference for three
+  of them: same executable, same ML-image config paths under `/usr/src/immich_ml/`, same port 3003,
+  same signal. The container identity in §1.2 is unchanged.
+- 2026-11-06 had **five** crashes (12:54, 12:56, 12:58, 13:12, 20:58), not one; 2026-11-07 had two;
+  2026-11-08 had two.
+- The **first observed** crash is 2026-10-31 01:23:34, not 2026-11-06 20:59:56. Retention *bounds*
+  that: the oldest retained apport log is `.7.gz` and the journal's first line is
+  `2026-10-30T06:13:52+00:00` (`journalctl -o short-iso | head -1`). "First on 2026-10-31" is
+  therefore a statement about **log retention**, not proof that it was the first occurrence.
+- **Attribution strength: direct for every recorded event.** Still not the strongest conceivable
+  evidence — that would be the core's `NT_PRPSINFO` note or the `.crash` report's own stack analysis,
+  both unread (§4) — but it is no longer inferential.
+- This repair *did* read the container's own log (`docker logs`, read-only, §5.2). It did not read
+  any core, did not read live process argv, and did not `docker exec`.
+
+What would still make it stronger (each is an owner decision I did not take):
+
+1. `docker inspect` `HostConfig.Ulimits` / `Config.Cmd` to show the in-container core limit;
+2. the definitive one: the core's `NT_PRPSINFO` note records the crashed process's argv and the
+   `.crash` report records its stack — both need root and mean reading a core/report file, which
+   this task forbids.
 
 ## 2. Recurrence
 
-Artifacts by date (stat/`ls -l` only; store `/var/lib/apport/coredump`, mode `0400 root:root`,
-dir mode `drwxr-xr-x`; report dir `/var/crash`, mode `drwxrwsrwt`, file `0640 root:root`):
+### 2.1 What the five surviving files are — and why they are not the crash count
 
-| # | date (UTC) | artifact | bytes | what else is known |
+⚠ **The store holds at most five cores by design.** `max_corefiles_per_uid = 5` at
+`/usr/lib/python3/dist-packages/apport/fileutils.py:36`, and
+`apport.fileutils.clean_core_directory(report_owner.uid)` is called at `/usr/share/apport/apport:305`
+— with the new file created two lines later (`apport:306-307`, `os.open(… O_CREAT | O_EXCL …)`) —
+i.e. **before every core write**. `clean_core_directory` (`fileutils.py:655-664`) rotates the oldest
+file out as soon as the directory already holds `max_corefiles_per_uid - 1`. The store therefore only
+ever holds the five most recent writes and never the crash count: with the 46 events of §1.3, at most
+five cores can exist at any moment, and these five are simply the last five writes. There is also a
+`systemd-tmpfiles` age rule (`/usr/lib/tmpfiles.d/apport.conf:2`,
+`d /var/lib/apport/coredump 0755 root root 3d`), but the five-file cap fires first and is the binding
+limit here. The recurrence basis is the **census (46 events / 8 dates)**, not this table.
+
+Artifacts by date (stat/`ls -l` only; re-measured 2026-11-08T21:08Z; store
+`/var/lib/apport/coredump`, mode `0400 root:root`, dir mode `drwxr-xr-x`; report dir `/var/crash`,
+mode `drwxrwsrwt`, file `0640 root:root`):
+
+| # | date (UTC) | artifact | bytes | its own apport log line |
 |---|---|---|---|---|
-| 1 | 2026-11-06 20:59:56 | `core._usr_bin_python3_12.0.…3229610.204196992` | **0** ⚠ | a core write that produced nothing; no log line survives |
-| 2 | 2026-11-07 13:26:18–13:26:24 | `core.…2158310.206996586` | 2,648,535,040 | no log line survives |
-| 3 | 2026-11-07 13:33:40–13:34:09 | `core.…3831101.212945710` | 5,481,521,152 | 7m50s after #2; no log line survives |
-| 4 | 2026-11-08 13:49:39 | `core.…3844822.212961837` | **2,147,479,552** on disk ⚠ (apport logged 2,725,670,912) | pid 3844822, signal 6, command line above |
+| 1 | 2026-11-06 20:59:56 | `core._usr_bin_python3_12.0.…3229610.204196992` | **0** ⚠ | yes — pid 3229610, signal 6, 20:58:25; apport then crashed writing it (§2.2) |
+| 2 | 2026-11-07 13:26:18–13:26:24 | `core.…2158310.206996586` | 2,648,535,040 | yes — pid 2158310, signal 6, 13:26:18, same command line |
+| 3 | 2026-11-07 13:33:40–13:34:09 | `core.…3831101.212945710` | 5,481,521,152 | yes — pid 3831101, signal 6, 13:33:40, 7m22s after #2 |
+| 4 | 2026-11-08 13:49:39 | `core.…3844822.212961837` | **2,147,479,552** on disk ⚠ (apport logged 2,725,670,912) | yes — pid 3844822, signal 6, command line above |
 | 5 | 2026-11-08 13:50:09 | `/var/crash/_usr_bin_python3.12.0.crash` | 694,695,161 | apport's report for #4 (same pid 3844822) |
-| 6 | 2026-11-08 13:52:19–13:52:34 | `core.…4063523.221699316` | 5,790,728,192 | pid 4063523, signal 6; apport refused a *second report* ("this executable already crashed 2 times, ignoring") but still wrote the core |
+| 6 | 2026-11-08 13:52:19–13:52:34 | `core.…4063523.221699316` | 5,790,728,192 | yes — pid 4063523, signal 6; apport refused a *second report* ("this executable already crashed 2 times, ignoring") but still wrote the core |
 
-Store sizes at 2026-11-08T20:28:10Z, unchanged at 20:28:54Z and 20:31:05Z:
+Every one of the five filenames' `<pid>.<serial>` field matches the `called for global pid` line of a
+retained apport event, so no file in the store has to be matched by mtime or by pattern.
+
+Store sizes at 2026-11-08T20:28:10Z, unchanged at 20:28:54Z, 20:31:05Z and 21:08Z:
 
 - `/var/lib/apport/coredump` — **16,068,284,416 B** (14.96 GiB) in 5 files; `du` agrees with the
-  sizes above (e.g. the 13:50 file holds 4,194,304 allocated blocks of 512 B = 2,147,483,648 B for a
-  2,147,479,552 B file).
+  per-file allocations (each non-empty file is its size plus one 4,096 B block; e.g. the 13:50 file
+  holds 4,194,304 allocated blocks of 512 B = 2,147,483,648 B for a 2,147,479,552 B file, and the
+  0-byte file has 0 blocks).
 - `/var/crash` — 694,706,176 B (1 file, 694,695,161 B).
-- `/var/lib/apport` total — 16,068,288,512 B.
+- `/var/lib/apport` — 16,068,288,512 B in total: the store above plus the directory's own 4,096 B.
+  (`du` counts each inode once, so asking it for the store *and* its parent in one invocation reports
+  only `4096` for the parent.)
 
-⚠ The one number that moved and is not explained: apport logged `of size 2725670912` for pid
-3844822 at 13:50:18, but the file measures 2,147,479,552 B with `Modify: 2026-11-08
-13:50:18.596011334 +0000` — 578,191,360 B short. Under this task's read scope I cannot tell whether
-that was a truncated write, a sparse/partial dump or a cap; I record the discrepancy rather than
-smoothing it. (The 11-07 sizes match the previously recorded figures exactly: 2,648,535,040 and
-5,481,521,152.)
 
-### Old transient, or ongoing failure?
+### 2.2 The 0-byte core of 2026-11-06 — apport crashed while writing it
 
-**Ongoing.** The basis:
+It is not "a write that produced nothing" and it is no longer open: the rotated log carries the
+traceback (`zcat /var/log/apport.log.2.gz`):
 
-- Four non-zero cores plus one 0-byte core across **three consecutive dates** (11-06, 11-07, 11-08).
-- On both complete days the crashes come in a **pair minutes apart inside the 13:2x–13:5x window**
-  (11-07: 13:26 and 13:34; 11-08: 13:49 and 13:52). That is the shape of a recurring workload
-  burst hitting the same failure, not a one-off.
-- The most recent crash is **13:52:19Z**, i.e. **6 h 35 m before** this measurement began
-  (20:27:50Z), and no further apport line appeared through 20:31:05Z. A ~7-hour quiet gap after a
-  pair is consistent with the daily-window pattern; it is not evidence of repair.
-- Nothing was upgraded or reconfigured in between: the container has been up since
-  2026-11-04T09:47:22Z with `RestartCount 0`, and its image was created 2026-10-08T21:58:57Z — so
-  the crashes follow no change to that container.
+```
+INFO: apport (pid 2133446) 2026-11-06 20:59:56,024: wrote report /var/crash/_usr_bin_python3.12.0.crash
+INFO: apport (pid 2133446) 2026-11-06 20:59:56,288: writing core dump to /var/lib/apport/coredump/core._usr_bin_python3_12.0.f56f3fd2-…3229610.204196992 (limit: -1)
+ERROR: apport (pid 2133446) 2026-11-06 20:59:56,303: Unhandled exception:
+Traceback (most recent call last):
+  …
+  File "/usr/share/apport/apport", line 319, in write_user_coredump
+    core_size = len(r["CoreDump"])
+                ~^^^^^^^^^^^^
+KeyError: 'CoreDump'
+```
+
+So: apport wrote the report first, then re-loaded it for the core write, and the **re-loaded report
+had no `CoreDump` key** — `len(r["CoreDump"])` at `/usr/share/apport/apport:319` raised, and the
+`O_CREAT | O_EXCL`-created file stayed behind at 0 bytes. The kernel-side dump itself still happened;
+this is the apport-side write that aborted, not a crash that produced nothing.
+
+### 2.3 The short core of 2026-11-08 13:50 — shape measured, reason NOT established
+
+The discrepancy the first version of this document recorded as unexplained is now measured precisely
+(`stat`, re-measured 2026-11-08T21:08Z):
+`size=2147479552 blocks=4194304 blksize=512` → `blocks × 512 = 2,147,483,648 B`, i.e. the file is
+**fully allocated and NOT sparse**. Its length is 2 GiB − 4,096 B, one page short of 2 GiB, while
+apport logged `of size 2725670912` (2.54 GiB) for the same write at 13:50:18 with
+`mtime 2026-11-08 13:50:18.596011334`: the write stopped **578,191,360 B short of what apport
+intended**. That is a **truncated write**, not a sparse or partial dump.
+
+Ruled out, each by measurement:
+
+- **not apport's own size limit.** `core_size_limit = usable_ram() * 3 / 4`
+  (`/usr/share/apport/apport:1049`), and `usable_ram()` is `(MemFree + Cached - Writeback) * 1024`
+  (`apport:357-370`) — a *moving* figure, ≈ **4.05 GiB** on this host at 2026-11-08T21:08Z, and
+  17.12 GiB even if it were computed from `MemTotal` (23,930,388 kB × 3/4). The write for this file
+  is logged with **`(limit: -1)`**, i.e. unlimited, and the `0 < limit` check at `apport:320` cannot
+  fire on that. 2.54 GiB is below the limit either way.
+- **not a cap leaving a short file.** When a limit *is* hit, apport closes and **unlinks** the file
+  (`/usr/share/apport/apport:320-325` in the report path, `:340-348` in the streamed path) instead of
+  leaving a truncated one.
+- **not tmpfiles.** That rule removes whole files by age (§2.1); it never truncates.
+
+What the source permits: in the report-file path apport writes with a **single unchecked `os.write`**
+— `/usr/share/apport/apport:328`, `os.write(core_file, r["CoreDump"])` — and discards the return
+value, so a short write leaves exactly this shape (the streamed path at `:344-348` *does* compare the
+return value, so the unchecked call is the one that ran here).
+
+**NOT established:** *why* the write stopped one page short of 2 GiB. The shape is measured; the reason
+is not, and this document does not substitute a guess for it.
+
+(The 11-07 sizes match the previously recorded figures exactly: 2,648,535,040 and 5,481,521,152.)
+
+
+### 2.4 Old transient, or ongoing failure?
+
+**Ongoing.** The basis is the census, not the store:
+
+- **46 events across 8 dates**, 2026-10-31 01:23:34 → 2026-11-08 13:52:19 (§1.3) — an 8.5-day span
+  whose only event-free calendar day, **2026-11-03**, is also the one day with no retained apport log
+  to check (§4).
+- It is not a clock slot. The earlier "pair minutes apart in the 13:2x–13:5x window" reading came from
+  the two days the live log could show; with the rotated logs the same service also crashed 17 times
+  on 10-31 between 01:23 and 08:10, and on 11-02 between 07:45 and 23:42. What recurs is the
+  trigger, not the hour. (The longest observed gap between events is **1 d 12 h 10 m**, at
+  2026-11-04 03:27:57 → 2026-11-05 15:38:05; 7 of the 45 gaps exceed 12 h.)
+- The most recent event is **13:52:19Z**, 7 h 16 m before the repair measurement (21:08:36Z) — shorter
+  than the longest observed gap, so that quiet stretch is not evidence of anything.
+- Nothing was upgraded or reconfigured in between: the current container has been up since
+  2026-11-04T09:47:22Z with `RestartCount 0`, image created 2026-10-08T21:58:57Z. Note what the census
+  adds: crashing begins 2026-10-31, i.e. **before** the container that exists now was started, and
+  continues after it — the failure survives a container start.
 - The container looks healthy throughout *because* gunicorn respawns the worker. "Healthy" is not
   counter-evidence; it is the reason nobody noticed.
+- The recurrence also has a kernel-side and a container-side half, both measured: every 11-06…11-08
+  event has a `GPU reset begin!` at the same second, and the container log names the GPU Hang (§5.2).
 
-What would show it had stopped: no new core file and no new apport line naming that command line
-across at least the observed recurrence interval (≥ 3–7 days, i.e. through ~2026-11-15), including
-the 13:2x–13:5x window.
+What would show it had stopped: no new apport line naming that command line, and no new core write,
+for longer than the whole observed span — **≥ 8.5 days of quiet, i.e. through ~2026-11-17** — with the
+container's uptime unbroken. A shorter quiet stretch proves nothing when a 36-hour gap already exists
+inside the failing period.
+
 
 ## 3. Headroom and store facts
 
 - Root filesystem `df -h /` (2026-11-08T20:28:10Z): `/dev/mapper/ubuntu--vg-ubuntu--lv`,
   **197 G size, 120 G used, 69 G available, 64 % used**. `df -B1 /`: 210,779,168,768 total /
-  127,857,930,240 used / 73,219,416,064 available. Headroom is not tight; the store is ~8 % of the
-  volume (16.07 GB of 197 GB) but ~23 % of what is currently free (16.07 GB of 69 GB).
+  73,219,416,064 available (127,857,930,240 used). Re-measured at 2026-11-08T21:08:36Z, unchanged in
+  substance: 127,859,322,880 used / 73,218,023,424 available, still 69 G / 64 %. Headroom is not
+  tight; the store is ~8 % of the volume (16.07 GB of 197 GB) but ~23 % of what is currently free
+  (16.07 GB of 69 GB).
 - Kernel core handler: `sysctl` is **not installed** (`bash: sysctl: command not found`, exit 127,
   20:28:10Z), so the value was read from `/proc/sys/kernel/core_pattern`:
   `|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E` — every core on this
@@ -197,13 +317,14 @@ the 13:2x–13:5x window.
 |---|---|
 | contents of any core file | `head -c 16 <13:50 core>` at 2026-11-08T20:28:48Z → `head: cannot open '…' for reading: Permission denied` (exit 1). Files are 0400 root:root; I am uid 1000. Also out of scope by instruction. |
 | contents of `/var/crash/_usr_bin_python3.12.0.crash` | `wc -c …` → `wc: /var/crash/_usr_bin_python3.12.0.crash: Permission denied` (2026-11-08T20:28:48Z). So apport's own stack-trace analysis is unread. |
-| the 11-06 / 11-07 apport log lines | current `/var/log/apport.log` was **born 2026-11-08 00:00:01** (daily rotation). Rotated files were outside my allowed read set and were not opened. |
+| anything about **2026-11-03** | the retained apport logs step straight from `.5.gz` (2026-11-02) to `.4.gz` (2026-11-04): no retained file carries an 11-03 timestamp, so any event that day is unrecoverable. |
+| the **true first** crash, or any event before 2026-10-31 | bounded by retention, not known: the oldest retained apport log is `.7.gz` and the journal's first line is `2026-10-30T06:13:52+00:00` (`journalctl -o short-iso \| head -1`). |
 | `coredumpctl` view of the crashes | binary **absent** (`command -v coredumpctl` → nothing, exit 1); `systemd-coredump.socket` inactive. There is no coredumpctl record to consult. |
-| journald coverage of the crash | not read at all; `systemctl status apport` itself warns its journal was rotated since the unit started. Journal coverage of 11-06/11-07 is therefore unknown, not "absent". |
+| journald coverage of the crash | now read: the kernel journal is readable and was read for the repair (§5.2 gives the reset correlation). What is *not* available there is anything the file log does not already carry — the crashed process's argv and registers. |
 | in-container core limit / compose `ulimits` | would need `docker inspect` fields outside the allowed named-field set, or `docker exec` (forbidden). |
 | the crashed process's own argv beyond apport's log | reading live process argv is out of scope; the processes are gone anyway. |
 | whether the crashing host pid actually sat in that container's cgroup | would need `/proc/<pid>/cgroup` (process gone) or a core read. |
-| GPU vendor/model and the ROCm stack version inside the image | no allowed command exposes it; only the image tag `-rocm` is measured. |
+| GPU vendor/model and the ROCm / MIGraphX / onnxruntime **versions inside the image** | the only measured identity is the tag `-rocm` plus the digest (§1.2). The bounded probe available for this (`docker run --rm --network none --entrypoint python3 <ml image> -c "import onnxruntime; print(onnxruntime.__version__)"`) was **not run** — this repair may not `docker run` — so versions stay **unmeasured**, not inferred. What *is* measured is a file name from the container log, `migraphx_execution_provider.cc` (§5.2); a version string is not. |
 | whether apport's rate limit ("already crashed 2 times") is suppressing further *reports* | the apport state file is not in my read set. Cores keep being written, so suppression of reports would not hide recurrence. |
 | sudo-based inspection | `sudo -n true` → `sudo: a password is required` (exit 1). No passwordless sudo. |
 
@@ -228,49 +349,120 @@ the 13:2x–13:5x window.
   <https://github.com/immich-app/immich/releases/tag/v3.4.0-rc.1>) carries
   "fix(ml): preloaded model loaded twice" (PR #32610).
 
-### 5.2 Is this crash known upstream, and is it fixed?
+### 5.2 The crash is matched upstream (#32046) and the mechanism is measured locally
 
-What I could establish (release notes for v3.3.1, v3.3.3, v3.3.4, v3.3.5, v3.3.6 and
-v3.4.0-rc.1..rc.3 were read):
+⚠ **CORRECTED.** The first version of this section said "I found **no** upstream issue that matches …
+Treat the upstream state as **not established** in both directions", and called the native-abort
+explanation "a hypothesis, not a measurement". Both were wrong, and R3/R4 were scoped against them.
+The mechanism is measured on this host, and the upstream tracker carries an open issue matching it
+line for line.
 
-- **No release note between the installed v3.3.1 and the latest stable v3.3.6 names any ML or
-  python worker crash.** v3.3.3 = two non-ML fixes; v3.3.4 = a translation fix + a server query
-  optimisation; v3.3.5 = dependency/security pins only; v3.3.6 = onnxruntime telemetry.
-- A **matching symptom family does exist**: issue #27387 "ROCm ML image crashes (SIGSEGV) on AMD
-  Phoenix iGPU (gfx1103) with MIGraphXExecutionProvider" (immich v2.6.3, ROCm 7.2.0, ONNX Runtime
-  1.24.2 — SIGSEGV during MIGraphX model compile, container crash-looping, CPU image as the
-  workaround) — <https://github.com/immich-app/immich/issues/27387>. It is **closed**, fixed by
-  the PR that serialises MIGraphX sessions (<https://github.com/immich-app/immich/pull/28444>).
-  Related: discussion #26953 "WARNING Worker (pid:35) was sent SIGSEGV!"
-  (<https://github.com/immich-app/immich/discussions/26953>).
-- **That fix is older than the installed version**: PR #28444 predates the v3.3.x PR range (~#32xxx
-  in the v3.3.0 notes), so v3.3.1 should already contain it. Therefore "upgrade to get the known
-  ROCm fix" is **not** an established remedy here.
-- ⚠ And the signal differs: these events are **SIGABRT (6)**, not SIGSEGV — consistent with a
-  native library calling `abort()` (ROCm/MIGraphX/ORT are the usual suspects inside that image),
-  but that is a hypothesis, not a measurement. I found **no upstream issue that matches
-  "immich_ml gunicorn worker dies with SIGABRT on v3.3.1-rocm"**, and I could not read the core or
-  the .crash report to identify the aborting frame. Treat the upstream state as **not established**
-  in both directions: not shown to be a known open bug, not shown to be fixed.
+**Local half — the kernel resets the GPU at every crash time.** Re-measured 2026-11-08T21:06Z with
+`journalctl -k --since '2026-11-06 00:00' --until '2026-11-09 00:00' | grep -E 'GPU reset begin|GPU reset\(|MODE2 reset'`:
 
-### 5.3 Options (all PROPOSAL — nothing applied)
+| apport event (signal 6) | kernel, same second |
+|---|---|
+| 2026-11-06 12:54:10 | `GPU reset begin!` 12:54:09 → `MODE2 reset` → `GPU reset(130) succeeded!` |
+| 2026-11-06 12:56:01 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(131) succeeded!` |
+| 2026-11-06 12:58:09 | `GPU reset begin!` 12:58:08 → `MODE2 reset` → `GPU reset(132) succeeded!` |
+| 2026-11-06 13:12:57 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(133) succeeded!` |
+| 2026-11-06 20:58:25 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(134) succeeded!` |
+| 2026-11-07 13:26:18 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(135) succeeded!` |
+| 2026-11-07 13:33:40 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(136) succeeded!` |
+| 2026-11-08 13:49:39 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(137) succeeded!` |
+| 2026-11-08 13:52:19 | `GPU reset begin!` → `MODE2 reset` → `GPU reset(138) succeeded!` |
+
+Nine events, nine resets, one-to-one. Over the whole retained journal
+(`journalctl -k --since '2026-10-01'`) there are **50** `GPU reset(` successes and **494**
+`MES failed to response` lines — the GPU instability both pre-dates and outlives the 46 apport
+events, so a reset alone is not the trigger; the container log supplies that half.
+
+**Container half — the worker's own log names the abort.** `docker logs --since
+2026-11-05T00:00:00Z immich_machine_learning`, bounded by grep, shows the same three lines per event:
+
+```
+[W:onnxruntime:Default, migraphx_execution_provider.cc:1270 compile_program] Model Compile: Begin
+HW Exception by GPU node-1 (Agent handle: 0x…) reason :GPU Hang
+WARNING Worker (pid:…) was sent SIGABRT!
+```
+
+e.g. compile 2026-11-07 13:24:33 → HW Exception → `Worker (pid:71702) was sent SIGABRT!` 13:26:25;
+compile 13:31:57 → SIGABRT 13:34:09; compile 2026-11-08 13:48:00 → SIGABRT 13:50:24; compile
+13:50:46 → SIGABRT 13:52:35. The worker then respawns and the container stays `healthy` with
+`RestartCount 0` — §1.3's argument, now measured from the worker's side instead of excluded from it.
+
+So the chain is: **MIGraphX model compile hits the GPU → the GPU hangs → the kernel resets it → the
+worker is SIGABRTed (signal 6) → apport dumps the host-side core.** The aborting *frame* is still
+unread (§4), but no link in that chain is a hypothesis any more.
+
+**Upstream: issue #32046, open and matching.**
+<https://github.com/immich-app/immich/issues/32046> — *"ROCm / MIGraphX causes reproducible GPU wedge
+on AMD Hawk Point / gfx1103 during model compilation"*, created 2026-10-03T10:07:48Z. Fields fetched
+from `https://api.github.com/repos/immich-app/immich/issues/32046` at 2026-11-08T21:07Z:
+**state `open`**, `state_reason: reopened`, **13 comments**, assignee **`mertalev`**, label
+**`🧠machine-learning`**. Its body reports the same sequence — MIGraphX `Model Compile: Begin` →
+`HW Exception by GPU node-1 … reason :GPU Hang` → `WARNING Worker (pid:39) was sent SIGABRT!`, with
+kernel `MES failed to respond to msg=REMOVE_QUEUE`, `MES might be in unrecoverable state`, `Failed to
+quiesce KFD`, `GPU reset begin!. Source: 3`, `MODE2 reset`, `GPU reset(1) succeeded!`, and a note that
+the `[drm]` GPU coredump under `/sys/class/drm/card1/device/devcoredump/data` was gone later.
+
+The thread's **tested partial mitigation**, which is not a fix:
+
+- maintainer `mertalev` (2026-10-03) asked the reporter to try `IMMICH_VERSION=v3.3.0-rc.2` together
+  with **`MACHINE_LEARNING_MODEL_REVISION=v2`**;
+- reporter (2026-10-05): with that pair, Smart Search compiled (`Model Compile: Complete`), "no GPU
+  hang and no kernel-side AMDGPU/KFD/MES errors or GPU reset"; the maintainer closed it as resolved;
+- the same reporter later reopened it in substance: OCR/face models then died with
+  `Worker (pid:39) was sent SIGSEGV!` plus a real wedge/reset and a userspace
+  `python[…] segfault … in libamdhip64.so.7.2.70200`; reverted ML to the **CPU image**, where
+  `buffalo_l` reports `Setting execution providers to ['CPUExecutionProvider']` and runs normally;
+- maintainer asked whether `HSA_OVERRIDE_GFX_VERSION` / `HSA_USE_SVM` are set; reporter: neither;
+- independent report (`davidvv`, gfx1150): `v2` fixes the hang (10 OCR runs, clean kernel log), but a
+  **first-seen input shape took 237 s versus 3.2 s on CPU** — per-shape MIGraphX recompile — so OCR
+  stays on CPU there;
+- other users confirm the OCR "dimension errors" are a *different* problem (resolution must be a
+  multiple of 32) and that fixing that does not remove the wedge.
+
+What survives from the old conclusion: **no release note between the installed v3.3.1 and the latest
+stable v3.3.6 names any ML or python worker crash** (§5.1's notes reading), so an upgrade is still
+not, by itself, a remedy. And #27387 — SIGSEGV on gfx1103, closed by the PR that serialises MIGraphX
+sessions (<https://github.com/immich-app/immich/pull/28444>) — is an older, different report: the
+signal here is SIGABRT, and #32046 is the one that matches.
+
+
+### 5.3 Options, re-ranked against the measured evidence (all PROPOSAL — nothing applied)
+
+Ranking follows one question: *what can an owner actually act on, given that the crash is a GPU wedge
+with an open upstream issue and a tested partial mitigation?* Nothing below was applied, and nothing
+below is verified — no option has been tested on this host.
 
 | # | option | status | bounded cost | what it does / does not do |
 |---|---|---|---|---|
-| R1 | Owner deletes the accumulated artifacts: 5 files in `/var/lib/apport/coredump` + `/var/crash/_usr_bin_python3.12.0.crash` | **PROPOSAL** | one `rm` as root; frees **16.76 GB** (16,068,284,416 + 694,706,176 B) | reclaims ~23 % of current free space. Destroys the only evidence: if any diagnosis is wanted, capture the apport report's metadata (or set one small core aside) **first**. Does not stop the crashes. |
-| R2 | Cap core dumps for that one service only — `ulimits: {core: 0}` (or a small value) on the `immich_machine_learning` compose service, then recreate *that* container | **PROPOSAL** | one service recreate; the crash behaviour is unchanged | stops the growth at the source — measured events wrote 0 B, 2.15 GB, 2.65 GB, 5.48 GB and 5.79 GB; gunicorn still respawns the worker, so the service keeps working exactly as now (it already survives these crashes). Also removes the artifact that recurrence is measured from — replace it with a counter (R5). Requires editing the owner's compose file, which is outside this task. |
-| R3 | Narrow the trigger: run the same ML image with the CPU provider (or drop the MIGraphX/ROCm provider) for a few days | **PROPOSAL** | owner must edit env and recreate one container; slower ML | a controlled experiment that would separate "ROCm/MIGraphX path" from "any ML worker". Not a fix; it is the cheapest way to make the cause falsifiable. |
-| R4 | Upgrade — but **only if a release that names this crash exists** | **PROPOSAL, conditional** | v3.3.1 → v3.3.6 is a four-release jump (server + ML together); v3.4.x is pre-release | per 5.2 there is **no such release note** today, so R4 is "upgrade only if a fixed release exists", not "upgrade because v3.3.6 is newer". The v3.4.0-rc ML memory notes are a plausible mitigation, not a fix claim. |
-| R5 | Record the crash count per day (one line/day from `ls /var/lib/apport/coredump`, or apport log matches) so the next measurement is a comparison, not a rediscovery | **PROPOSAL** | read-only, no service effect | keeps recurrence observable after R2 removes the cores. This document is the baseline: 5 artifacts / 3 dates as of 2026-11-08T20:31Z. |
-| R6 | Do nothing to the service; escalate to the owner with this document | **PROPOSAL** | zero | defensible: the service is healthy, the host has 69 GB free, and the failure is the owner's to triage. The only real cost is up to ~5.8 GB per event plus unread cores. |
+| R1 | Set **`MACHINE_LEARNING_MODEL_REVISION=v2`** on the existing `immich_machine_learning` service and recreate *that* container | **PROPOSAL** | one env edit + one service recreate; no image change | the only mitigation tested upstream for *this* mechanism (§5.2): with it, Smart Search compiled and the kernel log went clean in the reporter's test. It is **partial** — OCR/face models still crashed there (issue reopened), and a first-seen input shape cost **237 s vs 3.2 s on CPU**. Expect the wedge to stop for visual search, not a fix. Requires editing the owner's compose/env, outside this task. |
+| R2 | Run ML on the **CPU image** (or force `CPUExecutionProvider`) instead of `-rocm` | **PROPOSAL** | one image change + recreate that service; ML slower on CPU | this is where the upstream reporter ended up, and it doubles as the controlled experiment the first version of this document wanted: with no GPU in the path the wedge cannot occur, so if crashes continue it falsifies the attribution. Cost is throughput, not correctness; the CPU path is measured to work upstream, not on this host. |
+| R3 | Record recurrence from the **apport log**, one `grep -c` per day of `immich_ml.main:app` events in `/var/log/apport.log*` | **PROPOSAL** | read-only; no service effect | the store cannot be the counter — it is capped at five files by apport itself (§2.1). The log census is the measurement, and its baseline is 46 events / 8 dates, last at 2026-11-08 13:52:19 (§1.3). Do this **before** R5 if the owner wants the recurrence to stay visible. |
+| R4 | Owner deletes the accumulated artifacts: 5 files in `/var/lib/apport/coredump` + `/var/crash/_usr_bin_python3.12.0.crash` | **PROPOSAL** | one `rm` as root; frees **16.76 GB** (16,068,284,416 + 694,706,176 B) | reclaims ~23 % of current free space (69 G) and is cheap *for this operator* for a reason that is now measured: the cores are `0400 root:root` and **unreadable here** (§4), and the recurrence is recorded in the apport logs, so nothing this document concludes depends on their contents. If an owner who *can* read them wants the aborting frame, capture the `.crash` report's stack first. Does not stop the crashes. |
+| R5 | Cap core dumps for that one service — `ulimits: {core: 0}` on the `immich_machine_learning` compose service, then recreate *that* container | **PROPOSAL** | one service recreate; crash behaviour unchanged | stops the growth at the source — the five cores still on disk measured 0 B, 2.15 GB, 2.65 GB, 5.48 GB and 5.79 GB (earlier events' cores were rotated out by the cap, so their sizes are unmeasured). It does remove the store-level signal, but that signal is already bounded by apport's own five-file cap (§2.1) and the recurrence stays visible in the apport log (R3). Requires editing the owner's compose file, outside this task. |
+| R6 | Do nothing to the service; escalate to the owner with this document | **PROPOSAL** | zero | defensible on disk and health grounds (69 G free, `healthy`, `RestartCount 0`), but weaker than it looked: recurrence is now a 46-event fact over 8 dates, every event has a kernel GPU reset, and upstream has an open issue with a tested partial mitigation. The cost of waiting is up to ~5.8 GB per event plus one GPU wedge each time. |
 
-What would falsify "fixed" (any of these, not the absence of one): for **≥ 3–7 consecutive days**
-(through at least 2026-11-15) no new file in `/var/lib/apport/coredump` and no new apport line
-naming the `immich_ml` command line, **including** the 13:2x–13:5x window, with the ML container's
-uptime unbroken. Container `health` and `RestartCount` **cannot** falsify anything here — gunicorn
-respawn keeps both clean through every crash (measured: `RestartCount 0` across at least four
-crashes). Conversely, an upstream release note or commit that names this failure, plus one
-post-upgrade week of quiet, is what would establish "fixed" positively.
+**Not ranked as an action: upgrading.** v3.3.1 → v3.3.6 is a four-release jump and no release note in
+that range names this failure (§5.2), so a newer tag is not a remedy; v3.4.0-rc.x is pre-release. If
+the owner upgrades anyway, carry R1's `MACHINE_LEARNING_MODEL_REVISION=v2` along — the v3.4.0-rc notes
+recommend it for ML memory and performance reasons as well. "Upgrade to get the known ROCm fix" stays
+**not established**: the serialised-MIGraphX fix (PR #28444) is older than the installed image and did
+not prevent these events.
+
+What would falsify "fixed" (any of these, not the absence of one): **no** new apport line naming that
+command line and **no** new core write for **≥ 8.5 days — through ~2026-11-17** — with the container's
+uptime unbroken. That window is the observed span itself; a 36-hour gap already exists inside the
+failing period (§2.4), so anything shorter proves nothing. Container `health` and `RestartCount`
+**cannot** falsify anything — gunicorn respawn keeps both clean through every crash (measured:
+`RestartCount 0` on the container that has been up through the **12** events recorded since it started
+at 2026-11-04T09:47:22Z). A positive test is available and cheap: after R1 or R2, the
+kernel log should show **no** `GPU reset begin!` / `MES failed to respond` at crash times and apport
+should stop logging that command line. An upstream release note or commit that names this failure,
+plus one post-change week of quiet, is what would establish "fixed" positively.
+
 
 ## 6. What AItelier is not responsible for
 
@@ -308,3 +500,32 @@ docker image inspect --format 'RepoTags/RepoDigests/Id/Created' <ml image> aitel
 
 Web (2026-11-08T20:29–20:31Z): GitHub API `releases/latest`, `releases?per_page=…`,
 release pages v3.3.4/v3.3.5, issues #27387, PR #28444, discussion #26953.
+
+### Repair pass — commands actually run (2026-11-08T21:05–21:12Z, read-only)
+
+```
+python3 (gzip/pathlib) over /var/log/apport.log.{7..2}.gz, .1 and the live file   # 46-event census
+grep -n 'max_corefiles_per_uid' /usr/lib/python3/dist-packages/apport/fileutils.py  # :36, :655-664
+sed -n '303,307p'  /usr/share/apport/apport        # clean_core_directory call at :305, O_EXCL at :306
+sed -n '314,330p'  /usr/share/apport/apport        # :319 len(r["CoreDump"]), :328 unchecked os.write
+sed -n '340,350p'  /usr/share/apport/apport        # unlink-on-limit in the streamed path
+sed -n '357,370p'  /usr/share/apport/apport        # usable_ram() = (MemFree+Cached-Writeback)*1024
+sed -n '1045,1052p' /usr/share/apport/apport       # :1049 core_size_limit = usable_ram()*3/4
+zcat /var/log/apport.log.2.gz | sed -n '24,45p'    # the KeyError: 'CoreDump' traceback
+stat -c '%n %s %b %B' /var/lib/apport/coredump/* /var/crash/_usr_bin_python3.12.0.crash
+du -s -B1 /var/lib/apport/coredump /var/crash /var/lib/apport ; df -h / ; df -B1 /
+grep MemTotal /proc/meminfo                        # 23,930,388 kB
+journalctl -k --since '2026-11-06 00:00' --until '2026-11-09 00:00' \
+  | grep -E 'GPU reset begin|GPU reset\(|MODE2 reset'
+journalctl -k --since '2026-10-01' | grep -cF 'GPU reset('          # 50
+journalctl -k --since '2026-10-01' | grep -c 'MES failed to response'   # 494
+journalctl -o short-iso | head -1                  # journal begins 2026-10-30T06:13:52+00:00
+docker logs --since 2026-11-05T00:00:00Z immich_machine_learning \
+  | grep -E 'Model Compile: Begin|HW Exception|was sent SIGABRT'
+docker inspect --format 'StartedAt/Status/RestartCount/Health/Image' immich_machine_learning
+curl -s https://api.github.com/repos/immich-app/immich/issues/32046   # state/state_reason/comments/assignee/labels
+```
+
+The repair pass used no `docker run`, no `docker exec`, no container restart or recreate, no
+`sudo`, deleted no core or crash file, and changed no compose file, env var or service. The only
+network access was the one GitHub API read above. The only file written is this document.

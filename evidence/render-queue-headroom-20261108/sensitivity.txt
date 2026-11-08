@@ -1,0 +1,54 @@
+Sensitivity arm — the declared render queue wait leaves room for the largest
+measured render (issue iss-c91e470631224eea), run 2026-11-08T13:58Z.
+
+WHAT THE PRODUCT DECLARES NOW
+  aitelier/tools/godot_playtest/impl.py: post_playtest sends
+  render_wait_timeout_sec = render_queue_wait_sec(socket), where the wait is
+  min(RENDER_QUEUE_SHARE x socket, socket - LARGEST_MEASURED_RENDER_WALL_SEC)
+  floored to the millisecond. At the 4200 s default:
+      RENDER_QUEUE_SHARE x 4200              = 2100 s   (the old declaration)
+      4200 - LARGEST_MEASURED_RENDER_WALL_SEC = 4200 - 3471.2921 = 728.7079 s
+      declared                                = 728.707 s (millisecond floor)
+  Largest measured render: ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/
+  playtest.json, timing.wall_sec = 3471.2921.
+  Invariant: declared + 3471.2921 = 4199.9991 <= 4200.
+
+THE ARM
+  A scratch copy of this worktree (cp -a to /tmp/c12-sens-20261108) had exactly
+  one line put back to the pre-fix declaration — the call site in post_playtest:
+      payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
+  i.e. 0.5 x socket = 2100 s again. The test file in the scratch copy was
+  byte-identical to the committed one. Nothing in this worktree was edited for
+  the arm.
+
+COMMAND (same container shape the plan's test item uses, scratch as /w)
+  docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+    -v /tmp/c12-sens-20261108:/w -v /home/linxuhao/AItelier:/app:ro -w /w \
+    -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest \
+    /usr/local/bin/python -m pytest -q -p no:cacheprovider \
+    -k leaves_room_for_the_largest_measured_render \
+    tests/unit/test_playtest_caller_budget.py
+
+RESULT — RED (full output: sensitivity-arm-red.txt, exit code 1)
+  >       assert declared + pt.LARGEST_MEASURED_RENDER_WALL_SEC <= socket_timeout
+  E       assert (2100.0 + 3471.2921) <= 4200
+  E        +  where 3471.2921 = pt.LARGEST_MEASURED_RENDER_WALL_SEC
+  tests/unit/test_playtest_caller_budget.py:148: AssertionError
+
+  =========================== short test summary info ============================
+  FAILED tests/unit/test_playtest_caller_budget.py::test_declared_queue_wait_leaves_room_for_the_largest_measured_render
+  1 failed, 41 deselected, 1 warning in 0.27s
+
+GREEN COUNTERPART (the plan's frozen argv on this worktree, unmodified)
+  docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+    -v <this worktree>:/w -v /home/linxuhao/AItelier:/app:ro -w /w \
+    -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest \
+    /usr/local/bin/python -m pytest -q -p no:cacheprovider \
+    tests/unit/test_playtest_caller_budget.py tests/unit/test_harness_render_queue.py
+  70 passed, 1 warning in 62.63s
+
+RESTORED
+  The scratch copy /tmp/c12-sens-20261108 was removed after the arm. This
+  worktree carries only the product change and its test (see the commit);
+  its declaration is the 728.707 s one above, verified green by the run
+  recorded in the plan's test item.

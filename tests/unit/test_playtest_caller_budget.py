@@ -1,6 +1,7 @@
 """Actual urllib payloads and native admission/planning, with only probe execution faked."""
 import copy
 import importlib.util
+import inspect
 import io
 import json
 import math
@@ -111,9 +112,11 @@ def test_ordinary_request_grants_180_without_rewriting_contract(tmp_path, bridge
     assert payload["spec"] == authored and payload["timeout"] == 180
     assert {k: payload[k] for k in ("project_id", "run_id", "operation_id")} == {
         "project_id": "p", "run_id": "r", "operation_id": "o"}
-    # Default socket: old 3600 s -> new 4200 s. Queue share (RENDER_QUEUE_SHARE
-    # 0.5) derived from it: old 1800 s -> new 2100 s.
-    assert socket_timeout == 4200 and payload["render_wait_timeout_sec"] == 2100
+    # Default socket 4200 s. The queue share alone (RENDER_QUEUE_SHARE 0.5)
+    # would declare 2100 s and leave a largest-class render 2100 s, so the
+    # declaration is capped by the render's room instead: 4200 - 3471.2921 =
+    # 728.7079 s, floored to 728.707 s. (Old socket 3600 s -> share 1800 s.)
+    assert socket_timeout == 4200 and payload["render_wait_timeout_sec"] == 728.707
     assert payload["captures"] == pt._DPE_CAPTURES
     assert [(n, seconds) for n, seconds, _ in bridge["probes"]] == [
         (6030, 180), (180, 120), (6030, 180)]
@@ -123,6 +126,28 @@ def test_ordinary_request_grants_180_without_rewriting_contract(tmp_path, bridge
     assert not bridge["effects"] and not report["spec_errors"]
     loaded, _ = pt.read_spec(repo)
     assert loaded == authored
+
+
+def test_declared_queue_wait_leaves_room_for_the_largest_measured_render(tmp_path, bridge):
+    """declared_wait + largest measured render must fit inside the socket.
+
+    Every value comes from the module, not from a literal copied here: the
+    socket default is post_playtest's own signature default, the render wall is
+    the retained measurement the module names, and the share is what still
+    bounds shorter sockets. Declaring RENDER_QUEUE_SHARE x socket alone
+    (0.5 x 4200 = 2100 s) fails the sum: 2100 + 3471.2921 > 4200, i.e. a
+    largest-class render finishes inside the socket and is still reported as a
+    socket timeout.
+    """
+    repo = project(tmp_path, contract())
+    pt.godot_playtest(project_root=str(repo), out_dir=str(tmp_path / "out"))
+    payload, socket_timeout = bridge["requests"][0]
+    assert socket_timeout == inspect.signature(
+        pt.post_playtest).parameters["timeout"].default
+    declared = payload["render_wait_timeout_sec"]
+    assert declared + pt.LARGEST_MEASURED_RENDER_WALL_SEC <= socket_timeout
+    assert declared <= socket_timeout * pt.RENDER_QUEUE_SHARE
+    assert declared == pt.render_queue_wait_sec(socket_timeout)
 
 
 @pytest.mark.parametrize("spec", [None, {"scenarios": [contract()["scenarios"][1]]}])

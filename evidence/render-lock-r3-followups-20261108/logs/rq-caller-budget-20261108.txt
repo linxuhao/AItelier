@@ -1,0 +1,21 @@
+# arm: rq-caller-budget-20261108
+# tree: /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/c8-renderlock-r3-20261108
+# date: 2026-11-08T13:25:42Z
+# host: linxuhaserver  image: aitelier:latest
+# command: docker run -d --name rq-caller-budget-20261108 --network none --cpus 2 --memory 2g --init -u 1000:1000 \
+#   -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/c8-renderlock-r3-20261108:/w -w /w -e PYTHONPATH=/w aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_playtest_caller_budget.py
+9141959637deff43d1ff81f0d95634bf089039d4e34d10d7d91d8c4508d2cada
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.........................................                                [100%]
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+41 passed, 1 warning in 0.23s
+# exit_code: 0
+# ignition_lines: 0

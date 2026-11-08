@@ -94,16 +94,20 @@ class Backend:
                     "DPE_PROJECTS_PATH", "AITELIER_SCHEDULER_LOCK",
                     "AITELIER_INSTANCE_LOCK", "UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN"):
             self.env.pop(key, None)
-        # PINNED, not popped: api/main.py re-injects `<repo root>/.env` for every
-        # key that is MISSING from os.environ, and it does that before importing
-        # core.cf_access, whose _TEAM_DOMAIN/_AUD are read once at import. A
-        # popped key therefore comes straight back from the deployment's own
-        # .env in the tree root and configures this fixture's gate — measured
-        # 2026-11-08: the child answered 403 write_denied_not_authenticated to
-        # the credential-less POST /api/projects on a host checkout that has a
-        # .env, while the same tests passed in a worktree that has none. An
-        # empty value is present, so .env is skipped and the mode is the one
-        # stated here, in every tree.
+        # PINNED, not popped: core.cf_access reads _TEAM_DOMAIN/_AUD once, at
+        # import, so a key that is merely MISSING from os.environ would be read
+        # from whatever the running host exports. An EMPTY value is PRESENT,
+        # and that is what keeps it out — this fixture's backend then states its
+        # own mode instead of inheriting the deployment's Access identity.
+        # Until 2026-11-08 the pin also had to hold off api/main.py, which
+        # re-injected `<repo root>/.env` for every key missing from os.environ
+        # BEFORE importing core.cf_access: on a host checkout whose root has a
+        # .env, this fixture's backend answered 403 write_denied_not_authenticated
+        # to its own credential-less POST /api/projects, while the same tests
+        # passed in a worktree that has none (iss-f909af237ae944af). That read
+        # is gone — importing the app adds no environment key, see
+        # tests/integration/test_api_main_dotenv_isolation.py — and the pin
+        # stays because the host environment is still the caller's.
         self.env["AITELIER_CF_TEAM_DOMAIN"] = ""
         self.env["AITELIER_CF_AUD"] = ""
         self.env["AITELIER_WRITERS"] = ""
@@ -371,8 +375,11 @@ async def test_real_backend_shutdown_restart_and_recovery(backend_factory, entry
         # State the precondition instead of assuming it: the rest of this test
         # writes through the same gate a browser would hit, and until 2026-11-08
         # this died 40 lines later with a bare 403 on a tree whose root holds a
-        # .env (that causation is inferred from the code, not yet measured from a
-        # child's environment; what IS asserted here is the mode itself).
+        # .env (that causation is no longer only inferred from the code: it is
+        # measured from a child's environment in
+        # tests/integration/test_api_main_dotenv_isolation.py, the regression
+        # guard for the import-time read this fixture used to absorb; what IS
+        # asserted here is the mode itself).
         # gate_enabled is asserted, not merely recorded: with the gate ON this
         # fixture's token is still accepted (api/authz.py:222-225), so can_write
         # alone passes in either mode and would not name the one the fixture is

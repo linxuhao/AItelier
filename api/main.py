@@ -2,19 +2,16 @@
 # [修复说明] 在现有的 FastAPI 实例中补充 Scheduler 的生命周期挂载。
 # [变更] on_event("startup") → lifespan context manager (FastAPI 推荐方式)。
 
+# Deliberately NO import-time `.env` load here (removed 2026-11-08). This module
+# is imported by every test and by the container, and the old read ran BEFORE
+# `from core import cf_access` — which reads AITELIER_CF_TEAM_DOMAIN /
+# AITELIER_CF_AUD once — so an untracked `<repo root>/.env` decided the write
+# gate of any process that merely imported the app (iss-f909af237ae944af).
+# The parser lives in core/dotenv_boot.py and is called EXPLICITLY by the boot
+# entries that need it (cli/server.py, cli/client.py). The server container gets
+# its configuration from compose `env_file`, so nothing here needs the file.
+
 import os as _os
-from pathlib import Path as _Path
-_env_file = _Path(__file__).resolve().parent.parent / ".env"
-if _env_file.exists():
-    with open(_env_file) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _key, _val = _line.split("=", 1)
-                _key = _key.strip().removeprefix("export ")
-                _val = _val.strip().strip("\"'")
-                if _key not in _os.environ:
-                    _os.environ[_key] = _val
 
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path

@@ -60,15 +60,37 @@ overlay:
       - id: "5_compile"
         step_type: "tool"
         tool_name: "godot_compile"
-        # 3900, not 300. The 300 was fiction: measured claim->complete for this
+        # 4800, not 300. The 300 was fiction: measured claim->complete for this
         # step is 515-1171s (jinyong-menu/oneaction/buttons, 2026-08-24/25), so
         # every single run blew through it and nothing was killed. A declared
         # limit that nothing enforces reads like a guard and guards nothing —
-        # worse, it invites "the gate is slow, tighten the timeout" when the
-        # real budget lives in post_playtest (3600s) plus the sidecar's 120s
-        # per scenario. Keep this just above that so the outer number can never
-        # be the one that fires first.
-        timeout_seconds: 3900
+        # worse, it invites "the gate is slow, tighten the timeout".
+        #
+        # What this step contains, measured 2026-11-08:
+        #   * godot_compile's own /compile POST is a 600 s socket, PARSE leg
+        #     only (aitelier/tools/godot_compile/impl.py:265);
+        #   * on a passing parse it CHAINS godot_playtest, which chooses no
+        #     timeout and so runs on post_playtest's default 4200 s socket
+        #     (aitelier/tools/godot_playtest/impl.py:648, used at :705). The
+        #     3600 s this comment used to cite is AUTHORED_SCENARIO_CEILING_SEC
+        #     (impl.py:58) — a clamp on ONE authored scenario's caller budget,
+        #     not the socket.
+        # The two legs are sequential, so 600 + 4200 = 4800 is the longest this
+        # step can legitimately hold its claim. Stay at or above that sum: the
+        # outer number must never be the one that fires first. It corrects the
+        # previous 3900, which sat BELOW the 4200 s socket it claimed to sit
+        # above — a render in that 101 s band was recorded as a step timeout on
+        # the next advance_run while its report still landed.
+        #
+        # This is a claim-staleness window, NOT a kill: the engine fails a claim
+        # only when advance_run next runs after the claim is older than this
+        # number, and it never interrupts a running tool (measured: the
+        # coding_impl test step ran ~2050 s past its 1200 s budget and
+        # completed, no reclaim). The repo-gate path is not this number at all:
+        # run_tests -> run_tests.sh -> the game's tools/godot_gate.py posts
+        # /playtest with its own 3600 s socket, inside REPO_GATE_TIMEOUT
+        # (12600 s, aitelier/tools/run_tests/impl.py:1306).
+        timeout_seconds: 4800
         tool_params:
           out_dir: "$STEP_DIR"
           evidence_cycle_from: "5_test"
@@ -113,11 +135,19 @@ overlay:
         step_type: "tool"
         tool_name: "godot_vision"
         # One call per SCENARIO, so the budget scales with the play-test spec,
-        # not with the gate. A healthy 69-scenario run measured 770s on
-        # 2026-08-30 — 86% of the old 900s — and the step must survive long
-        # enough to WRITE its report: the blind branch below routes on
-        # `from_file: vision_report.json`, and a step killed mid-run leaves no
-        # file for that match to read, so the run fails instead of pausing.
+        # not with the gate. The only measurement behind it is a healthy
+        # 69-scenario run that took 770 s on 2026-08-30 — 86% of the 900 s it
+        # then had, which is why 900 went. 69 is not the contract any more: the
+        # wuxia spec is 166 scenarios (the largest COMPLETED render,
+        # wuxia-godot-gate-7kf51nvv, ran 166 scenarios + 109 controls in
+        # 3471.2921 s of play-test wall). Nobody has measured this judge over
+        # 166 scenarios, so read the number below as a bound, not as a scaled
+        # figure — 770 s over 69 scenarios is the FLOOR for what the step has
+        # to survive. What it must survive is long enough to WRITE its report:
+        # the blind branch below routes on `from_file: vision_report.json`, and
+        # a step killed mid-run leaves no file for that match to read, so the
+        # run fails instead of pausing. It bounds no play-test: this step does
+        # not POST /playtest at all, it reads 5_compile's captures.
         timeout_seconds: 3600
         tool_params:
           from_step: "5_compile"

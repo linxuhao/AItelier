@@ -639,12 +639,22 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
 
 
 #
-# 4200 s, not 3600 s. The largest harness-measured render retained anywhere is
+# 4200 s, not 3600 s. The largest COMPLETED harness-measured render retained is
 # 3471.2921 s of wall time: ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/
 # playtest.json, field timing.wall_sec (schema playtest-timing/1). With the old
 # 3600 s socket that left 128.7 s of headroom, so a slightly slower render was
 # orphaned and reported as not run. 4200 s leaves 728.7 s. The queue declaration
 # is derived from this number at RENDER_QUEUE_SHARE (2100 s, was 1800 s).
+#
+# COMPLETED is the scope, and it is not the same as "the largest retained": the
+# retained ABORTED gate wuxia-godot-gate-o_fr2y_w shows a 6559.5635 s play-test
+# stage in its manifest.json (stages.playtest) and no playtest.json at all. That
+# stage ran longer than any render we hold a report for and did not finish, so
+# it is a lower bound on how long the handler was held, not a completed
+# measurement — it is not evidence that 4200 s cut a finished render short, and
+# it is not covered by this socket (that gate is on the repo-gate path, where
+# the game's tools/godot_gate.py reads its own /playtest answer with a 3600 s
+# socket, inside REPO_GATE_TIMEOUT of 12600 s). 4200 is the TOOL path's bound.
 def post_playtest(payload: dict, timeout: int = 4200) -> dict:
     """POST one /playtest request to the sidecar and return its report.
 

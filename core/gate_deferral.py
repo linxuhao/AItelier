@@ -52,9 +52,14 @@ GATE_DEFERRAL_WAIT_SECONDS = float(
 # `aitelier.tools.run_tests.impl.REPO_GATE_TIMEOUT <= episode_max_seconds()`,
 # so a gate that runs to its full deadline is still inside the episode it
 # waits in. Raised from 10800 to 12600 (the `REPO_GATE_TIMEOUT` value of
-# 2026-11-08, which is ~2x the largest retained passing gate, 6476.1 s; see the
-# comment there). Tests:
-# tests/unit/test_gate_deferral_execution_points.py.
+# 2026-11-08, which is ~2x the largest retained passing WHOLE GATE, 6476.1 s:
+# gate-reports/gq-20261021T194832Z-38efe5f5/manifest.json started->finished,
+# python + compile + playtest + script; see the comment there). The 6476.1 is a
+# whole-gate wall and NOT a play-test stage: the largest passed play-test stage
+# is 3476.2 s (wuxia-godot-gate-7kf51nvv) and the largest of any status is
+# 6559.6 s, from an aborted gate (wuxia-godot-gate-o_fr2y_w) that never
+# completed. ~1.95x the whole gate is the thing this episode has to contain.
+# Tests: tests/unit/test_gate_deferral_execution_points.py.
 GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(
     os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS", "12600"))
 

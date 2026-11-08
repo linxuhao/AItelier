@@ -1,0 +1,70 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+..FF........                                                             [100%]
+=================================== FAILURES ===================================
+_ test_the_budget_goes_red_and_names_the_number_that_moved[3-gate runs per step=3 > 1] _
+
+attempts = 3, expect_name = 'gate runs per step=3 > 1'
+
+    @pytest.mark.parametrize("attempts,expect_name", [
+        (3, "gate runs per step=3 > 1"),
+        (4, "gate runs per step=4 > 1"),
+    ])
+    def test_the_budget_goes_red_and_names_the_number_that_moved(attempts,
+                                                                 expect_name):
+        """Kills "put the re-acquisition back to 3" (the round-5 regression) and
+        "widen one step's hold": both must be reported BY NAME, not as a bare
+        False. A guard nobody has seen go red is a claim, not a guard."""
+        from aitelier.tools.run_tests import impl as rt
+    
+        violations = _step_budget_violations(
+            gate_timeout=rt.REPO_GATE_TIMEOUT, attempts=attempts,
+            retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS)
+        assert any(expect_name in v for v in violations), violations
+        # ...and the hold it implies is named too, since that is the resource the
+        # budget protects.
+>       assert any("worst-case hold=" in v for v in violations), violations
+E       AssertionError: ['gate runs per step=3 > 1']
+E       assert False
+E        +  where False = any(<generator object test_the_budget_goes_red_and_names_the_number_that_moved.<locals>.<genexpr> at 0x7b465a8a2f60>)
+
+tests/unit/test_gate_deferral_execution_points.py:112: AssertionError
+_ test_the_budget_goes_red_and_names_the_number_that_moved[4-gate runs per step=4 > 1] _
+
+attempts = 4, expect_name = 'gate runs per step=4 > 1'
+
+    @pytest.mark.parametrize("attempts,expect_name", [
+        (3, "gate runs per step=3 > 1"),
+        (4, "gate runs per step=4 > 1"),
+    ])
+    def test_the_budget_goes_red_and_names_the_number_that_moved(attempts,
+                                                                 expect_name):
+        """Kills "put the re-acquisition back to 3" (the round-5 regression) and
+        "widen one step's hold": both must be reported BY NAME, not as a bare
+        False. A guard nobody has seen go red is a claim, not a guard."""
+        from aitelier.tools.run_tests import impl as rt
+    
+        violations = _step_budget_violations(
+            gate_timeout=rt.REPO_GATE_TIMEOUT, attempts=attempts,
+            retry_delay=rt.REPO_GATE_RETRY_DELAY_SECONDS)
+        assert any(expect_name in v for v in violations), violations
+        # ...and the hold it implies is named too, since that is the resource the
+        # budget protects.
+>       assert any("worst-case hold=" in v for v in violations), violations
+E       AssertionError: ['gate runs per step=4 > 1']
+E       assert False
+E        +  where False = any(<generator object test_the_budget_goes_red_and_names_the_number_that_moved.<locals>.<genexpr> at 0x7b465ac5a400>)
+
+tests/unit/test_gate_deferral_execution_points.py:112: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[3-gate runs per step=3 > 1]
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[4-gate runs per step=4 > 1]
+2 failed, 10 passed, 1 warning in 0.26s

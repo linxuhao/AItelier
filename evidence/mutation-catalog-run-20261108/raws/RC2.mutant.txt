@@ -1,0 +1,150 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.FFFFFFFF                                                                [100%]
+=================================== FAILURES ===================================
+________________ test_no_exit_code_alone_is_ever_unmeasured[1] _________________
+
+returncode = 1
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+________________ test_no_exit_code_alone_is_ever_unmeasured[2] _________________
+
+returncode = 2
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+________________ test_no_exit_code_alone_is_ever_unmeasured[3] _________________
+
+returncode = 3
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+_______________ test_no_exit_code_alone_is_ever_unmeasured[124] ________________
+
+returncode = 124
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+_______________ test_no_exit_code_alone_is_ever_unmeasured[137] ________________
+
+returncode = 137
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+_______________ test_no_exit_code_alone_is_ever_unmeasured[255] ________________
+
+returncode = 255
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+________________ test_no_exit_code_alone_is_ever_unmeasured[-1] ________________
+
+returncode = -1
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+________________ test_no_exit_code_alone_is_ever_unmeasured[-9] ________________
+
+returncode = -9
+
+    @pytest.mark.parametrize("returncode", [0, 1, 2, 3, 124, 137, 255, -1, -9])
+    def test_no_exit_code_alone_is_ever_unmeasured(returncode):
+        """The whole surface of what a bare `rc` may say. Nothing here is a
+        declaration, so the only two legal readings are pass (0) and fail."""
+        gate = {"returncode": returncode, "output": "=== gate ===\nred prose\n",
+                "output_truncated": False}
+        outcome = rt._repo_gate_outcome(gate)
+>       assert outcome != rt.REPO_GATE_UNMEASURED
+E       AssertionError: assert 'unmeasured' != 'unmeasured'
+E        +  where 'unmeasured' = rt.REPO_GATE_UNMEASURED
+
+tests/unit/test_run_tests_unmeasured_declaration.py:74: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[1]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[2]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[3]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[124]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[137]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[255]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-1]
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-9]
+8 failed, 1 passed, 1 warning in 0.29s

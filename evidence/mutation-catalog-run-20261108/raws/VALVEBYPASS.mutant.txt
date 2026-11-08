@@ -1,0 +1,87 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+....F....................F.....                                          [100%]
+=================================== FAILURES ===================================
+____ test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it ____
+
+    def test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it():
+        """The per-instance valve fires on claims > max_claims, unconditionally.
+    
+        The prior bypass (deferring → False) was removed as unreachable: the tick
+        returns early when state == "silent" (scheduler line ~1232), BEFORE the
+        valve check (~1283), so a step instance during a live episode never
+        accumulates more than 1 claim.  This is proved by the integration test
+        `test_the_tick_refuses_to_claim_while_the_gate_is_silent` below.
+    
+        The assertions here confirm the valve itself is narrow (fires only past
+        the bound) and that no deferral state changes its answer.
+        """
+        from core.scheduler import _MAX_CLAIMS_PER_INSTANCE
+    
+        wait = gd.wait_seconds()
+        ceiling = gd.episode_max_seconds()
+        assert wait >= 1.0
+        # The arithmetic: if the valve WERE reachable during an episode, it could
+        # be reached (ceiling/wait exceeds the bound).  That's why the tick's early
+        # return matters — it prevents claims from accumulating in the first place.
+        re_claim_bound = ceiling / wait
+        assert re_claim_bound > _MAX_CLAIMS_PER_INSTANCE, (
+            f"re-claim bound={re_claim_bound:.0f} exceeds valve={_MAX_CLAIMS_PER_INSTANCE}: "
+            "if the tick did NOT return early during deferral, this valve would fire")
+    
+        # Pole 1: at the bound, the valve does NOT fire.
+        assert gd.guard_per_instance_valve(
+            _MAX_CLAIMS_PER_INSTANCE, "run-1",
+            max_claims=_MAX_CLAIMS_PER_INSTANCE) is False
+        # Pole 2: past the bound, it fires unconditionally.
+        assert gd.guard_per_instance_valve(
+            _MAX_CLAIMS_PER_INSTANCE + 1, "run-1",
+            max_claims=_MAX_CLAIMS_PER_INSTANCE) is True
+        # Pole 3: a live episode no longer suppresses the valve (bypass removed).
+        ledger = gd.DeferralLedger()
+        ledger.note_absence("run-1", now=1000.0)
+>       assert gd.guard_per_instance_valve(
+            _MAX_CLAIMS_PER_INSTANCE + 1, "run-1",
+            max_claims=_MAX_CLAIMS_PER_INSTANCE, ledger=ledger, now=1000.0) is True
+E       AssertionError: assert False is True
+E        +  where False = <function guard_per_instance_valve at 0x7ccdf1c437e0>((20 + 1), 'run-1', max_claims=20, ledger=DeferralLedger(episodes={'run-1': _Episode(started_at=1000.0, last_absence_at=1000.0, absences=1, gate='', report_key=None, gate_runs=1)}), now=1000.0)
+E        +    where <function guard_per_instance_valve at 0x7ccdf1c437e0> = gd.guard_per_instance_valve
+
+tests/unit/test_gate_deferral_execution_points.py:151: AssertionError
+_________ test_the_valve_fires_on_excess_claims_regardless_of_episode __________
+
+ledger = DeferralLedger(episodes={'r': _Episode(started_at=1000.0, last_absence_at=1000.0, absences=1, gate='', report_key=None, gate_runs=1)})
+
+    def test_the_valve_fires_on_excess_claims_regardless_of_episode(ledger):
+        """The prior bypass (deferring → suppress the valve) was unreachable code:
+        the tick returns early during a live episode, so no re-claims accumulate
+        and the valve is never consulted. With the bypass removed, the valve is a
+        simple bound. This test replaces the old assertion that a live episode
+        suppressed it.
+    
+        The integration proof of unreachability lives in
+        test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent.
+        """
+        ledger.note_absence("r", now=1000.0)
+        # Even with a live episode, the valve fires past the bound — because the
+        # tick never reaches it in this state. The bound is a safety net for
+        # non-deferral runaways.
+>       assert gd.guard_per_instance_valve(21, "r", max_claims=20,
+                                          ledger=ledger, now=1000.0) is True
+E       AssertionError: assert False is True
+E        +  where False = <function guard_per_instance_valve at 0x7ccdf1c43740>(21, 'r', max_claims=20, ledger=DeferralLedger(episodes={'r': _Episode(started_at=1000.0, last_absence_at=1000.0, absences=1, gate='', report_key=None, gate_runs=1)}), now=1000.0)
+E        +    where <function guard_per_instance_valve at 0x7ccdf1c43740> = gd.guard_per_instance_valve
+
+tests/unit/test_gate_deferral_is_accounted.py:173: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_valve_fires_on_excess_claims_regardless_of_episode
+2 failed, 29 passed, 1 warning in 0.32s

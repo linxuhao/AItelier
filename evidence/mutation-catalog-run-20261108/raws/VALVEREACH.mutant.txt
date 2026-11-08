@@ -1,0 +1,228 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+......F......FF.....                                                     [100%]
+=================================== FAILURES ===================================
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7972f64d9d60>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched, and
+        each wait that runs out (`reacquire`) must re-run the gate step exactly
+        once — one gate call per re-acquisition, never an implement cycle.
+        """
+        from tests.gate_fixture import assert_repo_gate_calls
+        observations = []
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL,
+                           gate_observations=observations)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        _assert_test_row_untouched(sf, run_id)
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        first = outcomes.index("silent")
+>       assert set(outcomes[first:]) == {"silent", "reacquire"}, outcomes
+E       AssertionError: ['none', 'none', 'none', 'silent', 'silent', 'silent', ...]
+E       assert {'silent'} == {'reacquire', 'silent'}
+E         
+E         Extra items in the right set:
+E         'reacquire'
+E         Use -v to get more diff
+
+tests/skillflow/test_coding_impl_gate_absence.py:518: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+___________ test_the_tick_refuses_to_claim_while_the_gate_is_silent ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7972f48a6cf0>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_tick_refuses_to_claim0')
+
+    def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
+                                                                tmp_path):
+        """Kills S1 (delete the deferral skip inside the tick; 0/33 in review).
+    
+        Driven at the CALL SITE — `core/scheduler._run_skillflow_tick` — with the
+        REAL `observe_run` reading a REAL report off disk. Both poles are measured:
+        with the absence the tick must not claim; with a GRADED report the tick
+        must. One pole alone would pass for a tick that never claims anything.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+>       assert sf.claims == 0, "the tick claimed a step for a gate that never spoke"
+E       AssertionError: the tick claimed a step for a gate that never spoke
+E       assert 1 == 0
+E        +  where 1 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x7972f48a57c0>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:237: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+_______ test_during_a_deferral_hold_the_step_claim_is_held_not_released ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7972f48b0230>
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_during_a_deferral_hold_th0')
+
+    def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
+                                                                         tmp_path):
+        """While an absence is live the tick neither claims the step nor advances
+        it. This stub measures exactly two things: `claims == 0` across three
+        silent ticks, and the ledger holding the episode (3 absences, remaining
+        hold > 0). The step-STATE claims this file used to make in prose —
+        retry_count / release_count staying put — are measured on REAL step rows
+        in `test_coding_impl_gate_absence.py`, not here: a stub with no step row
+        cannot see a counter it does not model.
+        """
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _silent_report(out_dir)
+    
+        sf = _TickStub()
+        scheduler = _wire_tick(monkeypatch, sf, out_dir)
+    
+        # Drive multiple ticks: each returns without claiming.
+        for _ in range(3):
+            asyncio.run(scheduler._run_skillflow_tick("p", None))
+    
+>       assert sf.claims == 0, (
+            "the deferral tick claimed a step — retry_count or release would move")
+E       AssertionError: the deferral tick claimed a step — retry_count or release would move
+E       assert 3 == 0
+E        +  where 3 = <tests.unit.test_gate_deferral_execution_points._TickStub object at 0x7972f48b35f0>.claims
+
+tests/unit/test_gate_deferral_execution_points.py:270: AssertionError
+------------------------------ Captured log call -------------------------------
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=gate_deferral_hold run=run-1 gate=run_tests.sh remaining=300s
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=gate_deferral_hold run=run-1 gate=run_tests.sh remaining=300s
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=gate_deferral_hold run=run-1 gate=run_tests.sh remaining=300s
+WARNING  aitelier.scheduler:scheduler.py:2279 successor claim recovery inspection failed
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+WARNING  aitelier.scheduler:scheduler.py:2288 could not fail run after successor recovery inspection error
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2210, in _record_unclaimable_successor
+    resolver = sf._get_resolver_for_run(run_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/w/core/scheduler.py", line 2286, in _record_unclaimable_successor
+    sf.fail_run(run_id, reason)
+  File "/w/tests/unit/test_gate_deferral_execution_points.py", line 196, in fail_run
+    raise AssertionError(f"the tick ended the run: {reason}")
+AssertionError: the tick ended the run: Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+INFO     aitelier.scheduler.tick:scheduler.py:2042 project=p outcome=successor_claim_terminal run=run-1 node=unknown predecessor=unknown reason=Successor claim recovery inspection failed for run 'run-1': AttributeError: '_TickStub' object has no attribute '_get_resolver_for_run'
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released
+3 failed, 17 passed, 1 warning in 133.42s (0:02:13)

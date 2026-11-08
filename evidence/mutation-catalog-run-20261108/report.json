@@ -1,0 +1,1359 @@
+{
+  "catalog": "tools/mutation_catalog/mutations.py",
+  "commit": "be6d8db2aeeab613c4ca52129b562fe9e7ab5df0",
+  "scope": "TARGETED only (each entry's own targeted selection)",
+  "generated_utc": "2026-11-08T13:29:35.806806Z",
+  "entries_count_measured": 48,
+  "entries_count_source_keys": 48,
+  "total": 48,
+  "killed": 48,
+  "survivors": 0,
+  "anchor_errors": 0,
+  "unmeasured": 0,
+  "killed_names": [
+    "N9",
+    "M21",
+    "M21b",
+    "G2",
+    "G2b",
+    "DUPIMPL",
+    "RESTART",
+    "M21PAIR",
+    "M21BPAIR",
+    "M2",
+    "M19",
+    "TAILONLY2",
+    "D1",
+    "D4",
+    "ABSTERM",
+    "ABSTERM2",
+    "S1",
+    "VALVEREACH",
+    "SCHEDROWRETRY",
+    "SCHEDROWSTATUS",
+    "H2",
+    "RC2",
+    "TIMEOUT_NOT_UNMEASURED",
+    "VALVEBYPASS",
+    "ABSCEIL",
+    "ABSENCEWORD",
+    "READABSENCE",
+    "ABSREL",
+    "ABSSTATE",
+    "ABSWRITE",
+    "ABSSEED",
+    "RETFLAG",
+    "ATTEMPTS3",
+    "TIMEOUTBIG",
+    "WAITCLAMP",
+    "CEILCLAMP",
+    "DUPYIELD",
+    "DUPHITS",
+    "TIMEOUT60",
+    "ABSTERMTEXT",
+    "TERMREASONCYCLE",
+    "VALVEOFF",
+    "NEVEREXPIRE",
+    "READNONDICT",
+    "DECLNONE",
+    "HOST_HOLD_INERT",
+    "TICK_HOLD_INERT",
+    "OBSERVENONE"
+  ],
+  "survivor_names": [],
+  "reconciles": true,
+  "goal_table": [
+    "N9",
+    "M21",
+    "M21b",
+    "G2",
+    "G2b",
+    "DUPIMPL",
+    "RESTART"
+  ],
+  "full_scope_defined_by_catalog": [
+    "tests/unit",
+    "tests/skillflow"
+  ],
+  "full_scope_run": false,
+  "full_scope_note": "NOT run. The runner's full-scope arm (tests/unit + tests/skillflow) and its ignition analysis were not run; this report measures the TARGETED scope only, so a green targeted scope is not the catalog's own kill criterion. run_mutations.py was not executed (it spawns pytest from the host interpreter, which is forbidden here).",
+  "control": {
+    "arm": "unmutated archive of be6d8db2, targeted-union of 19 selectors, 95 tests",
+    "runs": [
+      {
+        "raw": "evidence/mutation-catalog-run-20261108/raws/CONTROL-union.txt",
+        "rc": 0,
+        "summary": "95 passed, 1 warning in 139.14s (0:02:19)",
+        "red_ids": []
+      },
+      {
+        "raw": "evidence/mutation-catalog-run-20261108/raws/CONTROL2-union.txt",
+        "rc": 0,
+        "summary": "95 passed, 1 warning in 161.95s (0:02:41)",
+        "red_ids": []
+      }
+    ],
+    "green": true,
+    "subtracted_red_ids": []
+  },
+  "union_targeted": [
+    "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b",
+    "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded",
+    "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code",
+    "tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
+    "tests/unit/test_run_tests_unmeasured_declaration.py",
+    "tests/skillflow/test_coding_impl_gate_absence.py",
+    "tests/unit/test_gate_deferral_is_accounted.py",
+    "tests/unit/test_gate_deferral_execution_points.py",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured",
+    "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why",
+    "tests/skillflow/test_config_loading.py",
+    "tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears",
+    "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"
+  ],
+  "union_targeted_count": 19,
+  "distinct_selections": 23,
+  "container_form": {
+    "argv_template": [
+      "docker",
+      "run",
+      "-d",
+      "--name",
+      "<unique-name>",
+      "--network",
+      "none",
+      "--cpus",
+      "2",
+      "--memory",
+      "2g",
+      "--init",
+      "-u",
+      "1000:1000",
+      "-e",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "-e",
+      "HOME=/tmp",
+      "-v",
+      "<scratch>:/w",
+      "-w",
+      "/w",
+      "-e",
+      "PYTHONPATH=/w",
+      "aitelier:latest",
+      "/usr/local/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "<ids>"
+    ],
+    "exact_mutant_argv_example": [
+      "docker",
+      "run",
+      "-d",
+      "--name",
+      "mc20261108-m21",
+      "--network",
+      "none",
+      "--cpus",
+      "2",
+      "--memory",
+      "2g",
+      "--init",
+      "-u",
+      "1000:1000",
+      "-e",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "-e",
+      "HOME=/tmp",
+      "-v",
+      "/tmp/mc-20261108-m/M21:/w",
+      "-w",
+      "/w",
+      "-e",
+      "PYTHONPATH=/w",
+      "aitelier:latest",
+      "/usr/local/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"
+    ],
+    "image": "aitelier:latest",
+    "image_id": "sha256:76e5f3c6d60cc9791c25ba409a3e48d3734110f4755901564028cfc6341de904",
+    "image_inspect_cmd": "docker image inspect aitelier:latest --format '{{.Id}}'",
+    "image_has_entrypoint": false,
+    "image_cmd": [
+      "uvicorn",
+      "api.main:app",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4444",
+      "--timeout-graceful-shutdown",
+      "5"
+    ],
+    "max_concurrent_own_containers": 2,
+    "run_pattern": "detached run, poll docker inspect State.Status, docker logs saved, docker rm -f; no --rm with timeout",
+    "host_pytest_run": false,
+    "production_container_used": false
+  },
+  "entries": [
+    {
+      "name": "N9",
+      "outcome": "killed",
+      "kind": "text",
+      "targeted": [
+        "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/tool.yaml",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.19s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/N9.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M21",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.25s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M21.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M21b",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.25s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_the_r4_shaped_witness_flips_under_the_literal_m21b"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M21b.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "G2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.20s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/G2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "G2b",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.20s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/G2b.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "DUPIMPL",
+      "outcome": "killed",
+      "kind": "text",
+      "targeted": [
+        "tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.28s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_no_verbatim_previous_line_dup_in_non_test_code"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/DUPIMPL.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "RESTART",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        },
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.20s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/RESTART.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M21PAIR",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        },
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.27s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_declaration_channel"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M21PAIR.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M21BPAIR",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        },
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.25s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_mid_line_echo_kills_the_in_operator_on_the_case_channel"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M21BPAIR.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.25s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "M19",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.26s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_bounded_fragment_is_not_a_record_on_its_own"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/M19.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TAILONLY2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 1.73s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TAILONLY2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "D1",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py",
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 44 passed, 1 warning in 142.62s (0:02:22)",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/D1.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "D4",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py",
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "9 failed, 37 passed, 1 warning in 90.55s (0:01:30)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+      ],
+      "mutant_red_count": 9,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/D4.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSTERM",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 18 passed, 1 warning in 0.21s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSTERM.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSTERM2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 18 passed, 1 warning in 0.23s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSTERM2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "S1",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py",
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "core/scheduler.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "7 failed, 13 passed, 1 warning in 263.13s (0:04:23)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent"
+      ],
+      "mutant_red_count": 7,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/S1.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "VALVEREACH",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py",
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "core/scheduler.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "3 failed, 17 passed, 1 warning in 133.42s (0:02:13)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_during_a_deferral_hold_the_step_claim_is_held_not_released",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent"
+      ],
+      "mutant_red_count": 3,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/VALVEREACH.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "SCHEDROWRETRY",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/scheduler.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "7 failed, 1 passed, 1 warning in 42.64s",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 7,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/SCHEDROWRETRY.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "SCHEDROWSTATUS",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/scheduler.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "7 failed, 1 passed, 1 warning in 41.51s",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 7,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/SCHEDROWSTATUS.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "H2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py",
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "6 failed, 14 passed, 1 warning in 143.44s (0:02:23)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_host_refuses_to_advance_before_reaching_the_framework"
+      ],
+      "mutant_red_count": 6,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/H2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "RC2",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "8 failed, 1 passed, 1 warning in 0.29s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-1]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[-9]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[124]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[137]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[1]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[255]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[2]",
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_no_exit_code_alone_is_ever_unmeasured[3]"
+      ],
+      "mutant_red_count": 8,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/RC2.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TIMEOUT_NOT_UNMEASURED",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.26s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_killed_gate_is_unmeasured_and_its_returncode_is_not_why"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TIMEOUT_NOT_UNMEASURED.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "VALVEBYPASS",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py",
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 29 passed, 1 warning in 0.32s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_valve_fires_on_excess_claims_regardless_of_episode"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/VALVEBYPASS.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSCEIL",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 11 passed, 1 warning in 0.26s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_no_environment_can_raise_the_episode_ceiling_past_six_hours"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSCEIL.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSENCEWORD",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 18 passed, 1 warning in 0.21s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSENCEWORD.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "READABSENCE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 18 passed, 1 warning in 0.21s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/READABSENCE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSREL",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 37 passed, 1 warning in 20.59s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_an_absence_whose_failures_are_all_known_red_still_does_not_pass"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSREL.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSSTATE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 37 passed, 1 warning in 16.29s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSSTATE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSWRITE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 37 passed, 1 warning in 16.13s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSWRITE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSSEED",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 37 passed, 1 warning in 16.34s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declared_absence_never_seeds_a_baseline_and_never_passes_relative"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSSEED.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "RETFLAG",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_config_loading.py",
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "8 failed, 15 passed, 1 warning in 65.11s (0:01:05)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 8,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/RETFLAG.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ATTEMPTS3",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 11 passed, 1 warning in 0.26s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ATTEMPTS3.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TIMEOUTBIG",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 10 passed, 1 warning in 0.27s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_whole_gate_deadline_fits_inside_the_episode_ceiling"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TIMEOUTBIG.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "WAITCLAMP",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.20s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_wait_cannot_be_widened_until_the_ceiling_disappears"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/WAITCLAMP.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "CEILCLAMP",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 10 passed, 1 warning in 0.28s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_G2_episode_max_seconds_is_hard_capped_against_1e9",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_no_environment_can_raise_the_episode_ceiling_past_six_hours"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/CEILCLAMP.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "DUPYIELD",
+      "outcome": "killed",
+      "kind": "text",
+      "targeted": [
+        "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"
+      ],
+      "edits": [
+        {
+          "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.19s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/DUPYIELD.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "DUPHITS",
+      "outcome": "killed",
+      "kind": "text",
+      "targeted": [
+        "tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"
+      ],
+      "edits": [
+        {
+          "file": "tests/unit/test_no_verbatim_previous_line_dup.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 0.19s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_no_verbatim_previous_line_dup.py::test_the_checker_file_is_clean_under_its_own_rule"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/DUPHITS.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TIMEOUT60",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 10 passed, 1 warning in 0.26s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[3-gate runs per step=3 > 1]",
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[4-gate runs per step=4 > 1]"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TIMEOUT60.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "ABSTERMTEXT",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py",
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 29 passed, 1 warning in 0.34s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/ABSTERMTEXT.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TERMREASONCYCLE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py",
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 30 passed, 1 warning in 0.33s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_an_expired_absence_names_the_absence_and_never_the_code"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TERMREASONCYCLE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "VALVEOFF",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py",
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "4 failed, 27 passed, 1 warning in 0.33s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_execution_points.py::test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_episode_ceiling_ends_the_run_before_the_valve_is_needed",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_valve_fires_on_excess_claims_regardless_of_episode",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_the_valve_is_narrow_not_blanket"
+      ],
+      "mutant_red_count": 4,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/VALVEOFF.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "NEVEREXPIRE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_execution_points.py",
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 19 passed, 1 warning in 130.62s (0:02:10)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/NEVEREXPIRE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "READNONDICT",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_gate_deferral_is_accounted.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "4 failed, 15 passed, 1 warning in 0.24s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[3]",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[absent]",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload0]",
+        "FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_is_not_an_object_states_no_absence[payload1]"
+      ],
+      "mutant_red_count": 4,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/READNONDICT.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "DECLNONE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound"
+      ],
+      "edits": [
+        {
+          "file": "aitelier/tools/run_tests/impl.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "1 failed, 1 warning in 1.68s",
+      "mutant_red_ids": [
+        "FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound"
+      ],
+      "mutant_red_count": 1,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/DECLNONE.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "HOST_HOLD_INERT",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/skillflow_host.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "5 failed, 3 passed, 1 warning in 143.72s (0:02:23)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_deferral_hold_leaves_real_step_rows_untouched",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 5,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/HOST_HOLD_INERT.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "TICK_HOLD_INERT",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/scheduler.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "2 failed, 6 passed, 1 warning in 134.08s (0:02:14)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 2,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/TICK_HOLD_INERT.mutant.txt",
+      "reason": null
+    },
+    {
+      "name": "OBSERVENONE",
+      "outcome": "killed",
+      "kind": "behaviour",
+      "targeted": [
+        "tests/skillflow/test_coding_impl_gate_absence.py"
+      ],
+      "edits": [
+        {
+          "file": "core/gate_deferral.py",
+          "anchor_occurrences": 1
+        }
+      ],
+      "mutant_rc": 1,
+      "mutant_summary": "5 failed, 3 passed, 1 warning in 268.95s (0:04:28)",
+      "mutant_red_ids": [
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_a_gate_that_finally_answers_clears_the_deferral",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them",
+        "FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them"
+      ],
+      "mutant_red_count": 5,
+      "raw": "evidence/mutation-catalog-run-20261108/raws/OBSERVENONE.mutant.txt",
+      "reason": null
+    }
+  ]
+}

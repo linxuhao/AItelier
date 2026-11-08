@@ -1,0 +1,105 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+..F...F.                                                                 [100%]
+=================================== FAILURES ===================================
+____ test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_pole_c_a_tiny_ceiling_ins0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fdddd397290>
+
+    def test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged(
+            tmp_path, monkeypatch):
+        """(c) ceiling tiny (3 s) and HONOURED, observed for a window shorter than
+        the ceiling (20 ticks x 0.1 s = 2 s): the absence never expires, so the run
+        stays silent and non-terminal, `implement_runs == 1`, and the rows the hold
+        parks are untouched. This is the non-expiring small-ceiling pole of
+        `an-expired-absence-is-never-charged-to-the-implementer`; the expiring one
+        is `test_pole_c_a_tiny_ceiling_ends_the_run_naming_the_absence` (C′).
+        """
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=3, wait=1,
+                           counter=counter, tail=_SILENT_TAIL)
+        assert gate_deferral.episode_max_seconds() == 3
+        _prime_ledger(sf, run_id)
+    
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=0.1)
+        _assert_test_row_untouched(sf, run_id)
+    
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+        assert "expired" not in outcomes, outcomes
+>       assert "silent" in outcomes, outcomes
+E       AssertionError: ['none', 'none', 'none', 'none', 'none', 'none', ...]
+E       assert 'silent' in ['none', 'none', 'none', 'none', 'none', 'none', ...]
+
+tests/skillflow/test_coding_impl_gate_absence.py:343: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+_____ test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them ______
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_the_tick_hold_alone_keeps0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fdddd6ca9c0>
+
+    def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
+            tmp_path, monkeypatch):
+        """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
+        own. With both holds in series, a break in one is covered by the other; so
+        here the host's `hold_blocks_advance` answers False (the host hold is out)
+        and the tick is the only driver. The tick's own `silent` return must then
+        keep the run parked at `test_gate_absent` with the rows untouched, and
+        each wait that runs out (`reacquire`) must re-run the gate step exactly
+        once — one gate call per re-acquisition, never an implement cycle.
+        """
+        from tests.gate_fixture import assert_repo_gate_calls
+        observations = []
+        counter = tmp_path / "calls.txt"
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
+                           counter=counter, tail=_SILENT_TAIL,
+                           gate_observations=observations)
+        monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
+                            lambda run_id, **_kw: False)
+        implement_runs, statuses, outcomes, nodes = _drive(
+            sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        _assert_test_row_untouched(sf, run_id)
+        assert implement_runs == 1, implement_runs
+        assert statuses[-1] == "running", statuses
+>       first = outcomes.index("silent")
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: 'silent' is not in list
+
+tests/skillflow/test_coding_impl_gate_absence.py:517: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  skillflow:core.py:1120 step baseline declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+WARNING  skillflow:core.py:1120 step test declares capability 'stateful', which is not registered on this deployment — granting nothing
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_pole_c_a_tiny_ceiling_inside_the_window_is_honoured_and_uncharged
+FAILED tests/skillflow/test_coding_impl_gate_absence.py::test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them
+2 failed, 6 passed, 1 warning in 134.08s (0:02:14)

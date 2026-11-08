@@ -1,0 +1,76 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+...........F...................F..............                           [100%]
+=================================== FAILURES ===================================
+_______ test_a_declaration_survives_output_far_past_the_retention_bound ________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_declaration_survives_ou0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x77e68ea813d0>
+
+    def test_a_declaration_survives_output_far_past_the_retention_bound(tmp_path, monkeypatch):
+        """The channel the whole protocol rests on, on a gate whose output is far
+        larger than the 2000 characters `output` retains.
+    
+        The record is FIRST and the log continues long past the bound, so the
+        retained fragment provably does not contain it: only scanning the whole
+        text before truncating can read it. This is the run that used to be
+        impossible — before, the declaration was only readable while the gate's
+        log was SHORT, and no real gate's log is.
+        """
+        install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
+        noise = "=" * 3000
+        repo = _repo_with_gate(tmp_path, DECLARED, noise, exit_code=3)
+        out = tmp_path / "out"
+        rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+        gate = report["repo_gate"]
+    
+        assert gate["output_truncated"] is True
+        # The fragment really is a fragment: no record survives in it.
+        assert rt._REPO_GATE_UNMEASURED_PREFIX not in gate["output"]
+        assert rt._unmeasured_declaration(gate["output"]) is None
+        # ...and the whole-text scan read it anyway.
+        assert gate["unmeasured_declaration"]["state"] == "blocked"
+        assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+>       assert report["repo_gate_unmeasured"] is True
+E       assert False is True
+
+tests/unit/test_run_tests_unmeasured_declaration.py:137: AssertionError
+___ test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one ____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_re_acquisition_is_bounded0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x77e68ea80890>
+
+    def test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one(
+            tmp_path, monkeypatch):
+        monkeypatch.setattr(rt, "REPO_GATE_UNMEASURED_ATTEMPTS", 3)
+        monkeypatch.setattr(rt, "REPO_GATE_RETRY_DELAY_SECONDS", 0)
+        repo = _repo_with_gate(tmp_path, "anything", exit_code=0)
+        calls = _scripted_gate(monkeypatch, [
+            {"passed": False, "returncode": 3, "output": DECLARED,
+             "output_truncated": False, "script": "run_tests.sh",
+             "measured": rt.REPO_GATE_UNMEASURED},
+        ])
+        out = tmp_path / "out"
+        rt.run_tests(project_root=str(repo), out_dir=str(out))
+        report = _report(out)
+    
+        assert len(calls) == rt.REPO_GATE_UNMEASURED_ATTEMPTS
+        assert report["repo_gate"]["attempts"] == rt.REPO_GATE_UNMEASURED_ATTEMPTS
+        assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
+>       assert report["repo_gate_unmeasured"] is True
+E       assert False is True
+
+tests/unit/test_run_tests_unmeasured_declaration.py:463: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_a_declaration_survives_output_far_past_the_retention_bound
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_re_acquisition_is_bounded_and_the_last_verdict_is_the_reported_one
+2 failed, 44 passed, 1 warning in 142.62s (0:02:22)

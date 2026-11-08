@@ -1,0 +1,34 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+F..................                                                      [100%]
+=================================== FAILURES ===================================
+_____________ test_a_report_that_graded_the_code_states_no_absence _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_graded_the_0')
+
+    def test_a_report_that_graded_the_code_states_no_absence(tmp_path):
+        """Kills "any red is treated as an absence": a report that says the code
+        failed is a MEASUREMENT, and the implementer does own that one."""
+        path = tmp_path / "test_report.json"
+        path.write_text(json.dumps({
+            "passed": False, "summary": "FAILED tests/test_ops.py::test_sub",
+            "failures": ["FAILED tests/test_ops.py::test_sub"], "repo_gate": {
+                "script": "run_tests.sh", "measured": "measured_fail"}}),
+            encoding="utf-8")
+>       assert gd.read_absence(path) is None
+E       AssertionError: assert {'gate': 'run_tests.sh'} is None
+E        +  where {'gate': 'run_tests.sh'} = <function read_absence at 0x76c6692d0720>(PosixPath('/tmp/pytest-of-unknown/pytest-0/test_a_report_that_graded_the_0/test_report.json'))
+E        +    where <function read_absence at 0x76c6692d0720> = gd.read_absence
+
+tests/unit/test_gate_deferral_is_accounted.py:46: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_is_accounted.py::test_a_report_that_graded_the_code_states_no_absence
+1 failed, 18 passed, 1 warning in 0.21s

@@ -1,0 +1,51 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+....................................F.                                   [100%]
+=================================== FAILURES ===================================
+_____ test_an_absence_whose_failures_are_all_known_red_still_does_not_pass _____
+
+tmp_path = PosixPath('/tmp/pytest-of-unknown/pytest-0/test_an_absence_whose_failures0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x73b11c935a60>
+
+    def test_an_absence_whose_failures_are_all_known_red_still_does_not_pass(
+            tmp_path, monkeypatch):
+        """Kills ABSREL (`and not absent` removed from `passed_relative`).
+    
+        The absence's own `failures[]` entry keys to the gate's name,
+        `repo_gate:run_tests.sh`. A baseline that already holds that key leaves
+        the absence with NO new failure, so `new_failures` alone would call it a
+        relative pass. Only the absence clause keeps it false.
+        """
+        install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
+        repo = _repo_with_gate(tmp_path, DECLARED, exit_code=3)
+        state = tmp_path / "state"
+        baseline = _baseline_file(state, repo)
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        baseline.write_text(json.dumps({"failures": ["repo_gate:run_tests.sh"]}))
+    
+        out = tmp_path / "out"
+        result = rt.run_tests(project_root=str(repo), out_dir=str(out),
+                              state_dir=str(state))
+        report = _report(out)
+    
+        assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
+        assert report["baseline_state"] == "compared"
+        assert report["new_failures"] == []
+>       assert report["passed_relative"] is False, (
+            "an absence over a baseline that already names its gate reported a "
+            "relative pass")
+E       AssertionError: an absence over a baseline that already names its gate reported a relative pass
+E       assert True is False
+
+tests/unit/test_run_tests_unmeasured_declaration.py:626: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_run_tests_unmeasured_declaration.py::test_an_absence_whose_failures_are_all_known_red_still_does_not_pass
+1 failed, 37 passed, 1 warning in 20.59s

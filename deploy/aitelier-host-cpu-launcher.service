@@ -1,0 +1,21 @@
+# Rendered by install_host_cpu_launcher.py; install the generated unit, not this template.
+[Unit]
+Description=aitelier host CPU launcher: the owned execution transport for repository gates, run_tests pytest and coding shells
+Documentation=file://@REPO@/docs/repository-host-launcher.md
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+ExecStartPre=@PREEXEC@
+ExecStart=@PYTHON@ -m core.repository_host_launcher --socket @SOCKET@ --config @CONFIG@
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+UMask=0002
+LimitNOFILE=1048576
+MemoryMax=536870912
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

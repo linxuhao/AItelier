@@ -77,13 +77,48 @@ coverage is inferred merely from labels.
 python3 -m core.repository_host_launcher --socket /run/aitelier/cpu-launcher.sock --config /etc/aitelier/host-launcher.json
 ```
 
-The operator supplies ordinary supervised service activation separately, with
-this repository available on the host, reviewed dependencies/image installed,
-and the backend mounting ONLY this narrow socket at AITELIER_HOST_LAUNCHER_SOCKET.
-No compose/systemd activation was performed in this source phase. The source
-refuses any already-existing socket path, including a live listener; it does not
-unlink a peer's listener to replace it. A stale path needs deliberate operator
-diagnosis and cleanup, not automatic ownership inference.
+The launcher needs a persistent supervisor on the host, with this repository
+available there, reviewed dependencies/image installed, and the backend mounting
+ONLY this narrow socket at AITELIER_HOST_LAUNCHER_SOCKET. That activation ships
+in the repository, so a rebuilt or second host reproduces it instead of relying
+on an operator's memory:
+
+- `deploy/aitelier-host-cpu-launcher.service` is a systemd --user unit TEMPLATE
+  carrying `@REPO@`/`@PYTHON@`/`@SOCKET@`/`@CONFIG@`/`@PREEXEC@` placeholders and
+  the measured live settings: Type=simple, Restart=on-failure, RestartSec=5,
+  KillMode=control-group, UMask=0002, LimitNOFILE=1048576, MemoryMax=536870912,
+  journal output, and `WantedBy=default.target`.
+- `deploy/install_host_cpu_launcher.py` renders that template with explicit
+  absolute paths (`--repo-root`, `--python`, `--socket`, `--config`) and writes
+  the rendered unit to `<target>/.config/systemd/user/` plus the probe to
+  `<target>/.AItelier/bin/`, where `--target` is a HOME-shaped root defaulting
+  to the invoking user's home. It takes no service action unless `--enable` is
+  given; with `--enable` it runs exactly `systemctl --user daemon-reload`, then
+  `systemctl --user enable <unit>`, then `systemctl --user start <unit>`. It
+  refuses to install a unit that still contains an unreplaced `@TOKEN@`.
+- `deploy/cpu-launcher-preexec.py` is the unit's `ExecStartPre` and takes the
+  socket path as its single argument. It decides the path before bind: absent ->
+  proceed and create nothing; `connect()` succeeds -> a live listener owns it,
+  refuse and touch nothing; `connect()` refused (ECONNREFUSED/ENOENT) -> the
+  path is dead, unlink it and proceed; any other OSError -> refuse without
+  unlinking. The dead-path case is not cosmetic: an unclean stop leaves the
+  socket file behind, and the launcher would then refuse to bind on every later
+  start, so without this step the supervised unit could not start after an
+  unclean stop or a reboot.
+
+The source's refusal semantics are unchanged: the launcher refuses any
+already-existing socket path, including a live listener; it does not unlink a
+peer's listener to replace it. A stale path is removed by the pre-start probe
+above, never by the launcher and never by automatic ownership inference.
+`tests/unit/test_host_launcher_activation.py` measures the render, the probe's
+`connect()` decision against real socket states, and the installer's
+explicit-only behaviour.
+
+This shipped activation proves neither that a real `systemctl --user` on a given
+host accepts the rendered unit (the disposable test container has no
+systemd-analyze) nor that the service survives a reboot, and it does not activate
+the facility: the run_tests/authored-gate acceptance listed below still needs the
+real probe.
 
 A selector watches the client's connection and the owned Docker CLI output while
 execution runs. Disconnect/EOF cancels the operation promptly; protocol write

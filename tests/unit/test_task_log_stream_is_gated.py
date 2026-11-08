@@ -102,7 +102,14 @@ class TestThePrivateBodyIsRefused:
         """A gate that refuses everyone is an outage: the public progress stream
         is a different route and stays reachable."""
         from api.main import health_check
-        assert health_check() == {"status": "ok", "engine": "DPE SOTA v3.0"}
+        # The two keys a liveness probe reads. Whole-payload equality made this
+        # test red for a field it never looks at: /health gained `gate_harness`
+        # (the identity of the harness the repository gate imports), which is
+        # not this test's subject and is asserted in
+        # tests/unit/test_health_reports_the_gate_export.py.
+        health = health_check()
+        assert health["status"] == "ok"
+        assert health["engine"] == "DPE SOTA v3.0"
 
 
 class TestTheAuthorizedStreamWorks:

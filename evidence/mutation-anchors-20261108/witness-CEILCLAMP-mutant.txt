@@ -1,0 +1,73 @@
+# witness CEILCLAMP arm=mutant
+# head=bf274721a7b4352a3891d96e4e657dcc211771cb
+# started=2026-11-08 12:44:16 UTC ended=2026-11-08 12:44:26 UTC
+# edits: edit[0] core/gate_deferral.py: anchor hits=1
+# argv: docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /tmp/mut-CEILCLAMP-hkxkywyr/mutant:/w -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_gate_deferral_execution_points.py
+# BARE_RC=1
+
+## stdout
+..........FF                                                             [100%]
+=================================== FAILURES ===================================
+____________ test_G2_episode_max_seconds_is_hard_capped_against_1e9 ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7686f569b740>
+
+    def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
+        """Kills G2: setting the env ceiling to 1e9 must not silently disable
+        the wall-clock bound. The hard-coded _ABSOLUTE_EPISODE_CEILING clips
+        the result regardless of what the environment says.
+    
+        Both directions: the ceiling env var cannot raise the effective bound
+        above the absolute, and the episode env var cannot either.
+        """
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)
+>       assert gd.episode_max_seconds() <= gd._ABSOLUTE_EPISODE_CEILING, (
+            f"episode_max_seconds()={gd.episode_max_seconds()} exceeds "
+            f"_ABSOLUTE_EPISODE_CEILING={gd._ABSOLUTE_EPISODE_CEILING} — "
+            "G2: the wall-clock bound is silently disabled")
+E       AssertionError: episode_max_seconds()=1000000000.0 exceeds _ABSOLUTE_EPISODE_CEILING=21600.0 — G2: the wall-clock bound is silently disabled
+E       assert 1000000000.0 <= 21600.0
+E        +  where 1000000000.0 = <function episode_max_seconds at 0x7686f51776a0>()
+E        +    where <function episode_max_seconds at 0x7686f51776a0> = gd.episode_max_seconds
+E        +  and   21600.0 = gd._ABSOLUTE_EPISODE_CEILING
+
+tests/unit/test_gate_deferral_execution_points.py:379: AssertionError
+_______ test_no_environment_can_raise_the_episode_ceiling_past_six_hours _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7686f54c7fe0>
+
+    def test_no_environment_can_raise_the_episode_ceiling_past_six_hours(
+            monkeypatch):
+        """Kills ABSCEIL (`_ABSOLUTE_EPISODE_CEILING = 1e9`). The test above
+        compares against the module's own constant, so it moves with it; this one
+        names the number: with both settings at 1e9 the effective ceiling is
+        21600 s."""
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)
+        monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)
+>       assert gd.episode_max_seconds() == 21600.0, (
+            f"episode_max_seconds()={gd.episode_max_seconds()}, not 21600.0 s: "
+            "the absolute six-hour ceiling no longer bounds the episode")
+E       AssertionError: episode_max_seconds()=1000000000.0, not 21600.0 s: the absolute six-hour ceiling no longer bounds the episode
+E       assert 1000000000.0 == 21600.0
+E        +  where 1000000000.0 = <function episode_max_seconds at 0x7686f51776a0>()
+E        +    where <function episode_max_seconds at 0x7686f51776a0> = gd.episode_max_seconds
+
+tests/unit/test_gate_deferral_execution_points.py:398: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_G2_episode_max_seconds_is_hard_capped_against_1e9
+FAILED tests/unit/test_gate_deferral_execution_points.py::test_no_environment_can_raise_the_episode_ceiling_past_six_hours
+2 failed, 10 passed, 1 warning in 0.24s
+
+## stderr
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+

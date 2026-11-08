@@ -1,0 +1,56 @@
+# witness N9 arm=mutant
+# head=bf274721a7b4352a3891d96e4e657dcc211771cb
+# started=2026-11-08 12:45:07 UTC ended=2026-11-08 12:45:16 UTC
+# edits: edit[0] aitelier/tools/run_tests/tool.yaml: anchor hits=1
+# argv: docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /tmp/mut-N9-5d9az71g/mutant:/w -w /w -e PYTHONPATH=/w -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader
+# BARE_RC=1
+
+## stdout
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________ test_N9_the_protocol_text_has_a_reader ____________________
+
+    def test_N9_the_protocol_text_has_a_reader():
+        """N9 deleted five lines of contract text from tool.yaml and the whole
+        suite stayed green, which means nothing read them. This is the reader for
+        the things the protocol has to keep saying: unmeasured has exactly three
+        sources, an exit code is never one of them by itself, a retained finding
+        overrides all three, an unmeasured gate is an absence only when nothing
+        else failed, and a gate that produced no verdict may not be charged to the
+        implementer. The sentence r2 carried ("DECLARED and never inferred") was
+        false beside the third source, and may not come back.
+    
+        Since rev 5 the routing lives in one place, the doc's routing table,
+        rendered from `ROWS` (`test_repo_gate_outcome_table.py`), and tool.yaml
+        points at it. So the routing half is read off that table: deleting the
+        table, or a row that carries one of these properties, fires here. The
+        declaration line and the pointer are read off tool.yaml. Both files are
+        read with their line breaks folded to single spaces.
+        """
+        raw = _source(_TOOL_YAML)
+        text = " ".join(raw.split())
+        assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
+            "N9: the declaration line the protocol is built on is gone from tool.yaml")
+>       assert ("the routing table in `docs/repo-gate-unmeasured-protocol.md`, "
+                "rendered from `ROWS` in `tests/unit/test_repo_gate_outcome_table.py`"
+                ) in text, "N9: tool.yaml no longer points at the routing table"
+E       AssertionError: N9: tool.yaml no longer points at the routing table
+E       assert 'the routing table in `docs/repo-gate-unmeasured-protocol.md`, rendered from `ROWS` in `tests/unit/test_repo_gate_outcome_table.py`' in "name: run_tests description: > Run the project's unit tests (pytest) over the current run worktree and write test_rep...-fallible: true # Reports/metadata are artifacts even when invoked by a code-producing agent. output: target: artifact"
+
+tests/unit/test_tree_level_accounting_witnesses.py:192: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader
+1 failed, 1 warning in 0.19s
+
+## stderr
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+

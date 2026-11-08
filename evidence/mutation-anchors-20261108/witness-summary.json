@@ -1,0 +1,80 @@
+{
+  "CEILCLAMP": {
+    "control_rc": 0,
+    "edit_hits": [
+      "edit[0] core/gate_deferral.py: anchor hits=1"
+    ],
+    "head": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+    "mutant_rc": 1,
+    "mutant_reds": [
+      "tests/unit/test_gate_deferral_execution_points.py::test_G2_episode_max_seconds_is_hard_capped_against_1e9",
+      "tests/unit/test_gate_deferral_execution_points.py::test_no_environment_can_raise_the_episode_ceiling_past_six_hours"
+    ],
+    "name": "CEILCLAMP",
+    "targeted": [
+      "tests/unit/test_gate_deferral_execution_points.py"
+    ]
+  },
+  "G2": {
+    "control_rc": 0,
+    "edit_hits": [
+      "edit[0] core/gate_deferral.py: anchor hits=1"
+    ],
+    "head": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+    "mutant_rc": 1,
+    "mutant_reds": [
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+    ],
+    "name": "G2",
+    "targeted": [
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+    ]
+  },
+  "N9": {
+    "control_rc": 0,
+    "edit_hits": [
+      "edit[0] aitelier/tools/run_tests/tool.yaml: anchor hits=1"
+    ],
+    "head": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+    "mutant_rc": 1,
+    "mutant_reds": [
+      "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"
+    ],
+    "name": "N9",
+    "targeted": [
+      "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"
+    ]
+  },
+  "TIMEOUT60": {
+    "control_rc": 0,
+    "edit_hits": [
+      "edit[0] aitelier/tools/run_tests/impl.py: anchor hits=1"
+    ],
+    "head": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+    "mutant_rc": 1,
+    "mutant_reds": [
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[3-gate",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[4-gate"
+    ],
+    "name": "TIMEOUT60",
+    "targeted": [
+      "tests/unit/test_gate_deferral_execution_points.py"
+    ]
+  },
+  "TIMEOUTBIG": {
+    "control_rc": 0,
+    "edit_hits": [
+      "edit[0] aitelier/tools/run_tests/impl.py: anchor hits=1"
+    ],
+    "head": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+    "mutant_rc": 1,
+    "mutant_reds": [
+      "tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run",
+      "tests/unit/test_gate_deferral_execution_points.py::test_the_whole_gate_deadline_fits_inside_the_episode_ceiling"
+    ],
+    "name": "TIMEOUTBIG",
+    "targeted": [
+      "tests/unit/test_gate_deferral_execution_points.py"
+    ]
+  }
+}

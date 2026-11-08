@@ -31,6 +31,54 @@ text (a duplicated line, a deleted contract sentence), where the reader of
 the text is the witness.
 """
 
+# ── Anchors re-aimed on 2026-11-08 (branch mutation-anchors-20261108, base
+# bf274721a7). The audit that found them is the plan's own:
+#   python3 -c "import sys;sys.path.insert(0,'tools/mutation_catalog');
+#   from mutations import MUTATIONS;m=[n for n,s in MUTATIONS.items() if any(
+#   open(e['file'],encoding='utf-8').read().count(e['anchor'])!=1
+#   for e in s['edits'])];print(sorted(m));assert not m"
+# which listed these 11 names before the re-aim (exit 1):
+#   CEILCLAMP D4 G2 H2 HOST_HOLD_INERT N9 OBSERVENONE RC2 READABSENCE
+#   TIMEOUT60 TIMEOUTBIG
+#
+# Re-aimed (the old statement is gone; the new anchor is today's statement
+# that plays the same role; each new anchor hits exactly once):
+#   * D4        `report["repo_gate_absent"] = True` -> `= absent` (the
+#               statement that now decides the flag). The `= True` line was
+#               last changed by 5b7f77c04c, which made the flag follow `absent`.
+#   * RC2       `_repo_gate_outcome`: the final `returncode == 0` return. Was a
+#               `gate.get("returncode")` return; the rule (exit code alone is
+#               never the measured-pass source) is unchanged.
+#   * H2        `hold_blocks_advance`: `return book.deferring(...)` -> `return
+#               False` (the one-line anchor; the `book = ...` line above it is
+#               untouched).
+#   * READABSENCE `read_absence`'s `if not absent: return None`.
+#   * OBSERVENONE `observe_run`'s `if absence is None:` early return (the old
+#               `last_gate_absence` call no longer exists; `read_absence`
+#               replaced it).
+#   * HOST_HOLD_INERT `core/skillflow_host.py` `advance_run`: the
+#               `if gate_deferral.hold_blocks_advance(run_id, sf=self):` check.
+#               The old anchor was `hold_blocks_advance(run_id):`; the call now
+#               passes `sf=self`, so that line no longer matched.
+#   * CEILCLAMP `episode_max_seconds`'s return, with the default 10800 -> 12600
+#               (the raised literal of bf274721).
+#   * G2 / G2b  the module constants' `os.getenv(..., "10800")` default -> "12600"
+#               (G2) and their `targeted` ids -> the renamed
+#               `test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded`
+#               (renamed by bf274721; G2b's old id was dead too).
+#   * TIMEOUT60 / TIMEOUTBIG `REPO_GATE_TIMEOUT = 5400` -> `= 12600`
+#               (the raised literal of bf274721).
+#   * N9        tool.yaml's routing-table pointer (three lines). The sentence
+#               the old anchor named (no-verdict does not loop back to
+#               implement) was removed in 5b7f77c04c and its test with it; the
+#               reader that now guards tool.yaml's protocol text is
+#               `test_N9_the_protocol_text_has_a_reader`, which the `targeted`
+#               list names. N9 stays in MUTATIONS because the goal table is
+#               pinned by test_mutation_catalog_anchors.py.
+#
+# Retired: none. Every mutation's code still exists in the tree, so none is
+# removed; the goal table (N9 included) stays whole.
+
 IMPL = "aitelier/tools/run_tests/impl.py"
 SCHED = "core/scheduler.py"
 HOST = "core/skillflow_host.py"
@@ -65,24 +113,21 @@ MUTATIONS = {
     # ── goal table, verbatim ──────────────────────────────────────────────
     "N9": {
         "kind": "text",
-        "file_note": "tool.yaml:52-56 — delete the sentence that states a "
-                     "no-verdict gate does not loop back to implement.",
+        "file_note": "tool.yaml's pointer to the routing table — delete the "
+                     "three lines that say where a report goes and what a gate "
+                     "run is worth. Re-aimed (see the 2026-11-08 header at the "
+                     "top of this module): the no-verdict-does-not-loop-back "
+                     "sentence this entry named was removed in 5b7f77c04c.",
         "edits": [{
             "file": "aitelier/tools/run_tests/tool.yaml",
             "anchor":
-                "  A gate that produced NO VERDICT does not loop back to "
-                "`implement`: its\n"
-                "  absence is stated on the report, with\n"
-                "  `repo_gate_unmeasured: true` and `repo_gate_absent: true` "
-                "(plus\n"
-                "  `repo_gate.measured: \"unmeasured\"` and "
-                "`repo_gate.attempts`, the number of\n"
-                "  runs the reading cost), and "
-                "`configs/coding_impl.yaml` routes\n",
+                "  Where a report goes and what a repository gate run is worth: the routing\n"
+                "  table in `docs/repo-gate-unmeasured-protocol.md`, rendered from `ROWS` in\n"
+                "  `tests/unit/test_repo_gate_outcome_table.py`.\n",
             "replacement": "",
         }],
         "targeted": [
-            DECL + "::test_the_tool_doc_names_the_no_verdict_gate_as_absent_not_a_loop",
+            "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader",
         ],
     },
     "M21": {
@@ -114,11 +159,11 @@ MUTATIONS = {
         "edits": [{
             "file": GD,
             "anchor": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(\n"
-                      "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS\", \"10800\"))\n",
+                      "    os.getenv(\"AITELIER_GATE_DEFERRAL_EPISODE_MAX_SECONDS\", \"12600\"))\n",
             "replacement": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = 1e9\n",
         }],
         "targeted": [
-            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded",
         ],
     },
     "G2b": {
@@ -130,7 +175,7 @@ MUTATIONS = {
             "replacement": "GATE_DEFERRAL_EPISODE_MAX_CEILING = 1e9\n",
         }],
         "targeted": [
-            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_ten_thousand_eight_hundred_as_loaded",
+            EXEC_POINTS + "::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded",
         ],
     },
     "DUPIMPL": {
@@ -256,11 +301,12 @@ MUTATIONS = {
         "targeted": [DECL, ABSENCE],
     },
     "D4": {
-        "file_note": "a declared absence no longer sets repo_gate_absent.",
+        "file_note": "a declared absence no longer sets repo_gate_absent: the "
+                     "flag is written as False whatever `absent` decided.",
         "edits": [{
             "file": IMPL,
-            "anchor": "                report[\"repo_gate_absent\"] = True",
-            "replacement": "                report[\"repo_gate_absent\"] = False",
+            "anchor": "                report[\"repo_gate_absent\"] = absent\n",
+            "replacement": "                report[\"repo_gate_absent\"] = False\n",
         }],
         "targeted": [DECL, ABSENCE],
     },
@@ -327,11 +373,12 @@ MUTATIONS = {
         "targeted": [ABSENCE],
     },
     "H2": {
-        "file_note": "hold_blocks_advance always answers False.",
+        "file_note": "hold_blocks_advance always answers False: the host "
+                     "never refuses to advance a run inside its wait.",
         "edits": [{
             "file": GD,
-            "anchor": "    book = LEDGER if ledger is None else ledger\n    return book.deferring(run_id, now=now)\n",
-            "replacement": "    book = LEDGER if ledger is None else ledger\n    return False\n",
+            "anchor": "    return book.deferring(run_id, now=now)\n",
+            "replacement": "    return False\n",
         }],
         "targeted": [
             ABSENCE,
@@ -339,10 +386,15 @@ MUTATIONS = {
         ],
     },
     "RC2": {
+        "file_note": "_repo_gate_outcome: a nonzero exit code alone is "
+                     "UNMEASURED (the old text was `gate.get(\"returncode\")`, "
+                     "re-aimed to the final `returncode` return).",
         "edits": [{
             "file": IMPL,
-            "anchor": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_MEASURED_FAIL)\n",
-            "replacement": "    return (REPO_GATE_MEASURED_PASS if gate.get(\"returncode\") == 0\n            else REPO_GATE_UNMEASURED)\n",
+            "anchor": "    return (REPO_GATE_MEASURED_PASS if returncode == 0\n"
+                      "            else REPO_GATE_MEASURED_FAIL)\n",
+            "replacement": "    return (REPO_GATE_MEASURED_PASS if returncode == 0\n"
+                           "            else REPO_GATE_UNMEASURED)\n",
         }],
         "targeted": [
             DECL + "::test_no_exit_code_alone_is_ever_unmeasured",
@@ -383,9 +435,11 @@ MUTATIONS = {
         "targeted": [ACCOUNTED],
     },
     "READABSENCE": {
+        "file_note": "read_absence: the no-absence short-circuit is removed, "
+                     "so a report that states no absence is read as one.",
         "edits": [{
             "file": GD,
-            "anchor": "    if not (data.get(\"repo_gate_absent\") or data.get(\"repo_gate_unmeasured\")):\n        return None\n",
+            "anchor": "    if not absent:\n        return None\n",
             "replacement": "    if False:\n        return None\n",
         }],
         "targeted": [ACCOUNTED],
@@ -444,7 +498,7 @@ MUTATIONS = {
     "TIMEOUTBIG": {
         "edits": [{
             "file": IMPL,
-            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
+            "anchor": "REPO_GATE_TIMEOUT = 12600\n",
             "replacement": "REPO_GATE_TIMEOUT = 1e9\n",
         }],
         "targeted": [EXEC_POINTS],
@@ -462,8 +516,8 @@ MUTATIONS = {
     "CEILCLAMP": {
         "edits": [{
             "file": GD,
-            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),\n               ceiling)\n",
-            "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0)\n",
+            "anchor": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 12600.0),\n               ceiling)\n",
+            "replacement": "    return _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 12600.0)\n",
         }],
         "targeted": [EXEC_POINTS],
     },
@@ -494,7 +548,7 @@ MUTATIONS = {
         "file_note": "round 8's `S1` edit: REPO_GATE_TIMEOUT = 60.",
         "edits": [{
             "file": IMPL,
-            "anchor": "REPO_GATE_TIMEOUT = 5400\n",
+            "anchor": "REPO_GATE_TIMEOUT = 12600\n",
             "replacement": "REPO_GATE_TIMEOUT = 60\n",
         }],
         "targeted": [EXEC_POINTS],
@@ -568,7 +622,7 @@ MUTATIONS = {
                      "can advance a deferred run.",
         "edits": [{
             "file": HOST,
-            "anchor": "        from core import gate_deferral\n        if gate_deferral.hold_blocks_advance(run_id):\n            return None\n",
+            "anchor": "        if gate_deferral.hold_blocks_advance(run_id, sf=self):\n            return None\n",
             "replacement": "        pass\n",
         }],
         "targeted": [ABSENCE],
@@ -587,11 +641,12 @@ MUTATIONS = {
     "OBSERVENONE": {
         "file_note": "round 9's `TICK_HOLD_INERT` edit, which is in "
                      "gate_deferral.observe_run, not in the tick: observe_run "
-                     "never reports an absence.",
+                     "never reports an absence (its `none` early return is "
+                     "taken unconditionally).",
         "edits": [{
             "file": GD,
-            "anchor": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if absence is None:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
-            "replacement": "    book = LEDGER if ledger is None else ledger\n    absence = last_gate_absence(sf, run_id, report_path=report_path)\n    if True:\n        book.clear(run_id)\n        return {\"state\": \"none\", \"remaining\": 0.0, \"gate\": \"\", \"reason\": \"\"}\n",
+            "anchor": "    absence = read_absence(report_path)\n    if absence is None:\n        book.clear(run_id)\n",
+            "replacement": "    absence = read_absence(report_path)\n    if True:\n        book.clear(run_id)\n",
         }],
         "targeted": [ABSENCE],
     },

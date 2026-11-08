@@ -1,0 +1,168 @@
+{
+  "attempt": "attempt-7cf27377829949efbd10aba17852c1a4",
+  "branch": "mutation-anchors-20261108",
+  "base": "bf274721a7b4352a3891d96e4e657dcc211771cb",
+  "retired": [],
+  "anchor_misses_after": 0,
+  "entries": [
+    {
+      "name": "CEILCLAMP",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "    return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 12600.0),",
+      "reason": "The clamp `min(...)` return moved from 10800 default to 12600 in bf274721 (raised literal).",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/witness-CEILCLAMP-control.txt",
+        "evidence/mutation-anchors-20261108/witness-CEILCLAMP-mutant.txt",
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": {
+        "control_bare_rc": 0,
+        "mutant_bare_rc": 1,
+        "mutant_red_tests": [
+          "tests/unit/test_gate_deferral_execution_points.py::test_G2_episode_max_seconds_is_hard_capped_against_1e9",
+          "tests/unit/test_gate_deferral_execution_points.py::test_no_environment_can_raise_the_episode_ceiling_past_six_hours"
+        ]
+      }
+    },
+    {
+      "name": "D4",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "                report[\"repo_gate_absent\"] = absent",
+      "reason": "`report[\"repo_gate_absent\"] = True` no longer exists; the flag is now `= absent`, so the statement that decides it is re-aimed. Hit once in impl.py.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "G2",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "GATE_DEFERRAL_EPISODE_MAX_SECONDS = float(",
+      "reason": "The env default `10800` is now `12600` in bf274721; anchor re-aimed to the raised default. Its targeted test was renamed to `..._twelve_thousand_six_hundred_as_loaded` by bf274721 and the targeted id is updated to match.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/witness-G2-control.txt",
+        "evidence/mutation-anchors-20261108/witness-G2-mutant.txt",
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": {
+        "control_bare_rc": 0,
+        "mutant_bare_rc": 1,
+        "mutant_red_tests": [
+          "tests/unit/test_gate_deferral_execution_points.py::test_the_effective_episode_ceiling_is_twelve_thousand_six_hundred_as_loaded"
+        ]
+      }
+    },
+    {
+      "name": "H2",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "    return book.deferring(run_id, now=now)",
+      "reason": "`hold_blocks_advance` now ends in `return book.deferring(...)` (the old anchor's `book = ...` line still exists); `return False` replaces it.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "HOST_HOLD_INERT",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "        if gate_deferral.hold_blocks_advance(run_id, sf=self):",
+      "reason": "The host's advance_run now calls `gate_deferral.hold_blocks_advance(run_id, sf=self)`; the old anchor lacked `sf=self`.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "N9",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "  Where a report goes and what a repository gate run is worth: the routing",
+      "reason": "The no-verdict-does-not-loop-back sentence and its test were removed in commit 5b7f77c04c (`git log -S` finds both). N9 stays in MUTATIONS because test_mutation_catalog_anchors.py pins the goal table. Re-aimed to tool.yaml's routing-table pointer, guarded by test_N9_the_protocol_text_has_a_reader.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/witness-N9-control.txt",
+        "evidence/mutation-anchors-20261108/witness-N9-mutant.txt",
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": {
+        "control_bare_rc": 0,
+        "mutant_bare_rc": 1,
+        "mutant_red_tests": [
+          "tests/unit/test_tree_level_accounting_witnesses.py::test_N9_the_protocol_text_has_a_reader"
+        ]
+      }
+    },
+    {
+      "name": "OBSERVENONE",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "    absence = read_absence(report_path)",
+      "reason": "`last_gate_absence` no longer exists (replaced by `read_absence`, same file). Anchor re-aimed to observe_run's `if absence is None:` early return.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "RC2",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "    return (REPO_GATE_MEASURED_PASS if returncode == 0",
+      "reason": "`_repo_gate_outcome` now returns `REPO_GATE_MEASURED_PASS if returncode == 0 else REPO_GATE_MEASURED_FAIL` (`returncode` local, not `gate.get`); the anchor re-aimed to that return.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "READABSENCE",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "    if not absent:",
+      "reason": "The guard `if not (data.get(...) or data.get(...))` was rewritten as `absent = ...; if not absent:`; anchor re-aimed to that early return.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": null,
+      "witness_note": "anchor hit recorded by audit transcript; no kill arm run for this name"
+    },
+    {
+      "name": "TIMEOUT60",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "REPO_GATE_TIMEOUT = 12600",
+      "reason": "REPO_GATE_TIMEOUT is 12600 in bf274721 (was 5400); anchor re-aimed to `REPO_GATE_TIMEOUT = 12600`.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/witness-TIMEOUT60-control.txt",
+        "evidence/mutation-anchors-20261108/witness-TIMEOUT60-mutant.txt",
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": {
+        "control_bare_rc": 0,
+        "mutant_bare_rc": 1,
+        "mutant_red_tests": [
+          "tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[3-gate",
+          "tests/unit/test_gate_deferral_execution_points.py::test_the_budget_goes_red_and_names_the_number_that_moved[4-gate"
+        ]
+      }
+    },
+    {
+      "name": "TIMEOUTBIG",
+      "outcome": "re-aimed",
+      "new_anchor_first_line": "REPO_GATE_TIMEOUT = 12600",
+      "reason": "REPO_GATE_TIMEOUT is 12600 in bf274721 (was 5400); anchor re-aimed to `REPO_GATE_TIMEOUT = 12600`.",
+      "transcripts": [
+        "evidence/mutation-anchors-20261108/witness-TIMEOUTBIG-control.txt",
+        "evidence/mutation-anchors-20261108/witness-TIMEOUTBIG-mutant.txt",
+        "evidence/mutation-anchors-20261108/anchor-audit.txt"
+      ],
+      "witness": {
+        "control_bare_rc": 0,
+        "mutant_bare_rc": 1,
+        "mutant_red_tests": [
+          "tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_scheduler_for_at_most_one_gate_run",
+          "tests/unit/test_gate_deferral_execution_points.py::test_the_whole_gate_deadline_fits_inside_the_episode_ceiling"
+        ]
+      }
+    }
+  ]
+}

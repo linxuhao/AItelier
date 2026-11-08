@@ -86,6 +86,15 @@ def _widen_status_check(conn) -> None:
     helper the attempt tables use: every row, index and trigger survives and a
     damaged table fails the copy instead of being normalized. A fresh table
     already carries the newest value and skips this.
+
+    The restore ORDER is the whole contract: SQLite silently IGNORES
+    ``PRAGMA foreign_keys`` inside a transaction, so a pragma restored while the
+    rebuild's transaction is still open leaves THIS connection enforcing nothing
+    after the commit — every later write on it goes unchecked. ``_rebuild``
+    leaves its transaction open (it hands the commit to the caller), so commit
+    first, then restore; the same shape as
+    ``core/state_claims._widen_status_check``. Nothing here weakens a check: the
+    rebuild is transactional and rolls back whole if it cannot preserve the table.
     """
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='state_issues'").fetchone()
     # Keyed on the NEWEST value, not on the oldest missing one: a database that
@@ -97,6 +106,10 @@ def _widen_status_check(conn) -> None:
         conn.execute("PRAGMA foreign_keys=OFF")
         try:
             _rebuild(conn, "state_issues", _issues_table_template(), ("state_issue_nodes",))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.execute("PRAGMA foreign_keys=ON")
 

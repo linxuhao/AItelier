@@ -109,19 +109,19 @@ def _observation(record, digest):
     }
 
 
-def _receipt(record, digest, *, unsettled=False, disagrees=False):
-    """A receipt the real tool reads. Both answers used below are the tool's own:
-    `unknown` for an unsettled receipt, and `unknown receipt platform record
-    disagrees with its own observation` for a record that contradicts its own
-    evidence."""
+def _receipt(record, digest, *, unsettled=False, no_record=False):
+    """A receipt the real tool reads. Every answer below is the tool's own:
+    `unknown` for an unsettled receipt, `unknown receipt carries no usable
+    platform record` once its platform record is dropped, else `reviewed`."""
     observed = _observation(record, digest)
     receipt = {"identity": "unchanged", "raw_exit": 23, "before": observed,
                "after": observed,
                "platform": {"binding_sha256": digest, "frozen_sha256": digest,
-                            "status": "unreviewed" if disagrees else "reviewed",
-                            "differences": []}}
+                            "status": "reviewed", "differences": []}}
     if unsettled:
         del receipt["after"]
+    if no_record:
+        del receipt["platform"]
     return json.dumps(receipt) + "\n"
 
 
@@ -190,11 +190,13 @@ def _ask(mode, fx, *extra):
 def test_a_platform_call_that_failed_is_not_the_answer_it_records(tmp_path):
     """Two runs, one response boundary: the exit file must tell them apart BY VALUE."""
     answered = _build(tmp_path / "answered",
-                      receipt=lambda record, digest: _receipt(record, digest, disagrees=True))
+                      receipt=lambda record, digest: _receipt(record, digest, no_record=True))
     assert _run(answered).returncode == 23
     recorded = _exit_lines(answered)
     answer = _ask("platform", answered).strip()
-    assert answer.startswith("unknown "), answer
+    # The neglected-record answer is the one the old spelling paraphrased, and it
+    # is reachable exactly where the launcher's fallback used to be.
+    assert answer == "unknown receipt carries no usable platform record", answer
     assert recorded[0] == "23"
     assert recorded[1] == f"platform_unreviewed {answer}"
 

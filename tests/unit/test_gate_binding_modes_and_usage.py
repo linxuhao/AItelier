@@ -89,7 +89,8 @@ def _observation(record, digest, *, sdk=None):
 
 
 def _receipt(tmp_path, record, digest, *, status="reviewed", differences=None, sdk=None,
-             identity="unchanged", error=None, name="receipt.json"):
+             identity="unchanged", error=None, unsettled=False, no_record=False,
+             name="receipt.json"):
     observed = _observation(record, digest, sdk=sdk)
     receipt = {"identity": identity, "raw_exit": 23, "before": observed, "after": observed,
                "platform": {"binding_sha256": digest, "frozen_sha256": digest,
@@ -97,6 +98,10 @@ def _receipt(tmp_path, record, digest, *, status="reviewed", differences=None, s
     if identity == "mismatch":
         receipt["after"]["engine"]["pid"] += 1
         receipt["error"] = error or "IdentityMismatch: observed engine PID differs"
+    if unsettled:
+        del receipt["after"]
+    if no_record:
+        del receipt["platform"]
     path = tmp_path / name
     path.write_text(json.dumps(receipt))
     return path
@@ -111,11 +116,15 @@ def _answers(tmp_path):
                        differences=[{"field": "sdk", "bound": SDK, "observed": "1.5.85"}])
     disagrees = _receipt(tmp_path, record, digest, status="unreviewed", name="disagrees.json")
     settled = _receipt(tmp_path, record, digest, name="settled.json")
+    unsettled = _receipt(tmp_path, record, digest, unsettled=True, name="unsettled.json")
+    no_record = _receipt(tmp_path, record, digest, no_record=True, name="no-record.json")
     moved = _receipt(tmp_path, record, digest, identity="mismatch", name="moved.json")
     rows = [
         ("platform-reviewed", ["platform", str(reviewed), "--binding-sha256", digest], env),
         ("platform-unreviewed", ["platform", str(differs), "--binding-sha256", digest], env),
         ("platform-disagreeing", ["platform", str(disagrees), "--binding-sha256", digest], env),
+        ("platform-unsettled", ["platform", str(unsettled), "--binding-sha256", digest], env),
+        ("platform-no-record", ["platform", str(no_record), "--binding-sha256", digest], env),
         ("receipt-settled", ["receipt", str(settled), "23", "--binding-sha256", digest], env),
         ("receipt-mismatch", ["receipt", str(moved), "23", "--binding-sha256", digest], env),
         # An unusable frozen hash is still an ANSWER (`unknown`), not a refusal:
@@ -145,6 +154,9 @@ def test_no_answer_the_tool_prints_is_spelled_like_a_substitution(tmp_path):
     assert "differs=1" in answers["platform-unreviewed"]
     assert answers["platform-disagreeing"] == (
         "unknown receipt platform record disagrees with its own observation")
+    assert answers["platform-unsettled"] == (
+        "unknown terminal receipt cannot say which platform measured")
+    assert answers["platform-no-record"] == "unknown receipt carries no usable platform record"
     assert answers["receipt-settled"] == "unchanged"
     assert answers["receipt-mismatch"] == "mismatch"
     assert answers["receipt-unusable-hash"] == "unknown"

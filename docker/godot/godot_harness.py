@@ -4161,15 +4161,32 @@ def _assert_errors(raw) -> list:
 
 
 _AIM_BUTTONS = ("left", "right", "middle")
+# Whitespace that is not an ASCII space: TAB, LF, CR, FF, VT, NBSP and the other
+# Unicode spaces. The separator is one ASCII space, so these are refused.
+_AIM_BAD_SPACING = re.compile(r"[^\S ]")
 
 
 def _aim_errors(key: str, aim) -> list:
-    """The probe parses an aim token by token and a later offset or button
-    overwrites an earlier one, so `X +0,500 +0,0` clicks at +0,0."""
-    toks = str(aim).split(" ")[1:]
+    """An aim is `<Node>[ +dx,dy][ left|right|middle]`. Its separator is exactly
+    one ASCII space. The probe splits on that space alone (`spec.split(" ",
+    false)` in `_click` and `_hover`). A TAB or any other whitespace is not a
+    separator to it: `HUD/Button\\t+0,0` reaches the probe as ONE name token, so
+    the offset is hidden and the request reads as a different target. Such an aim
+    is refused. A doubled or edge ASCII space is NOT refused: it leaves an empty
+    token that both readers drop, so it cannot hide an offset or button. Both
+    consumers get the refusal: `_normalize_timeline` calls this, and the sidecar
+    preflight reaches it through `_authored_execution_plan`.
+
+    The probe also overwrites an earlier offset or button with a later one
+    (`X +0,500 +0,0` clicks at +0,0), so a second offset or button is refused."""
+    text = str(aim)
+    errors = []
+    if _AIM_BAD_SPACING.search(text):
+        errors.append("%s %r: an aim separates its tokens with single spaces, not other "
+                      "whitespace" % (key, aim))
+    toks = text.split(" ")[1:]
     offsets = [t for t in toks if t.startswith(("+", "-")) or "," in t]
     buttons = [t for t in toks if t in _AIM_BUTTONS]
-    errors = []
     if len(offsets) > 1:
         errors.append("%s %r has %d offsets (%s); an aim takes one offset"
                       % (key, aim, len(offsets), ", ".join(offsets)))

@@ -749,6 +749,104 @@ def test_one_offset_and_one_button_still_run():
         "PlanEditKind1 +0,90 right", "PlanEditKind1 -3,4"}
 
 
+# An aim's tokens are separated by single spaces, and the probe splits on that
+# space alone. A TAB (or any other whitespace) is one name token to the probe,
+# so `HUD/Button\t+0,0` reads as the name `HUD/Button\t+0,0` and the offset it
+# was written with is never seen. That is refused by name, for every key form.
+# Measured on main 157aff35 (probe evidence/one-reading-residue-20261108): all
+# three TAB forms below passed preflight with 0 errors.
+_TAB_AIM_CASES = [
+    ("click", "HUD/Button\t+0,0"),
+    ("click", "HUD/Button +0,0\t+0,900"),
+    ("click", "HUD/Button\t+0,0 +0,900"),
+    ("hover", "HUD/Button\t+0,0"),
+    ("hovers", ["HUD/Button\t+0,0"]),
+    ("clicks", ["HUD/Button\t+0,0"]),
+]
+
+
+@pytest.mark.parametrize("key,aim", _TAB_AIM_CASES,
+                         ids=["click-tab", "click-tab-then-offset", "click-tab-offset-space",
+                              "hover-tab", "hovers-tab", "clicks-tab"])
+def test_an_aim_separated_by_a_tab_is_refused_naming_its_key_and_aim(key, aim):
+    out, errors = gh._normalize_timeline([{"at": 10, key: aim}])
+    assert out == [], "a refused aim must not be scheduled: %r" % (out,)
+    assert len(errors) == 1, errors
+    shown = aim[0] if isinstance(aim, list) else aim
+    assert errors[0] == (
+        "timeline entry 0 (at: 10): %s %r: an aim separates its tokens with single "
+        "spaces, not other whitespace" % (key, shown)), errors
+
+
+@pytest.mark.parametrize("aim", ["HUD/Button\t", "\tHUD/Button", "HUD/Button\t+0,0",
+                                 "HUD/Button\n+0,0", "HUD/Button\r+0,0",
+                                 "HUD/Button\x0c+0,0", "HUD/Button\x0b+0,0",
+                                 "HUD/Button\xa0right"],
+                         ids=["trailing-tab", "leading-tab", "inner-tab", "newline",
+                              "carriage-return", "form-feed", "vertical-tab", "nbsp"])
+def test_a_tab_or_other_whitespace_in_any_position_is_refused(aim):
+    """Whitespace other than an ASCII space is refused wherever it sits, edges
+    included. A doubled ASCII space is a different case and is NOT refused: see
+    test_the_accepted_forms_still_run."""
+    out, errors = gh._normalize_timeline([{"at": 10, "click": aim}])
+    assert out == [] and len(errors) == 1, errors
+    assert "click %r: an aim separates its tokens" % aim in errors[0], errors
+
+
+@pytest.mark.parametrize("aim", [" HUD/Button", "HUD/Button ", "HUD/Button +0,0 "],
+                         ids=["one-leading-space", "one-trailing-space", "offset-trailing-space"])
+def test_a_single_space_at_an_edge_is_still_accepted(aim):
+    """Not a new refusal: the probe drops the empty token one edge space leaves,
+    so these read exactly as they did before this change."""
+    out, errors = gh._normalize_timeline([{"at": 10, "click": aim}])
+    assert errors == [], errors
+    assert [e["click"] for e in out] == [aim]
+
+
+def test_a_tab_aim_is_refused_and_the_same_aim_with_a_space_still_runs():
+    # Differential: the only difference between the two entries is the separator.
+    out, errors = gh._normalize_timeline([
+        {"at": 10, "click": "HUD/Button\t+0,0"},
+        {"at": 20, "click": "HUD/Button +0,0"},
+    ])
+    assert len(errors) == 1 and "click 'HUD/Button\\t+0,0'" in errors[0], errors
+    assert [(e["at"], e["click"]) for e in out] == [(20, "HUD/Button +0,0")]
+
+
+@pytest.mark.parametrize("aim", ["HUD/Button +0,0", "HUD/Button +0,90 right",
+                                 "PlanEditKind1 -3,4", "HUD/Button",
+                                 # Control: a doubled ASCII space is the pre-existing
+                                 # reading. Both readers drop the empty token it
+                                 # leaves, so it is accepted and must stay accepted.
+                                 "HUD/Button  +0,0"],
+                         ids=["offset", "offset-and-button", "negative-offset", "plain",
+                              "doubled-space-control"])
+def test_the_accepted_forms_still_run(aim):
+    out, errors = gh._normalize_timeline([{"at": 10, "click": aim}])
+    assert errors == [], errors
+    assert [e["click"] for e in out] == [aim]
+
+
+def test_the_authored_preflight_refuses_a_tab_aim_and_the_space_form_still_plans():
+    """The real sidecar preflight, with no monkeypatching: the same call
+    tests/unit/test_playtest_timeline_value_shapes.py makes at its line 54."""
+    def preflight(aim):
+        spec = {"scenarios": [{"name": "s", "timeline": [
+            {"at": 5, "press": "ui_accept"},
+            {"at": 10, "click": aim}]}]}
+        return gh._authored_execution_plan(spec, 120, 120)
+
+    plans, errors = preflight("HUD/Button\t+0,0")
+    assert errors, "a TAB aim must be refused by the preflight, not run"
+    assert len(errors) == 1, errors
+    assert "click" in errors[0] and "HUD/Button\\t+0,0" in errors[0], errors[0]
+    assert "timeline entry 1 (at: 10)" in errors[0], errors[0]
+
+    plans, errors = preflight("HUD/Button +0,0")
+    assert errors == [], errors
+    assert len(plans) == 1 and plans[0][0] >= 10, plans
+
+
 # (f) A10: an entry past the frame cap never runs
 
 def test_a10_a_click_past_the_frame_cap_is_refused(monkeypatch, tmp_path):

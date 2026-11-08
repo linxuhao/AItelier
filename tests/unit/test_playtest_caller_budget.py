@@ -111,7 +111,9 @@ def test_ordinary_request_grants_180_without_rewriting_contract(tmp_path, bridge
     assert payload["spec"] == authored and payload["timeout"] == 180
     assert {k: payload[k] for k in ("project_id", "run_id", "operation_id")} == {
         "project_id": "p", "run_id": "r", "operation_id": "o"}
-    assert socket_timeout == 3600 and payload["render_wait_timeout_sec"] == 1800
+    # Default socket: old 3600 s -> new 4200 s. Queue share (RENDER_QUEUE_SHARE
+    # 0.5) derived from it: old 1800 s -> new 2100 s.
+    assert socket_timeout == 4200 and payload["render_wait_timeout_sec"] == 2100
     assert payload["captures"] == pt._DPE_CAPTURES
     assert [(n, seconds) for n, seconds, _ in bridge["probes"]] == [
         (6030, 180), (180, 120), (6030, 180)]
@@ -205,6 +207,8 @@ def test_carried_ceiling_respects_native_and_actual_transport_limits(
     result = pt.godot_playtest(project_root=str(repo), out_dir=str(tmp_path / "out"))
     assert native._valid_process_timeout(seconds) is valid
     assert result["passed"] is admitted, bridge["reports"]
+    # 3600 is AUTHORED_SCENARIO_CEILING_SEC, the per-scenario cap. It did NOT move
+    # when the socket default went 3600 -> 4200 s.
     assert bridge["requests"][0][0].get("timeout", 120) == (min(seconds, 3600) if valid else 120)
     if not admitted:
         assert bridge["reports"][0]["spec_errors"]

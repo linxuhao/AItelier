@@ -2019,11 +2019,12 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             _tick_last_paused[paused_key] = (signature, now)
         elif outcome == "tick_skipped":
             # Same repeater shape as `idle`: a tool step that owns the interval
-            # job for its whole duration (godot_compile declares 3900s) makes
+            # job for its whole duration (the 5_compile step declares 4800s) makes
             # APScheduler fire MAX_INSTANCES on EVERY tick until it returns —
             # measured 16,133 events in 5.2 days, which would become the log's
             # second-largest outcome and evict ~25% of the history it exists to
             # keep. One heartbeat a minute says the same thing.
+            # evidence: evidence/playtest-budget-chain-20261108/report.json (receipt-8ebfdd95b6e746278e2ea2f9c5d9c16e)
             now = _time.time()
             if now - _tick_last_skip < _TICK_SKIP_HEARTBEAT_S:
                 return

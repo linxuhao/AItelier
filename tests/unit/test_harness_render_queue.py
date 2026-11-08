@@ -638,10 +638,13 @@ def test_two_locked_beats_in_a_row_still_beat(tmp_path, monkeypatch):
     real_beat = gh.heartbeat_render_owner
     outcomes: list[str] = []
     beat_ok = threading.Event()
+    second_locked = threading.Event()
 
     def beat(owner_id, generation):
         if len(outcomes) < 2:
             outcomes.append("locked")
+            if len(outcomes) == 2:
+                second_locked.set()
             raise sqlite3.OperationalError("database is locked")
         real_beat(owner_id, generation)
         outcomes.append("ok")
@@ -649,7 +652,14 @@ def test_two_locked_beats_in_a_row_still_beat(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gh, "heartbeat_render_owner", beat)
     heartbeat = gh._start_owner_heartbeat(owner["owner_id"], owner["generation"])
+    _stop, thread = heartbeat
     try:
+        assert second_locked.wait(5), f"the second locked beat never ran: {outcomes}"
+        # A beat thread that gives up on its second consecutive failure is dead
+        # by now; a healthy one is still sleeping toward its next beat.
+        time.sleep(0.1)
+        assert thread.is_alive(), (
+            f"the beat thread ended after two locked beats in a row: {outcomes}")
         assert beat_ok.wait(5), (
             f"the heartbeat stopped after two locked beats in a row: {outcomes}")
     finally:
@@ -729,17 +739,26 @@ def test_the_heartbeat_stops_once_its_row_is_no_longer_active(tmp_path, monkeypa
     monkeypatch.setattr(gh, "heartbeat_render_owner", beat)
     heartbeat = gh._start_owner_heartbeat(owner["owner_id"], owner["generation"])
     thread = heartbeat[1]
+
+    def heartbeat_at() -> float:
+        return next(r for r in gh.render_owner_snapshot()
+                    if r["owner_id"] == owner["owner_id"])["heartbeat_at"]
+
     try:
         assert live.wait(5), "the heartbeat never beat while its row was active"
         gh.release_render_owner(owner["owner_id"], owner["generation"], "released by test")
         assert gone.wait(5), f"no beat saw the released row: {beats}"
+        frozen_at = heartbeat_at()
         thread.join(2)
         assert not thread.is_alive(), (
             f"the heartbeat outlived its row: {len(beats)} beats, last {beats[-3:]}")
         settled = len(beats)
+        # 0.1 s is ten 0.01 s intervals: a beat that kept running would show here.
         time.sleep(0.1)
         assert len(beats) == settled, (
             "the heartbeat kept beating after its row was gone", beats)
+        assert heartbeat_at() == frozen_at, (
+            "heartbeat_at advanced after the row was released", frozen_at)
     finally:
         gh._stop_owner_heartbeat(heartbeat)
     assert beats.count("gone") == 1 and beats[-1] == "gone", beats

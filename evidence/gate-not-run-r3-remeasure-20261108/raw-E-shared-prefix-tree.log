@@ -1,0 +1,462 @@
+/usr/local/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+============================= test session starts ==============================
+platform linux -- Python 3.12.15, pytest-9.2.0, pluggy-1.7.0
+rootdir: /w
+configfile: pytest.ini
+plugins: platformdirs-4.14.5, asyncio-1.4.1.post1, anyio-4.16.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 8 items
+
+tests/unit/test_gate_admission_shared_operation_id.py FFFF..FF           [100%]
+
+=================================== FAILURES ===================================
+_ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-a-arrives-first] _
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554498e0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255449580>, 'http://127.0.0.1:34717')
+owner = 'first-to-arrive', arrival = 'a-then-b'
+
+    @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
+                             ids=["a-arrives-first", "b-arrives-first"])
+    @pytest.mark.parametrize("owner", ["first-to-arrive", "second-to-arrive"],
+                             ids=["rows-of-first-arrival", "rows-of-second-arrival"])
+    def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(
+            rig, owner, arrival):
+        """BOTH arrival orders: the one row that appears belongs to neither request.
+    
+        Request A reaches the engine and takes its `before` snapshot (the relay
+        reads the owner table before it forwards the POST, so the sidecar's arrival
+        event bounds that read). Request B then arrives with the same
+        operation_id and takes its own snapshot. A row appearing now is strictly
+        after BOTH snapshots, and it is labelled as each arrival in turn: the old
+        `owners - before` witness read it as A's admission when it was B's, and as
+        B's when it was A's. Which of them actually arrived first is a parameter
+        here, not a constant -- the first version of this test started request 0
+        first in both cases and only relabelled the row, so the net effect of
+        swapping who claims was never exercised. The label and the order change
+        nothing on purpose: neither request can attribute the row.
+        """
+        side, relay, url = rig
+        # Which request starts first is the parameter; the sidecar's arrival slots
+        # are filled in that order, so `side.arrived[slot]` is the slot-th arrival.
+        order = (0, 1) if arrival == "a-then-b" else (1, 0)
+        progress = [dict(), dict()]
+        threads: list[threading.Thread] = []
+        boxes: list[dict] = [dict(), dict()]
+        try:
+            for slot, index in enumerate(order):
+                thread, boxes[index] = _start(relay, url, OP, progress[index])
+                threads.append(thread)
+                assert side.arrived[slot].wait(30), (
+                    f"request {index + 1} never reached the engine")
+            side.add_owner(f"row-of-the-{owner}")
+            marker = time.monotonic()
+            _await(lambda: all(_decided(record) for record in _records(relay).values()),
+                   "both requests to say what the new owner row was")
+            # The admission interim is what ENDS the queue keepalive, so a request
+            # that may not claim has to keep receiving the ordinary interim until
+            # its answer. Two more of them after the decision is that fact; it is
+            # best effort -- on the old witness the claim ends the keepalive and
+            # this expires -- because the record is the assertion, not the cadence.
+            kept_alive = [_until(lambda i=index: _interims_since(progress[i], marker) >= 2,
+                                 timeout=3.0)
+                          for index in (0, 1)]
+        finally:
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        _recorded(relay, 2)
+        for index, box in enumerate(boxes):
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+    
+        # Each request's record is identified by the ORDER it arrived in, so the
+        # reversed case asserts on the reverse request's record and not on a label.
+        for slot, index in enumerate(order):
+            label = f"the request that arrived {'first' if slot == 0 else 'second'}"
+            answer, record, kept = boxes[index]["result"], records[slot], kept_alive[index]
+            assert answer["status"] == 200, answer
+            assert record["outcome"] == admission.ANSWERED
+            # The owner table WAS readable: this is the shared-id rule, not the
+            # "admission cannot be observed" one.
+            assert record["admission_observed"] is True
+>           assert not _claims(record), (
+                f"{label} claimed an admission from an owner row it cannot "
+                "attribute to itself (the id was carried by two requests): "
+                f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
+E           AssertionError: the request that arrived first claimed an admission from an owner row it cannot attribute to itself (the id was carried by two requests): its record carries admitted_after_sec=0.052
+E           assert not True
+E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...})
+
+tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
+_ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-b-arrives-first] _
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554491f0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458f80>, 'http://127.0.0.1:34033')
+owner = 'first-to-arrive', arrival = 'b-then-a'
+
+    @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
+                             ids=["a-arrives-first", "b-arrives-first"])
+    @pytest.mark.parametrize("owner", ["first-to-arrive", "second-to-arrive"],
+                             ids=["rows-of-first-arrival", "rows-of-second-arrival"])
+    def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(
+            rig, owner, arrival):
+        """BOTH arrival orders: the one row that appears belongs to neither request.
+    
+        Request A reaches the engine and takes its `before` snapshot (the relay
+        reads the owner table before it forwards the POST, so the sidecar's arrival
+        event bounds that read). Request B then arrives with the same
+        operation_id and takes its own snapshot. A row appearing now is strictly
+        after BOTH snapshots, and it is labelled as each arrival in turn: the old
+        `owners - before` witness read it as A's admission when it was B's, and as
+        B's when it was A's. Which of them actually arrived first is a parameter
+        here, not a constant -- the first version of this test started request 0
+        first in both cases and only relabelled the row, so the net effect of
+        swapping who claims was never exercised. The label and the order change
+        nothing on purpose: neither request can attribute the row.
+        """
+        side, relay, url = rig
+        # Which request starts first is the parameter; the sidecar's arrival slots
+        # are filled in that order, so `side.arrived[slot]` is the slot-th arrival.
+        order = (0, 1) if arrival == "a-then-b" else (1, 0)
+        progress = [dict(), dict()]
+        threads: list[threading.Thread] = []
+        boxes: list[dict] = [dict(), dict()]
+        try:
+            for slot, index in enumerate(order):
+                thread, boxes[index] = _start(relay, url, OP, progress[index])
+                threads.append(thread)
+                assert side.arrived[slot].wait(30), (
+                    f"request {index + 1} never reached the engine")
+            side.add_owner(f"row-of-the-{owner}")
+            marker = time.monotonic()
+            _await(lambda: all(_decided(record) for record in _records(relay).values()),
+                   "both requests to say what the new owner row was")
+            # The admission interim is what ENDS the queue keepalive, so a request
+            # that may not claim has to keep receiving the ordinary interim until
+            # its answer. Two more of them after the decision is that fact; it is
+            # best effort -- on the old witness the claim ends the keepalive and
+            # this expires -- because the record is the assertion, not the cadence.
+            kept_alive = [_until(lambda i=index: _interims_since(progress[i], marker) >= 2,
+                                 timeout=3.0)
+                          for index in (0, 1)]
+        finally:
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        _recorded(relay, 2)
+        for index, box in enumerate(boxes):
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+    
+        # Each request's record is identified by the ORDER it arrived in, so the
+        # reversed case asserts on the reverse request's record and not on a label.
+        for slot, index in enumerate(order):
+            label = f"the request that arrived {'first' if slot == 0 else 'second'}"
+            answer, record, kept = boxes[index]["result"], records[slot], kept_alive[index]
+            assert answer["status"] == 200, answer
+            assert record["outcome"] == admission.ANSWERED
+            # The owner table WAS readable: this is the shared-id rule, not the
+            # "admission cannot be observed" one.
+            assert record["admission_observed"] is True
+>           assert not _claims(record), (
+                f"{label} claimed an admission from an owner row it cannot "
+                "attribute to itself (the id was carried by two requests): "
+                f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
+E           AssertionError: the request that arrived first claimed an admission from an owner row it cannot attribute to itself (the id was carried by two requests): its record carries admitted_after_sec=0.052
+E           assert not True
+E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...})
+
+tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
+_ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-a-arrives-first] _
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e4255458aa0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458da0>, 'http://127.0.0.1:34769')
+owner = 'second-to-arrive', arrival = 'a-then-b'
+
+    @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
+                             ids=["a-arrives-first", "b-arrives-first"])
+    @pytest.mark.parametrize("owner", ["first-to-arrive", "second-to-arrive"],
+                             ids=["rows-of-first-arrival", "rows-of-second-arrival"])
+    def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(
+            rig, owner, arrival):
+        """BOTH arrival orders: the one row that appears belongs to neither request.
+    
+        Request A reaches the engine and takes its `before` snapshot (the relay
+        reads the owner table before it forwards the POST, so the sidecar's arrival
+        event bounds that read). Request B then arrives with the same
+        operation_id and takes its own snapshot. A row appearing now is strictly
+        after BOTH snapshots, and it is labelled as each arrival in turn: the old
+        `owners - before` witness read it as A's admission when it was B's, and as
+        B's when it was A's. Which of them actually arrived first is a parameter
+        here, not a constant -- the first version of this test started request 0
+        first in both cases and only relabelled the row, so the net effect of
+        swapping who claims was never exercised. The label and the order change
+        nothing on purpose: neither request can attribute the row.
+        """
+        side, relay, url = rig
+        # Which request starts first is the parameter; the sidecar's arrival slots
+        # are filled in that order, so `side.arrived[slot]` is the slot-th arrival.
+        order = (0, 1) if arrival == "a-then-b" else (1, 0)
+        progress = [dict(), dict()]
+        threads: list[threading.Thread] = []
+        boxes: list[dict] = [dict(), dict()]
+        try:
+            for slot, index in enumerate(order):
+                thread, boxes[index] = _start(relay, url, OP, progress[index])
+                threads.append(thread)
+                assert side.arrived[slot].wait(30), (
+                    f"request {index + 1} never reached the engine")
+            side.add_owner(f"row-of-the-{owner}")
+            marker = time.monotonic()
+            _await(lambda: all(_decided(record) for record in _records(relay).values()),
+                   "both requests to say what the new owner row was")
+            # The admission interim is what ENDS the queue keepalive, so a request
+            # that may not claim has to keep receiving the ordinary interim until
+            # its answer. Two more of them after the decision is that fact; it is
+            # best effort -- on the old witness the claim ends the keepalive and
+            # this expires -- because the record is the assertion, not the cadence.
+            kept_alive = [_until(lambda i=index: _interims_since(progress[i], marker) >= 2,
+                                 timeout=3.0)
+                          for index in (0, 1)]
+        finally:
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        _recorded(relay, 2)
+        for index, box in enumerate(boxes):
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+    
+        # Each request's record is identified by the ORDER it arrived in, so the
+        # reversed case asserts on the reverse request's record and not on a label.
+        for slot, index in enumerate(order):
+            label = f"the request that arrived {'first' if slot == 0 else 'second'}"
+            answer, record, kept = boxes[index]["result"], records[slot], kept_alive[index]
+            assert answer["status"] == 200, answer
+            assert record["outcome"] == admission.ANSWERED
+            # The owner table WAS readable: this is the shared-id rule, not the
+            # "admission cannot be observed" one.
+            assert record["admission_observed"] is True
+>           assert not _claims(record), (
+                f"{label} claimed an admission from an owner row it cannot "
+                "attribute to itself (the id was carried by two requests): "
+                f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
+E           AssertionError: the request that arrived first claimed an admission from an owner row it cannot attribute to itself (the id was carried by two requests): its record carries admitted_after_sec=0.052
+E           assert not True
+E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...})
+
+tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
+_ test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-b-arrives-first] _
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554597f0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e425545be60>, 'http://127.0.0.1:39619')
+owner = 'second-to-arrive', arrival = 'b-then-a'
+
+    @pytest.mark.parametrize("arrival", ["a-then-b", "b-then-a"],
+                             ids=["a-arrives-first", "b-arrives-first"])
+    @pytest.mark.parametrize("owner", ["first-to-arrive", "second-to-arrive"],
+                             ids=["rows-of-first-arrival", "rows-of-second-arrival"])
+    def test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id(
+            rig, owner, arrival):
+        """BOTH arrival orders: the one row that appears belongs to neither request.
+    
+        Request A reaches the engine and takes its `before` snapshot (the relay
+        reads the owner table before it forwards the POST, so the sidecar's arrival
+        event bounds that read). Request B then arrives with the same
+        operation_id and takes its own snapshot. A row appearing now is strictly
+        after BOTH snapshots, and it is labelled as each arrival in turn: the old
+        `owners - before` witness read it as A's admission when it was B's, and as
+        B's when it was A's. Which of them actually arrived first is a parameter
+        here, not a constant -- the first version of this test started request 0
+        first in both cases and only relabelled the row, so the net effect of
+        swapping who claims was never exercised. The label and the order change
+        nothing on purpose: neither request can attribute the row.
+        """
+        side, relay, url = rig
+        # Which request starts first is the parameter; the sidecar's arrival slots
+        # are filled in that order, so `side.arrived[slot]` is the slot-th arrival.
+        order = (0, 1) if arrival == "a-then-b" else (1, 0)
+        progress = [dict(), dict()]
+        threads: list[threading.Thread] = []
+        boxes: list[dict] = [dict(), dict()]
+        try:
+            for slot, index in enumerate(order):
+                thread, boxes[index] = _start(relay, url, OP, progress[index])
+                threads.append(thread)
+                assert side.arrived[slot].wait(30), (
+                    f"request {index + 1} never reached the engine")
+            side.add_owner(f"row-of-the-{owner}")
+            marker = time.monotonic()
+            _await(lambda: all(_decided(record) for record in _records(relay).values()),
+                   "both requests to say what the new owner row was")
+            # The admission interim is what ENDS the queue keepalive, so a request
+            # that may not claim has to keep receiving the ordinary interim until
+            # its answer. Two more of them after the decision is that fact; it is
+            # best effort -- on the old witness the claim ends the keepalive and
+            # this expires -- because the record is the assertion, not the cadence.
+            kept_alive = [_until(lambda i=index: _interims_since(progress[i], marker) >= 2,
+                                 timeout=3.0)
+                          for index in (0, 1)]
+        finally:
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        _recorded(relay, 2)
+        for index, box in enumerate(boxes):
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+    
+        # Each request's record is identified by the ORDER it arrived in, so the
+        # reversed case asserts on the reverse request's record and not on a label.
+        for slot, index in enumerate(order):
+            label = f"the request that arrived {'first' if slot == 0 else 'second'}"
+            answer, record, kept = boxes[index]["result"], records[slot], kept_alive[index]
+            assert answer["status"] == 200, answer
+            assert record["outcome"] == admission.ANSWERED
+            # The owner table WAS readable: this is the shared-id rule, not the
+            # "admission cannot be observed" one.
+            assert record["admission_observed"] is True
+>           assert not _claims(record), (
+                f"{label} claimed an admission from an owner row it cannot "
+                "attribute to itself (the id was carried by two requests): "
+                f"its record carries admitted_after_sec={record.get('admitted_after_sec')}")
+E           AssertionError: the request that arrived first claimed an admission from an owner row it cannot attribute to itself (the id was carried by two requests): its record carries admitted_after_sec=0.052
+E           assert not True
+E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...})
+
+tests/unit/test_gate_admission_shared_operation_id.py:365: AssertionError
+________ test_another_requests_shared_id_does_not_suppress_a_unique_one ________
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e4255459e50>, <aitelier.gate_admission.AdmissionRelay object at 0x7e4255458650>, 'http://127.0.0.1:34145')
+
+    def test_another_requests_shared_id_does_not_suppress_a_unique_one(rig):
+        """The rule is per operation_id: a third request with its own id is admitted.
+    
+        Two requests share `op-shared` and a third carries `op-solo`. The shared id's
+        rows are unclaimable, and the unique one's row is still this request's own
+        admission -- the relay must not stop witnessing everything because one id
+        is aliased.
+        """
+        side, relay, url = rig
+        progress = [dict(), dict(), dict()]
+        boxes: list[dict] = [dict(), dict(), dict()]
+        threads: list[threading.Thread] = []
+        try:
+            for index, operation in enumerate((OP, OP, "op-solo")):
+                thread, boxes[index] = _start(relay, url, operation, progress[index])
+                threads.append(thread)
+                assert side.arrived[index].wait(30), (
+                    f"request {index + 1} never reached the engine")
+            side.add_owner("row-of-request-1", OP)
+            side.add_owner("row-of-request-3", "op-solo")
+            side.add_owner("row-of-request-2", OP)
+            _await(lambda: all(_decided(record) for record in _records(relay).values()),
+                   "all three requests to say what the new owner rows were")
+        finally:
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        _recorded(relay, 3)
+        for box in boxes:
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+        for index in (0, 1):
+            assert boxes[index]["result"]["status"] == 200
+>           assert not _claims(records[index]), records[index]
+E           AssertionError: {'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...}
+E           assert not True
+E            +  where True = _claims({'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...})
+
+tests/unit/test_gate_admission_shared_operation_id.py:508: AssertionError
+_________ test_a_request_in_flight_when_the_relay_stops_claims_no_row __________
+
+rig = (<tests.unit.test_gate_admission_shared_operation_id.Sidecar object at 0x7e42554495e0>, <aitelier.gate_admission.AdmissionRelay object at 0x7e425545bda0>, 'http://127.0.0.1:33115')
+
+    def test_a_request_in_flight_when_the_relay_stops_claims_no_row(rig):
+        """A row that appears while the relay stops is credited to nobody.
+    
+        753d1c03b6 cleared the shared marks inside `stop()`, so the next owner row
+        for an id was handed to the first request -- the one that was never refused
+        -- while it was still queued: measured on that commit as
+        `admitted_after_sec` on its record, twice, and never without a `stop()`.
+        The interleaving is the test's own, in three events: request 1 reached the
+        engine, request 1's watch is inside a `/lifecycle` read, and the relay has
+        stopped. Only then does the row appear, so the row is read AFTER `stop()`
+        returned by a request that was still in flight when it ran. Request 2
+        carries the same id over HTTP/1.0 -- it joins the id but opens no watch --
+        so the one watch here is unambiguously request 1's, and request 1 is the
+        first arrival, which is the request the leak was measured on.
+        """
+        side, relay, url = rig
+        progress = [dict(), dict()]
+        boxes: list[dict] = [dict(), dict()]
+        threads: list[threading.Thread] = []
+        try:
+            thread, boxes[0] = _start(relay, url, OP, progress[0])
+            threads.append(thread)
+            assert side.arrived[0].wait(30), "request 1 never reached the engine"
+            thread, boxes[1] = _start(relay, url, OP, progress[1], version="HTTP/1.0")
+            threads.append(thread)
+            assert side.arrived[1].wait(30), "request 2 never reached the engine"
+            _await(lambda: _records(relay)[0].get("admission_observed") is True,
+                   "request 1's watch to be running")
+            # The watch's next read of the owner table is held open, so the watch is
+            # parked inside the read the row has to be seen through.
+            side.hold_lifecycle = True
+            assert side.lifecycle_held.wait(30), "no watch read the owner table"
+            relay.stop()
+            # The row exists only from here: it is the row the stop-path leak was
+            # measured from, and the request it is offered to was already stopped.
+            side.add_owner("row-while-the-relay-stopped")
+            side.hold_lifecycle = False
+            side.release_lifecycle.set()
+            # The claim is written by the watch thread, so the assertion below is
+            # only meaningful once that thread has finished.
+            _await(lambda: not _watch_running(), "request 1's watch to finish")
+        finally:
+            side.release_lifecycle.set()
+            for event in side.answer:
+                event.set()
+            for thread in threads:
+                thread.join(60)
+    
+        for index, box in enumerate(boxes):
+            assert "error" not in box, box.get("error")
+        records = _records(relay)
+        first, second = records[0], records[1]
+    
+        # The relay stopped under both of them: this is the stop path, not an
+        # ordinary answer.
+        assert first["outcome"] == admission.ABANDONED, first
+        assert first["admission_observed"] is True, first
+>       assert "admitted_after_sec" not in first, (
+            "a request still in flight when the relay stopped claimed an owner row "
+            f"as its admission: admitted_after_sec={first.get('admitted_after_sec')}")
+E       AssertionError: a request still in flight when the relay stopped claimed an owner row as its admission: admitted_after_sec=0.503
+E       assert 'admitted_after_sec' not in {'route': '/script', 'method': 'POST', 'seq': 0, 'render_wait_injected': True, ...}
+
+tests/unit/test_gate_admission_shared_operation_id.py:574: AssertionError
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-a-arrives-first]
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-first-arrival-b-arrives-first]
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-a-arrives-first]
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_neither_request_claims_a_row_that_appeared_while_they_shared_an_id[rows-of-second-arrival-b-arrives-first]
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_another_requests_shared_id_does_not_suppress_a_unique_one
+FAILED tests/unit/test_gate_admission_shared_operation_id.py::test_a_request_in_flight_when_the_relay_stops_claims_no_row
+=================== 6 failed, 2 passed, 1 warning in 28.64s ====================

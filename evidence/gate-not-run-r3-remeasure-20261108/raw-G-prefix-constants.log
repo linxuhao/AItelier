@@ -1,0 +1,2 @@
+REPO_GATE_TIMEOUT=5400
+episode_max_seconds=10800.0

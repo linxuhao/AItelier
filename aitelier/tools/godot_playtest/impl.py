@@ -60,6 +60,16 @@ RENDER_QUEUE_SHARE = 0.5
 # socket and still be recorded as a socket timeout. The tolerable queue wait at
 # the default socket is 4200 - 3471.2921 = 728.7079 s.
 LARGEST_MEASURED_RENDER_WALL_SEC = 3471.2921
+# The game tree's own ceiling on ONE play-test, declared on the game side at
+# fd76891dd4 (its PLAYTEST_SOCKET_TIMEOUT) and machine-readable from 10a8c84582,
+# where an unanswered stage now records its span with `answered: false`. It is
+# not this repo's number to move, and it is declared here for one reason: so the
+# band below is computable instead of remembered. A render that outlives OUR
+# socket and still fits THIS ceiling is answerable through the game gate and
+# unanswerable through this path (see unanswerable_render_band). Closing that
+# band means raising the socket, and that needs a retained render above the
+# socket rather than arithmetic: no completed render has been measured there.
+GAME_GATE_PLAYTEST_CEILING_SEC = 7200
 # Ceiling on one authored scenario's caller budget (authored_caller_timeout).
 # Deliberately NOT the socket timeout: post_playtest's default socket timeout
 # was raised 3600 -> 4200 s, and this stays at 3600 s so that raising the
@@ -669,6 +679,24 @@ def render_queue_wait_sec(timeout: int | float) -> float:
     if room > 0:
         declared = min(declared, room)
     return math.floor(declared * 1000) / 1000
+
+
+def unanswerable_render_band(socket_sec: int | float) -> tuple[float, float] | None:
+    """The render durations THIS path cannot answer but the game gate can.
+
+    ``post_playtest``'s socket bounds the whole request — queue wait AND render —
+    while the game tree bounds one play-test at GAME_GATE_PLAYTEST_CEILING_SEC.
+    A render inside ``(socket_sec, GAME_GATE_PLAYTEST_CEILING_SEC]`` therefore
+    finishes inside a gate that asked for it and is recorded as a socket timeout
+    here. Returns that band, or None when the socket is already at or above the
+    ceiling — i.e. when raising the socket actually closed it, which is the only
+    way this repo may claim it did. Declaring the band is not a promise to
+    answer it: nothing has been measured inside it (see
+    LARGEST_MEASURED_RENDER_WALL_SEC, which sits below the default socket).
+    """
+    if socket_sec >= GAME_GATE_PLAYTEST_CEILING_SEC:
+        return None
+    return (float(socket_sec), float(GAME_GATE_PLAYTEST_CEILING_SEC))
 
 
 #

@@ -23,6 +23,17 @@ What stays a refusal is everything that is NOT a stale literal, because those
 guards decide whether there is a measurement at all: a manifest whose bytes are
 unreadable/malformed or changed after dispatch, an unobservable platform
 identity, and an identity that moved while the gate ran (`run_bound`).
+
+Mode `platform` answers a question about a receipt that was already written, so
+"this receipt is not `reviewed`" and "there is no receipt to read" are two
+different facts. The first is a verdict on stdout (`reviewed`, `platform_unreviewed
+…`, `unknown <why>`) with exit 0. The second is not a verdict at all: the receipt
+or the binding bytes named by GATE_BINDING_FILE cannot be read as the records they
+were named to be, so the process exits 3 and prints ONE line on stderr naming the
+path and the failure kind, with nothing on stdout. Until 2026-11-08 both ended in
+the same answer string -- `unknown platform record unavailable` -- which the
+launcher's own `||` fallback (`gate_run.sh:139`) still spells, so a reader could
+not tell "the tool answered unknown" from "the tool could not be asked".
 """
 import argparse
 import hashlib
@@ -92,7 +103,16 @@ def git(root, *args):
 
 
 def read_binding(path, expected_sha256=None):
-    raw = read_regular(path)
+    return binding_record(read_regular(path), expected_sha256)
+
+
+def binding_record(raw, expected_sha256=None):
+    """Validate a frozen binding from bytes already read.
+
+    Split out so a caller that must first prove the file is readable (and report
+    "could not read it" separately from "it is not the reviewed record") reads
+    the file once instead of twice.
+    """
     sha256 = hashlib.sha256(raw).hexdigest()
     if expected_sha256 is not None and sha256 != expected_sha256:
         raise IdentityMismatch("frozen binding bytes differ")
@@ -378,6 +398,79 @@ def _short(value):
     return text if len(text) <= 16 else text[:12]
 
 
+class Unanswerable(Exception):
+    """The question could not be put: an input is not the record it was named to be.
+
+    A verdict (`unknown <why>`) describes a receipt that WAS read. This describes
+    a receipt or binding that could not be read at all, so it is reported through
+    the exit status and one stderr line instead of as a word on stdout. Both used
+    to be the same string, which is how "the tool answered" and "the tool could
+    not be asked" became indistinguishable in the gate's own record.
+    """
+
+    def __init__(self, path, kind, detail=""):
+        self.path = str(path)
+        self.kind = kind
+        self.detail = detail
+        super().__init__(self.line())
+
+    def line(self):
+        text = f"platform identity cannot be answered: {self.kind}: {self.path}"
+        return f"{text}: {self.detail}" if self.detail else text
+
+
+def _unreadable_kind(path):
+    """WHY a path could not be read as a regular identity file, in the same words
+    a reader of the log needs: absent, not a regular file (directory or symlink),
+    or present and unreadable."""
+    try:
+        info = os.lstat(str(path))
+    except OSError:
+        return "missing"
+    if stat.S_ISLNK(info.st_mode):
+        return "not-a-regular-file (symlink)"
+    if stat.S_ISDIR(info.st_mode):
+        return "not-a-regular-file (directory)"
+    if not stat.S_ISREG(info.st_mode):
+        return "not-a-regular-file"
+    return "unreadable"
+
+
+def _regular_input(path, what):
+    try:
+        return read_regular(path)
+    except (OSError, ValueError) as exc:
+        raise Unanswerable(path, _unreadable_kind(path), f"{what}: {exc}") from exc
+
+
+def _receipt_record(path):
+    raw = _regular_input(path, "receipt")
+    try:
+        receipt = json.loads(raw)
+    except ValueError as exc:
+        raise Unanswerable(path, "not-json", f"receipt: {exc}") from exc
+    if type(receipt) is not dict:
+        raise Unanswerable(path, "not-a-receipt",
+                           f"receipt: a receipt is a JSON object, this is {type(receipt).__name__}")
+    return receipt
+
+
+def _binding_from_file(binding_path, expected_sha256):
+    """The reviewed binding's record, or `(None, None)` when the bytes are readable
+    but are NOT the record we were told to judge against (a verdict, not an
+    unreadable input)."""
+    if not binding_path:
+        raise Unanswerable("GATE_BINDING_FILE", "unset",
+                           "binding: mode platform reads the reviewed binding from this variable")
+    raw = _regular_input(binding_path, "binding")
+    try:
+        return binding_record(raw, expected_sha256)
+    except IdentityMismatch:
+        return None, None
+    except (ValueError, TypeError, KeyError) as exc:
+        raise Unanswerable(binding_path, "not-a-binding-record", f"binding: {exc}") from exc
+
+
 def platform_status(path, binding_path, expected_sha256):
     """Say what the receipt's identity is WORTH, as one line starting with the word.
 
@@ -389,31 +482,40 @@ def platform_status(path, binding_path, expected_sha256):
     receipt's own observations against the same manifest bytes the launcher
     froze; a receipt whose conclusion disagrees with its own evidence is
     `unknown`, never `reviewed`.
+
+    Every verdict above is about bytes that WERE read. When the receipt or the
+    binding cannot be read at all -- missing, not a regular file (a directory or a
+    symlink), unreadable, not JSON, not a receipt object, or GATE_BINDING_FILE
+    unset -- this raises `Unanswerable` instead of returning a word: "there is no
+    receipt to judge" is not an answer about a platform, and a caller that reads
+    it as one records a measurement that never happened.
     """
-    try:
-        receipt = json.loads(read_regular(path))
-        if receipt_identity(path, receipt["raw_exit"], binding_path, expected_sha256) != "unchanged":
-            return "unknown terminal receipt cannot say which platform measured"
-        binding, binding_sha256 = read_binding(binding_path, expected_sha256)
-        record = receipt["platform"]
-        if (type(record) is not dict
-                or set(record) != {"binding_sha256", "frozen_sha256", "status", "differences"}
-                or record["binding_sha256"] != binding_sha256
-                or record["frozen_sha256"] != expected_sha256
-                or record["status"] not in (REVIEWED, UNREVIEWED)):
-            return "unknown receipt carries no usable platform record"
-        differences = compare_to_binding(binding, receipt["before"])
-        status = UNREVIEWED if differences else REVIEWED
-        if record["status"] != status or record["differences"] != differences:
-            return "unknown receipt platform record disagrees with its own observation"
-        if status == REVIEWED:
-            return REVIEWED
-        shown = " ".join(f"{item['field']}:{_short(item['bound'])}->{_short(item['observed'])}"
-                         for item in differences[:6])
-        more = f" (+{len(differences) - 6} more)" if len(differences) > 6 else ""
-        return f"{UNREVIEWED} binding={binding_sha256[:12]} differs={len(differences)} {shown}{more}"
-    except (OSError, ValueError, TypeError, KeyError, IndexError):
-        return "unknown platform record unavailable"
+    receipt = _receipt_record(path)
+    # The binding is read BEFORE settlement is judged: without the reviewed record
+    # there is nothing to judge against, and reporting that as "this receipt cannot
+    # say which platform measured" blames the receipt for a missing input.
+    binding, binding_sha256 = _binding_from_file(binding_path, expected_sha256)
+    if binding is None:
+        return "unknown terminal receipt cannot say which platform measured"
+    if receipt_identity(path, receipt.get("raw_exit"), binding_path, expected_sha256) != "unchanged":
+        return "unknown terminal receipt cannot say which platform measured"
+    record = receipt.get("platform")
+    if (type(record) is not dict
+            or set(record) != {"binding_sha256", "frozen_sha256", "status", "differences"}
+            or record["binding_sha256"] != binding_sha256
+            or record["frozen_sha256"] != expected_sha256
+            or record["status"] not in (REVIEWED, UNREVIEWED)):
+        return "unknown receipt carries no usable platform record"
+    differences = compare_to_binding(binding, receipt["before"])
+    status = UNREVIEWED if differences else REVIEWED
+    if record["status"] != status or record["differences"] != differences:
+        return "unknown receipt platform record disagrees with its own observation"
+    if status == REVIEWED:
+        return REVIEWED
+    shown = " ".join(f"{item['field']}:{_short(item['bound'])}->{_short(item['observed'])}"
+                     for item in differences[:6])
+    more = f" (+{len(differences) - 6} more)" if len(differences) > 6 else ""
+    return f"{UNREVIEWED} binding={binding_sha256[:12]} differs={len(differences)} {shown}{more}"
 
 
 def sidecar_identity(output, before=None):
@@ -483,8 +585,15 @@ def main():
                                os.environ.get("GATE_BINDING_FILE"), args.binding_sha256))
         return 0
     if args.mode == "platform":
-        print(platform_status(args.binding, os.environ.get("GATE_BINDING_FILE"),
-                              args.binding_sha256))
+        try:
+            print(platform_status(args.binding, os.environ.get("GATE_BINDING_FILE"),
+                                  args.binding_sha256))
+        except Unanswerable as exc:
+            # Exit 3, not 0: "the identity tool could not be asked" must be a
+            # different fact from the answer `unknown …`, in the exit status and
+            # on stderr, without a verdict token on stdout. 2 stays argparse.
+            print(exc.line(), file=sys.stderr)
+            return 3
         return 0
     if args.mode == "sidecar":
         try:

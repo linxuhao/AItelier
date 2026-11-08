@@ -4179,6 +4179,74 @@ def _aim_errors(key: str, aim) -> list:
     return errors
 
 
+# Every timeline input value is read AS one of two shapes, and neither shape is
+# checked before it is consumed -- so a wrong one either raised out of
+# _normalize_timeline or was silently substituted. Measured 2026-11-08
+# (evidence/playtest-two-reading-20261108, rows `tl-*`):
+#   `actions`/`clicks`/`hovers` are ITERATED, each item becoming one press /
+#     click / hover; a bare string is the accepted one-item form. `actions: 5`
+#     therefore raised `TypeError: 'int' object is not iterable` -- the sidecar
+#     answered HTTP 500 and the author was told nothing -- while
+#     `actions: {jump: 1, crouch: 2}` was iterated by its KEYS, pressing both
+#     actions and dropping both values (rows tl-actions-int, tl-actions-mapping,
+#     tl-clicks-mapping, tl-hovers-mapping).
+#   `press`/`release`/`click`/`hover` are ONE action id or ONE aim. A number or
+#     a list there was carried through to a String-typed consumer that never
+#     sees a spec error (rows tl-click-int, tl-press-int, tl-release-int,
+#     tl-hover-list).
+# null is falsy for every reader below and reads as "no input" -- one reading,
+# so it stays accepted.
+_TIMELINE_VALUE_KINDS = {
+    # key: (is a list, what ONE value is, the shape to write instead)
+    "actions": (True, "action id", "actions: [jump, crouch]"),
+    "clicks": (True, "aim", "clicks: [HUD/Button +0,0, HUD/Label]"),
+    "hovers": (True, "aim", "hovers: [HUD/Button, HUD/Label]"),
+    "press": (False, "action id", "press: jump"),
+    "release": (False, "action id", "release: jump"),
+    "click": (False, "aim", "click: HUD/Button +0,0"),
+    "hover": (False, "aim", "hover: HUD/Button"),
+}
+_PLURAL_OF = {"press": "actions", "release": "actions",
+              "click": "clicks", "hover": "hovers"}
+
+
+def _timeline_value_errors(entry: dict) -> list:
+    """Refuse a timeline input value of the wrong shape, naming key and type.
+
+    Runs BEFORE anything iterates or reads a value: the aim-shape check and the
+    ``press``/``release``/``click``/``hover`` loop below both assume these
+    shapes, and the plural loop is exactly where `clicks: 5` raised."""
+    errors = []
+    for key, (is_list, one, example) in _TIMELINE_VALUE_KINDS.items():
+        if key not in entry:
+            continue
+        value = entry[key]
+        if value is None or isinstance(value, str):
+            continue   # absent/null, or the accepted one-value-as-a-string form
+        if not is_list:
+            errors.append(
+                "`%s` is of type %s, but one %s is a string - write `%s`. "
+                "Several on one frame go under `%s:`; this value is not read as "
+                "one %s by any consumer."
+                % (key, type(value).__name__, one, example, _PLURAL_OF[key], one))
+            continue
+        if not isinstance(value, list):
+            errors.append(
+                "`%s` is of type %s, but it is read as a list of %ss - write "
+                "`%s`. This value is iterated: a mapping here was read as its "
+                "keys with every value dropped, and a number raised "
+                "TypeError: not iterable."
+                % (key, type(value).__name__, one, example))
+            continue
+        for j, item in enumerate(value):
+            if not isinstance(item, str):
+                errors.append(
+                    "`%s` item %d is of type %s, but every item must be one %s "
+                    "as a string - write `%s`."
+                    % (key, j, type(item).__name__, one, example))
+    return errors
+
+
 _MAX_SPEC_FRAMES = 3000   # unchanged default; longer work needs an explicit budget
 # JSON.parse_string converts numbers to float before the probe's int cast.
 _MAX_JSON_FRAME = (1 << 53) - 1
@@ -4358,6 +4426,16 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
                 % (i, at, latest[0], latest[1], i, latest[0]))
         elif latest is None or at > latest[1]:
             latest = (i, at)
+        # The input values have one shape each (see _timeline_value_errors), and
+        # this check runs FIRST: the loops below iterate `clicks:`/`hovers:` and
+        # hand `press:`/`release:`/`click:`/`hover:` on unchanged, so a
+        # wrong-shaped value used to raise out of here as an HTTP 500 instead of
+        # being refused with its key named.
+        value_errors = _timeline_value_errors(e)
+        if value_errors:
+            errors.extend("timeline entry %d (at: %d): %s" % (i, at, m)
+                          for m in value_errors)
+            continue
         shape_errors = _assert_errors(e["assert"]) if "assert" in e else []
         for key in ("click", "hover", "clicks", "hovers"):
             aims = e.get(key) or []

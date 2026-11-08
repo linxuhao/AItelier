@@ -496,9 +496,14 @@ MUTATIONS = {
         "targeted": [EXEC_POINTS],
     },
     "TIMEOUTBIG": {
+        "file_note": "the anchor is the DERIVATION, not a number: REPO_GATE_TIMEOUT "
+                     "read MAX_LAUNCH_TIMEOUT_SECONDS since 571439a7, so replacing it "
+                     "with a literal is the mutation. Re-aim this anchor whenever that "
+                     "line changes shape; an anchor that misses reports anchor-error, "
+                     "not a surviving mutant.",
         "edits": [{
             "file": IMPL,
-            "anchor": "REPO_GATE_TIMEOUT = 12600\n",
+            "anchor": "REPO_GATE_TIMEOUT = repository_host_launcher.MAX_LAUNCH_TIMEOUT_SECONDS\n",
             "replacement": "REPO_GATE_TIMEOUT = 1e9\n",
         }],
         "targeted": [EXEC_POINTS],
@@ -545,10 +550,11 @@ MUTATIONS = {
     },
     # ── round 8's own edits under their own names ─────────────────────────
     "TIMEOUT60": {
-        "file_note": "round 8's `S1` edit: REPO_GATE_TIMEOUT = 60.",
+        "file_note": "round 8's `S1` edit: REPO_GATE_TIMEOUT = 60. Same anchor rule as "
+                     "TIMEOUTBIG: it tracks the derivation line, not a number.",
         "edits": [{
             "file": IMPL,
-            "anchor": "REPO_GATE_TIMEOUT = 12600\n",
+            "anchor": "REPO_GATE_TIMEOUT = repository_host_launcher.MAX_LAUNCH_TIMEOUT_SECONDS\n",
             "replacement": "REPO_GATE_TIMEOUT = 60\n",
         }],
         "targeted": [EXEC_POINTS],

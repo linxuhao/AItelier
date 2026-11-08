@@ -2026,3 +2026,39 @@ def test_clip_follows_renderer_half_pixel_and_rounding_in_png_space():
     assert "vp.get_stretch_transform() * vp.get_visible_rect()" in src
     assert '"coordinate_space":' in src and '"png_from_viewport_2d":' in src
     assert "under 0.5 px, so the renderer does not draw it" in src
+
+
+# ── input accumulation mode is recorded, never forced ─────────────────────
+def test_probe_reads_input_accumulation_mode_and_reports_it(monkeypatch, tmp_path):
+    """The probe records the engine's `use_accumulated_input` as a named field.
+
+    (a) Source contract: the probe READS the property through Input.get(), so a
+    build without it yields null instead of an error, and the probe never WRITES
+    it (the game under test owns the mode). (b) Dict level: the value the probe
+    reports reaches the response's scenario row under the same name, with null
+    kept as null and an old probe that omits it also null.
+    """
+    src = _HARNESS.read_text(encoding="utf-8")
+    probe_src = src.split("_PROBE_GD = r\'\'\'", 1)[1].split("\'\'\'", 1)[0]
+    assert 'out["use_accumulated_input"] = Input.get("use_accumulated_input")' in probe_src
+    assert "Input.use_accumulated_input =" not in probe_src
+    assert '"use_accumulated_input": probe.get("use_accumulated_input")' in src
+
+    spec = {"scenarios": [{"name": "press", "timeline": [
+        {"at": 3, "assert": [{"node": "Bird", "expr": "true"}]}]}]}
+    for reported, expected in ((True, True), (False, False), (None, None)):
+        _mock_run_probe(monkeypatch,
+                        {"frames": 10, "asserts": [{"name": "a", "passed": True}],
+                         "nodes": {}, "use_accumulated_input": reported},
+                        [], False)
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        row = r["behavior"]["scenarios"][0]
+        assert "use_accumulated_input" in row
+        assert row["use_accumulated_input"] is expected
+
+    # An old probe that never wrote the field is recorded as null, not guessed.
+    _mock_run_probe(monkeypatch,
+                    {"frames": 10, "asserts": [{"name": "a", "passed": True}], "nodes": {}},
+                    [], False)
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert r["behavior"]["scenarios"][0]["use_accumulated_input"] is None

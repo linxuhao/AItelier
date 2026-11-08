@@ -1490,6 +1490,9 @@ _PROBE_GD = r'''extends Node
 # Orthogonally, if AITELIER_PROBE_CAPTURE names a directory it saves the viewport
 # as a PNG at each frame listed in AITELIER_PROBE_CAPTURE_AT.
 # Always writes {frames, asserts[], nodes{}, captures[]} to AITELIER_PROBE_OUT.
+# `use_accumulated_input` (true | false | null) is the engine's Input setting this
+# run was under. It decides the observation order of a same-frame assert (see
+# _apply_entry). null = this build does not expose the property; nothing is guessed.
 # Indented with spaces (GDScript accepts consistent spaces or tabs).
 const _UI_TEXT_FACTS := false
 var _frame := 0
@@ -2641,6 +2644,14 @@ func _apply_entry(e: Dictionary) -> void:
     var rl = e.get("release", "")
     if rl != "" and InputMap.has_action(rl):
         _act(rl, false)
+    # OBSERVATION ORDER of an assert that shares a frame with an input (press/click/
+    # hover above): it depends on Input.use_accumulated_input, which the game sets and
+    # the probe only reads (report field `use_accumulated_input`).
+    #   true  (Godot default, buffered input): the same-frame assert observes the
+    #         state BEFORE that frame's input.
+    #   false (immediate input): the same-frame assert observes the state AFTER it.
+    #   null  (not reported): the order is unknown; read the field, do not assume it.
+    # Asserts with no same-frame input are unaffected by this setting.
     var asserts = e.get("assert", [])
     if typeof(asserts) == TYPE_ARRAY:
         for a in asserts:
@@ -3140,6 +3151,12 @@ func _finish() -> void:
     _t_step_end_usec = Time.get_ticks_usec()
     var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": _captures,
         "spec_errors": _spec_errors}
+    # The engine's input mode, READ only (the game under test owns it; this probe
+    # never writes it). Object.get() returns null for a property this build does not
+    # have, so an old engine records null rather than crashing the probe. true =
+    # buffered input (a same-frame assert sees the state BEFORE that frame's input),
+    # false = immediate (it sees the state AFTER); see _apply_entry.
+    out["use_accumulated_input"] = Input.get("use_accumulated_input")
     if _input_enabled:
         out["input_observation"] = _finish_input_observation()
     # Completeness accounting: a report that lost a scheduled assertion, or
@@ -4871,6 +4888,10 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "before_captures": probe.get("before_captures", {}),
+                             # The engine's input mode this scenario's asserts ran under
+                             # (true = buffered, false = immediate, null = not reported).
+                             # Recorded, never forced; absent from an old probe -> null.
+                             "use_accumulated_input": probe.get("use_accumulated_input"),
                              "input_observation": input_observation,
                              # Measurement-completeness rows: what was scheduled
                              # vs what the probe actually reported.

@@ -150,6 +150,36 @@ def test_declared_queue_wait_leaves_room_for_the_largest_measured_render(tmp_pat
     assert declared == pt.render_queue_wait_sec(socket_timeout)
 
 
+def test_the_band_the_direct_path_cannot_answer_is_declared_and_holds_no_measured_render():
+    """A render can outlive OUR socket and still fit the GAME GATE's own ceiling.
+
+    That band is a state this tree names rather than remembers: the game side
+    declared 7200 s at fd76891dd4 and made an unanswered stage machine-readable at
+    10a8c84582, while this path's socket is 4200 s. Both numbers are pinned here,
+    so moving either one alone fails this test: raising the socket to the ceiling
+    would close the band deliberately, and leaving the socket while the ceiling
+    moves must be a decision rather than a silent drift.
+
+    Closing the band is not done on arithmetic: no COMPLETED render has been
+    measured above the socket (the largest measured one is
+    LARGEST_MEASURED_RENDER_WALL_SEC, read from the module), so the band is empty
+    of measurements and stays declared. A render inside it is answerable through
+    the game gate and recorded as a socket timeout here — which is what the game
+    director asked to have written down (thread 52203189).
+    """
+    socket_sec = inspect.signature(pt.post_playtest).parameters["timeout"].default
+    assert (socket_sec, pt.GAME_GATE_PLAYTEST_CEILING_SEC) == (4200, 7200)
+    band = pt.unanswerable_render_band(socket_sec)
+    assert band == (4200.0, 7200.0)
+    assert band[0] < band[1], "the band exists only while the game's ceiling is above our socket"
+    assert pt.LARGEST_MEASURED_RENDER_WALL_SEC < socket_sec, (
+        "a measured render inside the band would be the decision to raise the socket, "
+        "not a reason to keep declaring the band")
+    # At or above the ceiling the band is closed, and the function says so.
+    assert pt.unanswerable_render_band(7200) is None
+    assert pt.unanswerable_render_band(7800) is None
+
+
 @pytest.mark.parametrize("spec", [None, {"scenarios": [contract()["scenarios"][1]]}])
 def test_no_authored_budget_retains_120(tmp_path, bridge, spec):
     repo = project(tmp_path, spec)

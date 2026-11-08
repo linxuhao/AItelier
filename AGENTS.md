@@ -94,6 +94,21 @@ docker compose logs -f          # tail
 
 Env reference lives in `.env.example`.
 
+Which of those variables is read WHEN is not uniform, and the difference is usable
+rather than academic. `api/main.py` has exactly three `os.getenv` reads, and only
+two are import-time: `_ALLOW_EXTERNAL` (`api/main.py:319`, module level) and
+`AITELIER_WEB_DIST` (`api/main.py:616`, also module level) are resolved once, when
+the module is imported — i.e. when the serving process starts. `AITELIER_SIGNIN_URL`
+is NOT one of them: it is read PER REQUEST inside the `/api/me` handler
+(`api/main.py:480`), so the serving process's `os.environ` is consulted on every
+call, and anything that mutates it at runtime (a test's monkeypatch, say) shows up
+in the next `/api/me` response while staying invisible to the two import-time reads.
+Both kinds are still bounded by the environment the process was started with — in
+Docker, compose's `env_file`, fixed when the container was created — so applying an
+edit to either means `docker compose up -d`; what differs is only whether the value
+is re-read within a process that keeps running. (The message of `7873a4bb99` grouped
+`AITELIER_SIGNIN_URL` with the two import-time reads; the code does not.)
+
 ## Architecture
 
 ### Repo Separation

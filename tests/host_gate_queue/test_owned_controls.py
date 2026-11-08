@@ -86,15 +86,38 @@ def test_C04_plain_python_recipe_original_bootstrap_counterexample(h):
     assert not h.requests and not list((h.root/"tickets").glob("*"))
 
 
-def test_C05_inherited_post_import_env_leaks_and_is_RED(h):
+def test_C05_env_inheriting_child_leaks_queue_env_and_ignores_root_dotenv_is_RED(h):
+    """Mutant: the child is launched with env=None, so it inherits the queue process's
+    whole environment instead of the curated launch_env.
+
+    Two vectors are checked under that mutant, and they are deliberately different:
+
+    1. The queue process's OWN environment is the vector the mutant opens. The marker
+       is planted in h.env, the dict the daemon is launched with, not in os.environ
+       of the pytest process: Harness.env already strips every AITELIER_*/GATE_* key
+       from os.environ. With the mutant in place the marker must reach the child, so
+       the expected RED is observed and retained as C05-FIRST-FAIL.txt.
+
+    2. The repo-root <aroot>/.env is NOT an inherited vector any more. Since
+       7873a4bb99 api/main.py no longer reads that file at import, and only the
+       explicit boot entries (cli/server.py, cli/client.py via core/dotenv_boot)
+       load it. The control used to be satisfied only because the old import-time
+       load put that file's marker into the queue process. It now must be absent from
+       an env-inheriting child, and that is asserted directly.
+    """
     mutate(h,"text=True, env=launch_env)","text=True, env=None)")
-    (h.aroot/".env").write_text("GATE_QUEUE_FIXTURE_DOTENV=marker\nAITELIER_ADMIN_TOKEN=fixture-admin-not-used\n")
+    h.env["GATE_QUEUE_FIXTURE_DOTENV"]="marker"
+    (h.aroot/".env").write_text("GATE_QUEUE_FIXTURE_ROOT_DOTENV=marker\nAITELIER_ADMIN_TOKEN=fixture-admin-not-used\n")
     a=h.submit(); h.complete(a)
     child=json.loads((h.reports/a/"child-environment.json").read_bytes())
     def exercise():
         assert "GATE_QUEUE_FIXTURE_DOTENV" not in child["names"], "child env contains GATE_QUEUE_FIXTURE_DOTENV; expected absent"
     first_failure(h,"C05",exercise,"child env contains GATE_QUEUE_FIXTURE_DOTENV")
-    assert "AITELIER_ADMIN_TOKEN" in child["names"]
+    assert "GATE_QUEUE_FIXTURE_ROOT_DOTENV" not in child["names"], (
+        "repo-root .env marker GATE_QUEUE_FIXTURE_ROOT_DOTENV reached an env-inheriting child; "
+        "the root .env must not be a vector since 7873a4bb99 (api/main.py no longer loads it)")
+    assert "AITELIER_ADMIN_TOKEN" not in child["names"], (
+        "root .env AITELIER_ADMIN_TOKEN reached an env-inheriting child")
 
 
 def test_C06_in_process_transport_stub_is_not_accepted_as_real_client(h):

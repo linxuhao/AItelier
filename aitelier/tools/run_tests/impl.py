@@ -1417,7 +1417,8 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
                 "script": REPO_GATE_SCRIPT, "ticket": ticket,
                 "output": f"repository gate not started: admission relay "
                           f"unavailable ({type(e).__name__}: {e})",
-                "measured": REPO_GATE_UNMEASURED}
+                "measured": REPO_GATE_UNMEASURED,
+                "render_contention": _render_contention({})}
     # Watched from before the gate starts: which entry the gate run created
     # first under its ticket (`_FirstEntry`).
     first_entry = _FirstEntry(report_dir)
@@ -1443,6 +1444,10 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
     result["report_dir"] = str(report_dir)
     result["repo"] = str(repo)
     result["admission"] = admission
+    # The contention, named at the top level so a reader of the gate result
+    # sees the wait without opening admission.json. Additive: the outcome below
+    # is decided by `admission.state` and the exit code, never by this block.
+    result["render_contention"] = _render_contention(admission)
     # Which report under the ticket is this gate run's (`_retained_findings`):
     # `state` is `own` when the gate's report was identified, and
     # `unattributable` otherwise, with `why`.
@@ -1599,6 +1604,37 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
         # the middle, and half a line still looks like a line.
         return False
     return _unmeasured_declaration(str(gate.get("output", ""))) is not None
+
+
+def _render_contention(admission: dict) -> dict:
+    """What the admission relay's own records say this gate waited behind.
+
+    Built ONLY from the `admission` summary (`gate_admission.admission_summary`):
+    `queued_behind` names the render owners the queue reported for this run's
+    requests, and `render_owner_wait_sec` is their summed wait. Nothing is read
+    from the engine's lifecycle or from prose. A run that waited behind nobody
+    is `owners: []`, `wait_sec: 0.0`, `state: "none"`. The state is `waited`
+    whenever an owner was named or any wait was recorded. Outcome
+    classification never reads this block: it names the contention, nothing
+    more.
+    """
+    admission = admission or {}
+    owners = list(dict.fromkeys(str(owner) for owner in admission.get("queued_behind") or []))
+    try:
+        wait = float(admission.get("render_owner_wait_sec") or 0.0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    waited = bool(owners) or wait > 0
+    return {"owners": owners, "wait_sec": round(wait, 3),
+            "state": "waited" if waited else "none"}
+
+
+def _contention_sentence(contention: dict) -> str:
+    """The one line a reader of the summary sees when the gate waited."""
+    owners = ", ".join(contention.get("owners") or []) or "no owner id recorded"
+    return ("Render contention: this run's repository gate waited "
+            f"{float(contention.get('wait_sec') or 0.0):.3f}s behind render owner(s) "
+            f"{owners}.")
 
 
 def _repo_gate_outcome(gate: dict) -> str:
@@ -3382,6 +3418,19 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         gate = _acquire_repo_gate(repo, run_id=run_id)
         if gate is not None:
             report["repo_gate"] = gate
+            # The block is always present on a report that has a gate result,
+            # clean or not: `state: "none"` is a measured absence of contention,
+            # not a missing key. Only the summary line depends on it.
+            contention = gate.get("render_contention") or _render_contention({})
+            report["render_contention"] = contention
+            if contention.get("state") == "waited":
+                # Named in the summary a reader sees, not only in the JSON. The
+                # sentence leads whatever summary there is; with none, it IS the
+                # summary, so the report never reads as empty (a malformed report
+                # to `coding_impl_outcome`, and a contention a reader cannot see).
+                sentence = _contention_sentence(contention)
+                report["summary"] = (sentence + "\n\n" + report["summary"]
+                                     if report.get("summary") else sentence)
             report["gate_coverage"] = gate.get("gate_coverage")
             if (isinstance(report["gate_coverage"], dict)
                     and report["gate_coverage"].get("purpose") == PROVISIONAL_PURPOSE):

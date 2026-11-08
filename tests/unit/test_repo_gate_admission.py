@@ -248,3 +248,138 @@ def test_the_summary_reads_the_last_request():
     assert gate_admission.admission_summary(
         [answered | {"delivered": False}])["state"] == "undelivered"
     assert gate_admission.admission_summary([])["state"] == "no_engine_request"
+
+
+# ── render-contention is named by the gate's own admission records ─────────
+#
+# The records below carry the relay's REAL field names and the harness's REAL
+# answer fields (`render_owner_waited_for_owner_ids`, `render_owner_wait_sec`,
+# `outcome`; see `docker/godot/godot_harness.py` and `gate_admission._ANSWER_FIELDS`).
+# They run without docker or the render lock: the builder is a fake, and the
+# contention is read from the same records the relay writes.
+
+def _answered(seq, *, waited_for=(), wait=0.0, outcome="answered", status=200):
+    """One relay record shaped as `AdmissionRelay._relay` writes it."""
+    record = {"seq": seq, "route": "/script", "method": "POST",
+              "outcome": outcome, "status": status, "delivered": True,
+              "render_owner_wait_sec": wait,
+              "render_owner_waited_for_owner_ids": list(waited_for)}
+    return record
+
+
+def test_a_gate_that_waited_names_the_owner_and_the_summed_wait():
+    """Two requests queued behind the same foreign owner, then one behind
+    another. The block names exactly those owner ids, de-duplicated in the
+    order the records name them, and the summed seconds; the summary line names
+    the wait and the owners so a reader sees it without the JSON."""
+    records = [
+        _answered(0, waited_for=["owner-A"], wait=180.9249),
+        _answered(1, waited_for=["owner-A", "owner-B"], wait=2.5),
+    ]
+    admission = gate_admission.admission_summary(records)
+    contention = rt._render_contention(admission)
+
+    assert contention == {"owners": ["owner-A", "owner-B"],
+                          "wait_sec": round(180.9249 + 2.5, 3),
+                          "state": "waited"}
+    sentence = rt._contention_sentence(contention)
+    assert "183.425s" in sentence
+    assert "owner-A" in sentence and "owner-B" in sentence
+    assert sentence.startswith("Render contention:")
+
+
+def test_a_gate_that_did_not_wait_has_no_contention_and_says_nothing():
+    """No owner was named and no wait recorded: the block is the clean default
+    and the summary line is never written."""
+    records = [_answered(0), _answered(1, waited_for=[], wait=0.0)]
+    contention = rt._render_contention(gate_admission.admission_summary(records))
+    assert contention == {"owners": [], "wait_sec": 0.0, "state": "none"}
+    # The summary line is written only for a `waited` state. A clean run's
+    # report must never name a contention it did not have.
+    assert contention["state"] != "waited"
+
+
+def test_no_engine_request_is_a_clean_none():
+    contention = rt._render_contention(gate_admission.admission_summary([]))
+    assert contention == {"owners": [], "wait_sec": 0.0, "state": "none"}
+
+
+def test_a_clean_gate_run_names_no_contention_in_its_report(tmp_path, monkeypatch):
+    """Requirement (b) end-to-end: a gate that waited behind nobody puts the
+    clean block on the gate result, and the report's summary never mentions
+    contention. The gate result is the real `_run_repo_gate` shape for an
+    answered green run."""
+    clean = _answered(0)
+    admission = gate_admission.admission_summary([clean])
+    gate = {"script": "run_tests.sh", "returncode": 0, "passed": True,
+            "output": "gate: all green", "output_truncated": False,
+            "admission": admission | {"ticket": "rt-clean", "upstream": "http://x"},
+            "render_contention": rt._render_contention(admission),
+            "ticket": "rt-clean", "retained_findings": 0,
+            "gate_coverage": None}
+    gate["measured"] = rt._repo_gate_outcome(gate)
+    assert gate["render_contention"] == {"owners": [], "wait_sec": 0.0, "state": "none"}
+
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda *_a, **_k: gate)
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    out = tmp_path / "out"
+    rt.run_tests(project_root=str(repo), out_dir=str(out), run_id="clean-gate")
+    report = json.loads((out / "test_report.json").read_text())
+
+    assert report["render_contention"] == {"owners": [], "wait_sec": 0.0, "state": "none"}
+    assert "contention" not in report["summary"].lower()
+    assert "render owner" not in report["summary"].lower()
+
+
+def test_a_contended_run_that_went_red_stays_a_measured_red(tmp_path, monkeypatch):
+    """A contended gate that then ran and went RED is still `measured_fail`:
+    the contention is named, and the outcome class is exactly what it was before
+    the field existed. Outcome classification reads `admission.state` and the
+    exit code only; `render_contention` changes neither.
+
+    Built on the REAL `run_tests` fold. The gate result is what
+    `_run_repo_gate` returns for an answered red after a contended wait: the
+    admission summary comes from the real relay records, and only the gate's
+    own exit code and retained findings are supplied.
+    """
+    contended = _answered(0, waited_for=["owner-A"], wait=180.9249)
+    admission = gate_admission.admission_summary([contended])
+    gate = {"script": "run_tests.sh", "returncode": 1, "passed": False,
+            "output": "gate: script FAILED", "output_truncated": False,
+            "admission": admission | {"ticket": "rt-test", "upstream": "http://x"},
+            "render_contention": rt._render_contention(admission),
+            "ticket": "rt-test", "retained_findings": 1,
+            "failure_cases": [{"case_id": "playtest/a", "detail": "red"}],
+            "gate_coverage": None}
+    gate["measured"] = rt._repo_gate_outcome(gate)
+    assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+
+    # The same gate without the contention is the same outcome class.
+    plain = dict(gate, admission=gate_admission.admission_summary([_answered(0)]),
+                 render_contention=rt._render_contention({}))
+    plain["measured"] = rt._repo_gate_outcome(plain)
+    assert plain["measured"] == gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda *_a, **_k: gate)
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    out = tmp_path / "out"
+    result = rt.run_tests(project_root=str(repo), out_dir=str(out),
+                          run_id="contended-red")
+    report = json.loads((out / "test_report.json").read_text())
+
+    # The contention is named, in the JSON and in the summary a reader sees.
+    assert report["render_contention"] == {"owners": ["owner-A"],
+                                           "wait_sec": 180.925, "state": "waited"}
+    assert report["summary"].startswith("Render contention:")
+    assert "owner-A" in report["summary"] and "180.925s" in report["summary"]
+    # ...and the outcome class is still a measured red: a product failure, not
+    # a "did not run" absence.
+    assert report["passed"] is False and result["passed"] is False
+    assert "repo_gate_absent" not in report
+    assert report.get("evidence_state") != "not_run"
+    assert result["repo_gate_absent"] is False
+    assert report["repo_gate"]["measured"] == rt.REPO_GATE_MEASURED_FAIL

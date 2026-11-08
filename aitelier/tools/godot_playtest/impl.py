@@ -459,18 +459,48 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(reason, TimeoutError)
 
 
+def _error_bytes(exc: urllib.error.HTTPError) -> bytes:
+    """The builder's error body, read once and kept on the exception.
+
+    An HTTP response can be read only once, and two answer paths look at the
+    same body (the 409 render-owner check, then the builder-error fallback).
+    Caching keeps every reader on the same bytes. A failed read raises as before.
+    """
+    raw = getattr(exc, "_aitelier_body", None)
+    if raw is None:
+        raw = exc.read()
+        exc._aitelier_body = raw
+    return raw
+
+
 def _render_owner_refusal(exc: BaseException) -> dict | None:
     """The sidecar's render-owner refusal body, or None for any other error."""
     if not isinstance(exc, urllib.error.HTTPError) or exc.code != 409:
         return None
     try:
-        body = json.loads(exc.read())
+        body = json.loads(_error_bytes(exc))
     except Exception:
         return None
     if isinstance(body, dict) and body.get("error") in (
             "render owner exists", "render owner wait timed out"):
         return body
     return None
+
+
+def _builder_error_body(exc: urllib.error.HTTPError):
+    """The body the builder sent with an error status, parsed when it is JSON.
+
+    Never raises: a body that cannot be read (dropped or truncated mid-send) is
+    itself a fact, recorded as one rather than letting the report fail.
+    """
+    try:
+        raw = _error_bytes(exc)
+    except Exception as read_exc:
+        return f"unreadable response body: {type(read_exc).__name__}"
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw.decode("utf-8", "replace")
 
 
 def authored_caller_timeout(spec, ceiling: int | float) -> int | float:
@@ -830,6 +860,23 @@ def post_playtest(payload: dict, timeout: int = 4200) -> dict:
                         f"{because}, owner {refusal.get('owner_id')}): "
                         f"{refusal.get('detail')}. Play-test gate skipped — "
                         f"scene NOT smoke-tested.")}
+        if isinstance(e, urllib.error.HTTPError):
+            # The sidecar ANSWERED with an error status (a 500 from a malformed
+            # spec, for instance). That is a failed run, not an absent one: the
+            # builder was reachable and did not run the play-test. It must not
+            # fall into the unreachable branch below, which reports a pass.
+            # Live 2026-11-08 (evidence/playtest-two-reading-20261108, key
+            # crash_consequence): `actions: 5` -> HTTP 500 -> passed:true.
+            return {"passed": False, "frames": 0, "errors": [], "state": {},
+                    "behavior": None, "spec_used": False,
+                    "builder_error": {"status": e.code,
+                                      "response": _builder_error_body(e)},
+                    "summary": (
+                        f"godot-builder answered the play-test request with an "
+                        f"error (HTTP {e.code}): the builder was reached and did "
+                        f"not run the play-test. This is a FAILURE and NOT a pass; "
+                        f"nothing in this build was verified. See builder_error "
+                        f"for the builder's response.")}
         # skillflow's validator reads `passed` and drops every other key, so
         # the flag beside it reaches nobody. Land the fact where it survives
         # the run — see aitelier/gate_skip_log.py. Live 2026-09-04 23:08: a

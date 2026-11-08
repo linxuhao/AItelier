@@ -13,13 +13,13 @@ Repaired **2026-11-08T21:05Z–21:12Z** against the rotated apport logs, the ker
 `immich_machine_learning` container log and the upstream tracker. The measurement window above and
 every measured figure that is still true are unchanged by the repair; what changed, marked ⚠ below:
 
-1. the recorded signal on **every** one of the 46 retained apport events — both 2026-11-08 events
+1. the recorded signal on **every** one of the 46 retained serving-worker apport events — both 2026-11-08 events
    included — is **6 (SIGABRT)**, not SIGSEGV;
 2. the 13:50 core on disk is **578,191,360 B smaller** than the size apport logged for it;
 3. ⚠ **CORRECTED:** the 11-06/11-07 events *do* have log lines. `/var/log/apport.log*` rotates daily,
    but the rotated files are `0640 root:adm` and readable by uid 1000 through group `adm`. All eight
-   retained files carry a **census of 46 `immich_ml` events across 8 dates** (2026-10-31 01:23:34 →
-   2026-11-08 13:52:19), so attribution to the ML container is **direct for every event**, not
+   retained files carry a **census of 46 serving-worker `immich_ml` events across 8 dates** — 52
+   `immich_ml` SIGABRTs in total (§1.3) — (2026-10-31 01:23:34 → 2026-11-08 13:52:19), so attribution to the ML container is **direct for every event**, not
    pattern inference (§1.3);
 4. ⚠ the five-file core store is apport's **cap**, not a crash count (§2), and the 0-byte core has a
    recorded cause — apport itself crashed while writing it (§2);
@@ -133,6 +133,13 @@ Per date: 2026-10-31 ×17, 11-01 ×9, 11-02 ×4, 11-04 ×4, 11-05 ×3, 11-06 ×5
 `python -m gunicorn immich_ml.main:app -k immich_ml.config.CustomUvicornWorker -c
 /usr/src/immich_ml/gunicorn_conf.py -b [::]:3003 -w 1 …`.
 
+The census is **scoped to that command line**. The same eight files hold **six further `immich_ml`
+SIGABRTs** from the image's one-shot entrypoint `python -m immich_ml.sessions.prepare` (11-01 ×4 at
+03:05–03:59, 11-02 ×2 at 13:08 and 23:40) — same `/usr/bin/python3.12`, same signal 6, same core
+store — so the image's total is **52 `immich_ml` SIGABRTs across the same eight dates**. Only the 46
+above serve models on port 3003; the six change the recurrence count, not the owner. A re-run that
+drops this filter reproduces 52, not 46.
+
 What that settles, and what it does not:
 
 - Attribution to `immich_machine_learning` is **direct for all 46 events**, not inference for three
@@ -163,10 +170,11 @@ What would still make it stronger (each is an owner decision I did not take):
 
 ⚠ **The store holds at most five cores by design.** `max_corefiles_per_uid = 5` at
 `/usr/lib/python3/dist-packages/apport/fileutils.py:36`, and
-`apport.fileutils.clean_core_directory(report_owner.uid)` is called at `/usr/share/apport/apport:305`
-— with the new file created two lines later (`apport:306-307`, `os.open(… O_CREAT | O_EXCL …)`) —
-i.e. **before every core write**. `clean_core_directory` (`fileutils.py:655-664`) rotates the oldest
-file out as soon as the directory already holds `max_corefiles_per_uid - 1`. The store therefore only
+`apport.fileutils.clean_core_directory(report_owner.uid)` is called at `/usr/share/apport/apport:304`
+— immediately before the new file is created by `os.open(… O_CREAT | O_EXCL, mode=0o400)` at
+`apport:305-307` — i.e. **before every core write**. `clean_core_directory`
+(`fileutils.py:655-664`) rotates the oldest file out as soon as the directory already holds
+`max_corefiles_per_uid - 1`. The store therefore only
 ever holds the five most recent writes and never the crash count: with the 46 events of §1.3, at most
 five cores can exist at any moment, and these five are simply the last five writes. There is also a
 `systemd-tmpfiles` age rule (`/usr/lib/tmpfiles.d/apport.conf:2`,
@@ -261,7 +269,8 @@ is not, and this document does not substitute a guess for it.
 
 **Ongoing.** The basis is the census, not the store:
 
-- **46 events across 8 dates**, 2026-10-31 01:23:34 → 2026-11-08 13:52:19 (§1.3) — an 8.5-day span
+- **46 serving-worker events across 8 dates** — **52 `immich_ml` SIGABRTs** once the six one-shot
+  `sessions.prepare` events are counted (§1.3) — 2026-10-31 01:23:34 → 2026-11-08 13:52:19, an 8.5-day span
   whose only event-free calendar day, **2026-11-03**, is also the one day with no retained apport log
   to check (§4).
 - It is not a clock slot. The earlier "pair minutes apart in the 13:2x–13:5x window" reading came from
@@ -506,7 +515,7 @@ release pages v3.3.4/v3.3.5, issues #27387, PR #28444, discussion #26953.
 ```
 python3 (gzip/pathlib) over /var/log/apport.log.{7..2}.gz, .1 and the live file   # 46-event census
 grep -n 'max_corefiles_per_uid' /usr/lib/python3/dist-packages/apport/fileutils.py  # :36, :655-664
-sed -n '303,307p'  /usr/share/apport/apport        # clean_core_directory call at :305, O_EXCL at :306
+sed -n '303,307p'  /usr/share/apport/apport        # clean_core_directory call — this window's SECOND line is :304 (read as :305 here; corrected in the second pass below), O_EXCL at :306-307
 sed -n '314,330p'  /usr/share/apport/apport        # :319 len(r["CoreDump"]), :328 unchecked os.write
 sed -n '340,350p'  /usr/share/apport/apport        # unlink-on-limit in the streamed path
 sed -n '357,370p'  /usr/share/apport/apport        # usable_ram() = (MemFree+Cached-Writeback)*1024
@@ -529,3 +538,22 @@ curl -s https://api.github.com/repos/immich-app/immich/issues/32046   # state/st
 The repair pass used no `docker run`, no `docker exec`, no container restart or recreate, no
 `sudo`, deleted no core or crash file, and changed no compose file, env var or service. The only
 network access was the one GitHub API read above. The only file written is this document.
+
+### Second repair pass (director, 2026-11-08T21:2xZ, read-only)
+
+Two figures in this document came from the director's own facts file and do not reproduce. Both are
+corrected above; the correction is recorded here rather than silently overwritten, because a number a
+reader cannot re-derive is the defect this document exists to avoid.
+
+1. **The census filter was unstated.** The 46-event table is right per row and per window, but the
+   method paragraph did not say it keeps only the events whose logged cmdline is the serving worker.
+   Re-deriving every `immich_ml` SIGABRT from the same eight files gives **52**: the extra six are
+   `python -m immich_ml.sessions.prepare` (11-01 ×4 at 03:05–03:59, 11-02 ×2 at 13:08 and 23:40), same
+   executable, same signal 6, same core store. Re-run: the block parse in §1.3 with and without the
+   `immich_ml.main:app` filter.
+2. **The call site is `:304`, not `:305`.** `clean_core_directory(report_owner.uid)` is the second line
+   of a `sed -n '303,307p'` window and was counted as the first; `:305` is the `core_file = os.open(`
+   that follows it. Re-run: `grep -n clean_core_directory /usr/share/apport/apport` → `304:`.
+
+Both numbers appear in the same shape in the director's `REPAIR-FACTS.md`; the correction there is the
+one that prevents the next copy of this document from repeating them.

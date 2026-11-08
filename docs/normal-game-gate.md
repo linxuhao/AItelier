@@ -105,6 +105,12 @@ a verdict. `unknown` (or `unknown <why>`) is what `tools/gate_binding.py` answer
 with exit 0 after reading the receipt and binding; `unanswered:<what>-tool-failed`
 means that call never returned an answer. The two must not be read as the same
 fact.
+A third spelling, `unanswered:sidecar-tool-failed`, means the `sidecar`
+re-observation call failed; it is the word before `-platform-identity` on the
+same `<suffix>.gate.exit` line
+(`unanswered:sidecar-tool-failed-platform-identity; real rc was ...`). It is not
+a verdict either, and not `unknown`: `unknown` (or `unknown <why>`) is still
+what `tools/gate_binding.py` answers, with exit 0, after reading the bytes.
 
 The frozen bytes still matter: a receipt can authorize cleanup only against the
 hash (and image) frozen before dispatch, never against a newly observed or

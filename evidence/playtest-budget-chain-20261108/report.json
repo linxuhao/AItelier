@@ -1,0 +1,310 @@
+{
+  "schema": "playtest-budget-chain/1",
+  "tree": {
+    "repo": "AItelier",
+    "commit": "be6d8db2aeeab613c4ca52129b562fe9e7ab5df0",
+    "worktree": "work/c6-playtest-budget-20261108",
+    "measured_on": "static reads of this commit; effective values read in a disposable aitelier:latest container (--network none, 2 CPU, 2 GiB, one worker)"
+  },
+  "question": "Which layer actually bounds a play-test today, given post_playtest's default socket timeout is 4200 s (raised 2026-11-08)?",
+  "answer_summary": "There are two real paths. (1) The godot_playtest tool / godot_compile chained playtest goes through post_playtest and is bounded by its 4200 s socket (impl.py:648, :705). (2) The repo gate (run_tests -> run_tests.sh -> game godot_gate.py -> sidecar /playtest) is bounded by the game gate's own /playtest socket of 3600 s (godot_gate.py:1816-1818 on the scratch copy), inside the 12600 s REPO_GATE_TIMEOUT relay (run_tests impl.py:1306). The largest completed render (3471.29 s, wuxia-godot-gate-7kf51nvv, passed) fired NO layer; on the repo-gate path the first layer to fire for a render that runs longer is the game gate's 3600 s socket, which had 128.7 s of headroom for it. The 4200 default raise does NOT lengthen the repo-gate path. The addon's 3900/3600 step budgets are claim-staleness windows in the engine, not kills (stepflow core.py:5732-5740). The 3600 s authored-scenario ceiling (impl.py:58) is a per-run clamp, not the socket.",
+  "layers": [
+    {
+      "id": "L1_tool_entry_playtest",
+      "path": "godot_playtest tool, action playtest (no feedback)",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:876",
+      "code": "report = post_playtest(payload)",
+      "effective_timeout_sec": 4200,
+      "source": "post_playtest default, aitelier/tools/godot_playtest/impl.py:648 `def post_playtest(payload: dict, timeout: int = 4200)`; confirmed by effective-value probe (post_playtest_default_timeout = 4200)",
+      "socket": "urllib.request.urlopen(req, timeout=timeout) at impl.py:705",
+      "queue_share": "payload render_wait_timeout_sec = round(4200 * 0.5, 3) = 2100.0 (impl.py:695, RENDER_QUEUE_SHARE=0.5 at :52)",
+      "authored_ceiling": "payload timeout = authored_caller_timeout(spec, min(4200, 3600)) (impl.py:693-694) -> ceiling 3600 applies to the sidecar's per-run authored budget",
+      "fires_for_completed_render_over": "4200 s socket (and the sidecar cannot return sooner than its own work)"
+    },
+    {
+      "id": "L2_feedback_arm",
+      "path": "godot_playtest tool with purpose=provisional_round_feedback",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:835-839",
+      "code": "feedback_timeout = int(kwargs.get(\"feedback_timeout\", 600)); run_feedback(..., lambda payload: post_playtest(payload, timeout=feedback_timeout), caller_timeout=feedback_timeout)",
+      "effective_timeout_sec": 600,
+      "source": "explicit kwarg default 600 at impl.py:835; the tool.yaml parameter (aitelier/tools/godot_playtest/tool.yaml:69-71) documents default 600",
+      "authored_ceiling": "authored_caller_timeout(selected, 600) at aitelier/round_feedback.py:248 -> min(...,600)",
+      "fires_for_completed_render_over": "600 s (provisional feedback only; never a final gate)"
+    },
+    {
+      "id": "L3_scenario_tool",
+      "path": "godot_playtest_scenario tool (one scenario, probe)",
+      "file_line": "aitelier/tools/godot_playtest_scenario/impl.py:149-152",
+      "code": "timeout = 900 if _timeout_seconds is None else int(_timeout_seconds); if not 1 <= timeout <= 900: refuse; post_playtest(..., timeout=timeout)",
+      "effective_timeout_sec": 900,
+      "source": "impl.py:149; hard refusal above 900 at :150-151",
+      "fires_for_completed_render_over": "900 s socket; a single-scenario probe is never a full-suite gate"
+    },
+    {
+      "id": "L4_godot_compile_chain",
+      "path": "godot_compile tool, chained playtest after a passing parse",
+      "file_line": "aitelier/tools/godot_compile/impl.py:306-311",
+      "code": "if report.get(\"passed\") is True ...: pt = godot_playtest(project_root=..., out_dir=..., ...)  # calls post_playtest with default",
+      "effective_timeout_sec": 4200,
+      "source": "godot_playtest(...) -> post_playtest(payload) default 4200 (impl.py:876)",
+      "compile_socket": "compile POST urlopen(req, timeout=600) at godot_compile impl.py:265 (parse phase only)",
+      "fires_for_completed_render_over": "4200 s socket for the playtest leg; 600 s for the parse leg"
+    },
+    {
+      "id": "L5_addon_step_5_compile",
+      "path": "game_harness addon step 5_compile (tool godot_compile) -> chains L4",
+      "file_line": "configs/addons/game_harness.yaml:60-71",
+      "declared_timeout_sec": 3900,
+      "value_line": "configs/addons/game_harness.yaml:71 `timeout_seconds: 3900`",
+      "enforcement": "NOT a process kill. skillflow engine (stepflow core.py:5626 advance_run, :5732-5740) fails a claim only when advance_run next runs and the claim is older than timeout_seconds; a running tool is not interrupted. Stale-claim reclaim window for tools is max(stale_threshold, timeout_seconds) (core.py:6486-6492). Corroborated by configs/coding_impl.yaml:191-194: a step ran ~2050 s past its 1200 s budget and completed with no reclaim.",
+      "fires_for_completed_render_over": "3900 s is a declared bound with no kill; it would only mark the claim failed on the next advance_run after 3900 s"
+    },
+    {
+      "id": "L6_addon_step_5_vision",
+      "path": "game_harness addon step 5_vision (godot_vision, no playtest POST)",
+      "file_line": "configs/addons/game_harness.yaml:112-121",
+      "declared_timeout_sec": 3600,
+      "value_line": "configs/addons/game_harness.yaml:121 `timeout_seconds: 3600`",
+      "relevance": "reads 5_compile's captures; does not POST /playtest and cannot bound a play-test",
+      "fires_for_completed_render_over": "n/a to play-test duration"
+    },
+    {
+      "id": "L7_addon_step_5_final_test",
+      "path": "game_harness addon step 5_final_test (run_tests, repo_gate:false)",
+      "file_line": "configs/addons/game_harness.yaml:473-490",
+      "declared_timeout_sec": 4200,
+      "value_line": "configs/addons/game_harness.yaml:481 `timeout_seconds: 4200`; tool_params repo_gate: false at :487-488",
+      "relevance": "repo_gate:false means run_tests does not shell run_tests.sh, so no play-test POST happens in this step",
+      "fires_for_completed_render_over": "n/a to play-test duration"
+    },
+    {
+      "id": "L8_addon_step_test_dpe",
+      "path": "dpe_default 5_test (run_tests) on game_harness path",
+      "file_line": "configs/dpe_default.yaml:904-920",
+      "declared_timeout_sec": 4200,
+      "value_line": "configs/dpe_default.yaml:920 `timeout_seconds: 4200`; repo_gate: false at :925",
+      "relevance": "repo_gate false on the game path; the engine gate is 5_compile only",
+      "fires_for_completed_render_over": "n/a to play-test duration"
+    },
+    {
+      "id": "L9_coding_impl_test",
+      "path": "coding_impl test step (run_tests, repo_gate default true)",
+      "file_line": "configs/coding_impl.yaml:166-198",
+      "declared_timeout_sec": 4200,
+      "value_line": "configs/coding_impl.yaml:198 `timeout_seconds: 4200`",
+      "repo_gate": "default true (no repo_gate: false in tool_params), so run_tests shells the repo gate script",
+      "repo_gate_path": {
+        "run_tests_gate_call": "aitelier/tools/run_tests/impl.py:1449 `_run_node_cmd(repo, [\"bash\", script], REPO_GATE_TIMEOUT, ...)`",
+        "REPO_GATE_TIMEOUT": "aitelier/tools/run_tests/impl.py:1306 `REPO_GATE_TIMEOUT = 12600`",
+        "relay_upstream_socket": "aitelier/gate_admission.py:520 `HTTPConnection(..., timeout=self._timeout)`, with _timeout = REPO_GATE_TIMEOUT (run_tests impl.py:1427 `upstream_timeout=REPO_GATE_TIMEOUT`)",
+        "relay_queue_window": "aitelier/gate_admission.py:94 `RENDER_WAIT_SECONDS = 1500.0`; injected as payload render_wait_timeout_sec at :483-484 when the gate sends none",
+        "sidecar_socket": "the game gate (godot_gate.py) owns the /playtest client timeout, which the docs state as 3600 s (docs/repo-gate-unmeasured-protocol.md:193; gate_admission.py:98 comment). Not in this tree; the game repo's godot_gate.py was not readable from here (glob timed out)."
+      },
+      "fires_for_completed_render_over": "12600 s (relay upstream socket / REPO_GATE_TIMEOUT) for the whole gate; the play-test leg is inside it"
+    },
+    {
+      "id": "L10_episode_ceiling",
+      "path": "core/gate_deferral.py episode ceiling (absent-gate wait)",
+      "file_line": "core/gate_deferral.py:58-59 (GATE_DEFERRAL_EPISODE_MAX_SECONDS default \"12600\"); :69 ceiling default 6*3600; :74 _ABSOLUTE_EPISODE_CEILING = 6*3600.0; :104-109 episode_max_seconds()",
+      "effective_value_sec": 12600.0,
+      "absolute_ceiling_sec": 21600.0,
+      "effective_ceiling_value_note": "the 21600 figure is the env ceiling default (:69, 6*3600) AND the hard absolute cap (:74, 6*3600); episode_max_seconds() clips to min(setting, min(env ceiling, 21600)) = 12600 at defaults (probe: gate_deferral_episode_max_seconds_effective = 12600.0)",
+      "relation": "contains REPO_GATE_TIMEOUT: 12600 <= 12600 (gate_deferral.py:50-53 invariant, asserted by tests/unit/test_gate_deferral_execution_points.py)",
+      "fires_for_completed_render_over": "12600 s episode; a completed render (3471 s) does not reach it, but it is the only ceiling that can end an absent-gate episode"
+    },
+    {
+      "id": "L11_sidecar_per_scenario",
+      "path": "godot-builder sidecar: undeclared scenario budget",
+      "file_line": "docker/godot/godot_harness.py:4231 `ceiling, seconds = _MAX_SPEC_FRAMES, min(timeout, 120)`",
+      "source_file": "docker/godot/godot_harness.py (tracked in this repo; Dockerfile.godot:86 `COPY docker/godot/godot_harness.py /srv/godot_harness.py`; docker-compose.yml godot-builder service builds it from the repo root). Not present at /srv on this host (the sidecar runs in its container).",
+      "effective_timeout_sec": 120,
+      "override": "scenario execution_budget.timeout_seconds at :4237, must be <= caller timeout (:4240-4241); authored_caller_timeout at impl.py:456-485 carries it upward",
+      "measured_max_scenario_wall_sec": 49.7794,
+      "measured_max_control_wall_sec": 47.0612,
+      "fires_for_completed_render_over": "120 s per undeclared scenario; never reached in the largest measured render (max 49.78 s)"
+    },
+    {
+      "id": "L12_sidecar_queue_and_post_ownership_locks",
+      "path": "godot-builder sidecar render queue and post-ownership locks",
+      "file_line": "docker/godot/godot_harness.py:162-163 RENDER_PROCESS_LOCK_WAIT_SEC = 3600.0, RENDER_EFFECT_LOCK_WAIT_SEC = 3600.0; queue wait bound by render_wait_timeout_sec (:7422-7427, :7526-7531)",
+      "effective_timeout_sec": "queue: caller render_wait_timeout_sec (2100 s from post_playtest default); post-ownership locks: 3600 s each",
+      "measured_render_lock_wait_sec": 0.0001,
+      "measured_source": "wuxia-godot-gate-7kf51nvv/playtest.json timing.render_lock_wait_sec (0.0001)",
+      "fires_for_completed_render_over": "not reached: the largest render waited 0.0001 s for the lock"
+    }
+  ],
+  "first_to_fire": {
+    "measured_render": {
+      "path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/playtest.json",
+      "field": "timing.wall_sec",
+      "value_sec": 3471.2921,
+      "schema": "playtest-timing/1",
+      "passed": true,
+      "scenario_count": 166,
+      "control_count": 109,
+      "manifest": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/manifest.json",
+      "manifest_playtest_stage_sec": 3476.2,
+      "manifest_playtest_stage": "2026-09-18T11:21:20.717950+00:00 -> 2026-09-18T12:19:16.919437+00:00"
+    },
+    "arithmetic": [
+      "sidecar timing.wall_sec 3471.2921 s = scenario_wall_sum 2029.9369 + control_wall_sum 1436.6302 + import_resources 4.491 + copy 0.1348 + unattributed 0.0992 (the sum of scenario+control = 3466.5671; the remainder is the ledger's own bookkeeping, per timing.unattributed_means)",
+      "L1/L4 post_playtest socket 4200 s: 4200 - 3471.2921 = 728.7079 s headroom (the render would survive it)",
+      "L1 socket if the render had been sent at the OLD 3600 s default: 3600 - 3471.2921 = 128.7079 s headroom (the 2026-11-08 raise was needed for a slower render)",
+      "L2 feedback 600 s: render exceeds it by 3471.2921 - 600 = 2871.2921 s (feedback is not a gate path for this render)",
+      "L3 scenario tool 900 s: render exceeds it by 2571.2921 s (single-scenario probe only; not a full-suite path)",
+      "L5 5_compile declared 3900 s: 3900 - 3471.2921 = 428.7079 s headroom, but it does NOT kill (engine marks the claim failed only on a later advance_run; see L5)",
+      "L9/L10 repo gate REPO_GATE_TIMEOUT 12600 s and episode 12600 s: 12600 - 3471.2921 = 9128.7079 s headroom",
+      "L11 per-scenario 120 s: max measured scenario 49.7794 s, headroom 70.2206 s; no scenario reached it",
+      "L12 render_lock_wait_sec 0.0001 s against 2100 s queue bound: headroom 2099.9999 s"
+    ],
+    "which_layer_fires_first_for_the_measured_render": "No layer fired for the completed 3471.29 s render: it returned passed:true with no gate_timeout. On the path it took (repo gate), the bounds in order of tightness are: (a) the game gate's /playtest socket at 3600 s (godot_gate.py:1816-1818, scratch copy; headroom 3600 - 3471.2921 = 128.7079 s), (b) the relay queue window 1500 s (gate_admission.py:94; not reached: lock wait 0.0001 s), (c) REPO_GATE_TIMEOUT / relay upstream socket 12600 s (run_tests impl.py:1306, :1449; gate_admission.py:520; headroom 9128.7079 s). So for this render the FIRST bound that would fire is (a), the game-side 3600 s socket, with 128.7 s to spare; it is the layer that would have orphaned it had it run 129 s longer. If the same render had gone through post_playtest (4200 s socket, impl.py:705), headroom would be 728.7079 s.",
+    "path_actually_taken": "Attribution: the retained report sits in a gate directory with the stage layout and progress.log header of the game repo gate (manifest stages python/compile/playtest/script; gate-reports/wuxia-godot-gate-<id>/), written by godot_gate.py via GATE_REPORT_DIR (the scratch copy shows the mkdtemp 'wuxia-godot-gate-' prefix at godot_gate.py:1892). So the path is run_tests -> run_tests.sh -> game godot_gate.py -> sidecar /playtest, NOT a post_playtest call from this tree; the tree's 4200 s socket (impl.py:648) was not on that path. The 4200 default is the bound only for godot_playtest / godot_compile callers. Attribution rests on the stage layout and the scratch copy's prefix; the 2026-09-18 game-gate source is not retained, so it is an inference."
+  },
+  "measured_worst": {
+    "completed_render_max_sec": 3471.2921,
+    "completed_render_path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/playtest.json (timing.wall_sec)",
+    "largest_aborted_render_sec": 6559.5635,
+    "largest_aborted_render_path": "/home/linxuhao/.AItelier/gate-reports/wuxia-godot-gate-o_fr2y_w/manifest.json (stages.playtest.started_at 2026-09-14T11:08:49.786099+00:00 -> finished_at 2026-09-14T12:58:09.349644+00:00, status aborted, no playtest.json retained)",
+    "largest_aborted_note": "NOT a completed measurement. The gate client was killed by the reroll-r1b driver and the sidecar drained (manifest note). It is a lower bound on the wall the sidecar handler held (6559.6 s). It exceeds the 4200 s post_playtest socket and the 3600 s game-gate socket, so on the repo-gate path it would have been orphaned at 3600 s (the client was in fact killed by the driver first). It is the only retained evidence of a render longer than 3600 s, and it did not complete.",
+    "measured_per_scenario_max_sec": 49.7794,
+    "measured_per_scenario_path": "wuxia-godot-gate-7kf51nvv/playtest.json timing.scenarios (two_phase_skill_unlock_and_hp_gate)",
+    "measured_render_lock_wait_max_sec": 0.0001
+  },
+  "mismatches": [
+    {
+      "id": "M1",
+      "file_line": "configs/addons/game_harness.yaml:67-70",
+      "current_text": "the real budget lives in post_playtest (3600s) plus the sidecar's 120s per scenario. Keep this just above that so the outer number can never be the one that fires first.",
+      "chain_value": "post_playtest default socket is 4200 s (impl.py:648); the 3600 s is AUTHORED_SCENARIO_CEILING_SEC (impl.py:58), a clamp on the authored caller budget, not the socket. For the repo-gate path the bound is REPO_GATE_TIMEOUT 12600 s (run_tests impl.py:1306).",
+      "could_cut_real_play_test_short": "No (for the measured render). Stale prose. The 3900 s value is not an enforced kill, so the 'outer number can never fire first' claim is not something the engine provides (L5).",
+      "severity": "stale"
+    },
+    {
+      "id": "M2",
+      "file_line": "configs/addons/game_harness.yaml:71",
+      "current_text": "timeout_seconds: 3900",
+      "chain_value": "The 5_compile step runs godot_compile, which chains godot_playtest at default 4200 s socket (godot_compile impl.py:309 -> impl.py:876). A 3900 s declared step budget is shorter than the 4200 s socket it contains, and it is only a claim-staleness window (stepflow core.py:5732-5740), not a kill.",
+      "could_cut_real_play_test_short": "Could mark the claim failed on the next advance_run if a playtest ran past 3900 s on the godot_compile path (4200 s socket). Not a kill; but a render between 3900 and 4200 s would be recorded as a step timeout while the report still lands. Caution, not a measured cut: the largest completed render is 3471.29 s, under 3900.",
+      "severity": "could_cut_short_on_godot_compile_path"
+    },
+    {
+      "id": "M3",
+      "file_line": "configs/addons/game_harness.yaml:121",
+      "current_text": "timeout_seconds: 3600",
+      "chain_value": "5_vision does not POST /playtest; it judges frames from 5_compile. The 3600 figure is about the vision judge (its own comment: a healthy 69-scenario run took ~770 s). Its comment (:116-118) says 'a healthy 69-scenario run measured 770s', while the largest retained playtest is 166 scenarios / 3471 s.",
+      "could_cut_real_play_test_short": "No. It does not bound the play-test; the number is stale relative to the current 166-scenario contract.",
+      "severity": "stale"
+    },
+    {
+      "id": "M4",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:53-57",
+      "current_text": "AUTHORED_SCENARIO_CEILING_SEC = 3600 ... 'post_playtest's default socket timeout was raised 3600 -> 4200 s, and this stays at 3600 s'",
+      "chain_value": "Matches code (impl.py:58 = 3600; impl.py:648 default 4200). Not a contradiction of the code, but the ceiling applies only to the authored per-run budget (impl.py:693-694 min(timeout, 3600)), not to the socket.",
+      "could_cut_real_play_test_short": "No; it is accurate. Listed to confirm the two numbers are distinct.",
+      "severity": "consistent"
+    },
+    {
+      "id": "M5",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:641-647",
+      "current_text": "4200 s, not 3600 s. The largest harness-measured render retained anywhere is 3471.2921 s of wall time ... ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/playtest.json ... 4200 s leaves 728.7 s.",
+      "chain_value": "Matches the measured value (timing.wall_sec 3471.2921, verified in gate_report_scan.json). BUT the comment claims it is 'the largest ... retained anywhere'; the retained aborted gate wuxia-godot-gate-o_fr2y_w has a 6559.6 s playtest stage (no playtest.json), which is larger.",
+      "could_cut_real_play_test_short": "No for completed renders. The 'largest retained anywhere' claim is wrong if aborted gates count; the completed-render claim is right.",
+      "severity": "stale_claim_scope"
+    },
+    {
+      "id": "M6",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:665-668",
+      "current_text": "4200s, not 1200 ... The per-scenario ceiling is AUTHORED_SCENARIO_CEILING_SEC (3600s) ... Undeclared scenarios retain 120s.",
+      "chain_value": "Matches code: undeclared scenario 120 s (godot_harness.py:4231); authored ceiling 3600 (impl.py:58). Consistent.",
+      "could_cut_real_play_test_short": "No.",
+      "severity": "consistent"
+    },
+    {
+      "id": "M7",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:678-680",
+      "current_text": "The queue wait is declared as render_wait_timeout_sec = RENDER_QUEUE_SHARE x timeout (0.5 x 4200 = 2100s at the default), so the sidecar gives up on the queue before our socket expires.",
+      "chain_value": "Matches code (impl.py:695 -> 2100.0). But the repo-gate relay injects 1500 s (gate_admission.py:94, :483-484), not 2100 s, for gates that do not come through post_playtest.",
+      "could_cut_real_play_test_short": "No for completed renders (lock wait 0.0001 s). It is a different queue constant on the repo-gate path.",
+      "severity": "consistent_for_post_playtest_only"
+    },
+    {
+      "id": "M8",
+      "file_line": "docs/repo-gate-unmeasured-protocol.md:193",
+      "current_text": "The game gate reads each render answer with one socket timeout (/script 1800 s, /playtest 3600 s).",
+      "chain_value": "The default post_playtest socket is 4200 s (impl.py:648), not 3600 s. The game gate's /playtest request is made by tools/godot_gate.py at line 1816-1818: transport(\"/playtest\", {...\"timeout\": process_timeout, ...}, 3600). The 3600 is the HTTP socket (http_transport urlopen timeout, godot_gate.py:246-250), so the game gate does NOT use the 4200 socket. Provenance caveat: the only godot_gate.py readable here is the scratch copy /home/linxuhao/gate-window-20261107/wtree/tools/godot_gate.py (mtime 2026-11-07, git a65e8829), NOT the copy that produced the 2026-09-18 wuxia render; the 2026-09-18 client timeout is therefore not directly measured.",
+      "could_cut_real_play_test_short": "YES if the current game gate is the scratch copy: a play-test whose sidecar wall exceeds 3600 s is orphaned by the GAME GATE's own socket at 3600 s, before the 4200 s post_playtest socket (which the game gate does not use) can fire. The 3471.29 s render has 128.7 s headroom under that socket. The impl.py:641-647 comment and the 4200 raise do not protect the repo-gate path; the 12600 relay REPO_GATE_TIMEOUT is the outer bound but the 3600 client socket fires first.",
+      "severity": "could_cut_real_play_test_short_on_repo_gate_path"
+    },
+    {
+      "id": "M9",
+      "file_line": "aitelier/gate_admission.py:98",
+      "current_text": "(/script 1800 s, /playtest 3600 s in tools/godot_gate.py).",
+      "chain_value": "Matches the game gate's client timeout in the scratch copy (godot_gate.py:1816-1818, transport(..., 3600)); the 1500 relay queue and 600 keepalive constants are the relay's own (gate_admission.py:94, :98). The /script 1800 figure is not re-verified here.",
+      "could_cut_real_play_test_short": "Same as M8: the 3600 s game-gate socket is the first repo-gate bound a render over 3600 s hits, on the scratch copy's evidence.",
+      "severity": "could_cut_real_play_test_short_on_repo_gate_path"
+    },
+    {
+      "id": "M10",
+      "file_line": "docker/godot/godot_harness.py:7585 vs aitelier/tools/godot_playtest/impl.py:648",
+      "current_text": "(not a text claim; the sidecar's /playtest route defaults req.get('timeout', 120) at godot_harness.py:7585)",
+      "chain_value": "The sidecar's own default is 120 s when the caller omits timeout. post_playtest always sets payload.timeout (impl.py:693), so 120 applies only to undeclared-scenario bounds, not to the whole suite.",
+      "could_cut_real_play_test_short": "No through post_playtest. A direct caller of /playtest without timeout would get 120 s for the whole suite; no such caller found in this tree.",
+      "severity": "stale_default_risk"
+    },
+    {
+      "id": "M11",
+      "file_line": "aitelier/tools/godot_compile/impl.py:254-264",
+      "current_text": "600s, not 180. ... Keep this comfortably under the 5_compile step's own timeout_seconds so the step budget, not this socket, is the bound.",
+      "chain_value": "Matches the 600 s parse-leg socket (impl.py:265). The step budget is 3900 (game_harness.yaml:71), but the chained playtest uses 4200 (impl.py:309/876), which is ABOVE the 3900 step budget, so the step budget is not the bound for the playtest leg.",
+      "could_cut_real_play_test_short": "Could, in principle: a render between 3900 and 4200 s would be marked as a step timeout (claim staleness) while the socket still allows it. Caution only; no measured render in that band.",
+      "severity": "contradicts_intent"
+    },
+    {
+      "id": "M12",
+      "file_line": "aitelier/tools/godot_playtest_scenario/impl.py:149-151",
+      "current_text": "timeout = 900 ... must be between 1 and 900 seconds",
+      "chain_value": "Matches the tool's own cap. Not a contradiction with post_playtest, but it is an explicit ceiling below post_playtest's 4200.",
+      "could_cut_real_play_test_short": "Only for single-scenario probes, which are not full-suite gates.",
+      "severity": "consistent"
+    },
+    {
+      "id": "M13",
+      "file_line": "aitelier/tools/godot_playtest/impl.py:53-58 (AUTHORED_SCENARIO_CEILING_SEC comment) vs core/gate_deferral.py:50-59",
+      "current_text": "impl.py: 'Deliberately NOT the socket timeout'; gate_deferral.py: 'Raised from 10800 to 12600 (the REPO_GATE_TIMEOUT value of 2026-11-08, which is ~2x the largest retained passing gate, 6476.1 s; see the comment there)'",
+      "chain_value": "REPO_GATE_TIMEOUT = 12600 (run_tests impl.py:1306) matches. The 6476.1 s figure is reproduced, but it is a WHOLE-GATE passed wall (manifest started_at->finished_at), not a playtest stage: gate-reports/gq-20261021T194832Z-38efe5f5/manifest.json = 6476.1 s (the largest passed whole gate; python+compile+playtest+script). The largest passed PLAYTEST stage is 3476.2 s (wuxia-godot-gate-7kf51nvv). The comment's wording 'largest retained passing gate' is correct only for whole gates; the ratio 12600/6476.1 ~ 1.95 holds.",
+      "could_cut_real_play_test_short": "No (episode 12600 >= REPO_GATE_TIMEOUT 12600). The number is accurate for a whole gate; the sentence should say so.",
+      "severity": "consistent_scope_wording"
+    },
+    {
+      "id": "M14",
+      "file_line": "aitelier/tools/run_tests/impl.py:1290-1301 (the measured-gate comment)",
+      "current_text": "largest whole gate of any status, 6570.9 s (aborted): gate-reports/wuxia-godot-gate-o_fr2y_w/manifest.json; ... playtest 6559.6 s (wuxia-godot-gate-o_fr2y_w)",
+      "chain_value": "The 6559.6 s stage is confirmed from manifest.json (stages.playtest 2026-09-14T11:08:49 -> 12:58:09). It is an ABORTED gate with no response retained, so it is a lower bound on the handler's hold, not a completed measurement. The comment is consistent with the manifest.",
+      "could_cut_real_play_test_short": "This is the only retained evidence of a play-test wall above 4200 s, and it did not complete; it is consistent with the 12600 s repo-gate budget and does not show the 4200 s socket cutting a completed render.",
+      "severity": "consistent"
+    }
+  ],
+  "unmeasured": [
+    {
+      "item": "Game-side godot_gate.py that produced the 2026-09-18 render",
+      "why": "tools/godot_gate.py lives in the game repository, not in this tree. The only copy read is the scratch worktree /home/linxuhao/gate-window-20261107/wtree/tools/godot_gate.py (mtime 2026-11-07, git a65e8829), which has the /playtest socket at 3600 (line 1816-1818). The 2026-09-18 gate's own client timeout is therefore not directly measured; the 3600 figure is inferred from the current copy and the repo's own comments (gate_admission.py:98, docs/repo-gate-unmeasured-protocol.md:193)."
+    },
+    {
+      "item": "Per-scenario execution_budget in the wuxia contract",
+      "why": "The retained playtest.json does not record per-scenario declared budgets (behavior.scenarios keys: name, ran, errors, native_debt, asserts, passed, pressed, input_dead). The spec lives in the game repo snapshot, which is not retained."
+    },
+    {
+      "item": "Engine enforcement of timeout_seconds for a RUNNING tool",
+      "why": "The pinned engine in pyproject.toml is skillflow-py==1.5.100; the source readable here is /home/linxuhao/stepflow at version 1.5.93 (stepflow pyproject.toml line 7). The 1.5.100 source is not on this host. The behaviour read (claim staleness, not kill) is from 1.5.93 and corroborated by configs/coding_impl.yaml:191-194."
+    },
+    {
+      "item": "Sidecar in the production image",
+      "why": "The sidecar source is docker/godot/godot_harness.py in this tree (tracked). The running godot-builder container's image digest was not compared against this file; the values read are from the tree at be6d8db2, not from the live container."
+    }
+  ],
+  "probes": {
+    "effective_values": "evidence/playtest-budget-chain-20261108/effective_values.json (disposable container read of post_playtest default, authored ceiling, queue share, feedback default, episode ceiling, REPO_GATE_TIMEOUT)",
+    "gate_report_scan": "evidence/playtest-budget-chain-20261108/gate_report_scan.json (all 69 playtest.json and 70 manifest playtest stages under ~/.AItelier/gate-reports)",
+    "scan_script": "evidence/playtest-budget-chain-20261108/probe_gate_reports.py"
+  }
+}

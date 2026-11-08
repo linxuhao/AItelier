@@ -95,6 +95,17 @@ failed". So:
 - an explicit binding (or its sha256) can still be passed in to judge a run
   against a historical review.
 
+When the identity tool could not be asked, the launcher writes a substitute
+spelling instead of an answer. `unanswered:receipt-tool-failed` means the
+`receipt` call failed or printed no recognised answer; it is what the
+`<suffix>.gate.exit` line begins with (`unanswered:receipt-tool-failed-platform-identity;
+real rc was ...`). `unanswered:platform-tool-failed` means the `platform` call
+failed; it is the word after `platform_unreviewed` on the second line. Neither is
+a verdict. `unknown` (or `unknown <why>`) is what `tools/gate_binding.py` answers
+with exit 0 after reading the receipt and binding; `unanswered:<what>-tool-failed`
+means that call never returned an answer. The two must not be read as the same
+fact.
+
 The frozen bytes still matter: a receipt can authorize cleanup only against the
 hash (and image) frozen before dispatch, never against a newly observed or
 rebuilt one, and an SDK pin mismatch, a bound file digest or the engine hash is

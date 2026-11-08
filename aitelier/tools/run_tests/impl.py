@@ -1418,7 +1418,12 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
                 "output": f"repository gate not started: admission relay "
                           f"unavailable ({type(e).__name__}: {e})",
                 "measured": REPO_GATE_UNMEASURED,
-                "render_contention": _render_contention({})}
+                # No relay ran, so nothing measured the render queue. The absence
+                # is NAMED, never `none`: `_render_contention({})` read as a
+                # measured clean queue on a gate that never started. No wait is
+                # recorded either (0.0 would itself be a measurement).
+                "render_contention": {"owners": [], "wait_sec": None,
+                                      "state": RENDER_CONTENTION_UNREPORTED}}
     # Watched from before the gate starts: which entry the gate run created
     # first under its ticket (`_FirstEntry`).
     first_entry = _FirstEntry(report_dir)
@@ -1447,7 +1452,14 @@ def _run_repo_gate(repo: Path, *, run_id: str = "") -> dict | None:
     # The contention, named at the top level so a reader of the gate result
     # sees the wait without opening admission.json. Additive: the outcome below
     # is decided by `admission.state` and the exit code, never by this block.
-    result["render_contention"] = _render_contention(admission)
+    # A gate that sent NO engine request (refused before it ran) was never
+    # measured against the render queue: that is the named absence, never
+    # `none` — the same fabricated-clean shape as the early return above.
+    if admission.get("state") == "no_engine_request":
+        result["render_contention"] = {"owners": [], "wait_sec": None,
+                                       "state": RENDER_CONTENTION_UNREPORTED}
+    else:
+        result["render_contention"] = _render_contention(admission)
     # Which report under the ticket is this gate run's (`_retained_findings`):
     # `state` is `own` when the gate's report was identified, and
     # `unattributable` otherwise, with `why`.

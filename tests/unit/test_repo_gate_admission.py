@@ -322,10 +322,16 @@ def test_no_engine_request_is_a_clean_none():
 
 
 def test_a_clean_gate_run_names_no_contention_in_its_report(tmp_path, monkeypatch):
-    """Requirement (b) end-to-end: a gate that waited behind nobody puts the
-    clean block on the gate result, and the report's summary never mentions
-    contention. The gate result is the real `_run_repo_gate` shape for an
-    answered green run."""
+    """HAND-BUILT GATE RECORD, REAL REPORT FOLD. The gate dict is assembled here
+    from an `admission` summary of one clean answered record, with its
+    `render_contention` written by this test, and `_acquire_repo_gate` is
+    monkeypatched to return it. No relay runs and no harness queue runs.
+
+    What this pins is the report site's handling of a clean block: the report
+    takes the `none` state through and its summary never mentions contention.
+    That the real gate path writes the clean block is pinned by
+    `test_a_real_uncontended_gate_run_records_no_contention`, which runs the
+    whole path with no gate dict supplied."""
     clean = _answered(0)
     admission = gate_admission.admission_summary([clean])
     gate = {"script": "run_tests.sh", "returncode": 0, "passed": True,
@@ -642,6 +648,83 @@ def test_a_gate_result_that_measured_none_keeps_the_clean_block(
         "owners": [], "wait_sec": 0.0, "state": "none"}
     assert "render_contention_absent" not in report
     assert "contention" not in report["summary"].lower()
+
+
+def test_a_gate_that_never_started_is_not_a_measured_clean_queue(
+        tmp_path, monkeypatch):
+    """A repository gate whose admission relay could not be started never
+    reached the render queue, so nothing measured it. The early return in
+    `_run_repo_gate` used to stamp `_render_contention({})` on that run, which
+    reads as `state: "none"` — a measured clean queue — and the report folded it
+    through as one.
+
+    REAL PATH, NO GATE DICT: `run_tests` -> `_acquire_repo_gate` ->
+    `_run_repo_gate`, with the relay start forced to fail by the same seam
+    `test_overlong_namespace_is_typed_before_bind_and_preserves_existing_peer`
+    uses (an `AITELIER_HOME` whose socket path overruns AF_UNIX's 107-byte
+    budget, so `relay_socket_path` raises before any bind). The gate is a real
+    declared `run_tests.sh`, but it never runs, so its own answer cannot
+    decide what the block says.
+    """
+    home = tmp_path / ("h" * 100)
+    home.mkdir()
+    monkeypatch.setenv("AITELIER_HOME", str(home))
+    install_entry_executor(monkeypatch)
+    repo = _repo(tmp_path)
+    out = tmp_path / "out"
+
+    rt.run_tests(project_root=str(repo), out_dir=str(out), run_id="never-started")
+    report = _report(out)
+
+    gate = report["repo_gate"]
+    assert gate["runner_error"] is True
+    assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+    assert "107-byte filesystem budget" in gate["output"]
+    # The gate result names the absence and asserts no measurement.
+    assert gate["render_contention"]["state"] == rt.RENDER_CONTENTION_UNREPORTED
+    assert gate["render_contention"]["state"] != "none"
+    assert gate["render_contention"]["wait_sec"] is None
+    # The report carries that named absence, not a clean block.
+    assert report["render_contention"]["state"] == rt.RENDER_CONTENTION_UNREPORTED
+    assert report["render_contention"]["state"] != "none"
+    assert report["render_contention"]["wait_sec"] is None
+    # No contention sentence is invented for a gate that never reached the queue.
+    assert "contention" not in report["summary"].lower()
+    assert "render owner" not in report["summary"].lower()
+
+
+def test_a_gate_refused_before_it_ran_is_not_a_measured_clean_queue(
+        tmp_path, monkeypatch):
+    """A repository gate the executor REFUSED to run: its relay started (so the
+    gate site folds an admission summary), but the gate command itself never
+    ran, so no engine request reached the queue. The relay record is empty, and
+    `admission_summary([])` names `no_engine_request`, which the old fold read as
+    `state: "none"` — a measured clean queue.
+
+    REAL PATH, NO GATE DICT: `run_tests` -> `_acquire_repo_gate` -> the REAL
+    `_run_repo_gate` and REAL relay; only the executor's refusal of the gate
+    command is injected, through the same `install_entry_executor(refuse=...)`
+    seam the outcome table uses.
+    """
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    install_entry_executor(monkeypatch,
+                           refuse=lambda args: "run_tests.sh" in " ".join(args)
+                           or list(args)[:1] == ["bash"])
+    repo = _repo(tmp_path)
+    out = tmp_path / "out"
+
+    rt.run_tests(project_root=str(repo), out_dir=str(out), run_id="refused-gate")
+    report = _report(out)
+
+    gate = report["repo_gate"]
+    assert gate["runner_error"] is True and gate["isolation_unavailable"] is True
+    assert gate["admission"]["requests"] == []
+    assert gate["measured"] == rt.REPO_GATE_UNMEASURED
+    # No engine request ran, so nothing measured the render queue.
+    assert gate["render_contention"]["state"] != "none", gate["render_contention"]
+    assert report["render_contention"]["state"] != "none", report["render_contention"]
+    assert "contention" not in report["summary"].lower()
+    assert "render owner" not in report["summary"].lower()
 
 
 # ── the summary edge case: an empty summary is not repaired ────────────────

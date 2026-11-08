@@ -74,8 +74,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The queue process's whole environment as it was started, taken before anything imports
+# the platform client. cli/client.py runs load_repo_dotenv() at import, which merges the
+# checkout's untracked .env into os.environ (core/dotenv_boot.py). _state_adapter puts
+# this snapshot back straight after that import, so the daemon's own environment never
+# gains the checkout .env keys, whatever untracked files that checkout holds.
+_STARTED_ENV = dict(os.environ)
 # Preserve the launcher's environment before cli.client's lazy .env import.
-_LAUNCH_ENV = dict(os.environ)
+_LAUNCH_ENV = dict(_STARTED_ENV)
 for _name in ("AITELIER_DRIVER_ID", "AITELIER_DRIVER_TOKEN", "AITELIER_DRIVER_TOKEN_FILE",
               "GATE_QUEUE_AITELIER_ROOT"):
     _LAUNCH_ENV.pop(_name, None)
@@ -482,6 +488,12 @@ def _state_adapter(expected_driver_id):
     except ImportError as exc:
         raise QueueRefusal("adapter-unavailable: %s not importable by %s; %s"
                            % (exc.name or "client", sys.executable, recipe)) from None
+    finally:
+        # cli.client's import-time load_repo_dotenv() may have merged the checkout .env
+        # into os.environ. Undo that here, before anything below reads the environment,
+        # so the queue process keeps exactly the environment it was started with.
+        os.environ.clear()
+        os.environ.update(_STARTED_ENV)
     for module in (client_module, credentials):
         require(Path(module.__file__).resolve().is_relative_to(root),
                 "adapter-unavailable: shadowed client module; " + recipe)

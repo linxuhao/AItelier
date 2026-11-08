@@ -30,6 +30,7 @@ import subprocess
 
 from core import datadir, env_scrub
 from core import repository_executor
+from core import repository_host_launcher
 from aitelier import gate_admission
 # Module-level, NOT function-local. This name is used on EVERY path out of
 # `run_tests` (the return dict's `release_evidence`), so an import that lives
@@ -1302,8 +1303,11 @@ REPO_GATE_SCRIPT = "run_tests.sh"
 # 12600 s is about 2x the largest passing gate. It must stay <=
 # core.gate_deferral.episode_max_seconds(): a deadline above the episode
 # ceiling lets one gate outlive the deferral meant to wait for it. Asserted by
-# tests/unit/test_gate_deferral_execution_points.py.
-REPO_GATE_TIMEOUT = 12600
+# tests/unit/test_gate_deferral_execution_points.py. It is also the host
+# launcher's accepted maximum (core.repository_host_launcher
+# MAX_LAUNCH_TIMEOUT_SECONDS): the launcher refuses any launch above it, so this
+# is the one number, and it cannot exceed the transport bound by construction.
+REPO_GATE_TIMEOUT = repository_host_launcher.MAX_LAUNCH_TIMEOUT_SECONDS
 
 
 # inotify(7) constants (linux/inotify.h).
@@ -2791,7 +2795,7 @@ def _commit_baseline(report: dict, pending: dict) -> bool:
 # 1.2% of its neighbour is not protecting the scheduler from anything, it is
 # just the smallest number in the file.
 PYTEST_WALL_SECONDS = 1800
-MAX_PYTEST_WALL_SECONDS = 7200  # Existing CPU executor request ceiling.
+MAX_PYTEST_WALL_SECONDS = 7200  # This tool's own pytest-wall ceiling (tool.yaml, "1 to 7200"); not the host launcher's bound.
 
 
 # --- Storage exhaustion is not a test regression -------------------------------

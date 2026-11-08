@@ -18,6 +18,18 @@ the harness reads a null wait as an unbounded queue -- so a request that is not
 admitted inside that window comes back as the harness's structured refusal
 while the gate is still listening. A gate that sends its own number keeps it.
 
+That refusal is the most contended answer a gate can get -- the request queued
+behind a live owner for its whole window and was then not run -- and the
+harness reports the SAME wait under the QUEUE's names:
+`waited_sec` / `waited_for_owner_ids` (`godot_harness.py:_wait_timed_out`),
+not the success path's `render_owner_*` ones. Both spellings are read here, so
+a refused request keeps its owners and its seconds in `admission_summary` and
+the render-contention block reads `waited` instead of a measured absence.
+`waited_sec` is a general name, so it is read ONLY from a record this module
+can point at as that refusal (`_render_queue_refusal`): a render route, an
+engine refusal, and the refusal's own structured pair -- never from an
+unrelated wait in another answer.
+
 While a render request waits in that queue the relay keeps the gate's socket
 alive: every `keepalive_sec` it sends the gate an interim
 `HTTP/1.1 100 Continue`, which an HTTP/1.1 client reads and skips, and which
@@ -101,9 +113,68 @@ ABANDONED = "abandoned"
 # A gate whose LAST engine request ended in one of these produced no verdict.
 NOT_RUN_STATES = frozenset({NOT_ADMITTED, UNREACHABLE, ABANDONED, "undelivered"})
 
+# _ANSWER_FIELDS is the whitelist the relay copies out of an engine answer.
+# It carries BOTH spellings of the render queue's wait: the success path's
+# `render_owner_*` names and the queue refusal's own `waited_*` names
+# (`godot_harness.py:_wait_timed_out`). Without `waited_for_owner_ids` here a
+# refusal would lose the owners it queued behind before `admission_summary`
+# ever saw them.
 _ANSWER_FIELDS = ("owner_kind", "needs_reconciliation", "owner_id",
                   "render_owner_wait_sec", "render_owner_waited_for_owner_ids",
-                  "waited_sec", "wait_timeout_sec", "deployment_fence_held")
+                  "waited_sec", "waited_for_owner_ids", "wait_timeout_sec",
+                  "deployment_fence_held")
+
+# The owners key and the wait key of each spelling of a render-queue answer: the
+# success path names them `render_owner_*`, the queue's refusal names them
+# `waited_*`. ONE record is read under exactly one spelling, so a wait is never
+# summed twice. `owner_id` is not a substitute for the owners list: a refusal
+# that never queued (a holder needing reconciliation) names an owner and is no
+# contention at all.
+SUCCESS_OWNERS_FIELD, SUCCESS_WAIT_FIELD = ("render_owner_waited_for_owner_ids",
+                                            "render_owner_wait_sec")
+QUEUE_OWNERS_FIELD, QUEUE_WAIT_FIELD = ("waited_for_owner_ids", "waited_sec")
+
+
+def _render_queue_refusal(record: dict) -> bool:
+    """True iff this record is the render queue's own wait-timeout refusal.
+
+    `waited_sec` is a general name for "somebody waited", so it is only ever
+    read as render-queue contention from a record this can be proven to be
+    that refusal: the engine refused admission (`not_admitted`, i.e. the 409)
+    on a render route, and the answer carried the refusal's own structured
+    pair `wait_timeout_sec` + `deployment_fence_held`. Those two keys are
+    emitted together by `godot_harness.py:_wait_timed_out` -- and by no other
+    answer the harness gives: the "render owner exists" 409 and the
+    `RuntimeError` 409 carry neither, and the queue's success row's
+    `waited_sec` is renamed to `render_owner_wait_sec` before the answer is
+    built (`_Handler.do_POST`), so it never reaches an answer at all.
+    """
+    return (record.get("route") in RENDER_ROUTES
+            and record.get("outcome") == NOT_ADMITTED
+            and "wait_timeout_sec" in record
+            and "deployment_fence_held" in record)
+
+
+def _recorded_render_wait(record: dict) -> tuple[list, float]:
+    """The owners and the seconds ONE record attributes to the render queue.
+
+    A record naming neither spelling contributed no wait and no owner: that is
+    the honest clean pole, not a default. The queue's own spelling is used
+    only under `_render_queue_refusal`'s identity, so a `waited_sec` belonging
+    to a different wait in a different answer can never become contention.
+    """
+    if "render_owner_waited_for_owner_ids" in record or "render_owner_wait_sec" in record:
+        owner_key, wait_key = SUCCESS_OWNERS_FIELD, SUCCESS_WAIT_FIELD
+    elif _render_queue_refusal(record):
+        owner_key, wait_key = QUEUE_OWNERS_FIELD, QUEUE_WAIT_FIELD
+    else:
+        return [], 0.0
+    owners = record.get(owner_key)
+    try:
+        seconds = float(record.get(wait_key) or 0.0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return (owners if isinstance(owners, list) else []), seconds
 
 
 def render_wait_seconds() -> float:
@@ -601,19 +672,20 @@ def admission_summary(records: list[dict]) -> dict:
     `state` is the fate of the LAST engine request the gate made: a gate stops
     at the first engine answer it cannot use, so that request is the one its
     exit code is about. `queued_behind` lists every render owner a request of
-    this run waited for in the queue.
+    this run waited for in the queue, and `render_owner_wait_sec` is the wait
+    they cost -- read from the success path's `render_owner_*` names and from
+    the queue refusal's own `waited_*` names, so a request REFUSED after
+    queueing contributes what it waited instead of nothing.
     """
     ordered = sorted(records, key=lambda r: r.get("seq", 0))
     queued_behind: list = []
     waited = 0.0
     for r in ordered:
-        for owner in r.get("render_owner_waited_for_owner_ids") or []:
+        owners, seconds = _recorded_render_wait(r)
+        for owner in owners:
             if owner not in queued_behind:
                 queued_behind.append(owner)
-        try:
-            waited += float(r.get("render_owner_wait_sec") or 0.0)
-        except (TypeError, ValueError):
-            pass
+        waited += seconds
     summary = {"requests": ordered, "queued_behind": queued_behind,
                "render_owner_wait_sec": round(waited, 3)}
     if not ordered:

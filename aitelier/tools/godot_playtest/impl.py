@@ -48,8 +48,18 @@ from core import external_deps
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 # The share of post_playtest's own timeout that a request may spend queued
 # behind another render (sent as render_wait_timeout_sec). The rest is left for
-# the render itself.
+# the render itself, but the share alone over-declares that rest: see
+# LARGEST_MEASURED_RENDER_WALL_SEC and render_queue_wait_sec, which cap it.
 RENDER_QUEUE_SHARE = 0.5
+# The largest COMPLETED harness-measured render retained on this host:
+# 3471.2921 s of wall time (~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/
+# playtest.json, field timing.wall_sec, schema playtest-timing/1). The socket
+# covers the queue wait AND the render, so the share alone spent
+# 0.5 x 4200 = 2100 s on the queue and left 4200 - 2100 = 2100 s for a render
+# measured at 3471.2921 s — a largest-class render would finish inside the
+# socket and still be recorded as a socket timeout. The tolerable queue wait at
+# the default socket is 4200 - 3471.2921 = 728.7079 s.
+LARGEST_MEASURED_RENDER_WALL_SEC = 3471.2921
 # Ceiling on one authored scenario's caller budget (authored_caller_timeout).
 # Deliberately NOT the socket timeout: post_playtest's default socket timeout
 # was raised 3600 -> 4200 s, and this stays at 3600 s so that raising the
@@ -638,13 +648,39 @@ def _suppressed_repeat(key, payload: dict) -> dict | None:
                 f"smoke-tested.")}
 
 
+def render_queue_wait_sec(timeout: int | float) -> float:
+    """The queue wait declared for one request whose socket is `timeout` seconds.
+
+    The socket must cover the queue wait AND the render, so the declaration
+    holds ``declared + LARGEST_MEASURED_RENDER_WALL_SEC <= timeout``. The share
+    is the upper bound; the subtraction is a lower cap that keeps a
+    default-socket request from spending the render's room on the queue (see
+    LARGEST_MEASURED_RENDER_WALL_SEC). The cap only applies while the socket
+    can still hold that render: below it the subtraction is negative, no
+    declaration could satisfy the invariant, and the share stays the bound —
+    keeping the pre-existing behaviour for short sockets rather than declaring
+    a 0 that would forbid queueing outright.
+    Floored to the millisecond, not rounded: 4200 - 3471.2921 = 728.7079 and
+    rounding that to 728.708 would put the sum 0.0001 s OVER the socket, which
+    is the very over-declaration this bound exists to prevent.
+    """
+    declared = timeout * RENDER_QUEUE_SHARE
+    room = timeout - LARGEST_MEASURED_RENDER_WALL_SEC
+    if room > 0:
+        declared = min(declared, room)
+    return math.floor(declared * 1000) / 1000
+
+
 #
 # 4200 s, not 3600 s. The largest COMPLETED harness-measured render retained is
 # 3471.2921 s of wall time: ~/.AItelier/gate-reports/wuxia-godot-gate-7kf51nvv/
 # playtest.json, field timing.wall_sec (schema playtest-timing/1). With the old
 # 3600 s socket that left 128.7 s of headroom, so a slightly slower render was
-# orphaned and reported as not run. 4200 s leaves 728.7 s. The queue declaration
-# is derived from this number at RENDER_QUEUE_SHARE (2100 s, was 1800 s).
+# orphaned and reported as not run. 4200 s leaves 728.7079 s of headroom for
+# the queue, and the queue declaration (render_queue_wait_sec: 4200 -
+# 3471.2921 = 728.7079, floored to 728.707 s) spends only that headroom — not
+# the share alone: 0.5 x 4200 = 2100 s would leave a largest-class render
+# 4200 - 2100 = 2100 s and report it as a socket timeout.
 #
 # COMPLETED is the scope, and it is not the same as "the largest retained": the
 # retained ABORTED gate wuxia-godot-gate-o_fr2y_w shows a 6559.5635 s play-test
@@ -686,9 +722,13 @@ def post_playtest(payload: dict, timeout: int = 4200) -> dict:
     that needs reconciliation, or this request's queue wait ran out). Nothing
     ran -> gate_skipped under its own skipped_because, like the first shape.
 
-    The queue wait is declared as render_wait_timeout_sec = RENDER_QUEUE_SHARE
-    x timeout (0.5 x 4200 = 2100s at the default), so the sidecar gives up on
-    the queue before our socket expires.
+    The queue wait is declared by render_queue_wait_sec(timeout): at most
+    RENDER_QUEUE_SHARE x timeout (0.5 x 4200 = 2100s at the default), further
+    capped by timeout - LARGEST_MEASURED_RENDER_WALL_SEC so the wait and the
+    largest measured render (3471.2921 s) both fit inside the socket — at the
+    default the cap binds, 4200 - 3471.2921 = 728.7079s — declared as 728.707s
+    after the millisecond floor — and the sidecar gives up on the queue with the
+    render's room still intact.
     A request that gets past that queue owns the render row, and then waits on
     the sidecar for the process render lock and then the cross-process
     render-effect lock (postlock-wait). Each of those waits is bounded by its own sidecar
@@ -703,7 +743,7 @@ def post_playtest(payload: dict, timeout: int = 4200) -> dict:
     payload = dict(payload)
     payload.setdefault("timeout", authored_caller_timeout(
         payload.get("spec"), min(timeout, AUTHORED_SCENARIO_CEILING_SEC)))
-    payload.setdefault("render_wait_timeout_sec", round(timeout * RENDER_QUEUE_SHARE, 3))
+    payload.setdefault("render_wait_timeout_sec", render_queue_wait_sec(timeout))
     body = json.dumps(payload).encode("utf-8")
     caller_key = _caller_key(payload)
     suppressed = _suppressed_repeat(caller_key, payload)

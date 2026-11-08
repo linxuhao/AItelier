@@ -68,9 +68,21 @@ def parse_dotenv(text: str) -> dict[str, str]:
     interpolation, no multi-line values, no escape sequences. A line without
     `=` is skipped, as is a blank or `#` line, and so is a line whose key is
     empty (the old loop raised OSError [Errno 22] on it from os.environ).
+
+    Lines are split on "\\n" alone, NOT with str.splitlines(): splitlines also
+    breaks on \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029, so a value
+    containing one of them was cut into a bogus second assignment. The inline
+    loops this replaces iterated the FILE (`for _line in _f`), which splits only
+    on newline sequences — and, under universal newlines, hands back each line
+    WITHOUT its trailing "\\r", which is why exactly one is stripped here.
+
+    One residual difference: a LONE "\\r" (the old-Mac separator) also broke a
+    line under universal newlines and does not break one here.
     """
     values: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -89,13 +101,17 @@ def load_repo_dotenv(
     """Merge `<repo root>/.env` into the process environment; existing keys win.
 
     Returns the file that was applied, or None when there is nothing to apply:
-    no `.env` in the tree root, or one that exists but cannot be read as a
-    regular file (a directory, unreadable, …). The old inline loops raised in
-    that last case (`open()` on a directory, or on a file without read
-    permission); this returns None instead, so a broken `.env` never stops a
-    boot entry — it just applies nothing. Within the file, a line whose key is
-    empty is skipped, where the old loop raised OSError [Errno 22] from
-    os.environ.
+    the path does not exist, or reading it raised OSError — it is a directory,
+    or a file this process may not read. The old inline loops raised in those
+    cases (`open()` on a directory, or on a file without read permission); this
+    returns None instead, so a missing or unreadable `.env` just applies
+    nothing.
+
+    OSError is the whole of that tolerance. A file that exists and opens but
+    cannot be DECODED raises UnicodeDecodeError out of this function, i.e. at
+    the boot entry that called it, and that process does not start. Within the
+    file, a line whose key is empty is skipped, where the old loop raised
+    OSError [Errno 22] from os.environ.
 
     Call this from a BOOT ENTRY — a CLI start, a script's own main — never from
     a module that something else imports to use the app.

@@ -1,0 +1,1818 @@
+{
+  "subject": "Revision 4 of the audit of the 34 rows the baked_toolchain mark deselects at base b7a64648ef. Every row was run in a disposable shipped-image container at this base, and each is classed by what the run shows. Three artefacts revision 3 never shipped are now here: per row a removes_from_deselected_set boolean with the edit that actually removes it (mark site named, because the mark alone keeps a row out even after a capability is supplied), a top-level still_deselected_after_edits derived from those flags, and a top-level docker_surface measured at this base beside the baked count. Two r3 claims are contradicted by measurement and corrected: the docker-marked group is 0, not 8, at this base, and the owned host launcher plus the image carrying the pinned bytes both exist on this host. 27 rows leave the deselected set with edits available here and pass with their own declared fixtures; 7 need the image to carry /opt/aitelier-node and /opt/aitelier-eslint.",
+  "base_sha": "b7a64648efee018f8a9edff06ef7be0351c429ad",
+  "revision": 4,
+  "node": "tests.the-baked-toolchain-rows-classified-by-what-they-actually-need-20261109",
+  "enumerated_from_this_run": {
+    "collect_argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m baked_toolchain --collect-only -q tests/",
+    "collect_line": "34/11574 tests collected (11540 deselected) in 25.92s",
+    "rows_in_this_report": 34,
+    "collect_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C1-collect-baked-rows.log",
+    "command": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v <worktree>:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m baked_toolchain --collect-only -q tests/",
+    "no_row_passes_in_the_shipped_image_as_delivered": {
+      "run": "B1-baked-group-as-delivered",
+      "result": "21 failed, 13 skipped, 0 passed",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/B1-baked-group-as-delivered.log"
+    },
+    "marks_dropped_the_rows_are_inside_the_default_selection": {
+      "run": "C3-collect-all-marks-dropped",
+      "result": "11574 tests collected in 26.99s",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C3-collect-all-marks-dropped.log",
+      "tree_diff": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/nomark-tree.diff"
+    }
+  },
+  "rows": [
+    {
+      "n": 1,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_engine_context_native_loader_and_owned_parser[True]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 96,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 2,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_engine_context_native_loader_and_owned_parser[False]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 96,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 3,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_empty_match_through_real_step_validator_is_unmeasured",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 113,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT only: a prepared disposable fixture root. No original exists on this host (byte_searches); the root used is a SUBSTITUTE",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED through its named guard, with no launcher and no /opt bytes (I3, reason in I6)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "lint matched no files; no lint measurement was made (I6)"
+    },
+    {
+      "n": 4,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_actual_supported_extensions_and_empty_parsed_program[js--True]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 123,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 5,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_actual_supported_extensions_and_empty_parsed_program[mjs-export const value=1;-True]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 123,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 6,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_actual_supported_extensions_and_empty_parsed_program[cjs-module.exports=require('node:path');-True]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 123,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 7,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_actual_supported_extensions_and_empty_parsed_program[cjs-import path from 'node:path';-False]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 123,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT (a SUBSTITUTE root) and, to prove the guard it names rather than the launcher refusal, an owned host launcher seated for that root",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED VACUOUSLY on the owned-launcher refusal (I2/I3, I6); with a launcher seated it PASSED through the guard it names (I4/I5)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "without a launcher: the owned-launcher refusal made it green (I6); with one: ESLint exits 1 with \"Parsing error: 'import' and 'export' may appear only with 'sourceType: module'\" (I5)"
+    },
+    {
+      "n": 8,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[missing-context]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 132,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT only: a prepared disposable fixture root. No original exists on this host (byte_searches); the root used is a SUBSTITUTE",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED through its named guard, with no launcher and no /opt bytes (I3, reason in I6)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "requires explicit run_id, step_id and project_root (I6)"
+    },
+    {
+      "n": 9,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[unbound]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 132,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT (a SUBSTITUTE root) and, to prove the guard it names rather than the launcher refusal, an owned host launcher seated for that root",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED VACUOUSLY on the owned-launcher refusal (I2/I3, I6); with a launcher seated it PASSED through the guard it names (I4/I5)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "without a launcher: the owned-launcher refusal (I6); with one: 'run has no supported existing repository ownership' (I5)"
+    },
+    {
+      "n": 10,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[artifact]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 132,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT only: a prepared disposable fixture root. No original exists on this host (byte_searches); the root used is a SUBSTITUTE",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED through its named guard, with no launcher and no /opt bytes (I3, reason in I6)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "'... is not in the subpath of ...' artifact guard (I6)"
+    },
+    {
+      "n": 11,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[foreign-root]",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 132,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "LINT_REAL_ROOT (a SUBSTITUTE root) and, to prove the guard it names rather than the launcher refusal, an owned host launcher seated for that root",
+      "class": "runs_with_its_declared_fixture_root",
+      "measured": "as delivered SKIPPED (B1); with the root PASSED VACUOUSLY on the owned-launcher refusal (I2/I3, I6); with a launcher seated it PASSED through the guard it names (I4/I5)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ],
+      "note": "without a launcher: the owned-launcher refusal (I6); with one: \"repo does not match the existing run's owned repository\" (I5)"
+    },
+    {
+      "n": 12,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_real_lint_ignores_hostile_project_authority_and_does_not_execute_js",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 148,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 13,
+      "nodeid": "tests/integration/test_javascript_lint_validation_context.py::test_actual_host_ingress_replaces_malicious_lint_identity_and_roots",
+      "file": "tests/integration/test_javascript_lint_validation_context.py",
+      "line": 166,
+      "mark_site": "tests/integration/test_javascript_lint_validation_context.py:53",
+      "group": "integration",
+      "as_delivered": "SKIPPED",
+      "as_delivered_error": "SKIPPED: requires LINT_REAL_ROOT (a prepared disposable fixture root; see module docstring) plus the owned launcher and baked /opt/aitelier-eslint",
+      "missing_object": "the owned host launcher socket seated for this fixture root (AITELIER_HOST_LAUNCHER_SOCKET): measured absent from the disposable container, and measured pass with one seated (I4)",
+      "class": "runs_with_its_declared_operator_fixture",
+      "measured": "as delivered SKIPPED (B1); with the root and no launcher FAILED 'JavaScript lint requires the owned host launcher' (I2); with a seated launcher PASSED (I4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53 (the ``pytest.mark.baked_toolchain,`` entry of the module-level pytestmark list, :52-57)",
+        "mechanism": "delete that one list entry; the module's own skipif (:54-56) still states the precondition, so without LINT_REAL_ROOT the 13 rows are collected and report SKIPPED instead of being deselected",
+        "would_prove": "that the mark, not the image, is what kept these rows out; with the root and a launcher seated for it, all 13 pass (I4)"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/integration/test_javascript_lint_validation_context.py",
+        "site": "tests/integration/test_javascript_lint_validation_context.py:53",
+        "mechanism": "drop ``pytest.mark.baked_toolchain`` from the module pytestmark; then with LINT_REAL_ROOT seated (a substitute root, see byte_searches) and an owned host launcher seated for it, all 13 pass (I4)"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "I2-integration-13-rows-root-and-bytes",
+        "I3-integration-13-rows-root-NO-bytes",
+        "I4-integration-13-rows-with-a-SEATED-launcher",
+        "I6-vacuity-refusal-reasons",
+        "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+      ]
+    },
+    {
+      "n": 14,
+      "nodeid": "tests/unit/test_gate_consumer_composition.py::test_raw_only_gate_cannot_claim_complete_coverage[0]",
+      "file": "tests/unit/test_gate_consumer_composition.py",
+      "line": 51,
+      "mark_site": "tests/unit/test_gate_consumer_composition.py:49",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 0; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49 (mark) and the test body at tests/unit/test_gate_consumer_composition.py:52"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 15,
+      "nodeid": "tests/unit/test_gate_consumer_composition.py::test_raw_only_gate_cannot_claim_complete_coverage[1]",
+      "file": "tests/unit/test_gate_consumer_composition.py",
+      "line": 51,
+      "mark_site": "tests/unit/test_gate_consumer_composition.py:49",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 1; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49 (mark) and the test body at tests/unit/test_gate_consumer_composition.py:52"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 16,
+      "nodeid": "tests/unit/test_gate_consumer_composition.py::test_raw_only_gate_cannot_claim_complete_coverage[2]",
+      "file": "tests/unit/test_gate_consumer_composition.py",
+      "line": 51,
+      "mark_site": "tests/unit/test_gate_consumer_composition.py:49",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49 (mark) and the test body at tests/unit/test_gate_consumer_composition.py:52"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_gate_consumer_composition.py",
+        "site": "tests/unit/test_gate_consumer_composition.py:49",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 17,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-await Promise.resolve(42);-0]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 0; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 18,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[mjs-export const caf\\xe9=42;-0]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 0; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 19,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[cjs-module.exports = require('node:path');-0]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 0; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 20,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[cjs-import x from 'node:path';-1]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 1; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 21,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-const broken = ;-1]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 1; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 22,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js--0]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 0; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 23,
+      "nodeid": "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-/* eslint no-undef: 'error' */ missingName;-0]",
+      "file": "tests/unit/test_javascript_lint_owned_boundary.py",
+      "line": 81,
+      "mark_site": "tests/unit/test_javascript_lint_owned_boundary.py:76",
+      "group": "lint_boundary",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: {'returncode': -1, ...} assert -1 == 0; unavailable: JavaScript lint unavailable: [Errno 2] No such file or directory: '/opt/aitelier-node/bin/node' (B1c, -vv so the string is not ellipsised)",
+      "missing_object": "/opt/aitelier-node/bin/node (and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js): absent from the shipped image (D1)",
+      "class": "needs_a_capability_the_shipped_image_lacks",
+      "measured": "as delivered FAILED (B1, B1c); PASSED with the bytes mounted and the mark as delivered (L1b); FAILED with the mark dropped and no bytes (L2); PASSED in the whole-file run with the mark dropped and the bytes mounted (L3)",
+      "smallest_edit": {
+        "kind": "image-bake",
+        "file": "the image at aitelier:latest (a Dockerfile change, not a repo edit available at this base)",
+        "site": "/opt/aitelier-node (node v24.22.0) and /opt/aitelier-eslint (eslint 10.12.0), the two absolute paths core/repository_executor.py:238-239 names -- plus dropping the mark at tests/unit/test_javascript_lint_owned_boundary.py:76, which would otherwise keep the row deselected after the bytes are supplied",
+        "mechanism": "the row calls core.repository_executor_entry.run() in this very container, and the entry refuses unless /opt/aitelier-node/bin/node --version prints v24.22.0 and /opt/aitelier-eslint/node_modules/eslint/bin/eslint.js --version prints v10.12.0 (core/repository_executor_entry.py:412-418); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint instead (D1)",
+        "would_prove": "that the row measures the real pinned parser. Measured by mounting the identical bytes: 7 passed with the marks as delivered (L1b), and 22 passed for the whole file with the mark dropped (L3). The bytes are not lost and the recipe for them is on this host: director/reports/node-official-npm-source-20261015/reports/image/Dockerfile installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks its official sha256 cc2f601c..., and director/reports/official-eslint-runtime-package-20261016 holds the official eslint 10.12.0 tree; both files are byte-identical to what the node executor image sha256:d28d9c16... carries (D1, D3-director-store-provenance-search)"
+      },
+      "removes_from_deselected_set": false,
+      "removes_by": null,
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1c-owned-boundary-7-rows-as-delivered-vv",
+        "L1b-owned-boundary-bytes-marks-as-delivered",
+        "L2-owned-boundary-mark-dropped-no-bytes",
+        "L3-owned-boundary-mark-dropped-with-bytes"
+      ]
+    },
+    {
+      "n": 24,
+      "nodeid": "tests/unit/test_repo_gate_admission.py::test_two_concurrent_repo_gates_are_each_admitted_by_the_queue",
+      "file": "tests/unit/test_repo_gate_admission.py",
+      "line": 68,
+      "mark_site": "tests/unit/test_repo_gate_admission.py:67",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "AssertionError: gate A never rendered; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:67 (mark) and the test body at tests/unit/test_repo_gate_admission.py:70"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:67",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 25,
+      "nodeid": "tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[live_render]",
+      "file": "tests/unit/test_repo_gate_admission.py",
+      "line": 148,
+      "mark_site": "tests/unit/test_repo_gate_admission.py:146",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:146 (mark) and the test body at tests/unit/test_repo_gate_admission.py:150"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:146",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 26,
+      "nodeid": "tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run[owner_lost]",
+      "file": "tests/unit/test_repo_gate_admission.py",
+      "line": 148,
+      "mark_site": "tests/unit/test_repo_gate_admission.py:146",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:146 (mark) and the test body at tests/unit/test_repo_gate_admission.py:150"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:146",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 27,
+      "nodeid": "tests/unit/test_repo_gate_admission.py::test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red",
+      "file": "tests/unit/test_repo_gate_admission.py",
+      "line": 190,
+      "mark_site": "tests/unit/test_repo_gate_admission.py:189",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 1; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:189 (mark) and the test body at tests/unit/test_repo_gate_admission.py:191"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:189",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 28,
+      "nodeid": "tests/unit/test_repo_gate_admission.py::test_an_unreachable_engine_is_not_run",
+      "file": "tests/unit/test_repo_gate_admission.py",
+      "line": 218,
+      "mark_site": "tests/unit/test_repo_gate_admission.py:217",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:217 (mark) and the test body at tests/unit/test_repo_gate_admission.py:219"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_admission.py",
+        "site": "tests/unit/test_repo_gate_admission.py:217",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 29,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[python_red]",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 127,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:125",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:125 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:129"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:125",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 30,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red[compile_red]",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 127,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:125",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:125 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:129"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:125",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 31,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_the_same_refusal_with_no_retained_red_is_still_not_run",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 160,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:159",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:159 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:161"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:159",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 32,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 195,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:194",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert -1 == 2; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:194 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:197"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:194",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 33,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 221,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:220",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert False (pytest:timed out absent from the report); the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of; and for this row only, pass the wall explicitly: replace monkeypatch.setattr(rt, 'PYTEST_WALL_SECONDS', 3) with rt.run_tests(..., pytest_wall_seconds=3) because run_tests binds that default at definition time (aitelier/tools/run_tests/impl.py:3102)",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed); this row alone still failed with the seam alone (S5) and passed after the named wall argument (G4)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:220 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:223"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:220",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; plus the explicit pytest_wall_seconds=3 for this row"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    },
+    {
+      "n": 34,
+      "nodeid": "tests/unit/test_repo_gate_red_beats_absence.py::test_a_green_pytest_beside_a_refused_gate_is_an_absence",
+      "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+      "line": 244,
+      "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:243",
+      "group": "repo_gate",
+      "as_delivered": "FAILED",
+      "as_delivered_error": "assert False is True; the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
+      "class": "runs_in_the_shipped_image_after_repo_edits",
+      "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (S5, G4)",
+      "smallest_edit": {
+        "kind": "repo-edit",
+        "mechanism": "drop the row's @pytest.mark.baked_toolchain line and call tests/gate_fixture.py:install_entry_executor(monkeypatch) as the test body's first statement; the seam runs the real core.repository_executor_entry.run() in place of the docker/launcher transport the container has neither of",
+        "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
+        "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:243 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:246"
+      },
+      "removes_from_deselected_set": true,
+      "removes_by": {
+        "file": "tests/unit/test_repo_gate_red_beats_absence.py",
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:243",
+        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+      },
+      "runs": [
+        "B1-baked-group-as-delivered",
+        "B1b-gate-rows-as-delivered-showlocals",
+        "S5-seam-arm-14-gate-rows",
+        "G4-combo-14-gate-rows"
+      ]
+    }
+  ],
+  "classification": {
+    "definition": "removes_from_deselected_set is true iff an edit available at this base removes the row from the baked deselect set AND the row then passes with only its own declared fixtures/operator seats -- measured, not inferred. The mark site is named on every row because supplying a capability never removes a row on its own: a row stays deselected until its mark line goes.",
+    "two_classes_asked_for": {
+      "runs_in_the_shipped_image": {
+        "count": 27,
+        "by_group": {
+          "repo_gate": 14,
+          "integration": 13
+        },
+        "means": "measured passing with aitelier:latest as the pytest image and no pinned bytes baked into or mounted into it: the 14 repo_gate rows with the in-repo seam (G4) and the 13 integration rows with their declared fixture root and an owned host launcher seated for it (I4). The launcher runs eslint in its own node_executor_image, which already carries the pinned bytes (D1)",
+        "runs": [
+          "G4-combo-14-gate-rows",
+          "I4-integration-13-rows-with-a-SEATED-launcher"
+        ]
+      },
+      "needs_a_capability_the_shipped_image_lacks": {
+        "count": 7,
+        "by_group": {
+          "lint_boundary": 7
+        },
+        "objects": [
+          "/opt/aitelier-node/bin/node (v24.22.0)",
+          "/opt/aitelier-eslint/node_modules/eslint/bin/eslint.js (10.12.0)"
+        ],
+        "means": "these rows execute those two absolute paths inside the pytest container itself (core/repository_executor.py:238-239); the shipped image carries node v24.22.2 at /usr/local/bin/node and distro eslint v6.4.0 at /usr/bin/eslint and neither /opt path (D1)",
+        "runs": [
+          "B1c-owned-boundary-7-rows-as-delivered-vv",
+          "L1b-owned-boundary-bytes-marks-as-delivered"
+        ]
+      }
+    },
+    "class_rollup": {
+      "runs_in_the_shipped_image": {
+        "total": 27,
+        "from_row_classes": {
+          "runs_in_the_shipped_image_after_repo_edits": 14,
+          "runs_with_its_declared_operator_fixture": 7,
+          "runs_with_its_declared_fixture_root": 6
+        }
+      },
+      "needs_a_capability_the_shipped_image_lacks": {
+        "total": 7,
+        "from_row_classes": {
+          "needs_a_capability_the_shipped_image_lacks": 7
+        }
+      },
+      "sum": "27 + 7 = 34"
+    },
+    "sub_counts_so_nothing_is_hidden_in_the_27": {
+      "freed_by_repo_edits_alone": {
+        "count": 14,
+        "run": "G4-combo-14-gate-rows",
+        "of_which_needed_the_explicit_wall_argument": {
+          "count": 1,
+          "row": "tests/unit/test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence",
+          "run": "S5-seam-arm-14-gate-rows -> G4-combo-14-gate-rows"
+        }
+      },
+      "freed_by_a_repo_edit_but_run_only_with_their_declared_fixture": {
+        "count": 13,
+        "run": "I4-integration-13-rows-with-a-SEATED-launcher",
+        "fixtures": [
+          "LINT_REAL_ROOT (a prepared disposable root: SUBSTITUTE here, see byte_searches)",
+          "a seated owned host launcher (AITELIER_HOST_LAUNCHER_SOCKET) for that root"
+        ]
+      },
+      "of_those_13_that_need_the_owned_launcher_to_pass_not_merely_to_skip": {
+        "count": 7,
+        "run": "I2-integration-13-rows-root-and-bytes (7 failed without it) vs I4 (13 passed with it)"
+      },
+      "of_the_other_6_integration_rows": {
+        "pass_on_the_refusal_path_with_no_launcher_and_no_/opt_bytes": {
+          "count": 6,
+          "run": "I3-integration-13-rows-root-NO-bytes"
+        },
+        "of_which_pass_through_the_guard_they_name": {
+          "count": 3,
+          "rows": [
+            "tests/integration/test_javascript_lint_validation_context.py::test_empty_match_through_real_step_validator_is_unmeasured",
+            "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[missing-context]",
+            "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[artifact]"
+          ],
+          "run": "I6-vacuity-refusal-reasons"
+        },
+        "of_which_pass_vacuously_on_the_launcher_refusal": {
+          "count": 3,
+          "rows": [
+            "tests/integration/test_javascript_lint_validation_context.py::test_actual_supported_extensions_and_empty_parsed_program[cjs-import path from 'node:path';-False]",
+            "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[unbound]",
+            "tests/integration/test_javascript_lint_validation_context.py::test_real_native_lint_context_refusals_are_not_green[foreign-root]"
+          ],
+          "run": "I6-vacuity-refusal-reasons",
+          "with_a_launcher_seated_they_prove_their_guard": "I5-vacuity-refusal-reasons-with-a-SEATED-launcher"
+        }
+      }
+    },
+    "what_the_shipped_image_itself_carries": {
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D1-host-and-image-facts.log",
+      "/opt": [
+        "aitelier-dsh",
+        "aitelier-gate-imports"
+      ],
+      "/opt/aitelier-node": "absent",
+      "/opt/aitelier-eslint": "absent",
+      "node": "v24.22.2 at /usr/local/bin/node",
+      "eslint": "v6.4.0 at /usr/bin/eslint (the distro package; NOT /usr/local/bin/eslint, which does not exist)",
+      "docker_cli": "absent",
+      "AITELIER_HOST_LAUNCHER_SOCKET": "unset"
+    },
+    "what_exists_elsewhere_on_this_host": {
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D1-host-and-image-facts.log",
+      "pinned_bytes_image": {
+        "digest": "sha256:d28d9c16c2ea5b2f0d503e8aed1c30dfbbda93bb363d72fb1b51c9ad8c546aac",
+        "named_by": "the live launcher's node_executor_image (D1 section 2)",
+        "carries": {
+          "/opt/aitelier-node/bin/node": {
+            "version": "v24.22.0",
+            "sha256": "67ca5783febb8bf85736c79fcdd92c8d6d465a0eb2a082672bcdfa76a506751c"
+          },
+          "/opt/aitelier-eslint/node_modules/eslint/bin/eslint.js": {
+            "version": "10.12.0",
+            "sha256": "bb07a179294caee1175397035fef38347782cb8fbf00356ca8c6fd2c87a989fa"
+          }
+        },
+        "identical_to_the_recovered_copies_at_/tmp/aitelier-opt": "yes, same two sha256 (D1 sections 5 and 6)"
+      },
+      "live_owned_host_launcher": {
+        "socket": "/home/linxuhao/.AItelier/cpu-launcher.sock",
+        "config": "/home/linxuhao/.AItelier/director/reports/storage-normal-runtime-r2-root-20261019/cpu-storage-operator-config.json",
+        "state_db": "/home/linxuhao/.AItelier/aitelier.db (run_isolation, 1415 rows)",
+        "allowed_roots": [
+          "/home/linxuhao/.AItelier/worktrees",
+          "/home/linxuhao/.AItelier/projects"
+        ],
+        "why_it_cannot_serve_these_rows_as_seated": "core/repository_host_launcher.py:106-123 binds a request to the run_id's row in ITS state_db and resolves the repo under ITS allowed_roots; a disposable fixture row writes its binding into the fixture root's own fixture-ownership.sqlite and its repo under that root, so the operator's launcher would answer 'run has no supported existing repository ownership' (that exact refusal was produced by a launcher seated to the wrong root, I5)"
+      },
+      "conclusion": "no row among the 34 consumes bytes that no longer exist on this host. The one object that does not exist here is a PREPARED fixture root (byte_searches), for which this audit used a SUBSTITUTE, built and measured (I2-I4)."
+    }
+  },
+  "measured_counts": {
+    "collected_total_at_base": 11574,
+    "collected_baked_toolchain_at_base": 34,
+    "deselected_by_the_baked_toolchain_mark_at_base": 11540,
+    "collected_docker_marked_at_base": 0,
+    "as_delivered": {
+      "failed": 21,
+      "skipped": 13,
+      "passed": 0,
+      "run": "B1-baked-group-as-delivered",
+      "per_group": {
+        "repo_gate_failed": 14,
+        "lint_boundary_failed": 7,
+        "integration_skipped": 13
+      }
+    },
+    "gate_rows_seam_only": {
+      "passed": 13,
+      "failed": 1,
+      "run": "S5-seam-arm-14-gate-rows"
+    },
+    "gate_rows_seam_plus_wall_argument": {
+      "passed": 14,
+      "failed": 0,
+      "run": "G4-combo-14-gate-rows"
+    },
+    "lint_rows_bytes_mounted_marks_as_delivered": {
+      "passed": 7,
+      "run": "L1b-owned-boundary-bytes-marks-as-delivered"
+    },
+    "lint_rows_mark_dropped_no_bytes": {
+      "passed": 15,
+      "failed": 7,
+      "run": "L2-owned-boundary-mark-dropped-no-bytes"
+    },
+    "lint_rows_mark_dropped_with_bytes": {
+      "passed": 22,
+      "failed": 0,
+      "run": "L3-owned-boundary-mark-dropped-with-bytes"
+    },
+    "integration_rows_root_and_bytes_no_launcher": {
+      "passed": 6,
+      "failed": 7,
+      "run": "I2-integration-13-rows-root-and-bytes"
+    },
+    "integration_rows_root_no_bytes_no_launcher": {
+      "passed": 6,
+      "failed": 7,
+      "run": "I3-integration-13-rows-root-NO-bytes"
+    },
+    "integration_rows_root_with_a_seated_launcher": {
+      "passed": 13,
+      "failed": 0,
+      "run": "I4-integration-13-rows-with-a-SEATED-launcher"
+    },
+    "rows_freed_by_edits_available_here": 27,
+    "rows_needing_the_pinned_toolchain_baked_into_the_image": 7,
+    "sum_check": "27 + 7 = 34"
+  },
+  "still_deselected_after_edits": 7,
+  "still_deselected_after_edits_arithmetic": {
+    "arithmetic": "34 rows - 27 rows whose removes_from_deselected_set is true = 7 rows still deselected",
+    "consistent_with_the_flags": "the 7 are exactly the rows with removes_from_deselected_set == false",
+    "the_7": [
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-await Promise.resolve(42);-0]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[mjs-export const caf\\xe9=42;-0]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[cjs-module.exports = require('node:path');-0]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[cjs-import x from 'node:path';-1]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-const broken = ;-1]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js--0]",
+      "tests/unit/test_javascript_lint_owned_boundary.py::test_actual_baked_cli_reads_exact_stdin_with_extension_semantics[js-/* eslint no-undef: 'error' */ missingName;-0]"
+    ],
+    "why_they_stay": "their smallest edit is an image bake (supply /opt/aitelier-node and /opt/aitelier-eslint), not an edit this base offers; even with the capability supplied, the mark at tests/unit/test_javascript_lint_owned_boundary.py:76 keeps them out until it is dropped",
+    "if_the_bake_were_done": {
+      "rows_would_leave": 7,
+      "still_deselected": 0,
+      "evidence": "L1b (7 passed with the bytes mounted and the marks as delivered) and L3 (22 passed for the whole file with the mark dropped and the bytes)"
+    },
+    "alternative_reading_not_used": "if only a plain repo edit with no operator seat counted as a removal, the 13 integration rows would also be 'still deselected' and the number would be 20; they are counted as removed because the one-line pytestmark edit at tests/integration/test_javascript_lint_validation_context.py:53 removes them from the deselected set and I4 shows all 13 pass once the launcher the module docstring declares is seated"
+  },
+  "docker_surface": {
+    "docker_marked_at_this_base": 0,
+    "measured_line": "no tests collected (11574 deselected) in 26.12s",
+    "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m docker --collect-only -q tests/",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C2-collect-docker-rows.log",
+    "baked_marked_at_this_base": {
+      "count": 34,
+      "measured_line": "34/11574 tests collected (11540 deselected) in 25.92s",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m baked_toolchain --collect-only -q tests/",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C1-collect-baked-rows.log"
+    },
+    "the_two_groups_kept_apart": "baked_toolchain and docker are separate marks with separate addopts terms. At this base the baked group is the only non-empty opt-in group: 34 rows, all enumerated below; the docker group selects nothing.",
+    "why_the_8_rows_an_earlier_audit_counted_are_not_here": {
+      "measured_then": "8 docker-marked rows of 11573 at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
+      "source_of_that_number": ".docker-marks-audit.json (revision 5, base_sha f9481ccf08)",
+      "were_they_still_marked_at_the_base_this_task_names": "no: the 8 lost their marks in 58f3e23506 'tests: free the 8 docker-marked rows with the real executor entry seam', an ancestor of this base (git merge-base --is-ancestor)",
+      "at_d72627bf83_measured_here": "0 as well: git grep 'pytest.mark.docker' at d72627bf83 finds only prose mentions in three files, and pytest.ini at that commit already states that the group selects no rows",
+      "at_this_base_measured_here": "0 (C2-collect-docker-rows: 'no tests collected (11574 deselected)', exit 5)"
+    }
+  },
+  "byte_searches": {
+    "why": "a row may only be called unrecoverable after a content search of the stores, not after reading its code. The searches below have NO name filter (no --glob, no include/exclude), include hidden and ignored files (-uu), and ran over the three stores the criterion names plus the director's report store. The reports_path_search below is the /reports question itself.",
+    "needles": [
+      "dsh-synthetic-evaluated-headers",
+      "synthetic-dsh-driver-token",
+      "fixture-ownership.sqlite",
+      "run_isolation",
+      "d28d9c16c2ea5b2f",
+      "node-v24.22.0",
+      "eslint-10.12.0",
+      "f98cfd1b9d54ea050d6c80d35d609b260eb80d333306c6ccc605934973b677a1",
+      "67ca5783febb8bf85736c79fcdd92c8d6d465a0eb2a082672bcdfa76a506751c"
+    ],
+    "records": [
+      {
+        "id": "search-artifacts",
+        "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-artifacts.log",
+        "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/artifacts",
+        "hits": {
+          "dsh-synthetic-evaluated-headers": {
+            "occurrences": 6,
+            "files": 2
+          },
+          "run_isolation": {
+            "occurrences": 361,
+            "files": 12
+          }
+        }
+      },
+      {
+        "id": "search-state-report-evidence",
+        "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-state-report-evidence.log",
+        "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/state-report-evidence",
+        "hits": {
+          "dsh-synthetic-evaluated-headers": {
+            "occurrences": 14,
+            "files": 13
+          },
+          "run_isolation": {
+            "occurrences": 58,
+            "files": 44
+          },
+          "d28d9c16c2ea5b2f": {
+            "occurrences": 116,
+            "files": 108
+          },
+          "f98cfd1b9d54ea050d6c80d35d609b260eb80d333306c6ccc605934973b677a1": {
+            "occurrences": 12,
+            "files": 12
+          }
+        }
+      },
+      {
+        "id": "search-workspaces",
+        "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-workspaces.log",
+        "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/workspaces",
+        "hits": {
+          "run_isolation": {
+            "occurrences": 586,
+            "files": 90
+          }
+        }
+      }
+    ],
+    "what_the_needles_found": {
+      "fixture-ownership.sqlite": "0 hits in the three stores above; the director's report store returns 351 files whose only kind is an archived COPY of tests/integration/test_javascript_lint_validation_context.py inside a report tree -- not one of them is a .sqlite file and not one is a prepared root. So the root the 13 integration rows expect is NOT on this host, and the root used here is a SUBSTITUTE",
+      "node-v24.22.0 / eslint-10.12.0": "0 hits in the three stores above (no tarball is archived there); the director's report store does hold them (see director_store_search): the retained Dockerfile that bakes /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz with its official sha256, and the retained official eslint 10.12.0 package tree",
+      "dsh-synthetic-evaluated-headers": "hits only in pytest logs and State records that mention the name (artifacts; state-report-evidence), never the file itself",
+      "f98cfd1b9d54ea050d6c80d35d609b260eb80d333306c6ccc605934973b677a1": "12 blobs in the content-addressed store mention the digest; none of them IS the file",
+      "d28d9c16c2ea5b2f": "108 files in state-report-evidence mention the image digest (reports about it)",
+      "run_isolation": "hits are logs/reports that talk about the table, not fixture roots"
+    },
+    "substitute_called_a_substitute": {
+      "what": "the fixture root LINT_REAL_ROOT=/tmp/baked-r4/lintroot used in I2/I3/I4/I5/I6",
+      "why_it_is_a_substitute": "its fixture-ownership.sqlite carries the 5-column run_isolation table the rows INSERT into (the shape tests/unit/test_javascript_lint_owned_boundary.py:23-25 shows), built by this attempt; the owning harness's own prepared root -- which the module docstring says nothing in this repository creates -- was looked for by name and by content and is not on this host",
+      "what_it_is_functionally": "equivalent for these rows: I4 passes all 13 with it, so the substitution is measured rather than assumed"
+    },
+    "binary_blobs_are_not_text_searched": "rg declines to decode binary files; the content-addressed store holds git bundles (e.g. state-report-evidence/a2/a2e8e9e7... begins '# v2 git bundle'), whose packfile is compressed and cannot be read by any text search. This cannot hide the needles that matter here: the digest-addressed lookup for f98cfd1b is exact and MISSING (the CAS slot state-report-evidence/f9/f98cfd1b... does not exist), and no baked row reads a /reports path at all (none of the four row files mentions /reports).",
+    "director_store_search": {
+      "why": "r3 searched this store too; it is not one of the three the criterion names, so it is recorded separately and no row's recoverability depends on it",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D3-director-store-provenance-search.log",
+      "argv": "",
+      "hits": {
+        "dsh-synthetic-evaluated-headers": [
+          "occurrences 441",
+          "files 415"
+        ],
+        "eslint-10.12.0": [
+          "occurrences 47",
+          "files 35"
+        ],
+        "fixture-ownership.sqlite": [
+          "occurrences 352",
+          "files 351"
+        ],
+        "node-v24.22.0": [
+          "occurrences 58",
+          "files 16"
+        ]
+      },
+      "what_the_fixture_hits_are": "351 files, every one of them a test_javascript_lint_validation_context.py copy under director/reports/<run>/... ; no .sqlite file, no prepared root",
+      "what_the_node_and_eslint_hits_are": "director/reports/node-official-npm-source-20261015/reports/image/Dockerfile plus its build.log: the recipe that installs /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz and checks sha256 cc2f601cee82d9a5a233302fe307abc600727035fd7d2c3a3571755989e95008; and director/reports/official-eslint-runtime-package-20261016/ctx/prefix/node_modules/eslint (version 10.12.0, bin/eslint.js sha256 bb07a179294caee1175397035fef38347782cb8fbf00356ca8c6fd2c87a989fa, the same bytes the executor image and /tmp/aitelier-opt carry)"
+    },
+    "pinned_bytes_provenance_on_this_host": {
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D3-director-store-provenance-search.log",
+      "node_recipe": "director/reports/node-official-npm-source-20261015/reports/image/Dockerfile",
+      "node_build_log": "director/reports/node-official-npm-source-20261015/reports/image/build.log",
+      "eslint_package_tree": "director/reports/official-eslint-runtime-package-20261016/ctx/prefix/node_modules/eslint (10.12.0)",
+      "identical_eslint_js_sha256_in": [
+        "that package tree",
+        "/opt/aitelier-eslint inside sha256:d28d9c16...",
+        "/tmp/aitelier-opt/aitelier-eslint"
+      ],
+      "identical_node_bin_sha256_in": [
+        "/opt/aitelier-node inside sha256:d28d9c16...",
+        "/tmp/aitelier-opt/aitelier-node"
+      ]
+    },
+    "cas_digest_lookup": {
+      "what": "the exact digest-addressed lookup is the one route into a content-addressed blob that a text search cannot take",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D2-cas-digest-lookup.log",
+      "argv": "bash /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/cas_lookup.sh"
+    },
+    "reports_path_search": {
+      "finding": "no row among the 34 consumes a path under /reports: grep -rn '/reports' over the four row files and tests/gate_fixture.py returns nothing; the 10 test files elsewhere in tests/ that do mention /reports are not in this group",
+      "the_one_place_the_bytes_are_gone": "/reports/dsh-synthetic-evaluated-headers.json (the row that r3's reports_search section discussed) has no CAS slot under its recorded sha256 and no copy in any store; that row was already fixed at this base and is not among the 34"
+    }
+  },
+  "runs": [
+    {
+      "id": "C1-collect-baked-rows",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C1-collect-baked-rows.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m baked_toolchain --collect-only -q tests/",
+      "result": "34/11574 tests collected (11540 deselected) in 25.92s",
+      "purpose": "the baked_toolchain collect at this base: 34 rows, and the 11574-row total the group sits in"
+    },
+    {
+      "id": "C2-collect-docker-rows",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C2-collect-docker-rows.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= -m docker --collect-only -q tests/",
+      "result": "no tests collected (11574 deselected) in 26.12s",
+      "purpose": "the docker-mark collect at this base, measured beside the baked count for docker_surface"
+    },
+    {
+      "id": "C3-collect-all-marks-dropped",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/C3-collect-all-marks-dropped.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/baked-r4/nomark:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -o addopts= --collect-only -q tests/",
+      "result": "11574 tests collected in 26.99s",
+      "purpose": "the same 11574 rows with the 11 baked_toolchain decorators and the module pytestmark entry dropped: nothing left deselected"
+    },
+    {
+      "id": "B1-baked-group-as-delivered",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/B1-baked-group-as-delivered.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=short -rfEs -p no:cacheprovider",
+      "result": "21 failed, 13 skipped, 11540 deselected, 2 warnings in 67.84s (0:01:07)",
+      "purpose": "all 34 rows as delivered in the shipped image: 21 failed, 13 skipped, 0 passed"
+    },
+    {
+      "id": "B1b-gate-rows-as-delivered-showlocals",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/B1b-gate-rows-as-delivered-showlocals.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -vv --tb=long --showlocals -p no:cacheprovider tests/unit/test_gate_consumer_composition.py tests/unit/test_repo_gate_admission.py tests/unit/test_repo_gate_red_beats_absence.py",
+      "result": "14 failed, 34 deselected, 1 warning in 42.40s",
+      "purpose": "the 14 repo_gate rows as delivered, -vv --showlocals: the IsolationUnavailable text"
+    },
+    {
+      "id": "B1b-owned-boundary-7-rows-as-delivered-showlocals",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/B1b-owned-boundary-7-rows-as-delivered-showlocals.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=long --showlocals -rfEs -p no:cacheprovider tests/unit/test_javascript_lint_owned_boundary.py",
+      "result": "7 failed, 15 deselected, 1 warning in 0.32s",
+      "purpose": "the 7 lint_boundary rows as delivered (ellipsised repr)"
+    },
+    {
+      "id": "B1c-owned-boundary-7-rows-as-delivered-vv",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/B1c-owned-boundary-7-rows-as-delivered-vv.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -vv --tb=long --showlocals -rfEs -p no:cacheprovider tests/unit/test_javascript_lint_owned_boundary.py",
+      "result": "7 failed, 15 deselected, 1 warning in 0.33s",
+      "purpose": "the 7 lint_boundary rows as delivered with -vv: the exact Errno 2 string per row"
+    },
+    {
+      "id": "S5-seam-arm-14-gate-rows",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/S5-seam-arm-14-gate-rows.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/baked-r4/seam:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -v --tb=short -rfEs -p no:cacheprovider tests/unit/test_gate_consumer_composition.py::test_raw_only_gate_cannot_claim_complete_coverage tests/unit/test_repo_gate_admission.py::test_two_concurrent_repo_gates_are_each_admitted_by_the_queue tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run tests/unit/test_repo_gate_admission.py::test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red tests/unit/test_repo_gate_admission.py::test_an_unreachable_engine_is_not_run tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red tests/unit/test_repo_gate_red_beats_absence.py::test_the_same_refusal_with_no_retained_red_is_still_not_run tests/unit/test_repo_gate_red_beats_absence.py::test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence tests/unit/test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence tests/unit/test_repo_gate_red_beats_absence.py::test_a_green_pytest_beside_a_refused_gate_is_an_absence",
+      "result": "1 failed, 13 passed, 1 warning in 93.10s (0:01:33)",
+      "purpose": "the 14 repo_gate rows with the mark dropped and the in-repo seam installed; the wall row unchanged"
+    },
+    {
+      "id": "G4-combo-14-gate-rows",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/G4-combo-14-gate-rows.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/baked-r4/combo:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -v --tb=short -rfEs -p no:cacheprovider tests/unit/test_gate_consumer_composition.py::test_raw_only_gate_cannot_claim_complete_coverage tests/unit/test_repo_gate_admission.py::test_two_concurrent_repo_gates_are_each_admitted_by_the_queue tests/unit/test_repo_gate_admission.py::test_pole_1_a_gate_the_engine_did_not_admit_is_not_run tests/unit/test_repo_gate_admission.py::test_pole_2_a_gate_that_ran_and_went_red_is_a_code_red tests/unit/test_repo_gate_admission.py::test_an_unreachable_engine_is_not_run tests/unit/test_repo_gate_red_beats_absence.py::test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red tests/unit/test_repo_gate_red_beats_absence.py::test_the_same_refusal_with_no_retained_red_is_still_not_run tests/unit/test_repo_gate_red_beats_absence.py::test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence tests/unit/test_repo_gate_red_beats_absence.py::test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence tests/unit/test_repo_gate_red_beats_absence.py::test_a_green_pytest_beside_a_refused_gate_is_an_absence",
+      "result": "14 passed, 1 warning in 32.91s",
+      "purpose": "the same 14 with the wall row's explicit pytest_wall_seconds=3"
+    },
+    {
+      "id": "L1b-owned-boundary-bytes-marks-as-delivered",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/L1b-owned-boundary-bytes-marks-as-delivered.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/aitelier-opt/aitelier-node:/opt/aitelier-node:ro -v /tmp/aitelier-opt/aitelier-eslint:/opt/aitelier-eslint:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=short -rA -p no:cacheprovider tests/unit/test_javascript_lint_owned_boundary.py",
+      "result": "7 passed, 15 deselected, 1 warning in 2.49s",
+      "purpose": "the 7 lint_boundary rows with the pinned bytes mounted and the marks as delivered"
+    },
+    {
+      "id": "L2-owned-boundary-mark-dropped-no-bytes",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/L2-owned-boundary-mark-dropped-no-bytes.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/baked-r4/lintmark:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -v --tb=line -rfEs -p no:cacheprovider tests/unit/test_javascript_lint_owned_boundary.py",
+      "result": "7 failed, 15 passed, 1 warning in 0.76s",
+      "purpose": "the mark dropped with no bytes: the 7 still fail, so the bytes are what they lack"
+    },
+    {
+      "id": "L3-owned-boundary-mark-dropped-with-bytes",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/L3-owned-boundary-mark-dropped-with-bytes.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/baked-r4/lintmark:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/aitelier-opt/aitelier-node:/opt/aitelier-node:ro -v /tmp/aitelier-opt/aitelier-eslint:/opt/aitelier-eslint:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -v --tb=line -rfEs -p no:cacheprovider tests/unit/test_javascript_lint_owned_boundary.py",
+      "result": "22 passed, 1 warning in 4.29s",
+      "purpose": "mark dropped and bytes mounted: the whole file"
+    },
+    {
+      "id": "I2-integration-13-rows-root-and-bytes",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I2-integration-13-rows-root-and-bytes.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/aitelier-opt/aitelier-node:/opt/aitelier-node:ro -v /tmp/aitelier-opt/aitelier-eslint:/opt/aitelier-eslint:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=short -rA -p no:cacheprovider tests/integration/test_javascript_lint_validation_context.py",
+      "result": "7 failed, 6 passed, 1 warning in 0.79s",
+      "purpose": "the 13 integration rows with the fixture root and the pinned bytes, no owned launcher"
+    },
+    {
+      "id": "I3-integration-13-rows-root-NO-bytes",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I3-integration-13-rows-root-NO-bytes.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=line -rA -p no:cacheprovider tests/integration/test_javascript_lint_validation_context.py",
+      "result": "7 failed, 6 passed, 1 warning in 0.59s",
+      "purpose": "the same 13 with the fixture root and NO /opt mounts: does any of them need the bytes at all?"
+    },
+    {
+      "id": "I4-integration-13-rows-with-a-SEATED-launcher",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I4-integration-13-rows-with-a-SEATED-launcher.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -v /tmp/baked-r4/launcher.sock:/tmp/baked-r4/launcher.sock -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot -e AITELIER_HOST_LAUNCHER_SOCKET=/tmp/baked-r4/launcher.sock aitelier:latest /usr/local/bin/python -m pytest -m baked_toolchain -v --tb=short -rA -p no:cacheprovider tests/integration/test_javascript_lint_validation_context.py",
+      "result": "13 passed, 1 warning in 9.67s",
+      "purpose": "the 13 with the fixture root and an owned host launcher seated for that root; no /opt mounts"
+    },
+    {
+      "id": "S1-seat-and-prove-launcher",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/S1-seat-and-prove-launcher.log",
+      "argv": "bash /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/seat_launcher_demo.sh",
+      "result": "2 passed, 1 warning in 3.28s",
+      "purpose": "the seat itself: the config, the exact launcher process cmdline, and one row passing through it"
+    }
+  ],
+  "probes": [
+    {
+      "id": "I6-vacuity-refusal-reasons",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I6-vacuity-refusal-reasons.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/aitelier-opt/aitelier-node:/opt/aitelier-node:ro -v /tmp/aitelier-opt/aitelier-eslint:/opt/aitelier-eslint:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/vacuity_probe_r4.py:/tmp/baked-r4/vacuity_probe_r4.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot aitelier:latest /usr/local/bin/python /tmp/baked-r4/vacuity_probe_r4.py",
+      "result": "5 CASE lines, one per reproduced case",
+      "cases": [
+        {
+          "case": "missing-context",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: JavaScript lint requires explicit run_id, step_id and project_root; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and en"
+        },
+        {
+          "case": "unbound",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: JavaScript lint requires the owned host launcher; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and enable its reviewed "
+        },
+        {
+          "case": "artifact",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: '/tmp/baked-r4/lintroot/artifact-target/fbf8ba5a26794d88a1342ec586a0d3f6/candidate.js' is not in the subpath of '/tmp/baked-r4/lintroot/projects/fe"
+        },
+        {
+          "case": "foreign-root",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: JavaScript lint requires the owned host launcher; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and enable its reviewed "
+        },
+        {
+          "case": "cjs-import",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: JavaScript lint requires the owned host launcher; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and enable its reviewed "
+        }
+      ],
+      "purpose": "which refusal each passing integration case hit with no launcher"
+    },
+    {
+      "id": "I5-vacuity-refusal-reasons-with-a-SEATED-launcher",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I5-vacuity-refusal-reasons-with-a-SEATED-launcher.log",
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -v /tmp/baked-r4/launcher.sock:/tmp/baked-r4/launcher.sock -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/vacuity_probe_r4.py:/tmp/baked-r4/vacuity_probe_r4.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot -e AITELIER_HOST_LAUNCHER_SOCKET=/tmp/baked-r4/launcher.sock aitelier:latest /usr/local/bin/python /tmp/baked-r4/vacuity_probe_r4.py",
+      "result": "5 CASE lines, one per reproduced case",
+      "cases": [
+        {
+          "case": "missing-context",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: JavaScript lint requires explicit run_id, step_id and project_root; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and en"
+        },
+        {
+          "case": "unbound",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: host CPU launcher refused: run has no supported existing repository ownership; JavaScript syntax unmeasured: select owned 'eslint' in the lint mani"
+        },
+        {
+          "case": "artifact",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: '/tmp/baked-r4/lintroot/artifact-target/4479683e9cb94218a23207462d32830b/candidate.js' is not in the subpath of '/tmp/baked-r4/lintroot/projects/e2"
+        },
+        {
+          "case": "foreign-root",
+          "passed": "False",
+          "reason": "JavaScript lint unavailable: host CPU launcher refused: repo does not match the existing run's owned repository; JavaScript syntax unmeasured: select owned 'eslint' in the lint"
+        },
+        {
+          "case": "cjs-import",
+          "passed": "False",
+          "reason": "{\"all_passed\": false, \"results\": [{\"file\": \"/tmp/baked-r4/lintroot/projects/fed2b22ebd8c42c681cc3bd28c2ef63a/input.cjs\", \"passed\": false, \"error_message\": \"ESLint exited 1: /tmp/input.cjs\\n  1:1  error  Parsing error: 'import' and 'export' may appear only with"
+        }
+      ],
+      "purpose": "the same probe with a launcher seated"
+    }
+  ],
+  "searches": [
+    {
+      "id": "search-artifacts",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-artifacts.log",
+      "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/artifacts",
+      "hits": {
+        "dsh-synthetic-evaluated-headers": {
+          "occurrences": 6,
+          "files": 2
+        },
+        "run_isolation": {
+          "occurrences": 361,
+          "files": 12
+        }
+      },
+      "purpose": "~/.AItelier/artifacts: content search, no name filter, hidden included"
+    },
+    {
+      "id": "search-state-report-evidence",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-state-report-evidence.log",
+      "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/state-report-evidence",
+      "hits": {
+        "dsh-synthetic-evaluated-headers": {
+          "occurrences": 14,
+          "files": 13
+        },
+        "run_isolation": {
+          "occurrences": 58,
+          "files": 44
+        },
+        "d28d9c16c2ea5b2f": {
+          "occurrences": 116,
+          "files": 108
+        },
+        "f98cfd1b9d54ea050d6c80d35d609b260eb80d333306c6ccc605934973b677a1": {
+          "occurrences": 12,
+          "files": 12
+        }
+      },
+      "purpose": "~/.AItelier/state-report-evidence (the content-addressed store): content search, no name filter"
+    },
+    {
+      "id": "search-workspaces",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-workspaces.log",
+      "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search-needles.txt /home/linxuhao/.AItelier/workspaces",
+      "hits": {
+        "run_isolation": {
+          "occurrences": 586,
+          "files": 90
+        }
+      },
+      "purpose": "~/.AItelier/workspaces (workspace staging): content search, no name filter"
+    }
+  ],
+  "host_measurements": [
+    {
+      "id": "D1-host-and-image-facts",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D1-host-and-image-facts.log",
+      "argv": "bash /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/host_facts.sh",
+      "script": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/host_facts.sh",
+      "result": "the launcher, its config, its images, the pinned bytes' sha256 in the image and on the host, the shipped image's /opt and tool versions, and the absence of any prepared fixture root"
+    },
+    {
+      "id": "D3-director-store-provenance-search",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D3-director-store-provenance-search.log",
+      "argv": "rg -uu --no-heading -o --with-filename --no-messages -F -f /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/needles-provenance.txt /home/linxuhao/.AItelier/director",
+      "script": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/search_director_provenance.sh",
+      "result": "dsh-synthetic-evaluated-headers 441/415, eslint-10.12.0 47/35, fixture-ownership.sqlite 352/351, node-v24.22.0 58/16, f98cfd1b... 0"
+    },
+    {
+      "id": "D2-cas-digest-lookup",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D2-cas-digest-lookup.log",
+      "argv": "bash /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/cas_lookup.sh",
+      "script": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/cas_lookup.sh",
+      "result": "the CAS slot named by the headers file's recorded sha256 does not exist; the 13 blobs that mention the name/digest have other sha256s (so none of them is the file); no row file reads /reports"
+    }
+  ],
+  "seat_and_trees": {
+    "seated_launcher_config": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D4-seated-launcher-config.json",
+    "seated_launcher_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D4-seated-launcher.log (empty: the launcher writes nothing; S1 records the process cmdline and a row served through it)",
+    "seam_tree_edits": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/seam-tree.diff",
+    "combo_tree_edits": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/combo-tree.diff",
+    "marks_dropped_tree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/nomark-tree.diff",
+    "edit_script": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/apply_seam_edits.py",
+    "vacuity_probe": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/vacuity_probe_r4.py"
+  },
+  "self_checks": {
+    "rows_equal_the_collected_count": {
+      "collected": 34,
+      "rows": 34,
+      "run": "C1-collect-baked-rows"
+    },
+    "every_row_has_a_run_outcome": 34,
+    "every_row_names_a_mark_site": 34,
+    "every_row_names_a_smallest_edit_or_a_reason": 34,
+    "groups": {
+      "lint_boundary": 7,
+      "repo_gate": 14,
+      "integration": 13
+    },
+    "classes": {
+      "runs_with_its_declared_operator_fixture": 7,
+      "runs_with_its_declared_fixture_root": 6,
+      "runs_in_the_shipped_image_after_repo_edits": 14,
+      "needs_a_capability_the_shipped_image_lacks": 7
+    },
+    "removes_from_deselected_set_true": 27,
+    "removes_from_deselected_set_false": 7,
+    "argv_recorded_for_every_run": 16,
+    "result_recorded_for_every_run": 16,
+    "nodeid_display_note": "pytest prints the mjs parameter's non-ASCII value escaped, as caf\\xe9, in both the collect log and the -v run; the nodeid strings here are copied from that output so a literal comparison with C1 holds",
+    "still_deselected_after_edits_is_the_false_count": true,
+    "worktree_status_before_the_commit": {
+      "porcelain": [
+        "?? .baked-toolchain-audit.json"
+      ],
+      "only_this_report": true,
+      "note": "the delivery commit adds exactly this file; the worktree is clean afterwards"
+    }
+  },
+  "notes": [
+    "Two r3 claims are corrected by measurement here, not carried forward.",
+    "1. docker_surface: r3's neighbour number (8 of 11573) belongs to base f9481ccf, not to this base; the 8 rows lost their docker marks in 58f3e23506 and the group selects nothing here (C2, exit 5).",
+    "2. The owned host launcher and the image carrying the pinned bytes are both present on this host (D1). r3 recorded them under 'not_recovered'. The launcher is alive but seated to the operator's home and state_db, so it cannot bind a disposable fixture run; a launcher seated to the fixture root runs all 13 integration rows (I4). Nothing among the 34 consumes bytes that no longer exist here.",
+    "3. The 7 lint_boundary rows are the only rows that need the pytest image itself to carry the pinned toolchain; the shipped image carries node v24.22.2 and distro eslint v6.4.0 instead, and not at the paths the entry checks (D1).",
+    "4. Without a launcher, three of the six passing integration rows pass for the wrong reason (the launcher refusal). That vacuity is a property of the environment, not of the rows: with a launcher seated the same three produce their named guards (I5).",
+    "5. Every number above is read from a file named beside it; every run record's argv is the argv line of its own retained log, so no record can describe a run that did not produce it."
+  ]
+}

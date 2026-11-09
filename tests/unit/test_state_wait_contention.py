@@ -30,9 +30,10 @@ from core.workspace_manager import WorkspaceManager
 # Every must-complete site names itself and the bound it read when that bound
 # expires (a bare asyncio.TimeoutError names neither, so a reader could not tell
 # a product regression from a slow host). The bound stays a direct name at both
-# the await and the message, never copied into another variable: shortening
-# HANDSHAKE_SECONDS is therefore what the witness below shortens, and the value
-# in force is the value the failure reports.
+# the await and the message, never copied into another variable. The witnesses
+# further down put HANDSHAKE_SECONDS in force at each of SITE_WITNESS_BOUNDS and
+# check that the message reports the value in force. A message that hardcoded one
+# literal passes only the arm carrying that literal and fails the other arm.
 HANDSHAKE_SECONDS = 20.0
 
 
@@ -488,8 +489,10 @@ async def test_an_expired_must_complete_wait_names_its_site_and_seconds(system, 
 # rendered: its own label, and the bound in force at that moment. None of them
 # restates the message text -- each forces the site's own awaited work to expire
 # (a recovery page that cannot return in time, a scan that cannot finish) and
-# shortens the module's HANDSHAKE_SECONDS, so the seconds reported can only have
-# been read by that site.
+# sets the module's HANDSHAKE_SECONDS to each bound in SITE_WITNESS_BOUNDS in turn.
+# Two distinct bounds are what make the seconds in the message a reading rather
+# than a coincidence: a literal written into one site's message matches the arm
+# that carries its value and fails the other.
 #
 # Driving, never re-implementing: a witness calls the shipped test (or the shipped
 # context manager) that owns its site, so the try/except under test is the one this
@@ -497,10 +500,11 @@ async def test_an_expired_must_complete_wait_names_its_site_and_seconds(system, 
 # and every expired bound it exercises belongs to the shipped code, which is what
 # tests/unit/test_state_wait_bounds.py audits.
 
-# The shortened bound the witnesses put in force. It is not a wait site: it only
-# replaces the module constant for the duration of one case, so a rendered
-# "0.5s" can only have come from the site reading HANDSHAKE_SECONDS by name.
-SITE_WITNESS_BOUND = .5
+# The shortened bounds the witnesses put in force, one arm each. They are not wait
+# sites: each only replaces the module constant for the duration of one case. Two
+# distinct values make the check a comparison: a site whose message hardcoded
+# either literal would still pass its own arm but fail the other.
+SITE_WITNESS_BOUNDS = (.5, .75)
 
 # Safety valve for the worker threads a stall holds: long enough that no case can
 # ever finish on it, short enough that a thread cannot outlive the run even if a
@@ -622,19 +626,21 @@ SITE_WITNESSES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("site", list(SITE_WITNESSES))
+@pytest.mark.parametrize(
+    "site,bound",
+    [pytest.param(site, bound, id=f"{site}-{bound}")
+     for site in SITE_WITNESSES for bound in SITE_WITNESS_BOUNDS])
 async def test_every_must_complete_site_renders_its_own_label_and_bound(
-        system, monkeypatch, site):
-    monkeypatch.setattr(sys.modules[__name__], "HANDSHAKE_SECONDS",
-                        SITE_WITNESS_BOUND)
+        system, monkeypatch, site, bound):
+    monkeypatch.setattr(sys.modules[__name__], "HANDSHAKE_SECONDS", bound)
     with pytest.raises((AssertionError, pytest.fail.Exception)) as expired:
         await SITE_WITNESSES[site](system, monkeypatch)
     message = str(expired.value)
     assert site in message, (
         f"the {site} witness expired its own site, but the message it read names "
         f"no such site: {message!r}")
-    assert f"{SITE_WITNESS_BOUND}s" in message, (
-        f"the {site} witness put {SITE_WITNESS_BOUND} in force, but the message "
+    assert f"{bound}s" in message, (
+        f"the {site} witness put {bound} in force, but the message "
         f"it read does not report that bound in seconds: {message!r}")
     named = [label for label in SITE_WITNESSES if label != site and label in message]
     assert not named, (

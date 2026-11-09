@@ -2,7 +2,18 @@
  "subject": "Revision 5 of the audit of the eight rows still carrying @pytest.mark.docker at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1: each row measured in two arms in this attempt, shim calls counted by invocation, every named edit shown to apply at the site it names, the daemon-path equivalence stated as inference, and the measurement head related to the base by two retained diffs.",
  "revision": 5,
  "node": "tests.the-remaining-docker-marks-classified-by-what-actually-blocks-them-20261109",
- "attempt": "attempt-97a13d9532594ff2b8ff85e6504ad951",
+ "attempt": "attempt-11c7b4c2c2464842b8456483ea8cb5e9",
+ "correction": {
+  "what_this_is": "a bookkeeping record, added in this revision, naming the commit that fixed this report's base_sha; the fix itself is b21487f005eca4e32ce7c371fc30b935169a3792, and this revision adds no measurement",
+  "previous_candidate_attempt": "attempt-97a13d9532594ff2b8ff85e6504ad951",
+  "previous_candidate_artifact": "ed3f1554bc2670170adc2de3729946f8db8dbe42",
+  "what_was_wrong": "that candidate's report stated base_sha and head_at_measurement as 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20. That is the commit that ADDED the report, not the commit the runs were made from: every measured run was made from f9481ccf0875a1d945b4ffa713238c25ea4de0c1, and the scratch trees were built with `git archive` of that commit.",
+  "fixed_by_commit": "b21487f005eca4e32ce7c371fc30b935169a3792",
+  "how_it_was_fixed": "the report builder's base was re-pinned to the measurement commit; base_sha and head_at_measurement now name f9481ccf0875a1d945b4ffa713238c25ea4de0c1, the subject, both tree notes and every edit-verification sentence name it again, and head_at_measurement_note states that the report's own commit sits on top of that measurement head",
+  "measured_values_unchanged": "no measured value, retained log, per-row class or count changed: the eight rows, their two arms, the retained-log references, the class counts (0 a, 4 b, 4 c) and the predicted docker-marked count (8 - 4 - 4 = 0) hold the same values as the previous candidate's report",
+  "how_the_error_was_found": "by the author's own verifier (evidence/docker-audit-r5-20261109/verify-report.py, which pins the measurement base and requires it to be an ancestor of HEAD), not by a non-author review",
+  "review_status_of_the_corrected_bytes": "no non-author review has read the corrected bytes yet, neither b21487f005's report nor this revision's; nothing in this record claims independent review of the correction"
+ },
  "base_sha": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
  "head_at_measurement": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
  "head_at_measurement_note": "the worktree was checked out at f9481ccf0875a1d945b4ffa713238c25ea4de0c1 for every run of this attempt (base and head coincide at measurement time); this report is committed on top of that commit, so `git rev-parse HEAD` in the worktree is now the report commit, not the measurement head",
@@ -828,7 +839,7 @@
    "where_the_revision_4_report_overclaimed": "it called the daemon-path equivalence \"measured, not assumed\" in the class-(c) rows while its own boundary section called it inference; this revision states it once, as inference, and every class-(c) row points here."
   },
   "recorded_intent_not_execution": {
-   "what": "a shim-refused `docker create` is recorded intent: argv, pid, cwd and timestamp, followed by exit 127. Example from this attempt (delivered/diag-artifact):",
+   "what": "a shim-refused `docker create` is recorded intent: the log line carries the timestamp, pid, cwd and argv only, and the refusal status 127 appears in no log line. The status comes from the retained shim script itself (each run keeps its own copy beside its log, at delivered/<run>/shim/docker): the shim appends the record, writes its \"no docker daemon\" note to stderr, and then `exit 127` unconditionally, without appending the status to the log. Example from this attempt (delivered/diag-artifact):",
    "example_first_record_first_line": "ts=2026-11-09T07:48:03Z pid=37 cwd=/app argv=create --rm --init --network none --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:size=16m --ulimit fsize=268435456:268435456 --user 1000:1000 --name aitelier-git-32b967f44323422ebc9f8ecec6f627e1 -v /tmp/pytest-of-unknown/pytest-0/test_run_tests_report_is_an_ar0/code/.git/objects:/tmp/pytest-of-unknown/pytest-0/test_run_tests_report_is_an_ar0/code/.git/objects:ro -v /tmp/aitelier-test-home-rkjtr5qj/cpu-git/git-lx7im582:/tmp/aitelier-test-home-rkjtr5qj/cpu-git/git-lx7im582:rw --entrypoint sh aitelier:latest -c set -eu",
    "example_record_length": "this one record continues for 27 lines in total (the argv is a multi-line `sh -c` git script); the full record is in the log below",
    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim/docker-calls.log"
@@ -966,7 +977,7 @@
  "self_checks": {
   "every_line_quoted_from_this_attempts_logs": {
    "rule": "each row's line/text/green lines are extracted at build time from the log named beside them by /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py, and the build aborts if a quoted line is not in that log",
-   "independent_recheck": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py re-reads every cited log without trusting the builder (308 checks when this report was committed: quoted lines present verbatim, shim counts recounted by `ts=` and by line, argv shape, green lines found in their own logs, class counts, 8 - 4 - 4 = 0, retained diffs present, no untracked log in the worktree, committed blob identical to the working file)",
+   "independent_recheck": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py re-reads every cited log without trusting the builder. The previous candidate's report quotes 308 checks from its own run of it; run in THIS attempt the same retained script reports 310 checks, 0 failures at HEAD b21487f005eca4e32ce7c371fc30b935169a3792 before this revision's edit, and 310 checks, 2 failures against this revision's edited bytes before the commit, where the only failures are its two commit-order checks (see verifier_run_this_attempt). What it checks: quoted lines present verbatim, shim counts recounted by `ts=` and by line, argv shape, green lines found in their own logs, class counts, 8 - 4 - 4 = 0, retained diffs present, no untracked log in the worktree, committed blob identical to the working file",
    "runs_retained": [
     "corrected/identity-long-red-run1",
     "corrected/identity-long-red-run2",
@@ -994,6 +1005,26 @@
     "seam/scoped-gate-survives",
     "seam/stable-two-runs"
    ]
+  },
+  "verifier_run_this_attempt": {
+   "command": "python3 /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py",
+   "cwd": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109",
+   "run_at_the_inherited_head_before_this_edits": {
+    "git_rev_parse_HEAD": "b21487f005eca4e32ce7c371fc30b935169a3792",
+    "git_status_porcelain": "empty",
+    "summary_line": "310 checks, 0 failures",
+    "means": "the inherited report's committed blob was exactly the file in the worktree, so this run covers every measured value below; it is the state this revision starts from"
+   },
+   "run_against_this_revision_before_its_commit": {
+    "git_rev_parse_HEAD": "b21487f005eca4e32ce7c371fc30b935169a3792",
+    "git_status_porcelain": " M .docker-marks-audit.json",
+    "summary_line": "310 checks, 2 failures",
+    "checks_that_fail_before_deliver_commits_because_they_compare_the_report_to_the_commit": [
+     "HEAD:.docker-marks-audit.json is byte-identical to the working file (the artifact is a commit sha)",
+     "worktree is clean apart from the declared report path (['M .docker-marks-audit.json'])"
+    ],
+    "these_two_are_properties_of_the_moment": "these two are properties of the moment (the report is edited but not yet committed); every substantive check passed in this same run -- quoted lines present verbatim, shim counts recounted by `ts=` and by line, argv shape, green lines found in their own logs, class counts, 8 - 4 - 4 = 0, retained diffs present, no untracked log in the worktree. They are the verifier's own commit-order checks, not findings about the audit, and both hold for the commit the deliver step makes from exactly these bytes. This is not a claim that a run covered the committed bytes: re-running after the commit is the only way to see those two green, and that run is deliberately not quoted here, because the line quoting it would itself change the bytes it certifies."
+   }
   },
   "rows_unique": "8 rows, 8 distinct node ids; they are exactly the ids `-m docker --collect-only` marks at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1 (8/11573 tests collected (11565 deselected) in 21.57s)",
   "class_counts_sum_to_8": "a 0 + b 4 + c 4 = 8",
@@ -1024,7 +1055,8 @@
      "invocations": 1
     }
    ],
-   "all_other_arms": "seam / narrow / corrected runs recorded 0 invocations (empty docker-calls.log)"
+   "all_other_arms": "seam / narrow / corrected runs recorded 0 invocations (empty docker-calls.log)",
+   "recount_commands_this_attempt": "`grep -c '^ts=' <run>/shim/docker-calls.log` and `wc -l <run>/shim/docker-calls.log`, run in this attempt over the two logs above: delivered/diag-artifact 1 invocation / 27 lines, delivered/scoped-gate-survives 1 invocation / 27 lines. `grep -rl '127'` over every retained shim/docker-calls.log: no file contains it, so the refusal status is never in a log line -- it is the retained shim script's own `exit 127` (see boundary_stated.recorded_intent_not_execution)."
   },
   "teardown_race_across_attempts": {
    "this_attempt_3s_form": [

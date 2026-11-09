@@ -1,0 +1,23 @@
+{
+  "schema": "aitelier.report-corrections.v1",
+  "subject": ".skip-inventory.json",
+  "subject_artifact": "61e8573d63a2f654a68d52416c125e2db700b460",
+  "subject_verified_receipt": "receipt-1c65bd70ca5d40ada38203c2cecc34b0",
+  "why_a_sibling_file": "The subject is the verified artifact of that receipt: a reader who re-hashes it must still get 61e8573d63. This file therefore carries the corrections and leaves the subject's bytes untouched. No row, class, count, site, edit or run is changed by any correction below; both are documentation defects the second non-author review recorded (evidence/skip-audit-correction-review-r2-20261109/REVIEW-VERDICT-R2.md, notes N1 and N2) and are now tracked as iss-83ac4084381546b0 items 5 and 6.",
+  "corrections": [
+    {
+      "path": "class_d_mutation_instrument.result",
+      "quoted": "tests/api/test_admin_routers.py:67 and tests/unit/test_novel_model_routes.py:1591",
+      "defect": "Both are the MUTATED COPY's line numbers, not the tree's: each arm deletes three lines above the assertion, so the retained tree carries the admin assert at tests/api/test_admin_routers.py:70 and the novel-route assert at tests/unit/test_novel_model_routes.py:1594. The report's own phrasing ('as the retained arm logs print them') is literally true; a reader opening the tree at :67 or :1591 lands on the line above the assertion.",
+      "replacement": "cite each site with both numbers: the mutated copy the log printed and the tree line it corresponds to (test_admin_routers.py:67 in the mutant = :70 in the tree; test_novel_model_routes.py:1591 in the mutant = :1594 in the tree)",
+      "affects_measured_values": false
+    },
+    {
+      "path": "revisions",
+      "quoted": "revision 3's change list and revision 2's parenthetical 'names the attempt that delivered this revision'",
+      "defect": "Revision 3's own change list does not disclose that it moved the document's root attempt_id from attempt-44746c6280ec4253ba00fd81cf8ecc8c to attempt-2b208e544bc0492c866fe31a122a28ab, and revision 2's parenthetical reads as current while the root field now names revision 3's attempt.",
+      "replacement": "state the root attempt_id move in revision 3's change list, and make revision 2's clause past-tense ('named the attempt that delivered that revision')",
+      "affects_measured_values": false
+    }
+  ]
+}

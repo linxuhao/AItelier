@@ -104,11 +104,13 @@ def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch
     and two at `.../evidence/docker-audit-r5-20261109/narrow/keepalive-
     render-bound-run{1,2}/stdout-stderr.log` (4.25s / 4.21s).
 
-    At 6.0 s the row is green in every retained run, and each run is named
-    with the tree that printed it: the audit tree's r4 corrected rows
+    At 6.0 s the row is green on every retained run of the corrected
+    container shape, and each run is named with the tree that printed it:
+    the audit tree's r4 corrected rows
     (`.../work/docker-audit-r3-evidence-20261109/r4/logs/corrected/render-
-    bound-run{1,2,3}/stdout-stderr.log`, 4.22s / 4.24s / 4.75s), the same
-    three retained again at `.../evidence/docker-audit-r5-20261109/corrected/
+    bound-run{1,2,3}/stdout-stderr.log`, 4.22s / 4.24s / 4.75s), three more
+    runs of the same row on the same corrected tree at
+    `.../evidence/docker-audit-r5-20261109/corrected/
     keepalive-render-bound-run{1,2,3}/stdout-stderr.log` (4.76s / 4.23s /
     4.24s), and two 11-row passes whose own header names the tree
     `9eeb9f00c5 + working-tree edits` with the three dead setenv lines already

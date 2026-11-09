@@ -198,20 +198,56 @@ async def test_quiet_recovery_release_allows_fresh_disposition(system, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_deadline_before_recovery_does_not_authorize_cached_idle(system, monkeypatch):
+async def test_pending_recovery_with_exhausted_budget_cannot_authorize_cached_idle(system, monkeypatch):
+    # The first observation cycle is unconditional, but a page that returns the
+    # pending marker (another observer holds this database) observed nothing:
+    # recovery_ok stays None, so no cached status may authorize an idle
+    # decision -- the caller's exhausted .04 s budget is still a timeout.
     service = system[0]
     scan = state_changes.scan
+
+    def slow_scan(*args):
+        result = scan(*args)
+        threading.Event().wait(.08)  # The caller's budget is gone by now.
+        return result
+
+    monkeypatch.setattr(state_changes, "scan", slow_scan)
+    after = cursor(service, "follow")
+    async with held_recovery(system, monkeypatch):
+        result = await other_service(service).wait_for_state_change("follow",
+            after=after, return_when_idle=True, timeout_seconds=.04)
+        assert result == {"events": [], "next_after": after, "timed_out": True}
+
+
+@pytest.mark.asyncio
+async def test_observed_page_with_exhausted_budget_returns_nothing_to_wait(system, monkeypatch):
+    # A page that really was observed may authorize an immediate idle decision:
+    # with no nonterminal attempt in scope, reason=nothing_to_wait returns at
+    # once (timed_out=false). The slowed scan outlives the .04 s budget, so
+    # only the unconditional first observation keeps the disposition honest.
+    service = system[0]
+    scan, recover = state_changes.scan, state_changes.recover_page
+    pages = []
 
     def slow_scan(*args):
         result = scan(*args)
         threading.Event().wait(.08)
         return result
 
+    def observed_page(*args):
+        page_after, ok = recover(*args)
+        if args[1] == "follow":
+            pages.append(ok)
+        return page_after, ok
+
     monkeypatch.setattr(state_changes, "scan", slow_scan)
+    monkeypatch.setattr(state_changes, "recover_page", observed_page)
     after = cursor(service, "follow")
     result = await service.wait_for_state_change("follow", after=after,
         return_when_idle=True, timeout_seconds=.04)
-    assert result == {"events": [], "next_after": after, "timed_out": True}
+    assert pages and all(ok is True for ok in pages), "the page must be observed, not skipped"
+    assert result == {"events": [], "next_after": after, "timed_out": False,
+                      "reason": "nothing_to_wait"}
 
 
 @pytest.mark.asyncio

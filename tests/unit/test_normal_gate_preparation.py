@@ -95,7 +95,12 @@ def test_capture_measures_actual_imports_and_both_coordinates(bound):
     assert captured["files"][1]["path"] == str(fixture / gb.FILES[0])
     assert captured["engine"]["path"] == "/srv/godot_harness.py"
     assert captured["engine"]["sha256"] == binding["engine_sha256"]
-    assert captured["sdk"] == binding["sdk"]
+    # Show the pair this row compared, on green as well as on red: the numbers
+    # are the whole content of the check, and a message that only exists inside
+    # an AssertionError cannot be read off a passing run.
+    print(f"skillflow-py pin={binding['sdk']} installed={captured['sdk']}")
+    assert captured["sdk"] == binding["sdk"], (
+        f"skillflow-py pin={binding['sdk']} installed={captured['sdk']}")
     assert captured["binding_sha256"] == sha256
 
 

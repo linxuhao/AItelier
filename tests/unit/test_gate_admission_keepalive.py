@@ -43,7 +43,6 @@ def _repo(tmp_path, *, client_timeout=None):
 def _queued_gate(tmp_path, monkeypatch, *, render, queue, client_timeout):
     rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=render)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", str(client_timeout))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "60")
     monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.5")
     try:
@@ -79,10 +78,24 @@ def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch
     """Queue 1.5 s, render 6 s, client timeout 2 s: once admitted, the gate's
     own timeout runs again, and a render longer than it is not waited out.
 
-    The render must outlast the timeout by more than the relay's teardown
-    (measured: 0.5 s of executor-entry teardown plus 0.5 s of relay
-    shutdown, ~1 s), or the harness's answer lands before `stop()` and the
-    record reads `answered` instead of `abandoned`."""
+    What the row pins is the record: the render must still be running when
+    `stop()` cuts the upstream, or the harness answers first and the record
+    reads `answered` instead of `abandoned`. That is a race between what is
+    left of the render after the 2 s client timeout and the teardown; the
+    render value is the margin, and 6.0 s is headroom so that boundary is not
+    a race -- not the repair of a reproduced failure.
+
+    The row is green at the original 3.0 s as well as at 6.0 s, three runs
+    each: 3.0 s in a scratch copy of 9eeb9f00c5 with only this value reverted,
+    `.../evidence/docker-rows-unmark-director-20261109/render30-run{1,2,3}.log`
+    (4.27s / 4.51s / 4.25s), and 6.0 s in `.../evidence/docker-audit-r5-
+    20261109/corrected/keepalive-render-bound-run{1,2,3}/stdout-stderr.log`
+    (4.76s / 4.23s / 4.24s).
+
+    The one teardown figure that was measured is the relay's own shutdown,
+    0.5 s (`relay.stop took 0.5`, PROBE-7 in `.../evidence/docker-audit-r5-
+    20261109/diff-98e8007e11-e32d5d16.diff`); no executor-entry teardown
+    figure was measured, so none is claimed here."""
     install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=6.0,
                                        queue=1.5, client_timeout=2)
@@ -124,7 +137,6 @@ def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("GODOT_BUILDER_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "1")
     monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.2")
     try:
         gate = rt._run_repo_gate(_repo(tmp_path, client_timeout=1))

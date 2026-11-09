@@ -24,7 +24,6 @@ def rig(tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     rig.script_report = red_report()
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_NOISE", "6000")
     yield rig
     rig.close()
 

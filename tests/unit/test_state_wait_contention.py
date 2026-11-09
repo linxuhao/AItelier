@@ -478,3 +478,169 @@ async def test_an_expired_must_complete_wait_names_its_site_and_seconds(system, 
         # The stalled scan finishes off the event loop; let it return now instead
         # of when its own wait elapses.
         release.set()
+
+
+# --- one witness per must-complete site -------------------------------------
+#
+# A must-complete site owes the reader a message naming itself and the bound it
+# read, and a message no case ever renders is not a diagnostic. Each case below
+# drives ONE shipped site into that site's own handler and reads what the handler
+# rendered: its own label, and the bound in force at that moment. None of them
+# restates the message text -- each forces the site's own awaited work to expire
+# (a recovery page that cannot return in time, a scan that cannot finish) and
+# shortens the module's HANDSHAKE_SECONDS, so the seconds reported can only have
+# been read by that site.
+#
+# Driving, never re-implementing: a witness calls the shipped test (or the shipped
+# context manager) that owns its site, so the try/except under test is the one this
+# file ships. A witness adds no asyncio.wait/wait_for site of its own -- every wait
+# and every expired bound it exercises belongs to the shipped code, which is what
+# tests/unit/test_state_wait_bounds.py audits.
+
+# The shortened bound the witnesses put in force. It is not a wait site: it only
+# replaces the module constant for the duration of one case, so a rendered
+# "0.5s" can only have come from the site reading HANDSHAKE_SECONDS by name.
+SITE_WITNESS_BOUND = .5
+
+# Safety valve for the worker threads a stall holds: long enough that no case can
+# ever finish on it, short enough that a thread cannot outlive the run even if a
+# witness forgets to release it. It bounds nothing under test -- the site's own
+# HANDSHAKE_SECONDS is what expires -- and it is a threading wait, not an asyncio
+# wait site, so the bounds audit neither sees nor classifies it.
+WITNESS_STALL_SECONDS = 30
+
+
+def expire_after_real_page(monkeypatch, project_id):
+    """Make *project_id*'s recovery page raise TimeoutError after doing its work.
+
+    The real page still runs, so every precondition the shipped test handshakes
+    on still happens; only that page's return becomes the expiration the owning
+    site's handler is written to catch -- the wait's own awaited work failing,
+    not a shortened timer firing first.
+    """
+    page = state_changes.recover_page
+
+    def expiring(*args, **kwargs):
+        result = page(*args, **kwargs)
+        if args[1] == project_id:
+            raise asyncio.TimeoutError(
+                f"witness: the {project_id} recovery page's bound expired")
+        return result
+
+    monkeypatch.setattr(state_changes, "recover_page", expiring)
+
+
+async def witness_held_recovery_owner_page(system, monkeypatch):
+    """held_recovery's own site: the owner wait it releases must complete."""
+    expire_after_real_page(monkeypatch, "owner")
+    async with held_recovery(system, monkeypatch):
+        pass
+
+
+async def witness_external_only_replay(system, monkeypatch):
+    """test_external_only_wait_survives_...: the waiter owns an observed event."""
+    expire_after_real_page(monkeypatch, "follow")
+    await test_external_only_wait_survives_other_recovery_and_replays_own_event(
+        system, monkeypatch, "follow")
+
+
+async def witness_quiet_recovery_release(system, monkeypatch):
+    """test_quiet_recovery_release_...: the released waiter reaches a disposition."""
+    expire_after_real_page(monkeypatch, "follow")
+    await test_quiet_recovery_release_allows_fresh_disposition(
+        system, monkeypatch, "empty")
+
+
+async def witness_slow_page_walk_last_page(system, monkeypatch):
+    """test_busy_nonzero_recovery_cursor_...: the released waiter reaches its last page."""
+    # That test asserts the waiter walked onto a second page before this site is
+    # reached, so two pages are served for real and the scan after them stalls:
+    # nothing bounds that scan, so the site's own bound is what expires.
+    page, scan, release, served = (state_changes.recover_page, state_changes.scan,
+                                   threading.Event(), [])
+
+    def counting_page(*args, **kwargs):
+        result = page(*args, **kwargs)
+        if args[1] == "follow":
+            served.append(args[2])
+        return result
+
+    def stalling_scan(*args, **kwargs):
+        result = scan(*args, **kwargs)
+        if args[1] == "follow" and len(served) >= 2:
+            release.wait(WITNESS_STALL_SECONDS)
+        return result
+
+    monkeypatch.setattr(state_changes, "recover_page", counting_page)
+    monkeypatch.setattr(state_changes, "scan", stalling_scan)
+    try:
+        await test_busy_nonzero_recovery_cursor_waits_without_hotspin_and_reaches_last_page(
+            system, monkeypatch)
+    finally:
+        release.set()
+
+
+async def witness_reentrant_observation(system, monkeypatch):
+    """test_reentrant_observation_...: the reentrant product call must return."""
+    release = threading.Event()
+    # Every observation cycle begins with this scan; stalling it before the real
+    # page runs means the reentrant call cannot return inside the bound.
+    scan = state_changes.scan
+
+    def stalling(*args, **kwargs):
+        result = scan(*args, **kwargs)
+        release.wait(WITNESS_STALL_SECONDS)
+        return result
+
+    monkeypatch.setattr(state_changes, "scan", stalling)
+    try:
+        await test_reentrant_observation_does_not_deadlock_or_lose_outer_result(
+            system, monkeypatch)
+    finally:
+        release.set()
+
+
+async def witness_slow_pages(system, monkeypatch):
+    """test_a_slow_but_correct_page_...: the follow wait must reach its verdict."""
+    # Its own slow pages (1.5 s each) outlast the shortened bound, and its own
+    # `budget` drain then lets the waiter finish, so the shipped site fails by
+    # its own rule rather than by anything this witness adds.
+    await test_a_slow_but_correct_page_does_not_decide_the_wait_verdict(
+        system, monkeypatch)
+
+
+# Site label -> the shipped code that renders it. The keys ARE the labels the
+# messages must name, so a renaming cannot silently leave a site unwitnessed.
+SITE_WITNESSES = {
+    "held_recovery_owner_page": witness_held_recovery_owner_page,
+    "external_only_replay": witness_external_only_replay,
+    "quiet_recovery_release": witness_quiet_recovery_release,
+    "slow_page_walk_last_page": witness_slow_page_walk_last_page,
+    "reentrant_observation": witness_reentrant_observation,
+    "slow_pages": witness_slow_pages,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", list(SITE_WITNESSES))
+async def test_every_must_complete_site_renders_its_own_label_and_bound(
+        system, monkeypatch, site):
+    monkeypatch.setattr(sys.modules[__name__], "HANDSHAKE_SECONDS",
+                        SITE_WITNESS_BOUND)
+    with pytest.raises((AssertionError, pytest.fail.Exception)) as expired:
+        await SITE_WITNESSES[site](system, monkeypatch)
+    message = str(expired.value)
+    assert site in message, (
+        f"the {site} witness expired its own site, but the message it read names "
+        f"no such site: {message!r}")
+    assert f"{SITE_WITNESS_BOUND}s" in message, (
+        f"the {site} witness put {SITE_WITNESS_BOUND} in force, but the message "
+        f"it read does not report that bound in seconds: {message!r}")
+    named = [label for label in SITE_WITNESSES if label != site and label in message]
+    assert not named, (
+        f"the {site} witness read a message naming {named} instead of its own site: "
+        f"{message!r}")
+    if isinstance(expired.value, AssertionError):
+        assert isinstance(expired.value.__cause__, asyncio.TimeoutError), (
+            f"the failure must come from the expired bound, got "
+            f"{expired.value!r} caused by {expired.value.__cause__!r}")

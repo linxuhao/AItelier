@@ -378,10 +378,17 @@ def test_a_terminated_cli_leaves_no_running_command_behind(cli, repo, base, tmp_
     cli_proc = subprocess.Popen([sys.executable, "-m", "core.todo_cli", "done", "--attempt", "att-1", "--item", "gate",
                                  "--store", str(cli.store)], cwd=REPO_ROOT, stdout=subprocess.PIPE, text=True)
     deadline = time.time() + 60
-    while not pidfile.exists() and time.time() < deadline:
-        time.sleep(0.05)
+    # open(...,'w') truncates the witness BEFORE it writes the pid, so the file's
+    # existence is not proof the content arrived: wait for a readable pid instead
+    # of reading int('') out of a half-written file.
+    grandchild = None
+    while grandchild is None and time.time() < deadline:
+        try:
+            grandchild = int(pidfile.read_text())
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    assert grandchild is not None, "the command never published its child's pid"
     time.sleep(0.3)
-    grandchild = int(pidfile.read_text())
     cli_proc.send_signal(signal.SIGTERM)
     try:
         assert cli_proc.wait(timeout=30) == 143

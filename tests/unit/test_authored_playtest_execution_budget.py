@@ -128,14 +128,26 @@ def alive(pid):
 
 def test_actual_timeout_kills_only_owned_group_and_cleans_descendant_stdout(monkeypatch,tmp_path):
     wrapper=tmp_path/'owned.py';pidfile=tmp_path/'owned-child.pid';foreignfile=tmp_path/'foreign-finished'
-    wrapper.write_text('#!/usr/bin/env python3\nimport subprocess,sys,time,os\nfrom pathlib import Path\nchild=subprocess.Popen([sys.executable,"-c","import time;time.sleep(3)"],stdout=sys.stdout,stderr=sys.stderr)\nPath(os.environ["OWNED_PID_FILE"]).write_text(str(child.pid))\ntime.sleep(3)\n');wrapper.chmod(0o755)
+    # The pid is published by rename, not by a bare write_text: open(...,'w')
+    # truncates the target before it writes into it, so the 0.15 s SIGKILL below
+    # can land inside that window and leave the witness existing with zero
+    # bytes. rename(2) is atomic, so `pidfile.exists()` implies a complete pid.
+    wrapper.write_text('#!/usr/bin/env python3\nimport subprocess,sys,time,os\nfrom pathlib import Path\nchild=subprocess.Popen([sys.executable,"-c","import time;time.sleep(3)"],stdout=sys.stdout,stderr=sys.stderr)\nw=Path(os.environ["OWNED_PID_FILE"]);s=w.with_name(w.name+".writing");s.write_text(str(child.pid));os.replace(s,w)\ntime.sleep(3)\n');wrapper.chmod(0o755)
     monkeypatch.setattr(gh,'GODOT_BIN',str(wrapper))
     foreign=subprocess.Popen([sys.executable,'-c','import time;from pathlib import Path;time.sleep(.5);Path('+repr(str(foreignfile))+').write_text("done")'],start_new_session=True)
     try:
         start=time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired):gh._run([],0.15,{'OWNED_PID_FILE':str(pidfile)})
         assert time.monotonic()-start<1.0
-        assert pidfile.exists() and not alive(int(pidfile.read_text()))
+        assert pidfile.exists(), (
+            'the wrapper never published a complete pid inside the 0.15 s budget: '
+            'the SIGKILL landed between its pid write and its rename (witness '
+            'absent, not partial)')
+        pid_text=pidfile.read_text().strip()
+        assert pid_text.isdigit(), (
+            'the pid witness holds %r, not a pid: the kill landed inside the write'
+            % pid_text)
+        assert not alive(int(pid_text))
         assert foreign.poll() is None
         assert foreign.wait(timeout=2)==0 and foreignfile.read_text()=='done'
     finally:

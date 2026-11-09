@@ -86,25 +86,56 @@ def test_actual_container_entry_captures_real_pytest_and_junit(tmp_path, failing
     assert candidate._junit_node_ids(junit) == {"tests/test_fixture.py::test_fixture"}
 
 
+def _witness_pid(witness):
+    """The pid a witness file carries, or a named failure -- never `int('')`.
+
+    The child publishes its pid AS THE NAME of the witness, created by a single
+    open(2) (`: > child.pid.$$`), so a witness that exists carries a COMPLETE
+    pid: there is no "created but not yet written" state to read. (The previous
+    shape wrote the pid INTO a file the shell had just created/truncated, and a
+    SIGKILL inside that window left an empty file, so `int('')` reported a
+    passed contract as `ValueError: invalid literal for int() with base 10: ''`.)
+    Anything else is reported by name here instead of being raised from int().
+    """
+    suffix = witness.name.rpartition(".")[2]
+    if not suffix.isdigit():
+        pytest.fail(f"pid witness {witness} does not carry a pid in its name, so the "
+                    "kill landed before the witness was published")
+    return int(suffix)
+
+
 def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
-    pid_file = tmp_path / "child.pid"
     # The budget clock starts when entry.run is called, so the child's first
     # byte must not depend on CPython start-up (interpreter init alone can exceed
-    # 0.2 s under CPU contention). /bin/sh prints "partial" BEFORE it writes its
-    # pid, so the pid file is a witness that the byte already reached the pipe;
+    # 0.2 s under CPU contention). /bin/sh prints "partial" BEFORE it publishes
+    # its pid, so a witness is proof that the byte already reached the pipe;
     # `exec` keeps that pid for the reap check below.
-    script = f"echo partial; echo $$ > {shlex.quote(str(pid_file))}; exec sleep 20"
+    #
+    # The pid travels in the witness FILE NAME, published by one open(2) and by
+    # nothing else, so existence implies a complete pid. Writing the pid INTO a
+    # witness (`echo $$ > child.pid`) takes two steps instead -- the shell
+    # creates/truncates the target, then writes into it -- and the 0.2 s SIGKILL
+    # can land between them, leaving an EMPTY file: measured in a whole-suite run
+    # on 2026-11-09, where int(pid_file.read_text()) raised ValueError from inside
+    # a passed contract. A file name cannot be half-created, and publishing costs
+    # the child no extra fork/exec (a shell has no rename builtin, so a
+    # temp-file+rename witness would spend budget on starting `mv`).
+    script = f"echo partial; : > {shlex.quote(str(tmp_path))}/child.pid.$$; exec sleep 20"
     result = entry.run({"repo":str(tmp_path),"timeout":0.2,"args":["/bin/sh","-c",script]})
     assert result["timed_out"] and result["returncode"] != 0
-    # Child-side witness: the child got its first write out inside the budget.
-    # Without it, an empty stdout would be a timing miss, not the partial-capture
-    # contract, and the assertion below would blame the wrong thing.
-    assert pid_file.exists(), (
-        "child never reached its first write inside the 0.2 s budget "
-        f"(start-up outran the budget under load): {result!r}")
+    witnesses = sorted(tmp_path.glob("child.pid.*"))
+    # Child-side witness: the child got its first write out inside the budget,
+    # and `witness.exists()` here means the pid was FULLY written -- the witness
+    # carries the pid in its name, so nothing is ever written into it and there
+    # is no half-published state. Without a witness, an empty stdout would be a
+    # timing miss, not the partial-capture contract, and the assertion below
+    # would blame the wrong thing.
+    assert len(witnesses) == 1, (
+        "child never published its pid inside the 0.2 s budget (start-up outran "
+        f"the budget under load): witnesses={[w.name for w in witnesses]}: {result!r}")
     assert "partial" in result["stdout"]
     with pytest.raises(ProcessLookupError):
-        os.kill(int(pid_file.read_text()),0)
+        os.kill(_witness_pid(witnesses[0]),0)
 
 
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])

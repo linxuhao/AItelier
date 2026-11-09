@@ -1,0 +1,898 @@
+{
+  "schema": "coding-workspace-rows-audit/1",
+  "attempt_id": "attempt-ce06f99cf0f942fca0903929ae40f0af",
+  "base_sha": "d72627bf8344be6c9c34d3e9babb4dc7c243d0f5",
+  "worktree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109",
+  "scope": "the 29 test IDs of tests/integration/test_coding_workspace_integration.py that .skip-inventory.json classes as b with one shared minimal_edit marked 'evidence: estimate'. The 29-row group is the only arm under audit; three further runs are measured and reported as labelled controls, not as arms: the collateral module before/after the conftest default (collateral.other_readers_of_the_two_variables.measured) and the conftest default alone (arms.scratch_conftest_default_only). Two more runs are import-order probes of the fixture root (fixture_root.measured_in_two_import_orders), not pytest arms.",
+  "base": {
+    "tree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-base-module.log",
+    "log_sha256": "e6166bd66f68221d701bd27032b51825696397f56055ecbc0d5a524cbf8f92bc",
+    "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -q -rs -p no:cacheprovider tests/integration/test_coding_workspace_integration.py",
+    "collected": 29,
+    "counts": {
+      "skipped": 29,
+      "printed_seconds": 0.28,
+      "printed": "29 skipped, 1 warning in 0.28s"
+    },
+    "skip_reason_printed": "requires an owned disposable fixture root",
+    "skipif_site": "tests/integration/test_coding_workspace_integration.py:29",
+    "note": "all 29 collect and skip at the module-level skipif; the session 'env' fixture never runs, so no product code executes",
+    "collected_source": "pytest -q does not print a collected count. 29 is counted from this log's own output: the progress line (log line 9) carries exactly 29 's' characters, and the 28 SKIPPED summary entries sum to 29 because the :1174 row prints 'SKIPPED [2]' while every other entry prints '[1]'."
+  },
+  "arms": {
+    "base": {
+      "edit": "none",
+      "tree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109",
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-base-module.log",
+      "ran": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 29,
+      "counts": {
+        "skipped": 29,
+        "printed_seconds": 0.28,
+        "printed": "29 skipped, 1 warning in 0.28s"
+      }
+    },
+    "scratch_conftest_default_plus_src_substitutions": {
+      "edit": "tests/conftest.py at import: os.environ.setdefault CODING_WORKSPACE_FIXTURE=tempfile.mkdtemp(prefix='cwi-') and CODING_WORKSPACE_RAW=<fixture>/raw; the module's three hardcoded /src uses (:92 module hashes, :780 and :1026 cwd) replaced by REPO_ROOT = Path(__file__).resolve().parents[2]",
+      "tree": "/tmp/cwi-arm-b",
+      "tree_note": "git archive of d72627b, outside the worktree, disposable",
+      "logs": [
+        "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module.log",
+        "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module-rowbyrow.log"
+      ],
+      "log_sha256": [
+        "cf29b9428780332025d5434e178f9f52f90690f2ac7db4f44df814122c455a01",
+        "08f9685b9946cb9e0f634d92ae5d179ff4f76784ac3d302616ac50d964b18bdf"
+      ],
+      "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/cwi-arm-b:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -q -rs -p no:cacheprovider tests/integration/test_coding_workspace_integration.py",
+      "collected": 29,
+      "ran": 29,
+      "passed": 28,
+      "failed": 1,
+      "skipped": 0,
+      "errors": 0,
+      "counts_run1": {
+        "passed": 28,
+        "failed": 1,
+        "printed_seconds": 58.79,
+        "printed": "1 failed, 28 passed, 1 warning in 58.79s"
+      },
+      "counts_run2_rowbyrow": {
+        "passed": 28,
+        "failed": 1,
+        "printed_seconds": 57.15,
+        "printed": "1 failed, 28 passed, 1 warning in 57.15s"
+      },
+      "reproducible": "two independent runs agree: 28 passed / 1 failed"
+    },
+    "scratch_conftest_default_only": {
+      "edit": "the conftest default alone, /src uses left hardcoded",
+      "tree": "/tmp/cwi-arm-b-conftest-only",
+      "ran": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "errors": 29,
+      "errors_source": "measured by runs.no_maxfail below, which prints '1 warning, 29 errors in 1.29s': the session 'env' fixture errors once per row at :92, so all 29 rows error and none skips. This is no longer an extrapolation.",
+      "runs": {
+        "no_maxfail": {
+          "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-armB-conftest-only-no-maxfail.log",
+          "log_sha256": "0982a0962c7a3abe0b89c37d00c9b734b2a803ba7deaffd17c8b1454bb80d044",
+          "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/cwi-arm-b-conftest-only:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -q -rs -p no:cacheprovider tests/integration/test_coding_workspace_integration.py",
+          "counts": {
+            "errors": 29,
+            "printed_seconds": 1.29,
+            "printed": "1 warning, 29 errors in 1.29s"
+          },
+          "error_sections_in_log": 29,
+          "error_printed": "FileNotFoundError: [Errno 2] No such file or directory: '/src/core/coding_workspace.py'",
+          "note": "this is the arm's own number: the same command as the r1 control with --maxfail=1 removed, so every one of the 29 session-setup errors is reported instead of the first."
+        },
+        "with_maxfail_1": {
+          "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-conftest-only-no-src-substitution.log",
+          "log_sha256": "4ef80d23b9f8ad346c2589472297877856e9be4cd0ae777cab323f4c40a56b23",
+          "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/cwi-arm-b-conftest-only:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python -m pytest -q -rs --maxfail=1 -p no:cacheprovider tests/integration/test_coding_workspace_integration.py",
+          "counts": {
+            "errors_reported": 1,
+            "printed_seconds": 0.44,
+            "printed": "1 warning, 1 error in 0.44s"
+          },
+          "note": "kept as its own labelled field because it is the run the r1 report cited: --maxfail=1 stops the session at the first error, so this log really does print '1 error' and no field of this report claims it prints 29. It measures the failure and its site; runs.no_maxfail measures its extent."
+        }
+      },
+      "error_printed": "FileNotFoundError: [Errno 2] No such file or directory: '/src/core/coding_workspace.py'",
+      "conclusion": "the env default alone unskips nothing: every row errors in session setup at :92, so the /src substitution is load-bearing, not cosmetic"
+    }
+  },
+  "rows": [
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_trivial_edit_one_tree_no_commit_handoff",
+      "line": 171,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.58,
+        "setup_seconds": 1.01
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_dispatch_refuses_escape_tools_and_foreign_scope",
+      "line": 219,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.32,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_other_session_busy_and_distinct_projects_parallel",
+      "line": 248,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 2.92,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_overlapping_request_is_busy",
+      "line": 274,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.26,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_governing_plan_gate_reload_reject_stale_and_exact_approval",
+      "line": 312,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 3.79,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_dismissal_closes_without_delivery_and_frees_project",
+      "line": 402,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 2.56,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_historical_plan_does_not_gate_next_trivial_request",
+      "line": 424,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 3.1,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_source_conflict_retains_w_and_changes_nothing",
+      "line": 447,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.67,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_partial_handoff_retains_admission_and_recovers_forward",
+      "line": 494,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.84,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_partial_handoff_third_state_stays_ambiguous",
+      "line": 530,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.5,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_optional_commit_same_admission_no_hooks",
+      "line": 562,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.35,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_commit_unavailable_for_dirty_base_but_working_bytes_delivered",
+      "line": 589,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.38,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_commit_crash_after_ref_cas_recovers_index",
+      "line": 605,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.5,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_no_index_policy_with_lifecycle_enabled",
+      "line": 640,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 0.89,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_shell_missing_facility_validated_grant_and_unknown_retention",
+      "line": 688,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 2.18,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_restart_reclaims_same_run_after_positive_quiet",
+      "line": 784,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 4.37,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_interrupted_creation_is_settled_not_retried_or_adopted",
+      "line": 800,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "FAILED",
+        "call_seconds": 1.37,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_new_routes_are_writer_gated",
+      "line": 822,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": null,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_budget_pause_reuses_exact_run_and_tree",
+      "line": 843,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.04,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_lost_claim_with_live_owner_is_not_reclaimed",
+      "line": 868,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.09,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_engine_terminal_run_still_reconciles_pending_handoff",
+      "line": 904,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.23,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_unknown_plan_start_gates_until_dismissed",
+      "line": 931,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.1,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_closed_dirty_tree_is_retained_by_ordinary_cleanup",
+      "line": 960,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.02,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_coding_workspace_is_not_offered_as_a_pipeline",
+      "line": 983,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": null,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_resuming_one_workspace_never_recovers_another_runs_claim",
+      "line": 1066,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 5.19,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_missing_scoped_recovery_refuses_before_cross_run_effects",
+      "line": 1104,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 4.28,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_settled_record_failure_keeps_exact_admission_and_next_request_settles",
+      "line": 1133,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 1.31,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_interruption_after_durable_settlement_is_recovered[row_retirement]",
+      "line": 1174,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 2.61,
+        "setup_seconds": null
+      }
+    },
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_interruption_after_durable_settlement_is_recovered[retirement_record]",
+      "line": 1174,
+      "inventory_class": "b",
+      "base": {
+        "outcome": "skipped",
+        "reason": "requires an owned disposable fixture root"
+      },
+      "arm": {
+        "outcome": "PASSED",
+        "call_seconds": 2.22,
+        "setup_seconds": null
+      }
+    }
+  ],
+  "failing_rows": [
+    {
+      "nodeid": "tests/integration/test_coding_workspace_integration.py::test_interrupted_creation_is_settled_not_retried_or_adopted",
+      "line": 800,
+      "assertion_line": 806,
+      "printed": "AssertionError: assert 1 == 17",
+      "child_stderr_message": "TypeError: start_and_die() got an unexpected keyword argument 'db'",
+      "child_stderr_source": "printed by pytest inside the assertion's `where ... CompletedProcess(...)` clause on run-armB-module.log:22 and run-armB-module-rowbyrow.log:22, where the repr escapes the quotes (\\'db\\'); the message is the CHILD script's stderr, which is why the child exits 1 instead of os._exit(17).",
+      "cause": "the CHILD script at :765-768 replaces sf.start_run with start_and_die(rid); the product path calls it as sf.start_run(run_id, db=db) from core/skillflow_host.py:44 (host signature at core/skillflow_host.py:809: def start_run(self, run_id: str, *, db: Any = None) -> None), so the child dies with TypeError instead of os._exit(17).",
+      "reproduced_in": [
+        "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module.log",
+        "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module-rowbyrow.log"
+      ],
+      "classification": "stale test-body monkeypatch signature, not an edit artefact. Git shows the child patch at :766 (def start_and_die(rid)) was written in d4978d7444 (2026-10-16) and that the keyword-only db= it does not accept arrived later, in 5586c0766e (2026-11-04): d4978d7444 is an ancestor of 5586c0766e, so the child script predates the keyword and was never updated for it. Whether the row ever passed anywhere before that keyword existed is not evidenced by this audit and is not claimed here."
+    }
+  ],
+  "src_substitutions": [
+    {
+      "line": 92,
+      "base": "hashlib.sha256(Path(f\"/src/{m}\").read_bytes())",
+      "scratch": "hashlib.sha256(Path(REPO_ROOT, m).read_bytes())",
+      "why": "the tree is mounted at /app, there is no /src in this runtime"
+    },
+    {
+      "line": 780,
+      "base": "cwd=\"/src\"",
+      "scratch": "cwd=str(REPO_ROOT)",
+      "why": "subprocess child (_child) would raise FileNotFoundError before running"
+    },
+    {
+      "line": 1026,
+      "base": "cwd=\"/src\"",
+      "scratch": "cwd=str(REPO_ROOT)",
+      "why": "subprocess child (_owners_left_by_dead_child), same failure"
+    },
+    {
+      "line": 30,
+      "base": "absent",
+      "scratch": "REPO_ROOT = Path(__file__).resolve().parents[2]",
+      "why": "the single definition the three sites above use; parents[2] of the test file is the repo root (/app)"
+    }
+  ],
+  "fixture_root": {
+    "question": "C1: does the module's own fixture root under CODING_WORKSPACE_FIXTURE already exist, so that no /src mount is needed?",
+    "answer": "No tree has to pre-exist under CODING_WORKSPACE_FIXTURE, and no /src mount is needed. The runner only has to name an owned directory (the arm below minted an empty one with tempfile.mkdtemp(prefix='cwi-')); from that empty root the module creates every directory it uses, at import, before any test body runs. So a freshly created empty directory is sufficient: nothing needs to be laid down under it first, and nothing is mounted at /src.",
+    "module_builds_every_root_it_needs": {
+      "source": "tests/integration/test_coding_workspace_integration.py at d72627bf8344be6c9c34d3e9babb4dc7c243d0f5, quoted line by line as read",
+      "lines": [
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 28,
+          "text": "FIXTURE = os.environ.get(\"CODING_WORKSPACE_FIXTURE\")"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 33,
+          "text": "if FIXTURE and \"api.dependencies\" not in sys.modules:"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 34,
+          "text": "    _HOME = Path(FIXTURE) / (\"h-\" + uuid.uuid4().hex[:8])"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 35,
+          "text": "    _HOME.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 36,
+          "text": "    os.environ[\"AITELIER_HOME\"] = str(_HOME)"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 37,
+          "text": "RAW = Path(os.environ.get(\"CODING_WORKSPACE_RAW\", \"/raw\"))"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 53,
+          "text": "        RAW.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 54,
+          "text": "        (RAW / f\"{name}.json\").write_text(json.dumps(obj, indent=2, default=str))"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 111,
+          "text": "        src = Path(FIXTURE) / \"repos\" / pid"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 777,
+          "text": "    script = Path(FIXTURE) / f\"child-{uuid.uuid4().hex[:6]}.py\""
+        }
+      ],
+      "reading": [
+        ":28 reads the variable; :33-36 are the import-time block that mints the data root under it (`h-` + 8 hex chars) and points AITELIER_HOME at it; :37 reads CODING_WORKSPACE_RAW; :53-54 write evidence JSON under RAW; :111 is the per-project git repository the `project` fixture builds under FIXTURE/repos; :777 is a child script for the same tree (the launcher sockets at :720/:735 and the second child at :1022 land there too).",
+        "Every one of those paths is created by this module (mkdir(parents=True, exist_ok=True) / mkdir(parents=True) / write_text), never read from a tree that was expected to be there already."
+      ]
+    },
+    "where_the_data_roots_land": {
+      "why_this_is_not_just_home": "The SQLite ledger and native_context are not under RAW; they hang off AITELIER_HOME, which this module sets to _HOME at :36 only when it gets to create it. Under pytest that block is skipped, because tests/conftest.py imports api.main/api.dependencies first and the guard at :33 sees 'api.dependencies' in sys.modules; tests/conftest.py:20 has already set AITELIER_HOME to its own tempfile.mkdtemp. Either root is freshly created in-process, which is the point.",
+      "lines": [
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 62,
+          "text": "    home = datadir.aitelier_home()  # the root the DB singletons were bound to"
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 652,
+          "text": "    ledger = datadir.semantic_index_control_dir() / \"control.sqlite3\""
+        },
+        {
+          "file": "tests/integration/test_coding_workspace_integration.py",
+          "line": 810,
+          "text": "    creations = list((Path(env[\"home\"]) / \"native_context\" / \"coding_workspace\").rglob(\"creations/*.json\"))"
+        },
+        {
+          "file": "core/datadir.py",
+          "line": 24,
+          "text": "    return Path(os.getenv(\"AITELIER_HOME\") or Path.home() / \".AItelier\")"
+        },
+        {
+          "file": "core/datadir.py",
+          "line": 28,
+          "text": "    return os.getenv(\"DPE_DB_PATH\") or str(aitelier_home() / \"aitelier.db\")"
+        },
+        {
+          "file": "core/datadir.py",
+          "line": 102,
+          "text": "    return aitelier_home() / \"semantic-index-control\""
+        },
+        {
+          "file": "tests/conftest.py",
+          "line": 20,
+          "text": "os.environ[\"AITELIER_HOME\"] = tempfile.mkdtemp(prefix=\"aitelier-test-home-\")"
+        }
+      ],
+      "reading": [
+        ":62 resolves home through datadir.aitelier_home(); core/datadir.py:24 makes that $AITELIER_HOME (else ~/.AItelier) and :28 puts aitelier.db under it; :652 is the semantic-index control SQLite under datadir.semantic_index_control_dir() (datadir.py:102); :810 reads native_context under env['home'], i.e. the same root. tests/conftest.py:20 is the other minter of that root."
+      ]
+    },
+    "measured_in_two_import_orders": {
+      "probe": {
+        "path": "/tmp/cwi-fixture-probe.py (the file the two argv lines below mount at /probe.py)",
+        "copy": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/probe-fixture-root.py",
+        "copy_sha256": "b795c2433aa966d0969ce12790ab66b77315847e5d81e42022782cdd56f61c4c",
+        "script": "import os, sys, tempfile\nsys.path.insert(0, os.getcwd())\nmode = sys.argv[1]\nif mode == \"app-first\":\n    # what the arm-B module run does: tests/conftest.py is imported first\n    # (pytest loads it before collecting the module) and it imports api.main.\n    import tests.conftest  # noqa: F401  -> sets AITELIER_HOME to its own mkdtemp\n    os.environ.setdefault(\"CODING_WORKSPACE_FIXTURE\", tempfile.mkdtemp(prefix=\"cwi-\"))\n    os.environ.setdefault(\"CODING_WORKSPACE_RAW\", os.path.join(os.environ[\"CODING_WORKSPACE_FIXTURE\"], \"raw\"))\n    from tests.integration import test_coding_workspace_integration as m\nelse:  # module-first: the module imported before anything touched api.dependencies\n    os.environ[\"CODING_WORKSPACE_FIXTURE\"] = tempfile.mkdtemp(prefix=\"cwi-\")\n    os.environ[\"CODING_WORKSPACE_RAW\"] = os.path.join(os.environ[\"CODING_WORKSPACE_FIXTURE\"], \"raw\")\n    from tests.integration import test_coding_workspace_integration as m\nfrom core import datadir\nprint(\"mode                =\", mode)\nprint(\"CODING_WORKSPACE_FIXTURE =\", os.environ[\"CODING_WORKSPACE_FIXTURE\"])\nprint(\"module has _HOME    =\", getattr(m, \"_HOME\", None))\nprint(\"AITELIER_HOME       =\", os.environ.get(\"AITELIER_HOME\"))\nprint(\"datadir.aitelier_home =\", datadir.aitelier_home())\nprint(\"db_path             =\", datadir.db_path())\nprint(\"semantic_index_dir  =\", datadir.semantic_index_control_dir())\nprint(\"fixture root existed before? \", \"no: mkdtemp made it in this process\")\n",
+        "note": "the probe only reads os.environ and core.datadir; it writes nothing, which is why the argv carries -e PYTHONDONTWRITEBYTECODE=1 and the tree stays clean."
+      },
+      "why": "because 'already exists' is a question about the root actually in force, and the answer differs by import order while the conclusion does not: in both orders the root is created in-process from nothing.",
+      "module_first": {
+        "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-fixture-root-probe-module-first.log",
+        "log_sha256": "f92f00df6c35ebbe5fdd509d61e542bfd834925a4ac4c4cf1df140bf37d42c63",
+        "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/cwi-arm-b:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/cwi-fixture-probe.py:/probe.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python /probe.py module-first",
+        "printed": [
+          "CODING_WORKSPACE_FIXTURE = /tmp/cwi-1mj0eynk",
+          "module has _HOME    = /tmp/cwi-1mj0eynk/h-b32477ce",
+          "AITELIER_HOME       = /tmp/cwi-1mj0eynk/h-b32477ce",
+          "db_path             = /tmp/cwi-1mj0eynk/h-b32477ce/aitelier.db",
+          "semantic_index_dir  = /tmp/cwi-1mj0eynk/h-b32477ce/semantic-index-control"
+        ],
+        "shows": "the module itself created h-b32477ce under the empty fixture root, and the DPE SQLite and semantic-index roots landed under it."
+      },
+      "app_first": {
+        "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-fixture-root-probe.log",
+        "log_sha256": "15a0ebc3cc573b6119a3a748250530772afdd04e18df88d8cd734600cd3f8f0e",
+        "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/cwi-arm-b:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/cwi-fixture-probe.py:/probe.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 aitelier:latest /usr/local/bin/python /probe.py app-first",
+        "printed": [
+          "CODING_WORKSPACE_FIXTURE = /tmp/cwi-lxcxu4bs",
+          "module has _HOME    = None",
+          "AITELIER_HOME       = /tmp/aitelier-test-home-sr4_0d45",
+          "db_path             = /tmp/aitelier-test-home-sr4_0d45/aitelier.db",
+          "semantic_index_dir  = /tmp/aitelier-test-home-sr4_0d45/semantic-index-control"
+        ],
+        "shows": "this is the arm-B import order (tests/conftest.py first, so api.dependencies is already imported and the module's :33 guard is False): _HOME is not created and the data roots sit under the conftest's own mkdtemp. Still nothing pre-existing, and still no /src."
+      }
+    },
+    "evidence_that_only_app_is_mounted": {
+      "arm_b_mounts": [
+        "-v /tmp/cwi-arm-b:/app",
+        "-v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro"
+      ],
+      "arm_b_argv_source": "arms.scratch_conftest_default_plus_src_substitutions.argv (verbatim, no /src mount anywhere)",
+      "mount_note": "the .git entry is read-only object metadata that git needs inside the container, not a source tree; neither mount is \"/src\", and no other -v appears in the argv.",
+      "arm_b_result": "29 ran / 28 passed / 1 failed in 58.79s printed \u2014 the rows run and pass with the worktree at /app and no /src, because the three /src reads were replaced by REPO_ROOT reads (src_substitutions).",
+      "control_shows_the_other_half": "arms.scratch_conftest_default_only has the same single /app mount and no /src; it errors at :92 on '/src/core/coding_workspace.py' precisely because that read was left hardcoded. So /src is what the un-edited reads want, not a mount the passing arm relied on."
+    },
+    "verdict": "The fixture root under CODING_WORKSPACE_FIXTURE does not have to exist beforehand \u2014 an empty directory is enough, and any root the run does use is created in-process \u2014 so no /src mount and no pre-existing tree are needed once the three /src reads become REPO_ROOT reads. On 'is the edit as written enough': it is enough for the 29 rows to run and for 28 to pass; it is NOT enough to make the group green, because the one row named in failing_rows still fails on its own stale child patch at :766, which is a second, separate change (recommendations[1])."
+  },
+  "collateral": {
+    "other_readers_of_the_two_variables": [
+      {
+        "file": "tests/integration/test_dsh_project_work.py",
+        "lines": [
+          10,
+          16,
+          17,
+          43,
+          45
+        ],
+        "line_roles": {
+          "10": "module docstring \u2014 prose",
+          "16": "module docstring's invocation example \u2014 prose",
+          "17": "module docstring's invocation example \u2014 prose",
+          "43": "the actual read, inside the module-level skipif",
+          "45": "the skip reason string \u2014 prose"
+        },
+        "gate_lines": {
+          "41": "_CAPSULE = Path(\"/src/core/coding_workspace.py\").is_file()",
+          "42": "pytestmark = pytest.mark.skipif(",
+          "43": "    not (_CAPSULE and os.environ.get(\"CODING_WORKSPACE_FIXTURE\")),",
+          "44": "    reason=(\"requires the Coding Mode fixture: the tree mounted at /src and \"",
+          "45": "            \"CODING_WORKSPACE_FIXTURE=<owned disposable root> (see module \"",
+          "46": "            \"docstring for the full invocation)\"))"
+        },
+        "gate_source": "tests/integration/test_dsh_project_work.py:41-46 at d72627bf8344be6c9c34d3e9babb4dc7c243d0f5, quoted exactly; the two-part gate is :41 plus :42-46",
+        "not_a_variable_read": {
+          "line": 41,
+          "text": "_CAPSULE = Path(\"/src/core/coding_workspace.py\").is_file()",
+          "why_listed": "it reads /src, neither variable; it is the other half of the same gate, and it is called out here rather than folded into the line list so that the five entries above are exactly this file's five occurrences of the two variables \u2014 of which only :43 is a read."
+        },
+        "reads_both_variables": "no \u2014 this file reads only CODING_WORKSPACE_FIXTURE (:43). CODING_WORKSPACE_RAW is read by the module alone (:37), and this is the only other file that reads either variable.",
+        "rows_gated": 6,
+        "rows_gated_note": "class b in the inventory: :73, :93, :107, :122, :169, :203; the 7th row :138 is class a and keeps its own skipif",
+        "verdict_change": false,
+        "measured": {
+          "base": {
+            "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-base-collateral-dsh_project_work.log",
+            "log_sha256": "e17d6ba6fe69ee105ea5c10961049412d85de25d175cea6c13a9c1420a00da25",
+            "counts": {
+              "skipped": 7,
+              "printed_seconds": 0.31,
+              "printed": "7 skipped, 1 warning in 0.31s"
+            }
+          },
+          "scratch_edit": {
+            "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-collateral-dsh_project_work.log",
+            "log_sha256": "d590c85bc1f450345e99ac03835717d35f0eb44f2cae959527b8e9bec5db70ae",
+            "counts": {
+              "skipped": 7,
+              "printed_seconds": 0.31,
+              "printed": "7 skipped, 1 warning in 0.31s"
+            }
+          }
+        },
+        "what_changes": "nothing runs: _CAPSULE is False because the tree is at /app, so the 6 rows keep skipping and the module arm's edit does not change that (verdict_change false, measured above). The skip reason is a static string literal in this file and is byte-identical in both logs, so the edit changes no printed text; what changes is that one clause of that fixed string is now false \u2014 it names CODING_WORKSPACE_FIXTURE=<owned disposable root> as missing while the conftest now sets it \u2014 while its other clause, the tree mounted at /src, is still the real blocker and _CAPSULE really is False. The text therefore now misnames which half is missing; it is not 'sent after the wrong variable'. Giving these 6 rows the same treatment needs a fourth edit here (:41's _CAPSULE probe made REPO_ROOT-based), which this minimal_edit does not carry."
+      }
+    ],
+    "suite_level": {
+      "what": "a tests/conftest.py default is unconditional: it applies to every default pytest run, not only to this module",
+      "cost": "the group's printed wall time is added to every default run; the inventory's own default run was 346.56s for 875 passed, so this group is a visible fraction of the suite",
+      "verdict": "DERIVED, not measured: the default suite would go from green to 1 failed until the stale child patch is fixed. No arm ran the default selection with the edit \u2014 the whole-suite container was busy during this audit \u2014 so this is a composition of two verified facts, not a measurement.",
+      "derived_from": [
+        "pytest.ini:3 (testpaths = tests) and :14 (addopts deselects only network/docker/baked_toolchain) put this module in the default selection; its only module-level mark is the skipif at :29, so no addopts -m expression deselects it.",
+        "the module arm (arms.scratch_conftest_default_plus_src_substitutions) measures 1 failed / 28 passed when the rows are given a root, and that failing row is in this module."
+      ],
+      "not_measured_why": "~400 s at the inventory's own 346.56 s default run, in a container that had to be free; the review's should-fix asked for the label instead of the run and this is it."
+    },
+    "no_other_readers": {
+      "pattern": "CODING_WORKSPACE_(FIXTURE|RAW)",
+      "answer": "exactly two files read either variable: the module itself and tests/integration/test_dsh_project_work.py. No other source, test, script, config or doc reads them.",
+      "commands": [
+        {
+          "purpose": "every occurrence in the base tree's tracked content (the canonical scope: reproducible from the commit)",
+          "cwd": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109",
+          "command": "git grep -n -E 'CODING_WORKSPACE_(FIXTURE|RAW)' d72627bf83 -- .",
+          "matches": 84,
+          "files": 3,
+          "per_file": {
+            "tests/integration/test_coding_workspace_integration.py": 3,
+            "tests/integration/test_dsh_project_work.py": 5,
+            ".skip-inventory.json": 76
+          },
+          "scope": "every tracked file at base_sha d72627bf83. The third file is the node's own input inventory (.skip-inventory.json): its 76 hits are the same class-b edit description repeated once per row, i.e. the audit's input, not a reader."
+        },
+        {
+          "purpose": "readers only \u2014 the inventory pathspec-removed",
+          "cwd": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109",
+          "command": "git grep -n -E 'CODING_WORKSPACE_(FIXTURE|RAW)' d72627bf83 -- . ':!.skip-inventory.json'",
+          "matches": 8,
+          "files": 2,
+          "output": [
+            "d72627bf83:tests/integration/test_coding_workspace_integration.py:12:Requires ``CODING_WORKSPACE_FIXTURE`` (an owned disposable directory); the",
+            "d72627bf83:tests/integration/test_coding_workspace_integration.py:28:FIXTURE = os.environ.get(\"CODING_WORKSPACE_FIXTURE\")",
+            "d72627bf83:tests/integration/test_coding_workspace_integration.py:37:RAW = Path(os.environ.get(\"CODING_WORKSPACE_RAW\", \"/raw\"))",
+            "d72627bf83:tests/integration/test_dsh_project_work.py:10:  * ``CODING_WORKSPACE_FIXTURE`` names an owned, writable, disposable root.",
+            "d72627bf83:tests/integration/test_dsh_project_work.py:16:        -e EXPECTED_SOURCE=/src -e CODING_WORKSPACE_FIXTURE=/tmp/cwf \\",
+            "d72627bf83:tests/integration/test_dsh_project_work.py:17:        -e CODING_WORKSPACE_RAW=/tmp/raw <image> \\",
+            "d72627bf83:tests/integration/test_dsh_project_work.py:43:    not (_CAPSULE and os.environ.get(\"CODING_WORKSPACE_FIXTURE\")),",
+            "d72627bf83:tests/integration/test_dsh_project_work.py:45:            \"CODING_WORKSPACE_FIXTURE=<owned disposable root> (see module \""
+          ]
+        },
+        {
+          "purpose": "the same search over the working tree, so an untracked reader cannot hide behind git",
+          "cwd": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109",
+          "command": "grep -rn --binary-files=without-match -E 'CODING_WORKSPACE_(FIXTURE|RAW)' . --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude='.skip-inventory.json' --exclude='.coding-workspace-rows-audit*.json'",
+          "matches": 8,
+          "files": 2,
+          "file_list": [
+            "./tests/integration/test_coding_workspace_integration.py: 3",
+            "./tests/integration/test_dsh_project_work.py: 5"
+          ],
+          "scope": "every path under the worktree except .git, build output (node_modules/, dist/ \u2014 absent here), the inventory, and this report; the eight lines are the same eight the git grep above prints, with a ./ prefix."
+        }
+      ],
+      "actual_reads": {
+        "tests/integration/test_coding_workspace_integration.py": [
+          ":28 CODING_WORKSPACE_FIXTURE",
+          ":37 CODING_WORKSPACE_RAW"
+        ],
+        "tests/integration/test_dsh_project_work.py": [
+          ":43 CODING_WORKSPACE_FIXTURE (inside the skipif)"
+        ],
+        "note": "every other hit in the eight lines is prose: the two docstrings and the skip reason."
+      }
+    }
+  },
+  "wall_time": {
+    "base_printed": "29 skipped, 1 warning in 0.28s",
+    "base_seconds": 0.28,
+    "arm_printed_run1": "1 failed, 28 passed, 1 warning in 58.79s",
+    "arm_seconds_run1": 58.79,
+    "arm_printed_run2": "1 failed, 28 passed, 1 warning in 57.15s",
+    "arm_seconds_run2": 57.15,
+    "host_wall_seconds_incl_container": 64,
+    "host_wall_note": "'# host wall seconds' footer of the arm log: docker start + import + teardown, not the group's own printed time",
+    "host_wall_by_log": {
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-base-module.log": 5,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module.log": 64,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module-rowbyrow.log": 64,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-conftest-only-no-src-substitution.log": 6,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-base-collateral-dsh_project_work.log": 6,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-collateral-dsh_project_work.log": 6,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-armB-conftest-only-no-maxfail.log": 6,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-fixture-root-probe.log": 5,
+      "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-report-r2-20261109/evidence-cwi-rows-audit-r2/run-fixture-root-probe-module-first.log": 0
+    },
+    "per_row_seconds": {
+      "rows_with_a_call_duration": 27,
+      "min": 0.89,
+      "max": 5.19,
+      "from": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module-rowbyrow.log"
+    },
+    "conftest_only_printed": {
+      "no_maxfail": "1 warning, 29 errors in 1.29s",
+      "with_maxfail_1": "1 warning, 1 error in 0.44s"
+    }
+  },
+  "number_sources": {
+    "counts_outcomes_and_seconds": "parsed from the pytest summary line of each log named above",
+    "per_row_call_and_setup_seconds": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module-rowbyrow.log (--durations=0 section)",
+    "row_source_lines_and_inventory_class": ".skip-inventory.json rows (file, line, class) at base_sha d72627bf8344be6c9c34d3e9babb4dc7c243d0f5",
+    "assertion_line": "the traceback line printed in /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109/evidence-cwi-rows-audit/run-armB-module.log",
+    "monkeypatch_site_lines": "the base tree's own source at base_sha (tests/integration/test_coding_workspace_integration.py:765-768, core/skillflow_host.py:44 and :809; :812 is a docstring line, not the def)",
+    "host_wall_seconds": "the '# host wall seconds' footer each log's wrapper appends",
+    "collected": "pytest -q does not print a collected count. 29 is counted from this log's own output: the progress line (log line 9) carries exactly 29 's' characters, and the 28 SKIPPED summary entries sum to 29 because the :1174 row prints 'SKIPPED [2]' while every other entry prints '[1]'.",
+    "fixture_root_quotes": "git show d72627bf8344be6c9c34d3e9babb4dc7c243d0f5:<path>, line by line \u2014 the same bytes `read` returns from the base tree \u2014 for every line quoted under fixture_root and collateral.other_readers_of_the_two_variables",
+    "reader_search": "collateral.no_other_readers.commands[*].command, run by this audit in the base worktree; the outputs are quoted there, and the r2 logs under evidence-cwi-rows-audit-r2/ carry the same shape of header (run time, tree, literal argv) and footer (exit code, host wall seconds)"
+  },
+  "affordable": true,
+  "affordable_why": "28 of 29 rows pass in 57.15-58.79s printed, ~2.0s per row, no docker, no launcher socket, no network: the edit buys 29 real end-to-end rows for roughly a sixth of the inventory's 346.56s default run. The provisioning cost is nil as well \u2014 the fixture root needs no pre-existing tree and no /src mount (fixture_root). It is affordable in cost and NOT yet green: one row fails on a stale monkeypatch signature in the test body, so landing the conftest default without fixing that line turns the default suite red.",
+  "recommendations": [
+    "Land the two halves together: the conftest default alone is worth 0 rows (all 29 error at :92), and the /src substitution alone is worth 0 rows (still skipped).",
+    "Fix the stale patch before turning it on: tests/integration/test_coding_workspace_integration.py:766 start_and_die(rid) must accept the host's keyword-only db (def start_and_die(rid, **kw): os._exit(17)) \u2014 core/skillflow_host.py:809 start_run(self, run_id: str, *, db: Any = None). That is a test-body change and was out of scope here.",
+    "Prefer a per-module fixture root over a tests/conftest.py default: set the two variables in the module (or in tests/integration/conftest.py) so a suite-wide default does not add ~58s and one failure to every default run, and does not leave tests/integration/test_dsh_project_work.py printing a reason that names a variable which is now set.",
+    "When that file is next touched, replace its /src capsule probe at :41 the same way (repo root), which is what would actually unskip its 6 class-b rows.",
+    "Keep the mkdtemp root out of the committed edit's blast radius: nothing removes it today, so on any runner with a persistent TMPDIR a suite-wide default leaks one directory per session. Under the prescribed `docker run --rm` shape it dies with the container, which is what the arm runs did (HOME=/tmp is the container's own /tmp)."
+  ],
+  "revision": "r2",
+  "supersedes": {
+    "commit": "b0dbc1466ed0886f54f10a70bb542ca253acb401",
+    "why": "r2 of the same report, rewritten from the r1 bytes: the four review must-fixes (fixture_root, the literal reader-search command, a measured errors:29, core/skillflow_host.py:809) and the six should-fixes, plus the two fixture-root probes the first of them needed. No r1 measurement was re-run or altered; the one new pytest run repeats the conftest-only control without --maxfail=1, and the r1 control stays as its own labelled field. The six r1 logs are the same bytes and are still the ones this report names.",
+    "r1_worktree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-cwi-rows-audit-20261109"
+  }
+}

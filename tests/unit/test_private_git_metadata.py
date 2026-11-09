@@ -407,11 +407,22 @@ def test_preparation_deadline_stops_and_removes_it(tmp_path, docker, monkeypatch
     marker = tmp_path / "pid"
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="deadline"):
+        # The pid witness is renamed into place -- the idiom the cancel test below
+        # already uses. `echo $$ > marker` creates/truncates the marker BEFORE
+        # writing into it, and the 0.3 s deadline can kill the child inside that
+        # window, leaving an empty file for the reader below to choke on; after a
+        # rename the witness exists only with its complete content.
         executor._run_prep([docker, "create", "--name", "prep-x", "--entrypoint", "sh", "image",
-                            "-c", f"echo $$ > {marker}; exec sleep 30"], docker, "prep-x")
+                            "-c", f"echo $$ > {marker}.tmp; mv {marker}.tmp {marker}; exec sleep 30"],
+                           docker, "prep-x")
     assert time.monotonic() - started < 3
+    published = marker.read_text().strip() if marker.exists() else ""
+    assert published.isdigit(), (
+        "the prep child never published a complete pid before the 0.3 s deadline: "
+        f"the witness is {'absent' if not marker.exists() else repr(published)}, i.e. "
+        "the kill landed inside its write window")
     with pytest.raises(ProcessLookupError):
-        os.kill(int(marker.read_text()), 0)
+        os.kill(int(published), 0)
     assert docker_calls(tmp_path)[1:] == [["start", "-a", _id("prep-x")], ["rm", "-f", _id("prep-x")]]
 
 

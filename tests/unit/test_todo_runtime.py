@@ -428,7 +428,19 @@ def test_a_command_that_times_out_takes_its_whole_process_group_with_it(tmp_path
         Binding("command_exit", {"argv": [sys.executable, "-c", code, str(pidfile)], "timeout": 1.5}),
         workspace=tmp_path, pre_state={})
     elapsed = time.monotonic() - started
-    grandchild = int(pidfile.read_text())
+    # The command's own write of its child's pid can be cut short by the 1.5 s
+    # kill: open(...,'w') truncates before it writes, so the witness is read for
+    # a COMPLETE pid (bounded) rather than assumed readable just because the
+    # command returned -- the pre-kill window must not surface as int('').
+    read_deadline = time.monotonic() + 5
+    while True:
+        try:
+            grandchild = int(pidfile.read_text())
+            break
+        except (OSError, ValueError):
+            if time.monotonic() > read_deadline:
+                pytest.fail(f"the command never published its child's pid in {pidfile}")
+            time.sleep(0.05)
     # A survivor holds the command's pipes open, so the call blocks until it exits on its own (~60 s)
     # and would look stopped by the time it is checked: bound the call itself, not only the survivor.
     if elapsed > 20:

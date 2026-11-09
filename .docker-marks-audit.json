@@ -1,16 +1,16 @@
 {
- "subject": "Revision 5 of the audit of the eight rows still carrying @pytest.mark.docker at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1: each row measured in two arms in this attempt, shim calls counted by invocation, every named edit shown to apply at the site it names, the daemon-path equivalence stated as inference, and the measurement head related to the base by two retained diffs.",
+ "subject": "Revision 5 of the audit of the eight rows still carrying @pytest.mark.docker at base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20: each row measured in two arms in this attempt, shim calls counted by invocation, every named edit shown to apply at the site it names, the daemon-path equivalence stated as inference, and the measurement head related to the base by two retained diffs.",
  "revision": 5,
  "node": "tests.the-remaining-docker-marks-classified-by-what-actually-blocks-them-20261109",
  "attempt": "attempt-97a13d9532594ff2b8ff85e6504ad951",
- "base_sha": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
- "head_at_measurement": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
+ "base_sha": "6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20",
+ "head_at_measurement": "6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20",
  "checkout": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109",
  "measured_at_utc": "2026-11-09T07:53:17Z",
  "measured_at_utc_note": "the latest `# written_utc:` header among the retained runs of this attempt; each run carries its own",
  "measured_this_attempt_note": "Every quoted outcome line below was produced by a container run of THIS attempt and is extracted from the log named beside it at build time (/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py); the build aborts if a quoted line is absent from its log. The previous revision's logs are cited only where they are explicitly labelled as the previous attempt.",
  "head_and_base_relation": {
-  "this_attempt": "measured at its own base f9481ccf0875a1d945b4ffa713238c25ea4de0c1 (HEAD of the r5 worktree); head_at_measurement is that same commit, so for this revision base and head coincide and the \"unexplained hash\" of revision 4 is gone",
+  "this_attempt": "measured at its own base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 (HEAD of the r5 worktree); head_at_measurement is that same commit, so for this revision base and head coincide and the \"unexplained hash\" of revision 4 is gone",
   "revision_4_hashes_explained": {
    "base_sha_was": "98e8007e116574bfb49912d000e149bb47b4af51",
    "head_at_measurement_was": "e32d5d162fa9e5f1c6847c0f46ad5d8d681de4d7",
@@ -35,7 +35,7 @@
    "observed": "first on PATH, so core.repository_executor's shutil.which(\"docker\") finds it; measured inside this attempt's shape: docker_on_PATH=/shim/docker; the shim records the argv and exits 127, so every acceptance is recorded intent, never an execution"
   },
   "trees": {
-   "delivered": "/tmp/docker-audit-r5/tree-base = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 of /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109 (no edit)",
+   "delivered": "/tmp/docker-audit-r5/tree-base = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 of /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109 (no edit)",
    "seam": "/tmp/docker-audit-r5/tree-seam = tree-base + arm2.patch (sha256 f3935f49530e9ac97b494237ce7c354727c808c474243ab00efb1b5eb2bb2df3)",
    "narrow": "/tmp/docker-audit-r5/tree-narrow = tree-base + arm3.patch (sha256 4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f)",
    "corrected": "/tmp/docker-audit-r5/tree-corrected = tree-base + arm4.patch (sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0)",
@@ -141,7 +141,7 @@
    },
    "measured_with_seam": {
     "run": "seam/diag-artifact",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/container-argv.txt",
@@ -169,7 +169,7 @@
     "measured_green_repeats": [
      "1 passed, 1 warning in 1.04s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": null
   },
@@ -195,7 +195,7 @@
    },
    "measured_with_seam": {
     "run": "seam/keepalive-queue",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/container-argv.txt",
@@ -223,7 +223,7 @@
     "measured_green_repeats": [
      "1 passed, 1 warning in 5.27s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": null
   },
@@ -249,7 +249,7 @@
    },
    "measured_with_seam": {
     "run": "seam/keepalive-render-bound",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/container-argv.txt",
@@ -319,7 +319,7 @@
      "1 passed, 1 warning in 4.23s",
      "1 passed, 1 warning in 4.24s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": {
     "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
@@ -377,7 +377,7 @@
    },
    "measured_with_seam": {
     "run": "seam/keepalive-nolifecycle",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/container-argv.txt",
@@ -433,7 +433,7 @@
      "1 passed, 1 warning in 2.16s",
      "1 passed, 1 warning in 2.15s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": {
     "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
@@ -473,7 +473,7 @@
    },
    "measured_with_seam": {
     "run": "seam/identity-long-red",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/container-argv.txt",
@@ -529,7 +529,7 @@
      "1 passed, 1 warning in 1.56s",
      "1 passed, 1 warning in 1.07s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": {
     "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
@@ -569,7 +569,7 @@
    },
    "measured_with_seam": {
     "run": "seam/identity-tail-independent",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/container-argv.txt",
@@ -625,7 +625,7 @@
      "1 passed, 1 warning in 3.57s",
      "1 passed, 1 warning in 3.52s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": {
     "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
@@ -665,7 +665,7 @@
    },
    "measured_with_seam": {
     "run": "seam/stable-two-runs",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/container-argv.txt",
@@ -693,7 +693,7 @@
     "measured_green_repeats": [
      "1 passed, 1 warning in 2.19s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": null
   },
@@ -719,7 +719,7 @@
    },
    "measured_with_seam": {
     "run": "seam/scoped-gate-survives",
-    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 + arm2.patch), no `-m` override",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/stdout-stderr.log",
     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/container-argv.txt",
@@ -747,7 +747,7 @@
     "measured_green_repeats": [
      "1 passed, 1 warning in 0.61s"
     ],
-    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
    "no_container_capability_would_change_it": null
   }
@@ -806,7 +806,7 @@
   },
   "rows_that_would_lose_the_mark": 8,
   "predicted_docker_marked_after_edits": 0,
-  "arithmetic": "8 (docker-marked at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, measured: 8/11573 tests collected (11565 deselected) in 21.57s) - 4 (class b, measured green from the seam alone) - 4 (class c, measured green only after their named test-side correction) = 0",
+  "arithmetic": "8 (docker-marked at base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20, measured: 8/11573 tests collected (11565 deselected) in 21.57s) - 4 (class b, measured green from the seam alone) - 4 (class c, measured green only after their named test-side correction) = 0",
   "if_only_the_seam_lands_and_no_test_side_correction": {
    "predicted_docker_marked": 4,
    "arithmetic": "8 - 4 (class b) = 4; the four class-(c) rows keep their mark",
@@ -852,7 +852,7 @@
    "done": "boundary_stated.daemon_path_is_inference says plainly that no docker-path run exists in this attempt, and every class-(c) row refers to it."
   },
   "4_head_at_measurement_related_to_base": {
-   "done": "head_at_measurement is now this attempt's own base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the two revision-4 hashes are explained in head_and_base_relation with both diffs retained as files (98e8 -> e32d5d16 adds only the report; 98e8 -> f9481ccf08 changes only the two baked_toolchain rows)."
+   "done": "head_at_measurement is now this attempt's own base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20; the two revision-4 hashes are explained in head_and_base_relation with both diffs retained as files (98e8 -> e32d5d16 adds only the report; 98e8 -> 6e9e2e23b8 changes only the two baked_toolchain rows)."
   },
   "5_corrected_arms_rerun_in_this_attempt": {
    "done": "all eight delivered arms, all eight seam arms, all four class-(c) corrected arms and the two narrow probes were run in this attempt; every green line quoted comes from a log written by this attempt, and the class counts (0 a, 4 b, 4 c) and the 8 - 4 - 4 = 0 arithmetic rest on those runs.",
@@ -876,6 +876,7 @@
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/run-all.sh",
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/shim/docker",
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py",
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm2.patch",
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm3.patch",
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch"
@@ -964,6 +965,7 @@
  "self_checks": {
   "every_line_quoted_from_this_attempts_logs": {
    "rule": "each row's line/text/green lines are extracted at build time from the log named beside them by /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py, and the build aborts if a quoted line is not in that log",
+   "independent_recheck": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py re-reads every cited log without trusting the builder (308 checks when this report was committed: quoted lines present verbatim, shim counts recounted by `ts=` and by line, argv shape, green lines found in their own logs, class counts, 8 - 4 - 4 = 0, retained diffs present, no untracked log in the worktree, committed blob identical to the working file)",
    "runs_retained": [
     "corrected/identity-long-red-run1",
     "corrected/identity-long-red-run2",
@@ -992,12 +994,12 @@
     "seam/stable-two-runs"
    ]
   },
-  "rows_unique": "8 rows, 8 distinct node ids; they are exactly the ids `-m docker --collect-only` marks at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1 (8/11573 tests collected (11565 deselected) in 21.57s)",
+  "rows_unique": "8 rows, 8 distinct node ids; they are exactly the ids `-m docker --collect-only` marks at base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20 (8/11573 tests collected (11565 deselected) in 21.57s)",
   "class_counts_sum_to_8": "a 0 + b 4 + c 4 = 8",
   "per_row_flags_agree_with_the_prediction": "smallest_edit.removes_from_deselected_set is true for 8/8 rows; 8 - 8 = 0 = predicted_docker_marked_after_edits",
   "each_class_c_row_states_the_container_capability_that_would_not_help": "4/4: every class-(c) row carries no_container_capability_would_change_it with a row-specific why and its own measured basis.",
   "edits_applicable_at_the_named_site": {
-   "how": "patches applied with `patch -p1` to a git archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the resulting files were cmp-identical to the previous attempt's tree-arm4 copies, and every row then ran from the patched tree",
+   "how": "patches applied with `patch -p1` to a git archive of base 6e9e2e23b8a4c9ad4cba1f810a3aae3ad7257c20; the resulting files were cmp-identical to the previous attempt's tree-arm4 copies, and every row then ran from the patched tree",
    "patch_sha256": {
     "arm2": "f3935f49530e9ac97b494237ce7c354727c808c474243ab00efb1b5eb2bb2df3",
     "arm3": "4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f",

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -25,6 +26,13 @@ from core.workspace_manager import WorkspaceManager
 # a message saying which wait it was. The same bound covers the must-complete
 # watchdogs below: they await the very same work, so a smaller number would let
 # a slow-but-correct page, not the claim under test, decide the verdict.
+#
+# Every must-complete site names itself and the bound it read when that bound
+# expires (a bare asyncio.TimeoutError names neither, so a reader could not tell
+# a product regression from a slow host). The bound stays a direct name at both
+# the await and the message, never copied into another variable: shortening
+# HANDSHAKE_SECONDS is therefore what the witness below shortens, and the value
+# in force is the value the failure reports.
 HANDSHAKE_SECONDS = 20.0
 
 
@@ -134,7 +142,13 @@ async def held_recovery(system, monkeypatch):
         release.set()
         # Must complete: the owner wait is the work under test, and a page that
         # is correct but slow must not decide this verdict.
-        result = await asyncio.wait_for(owner_wait, HANDSHAKE_SECONDS)
+        try:
+            result = await asyncio.wait_for(owner_wait, HANDSHAKE_SECONDS)
+        except asyncio.TimeoutError as expired:
+            raise AssertionError(
+                f"must-complete wait 'held_recovery_owner_page' never completed within "
+                f"{HANDSHAKE_SECONDS}s: the owner wait under test did not reach its "
+                f"paused status after the fixture released the observer") from expired
         assert result["events"][-1]["payload"]["status"] == "paused"
 
 
@@ -154,7 +168,13 @@ async def test_external_only_wait_survives_other_recovery_and_replays_own_event(
             observe(service, external, "failed")
             # Must complete: this waiter owns the observed event, and the page
             # behind it being slow is not a verdict on the replay.
-            result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+            try:
+                result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+            except asyncio.TimeoutError as expired:
+                raise AssertionError(
+                    f"must-complete wait 'external_only_replay' never completed within "
+                    f"{HANDSHAKE_SECONDS}s: the external-only waiter did not replay its "
+                    f"own observed event") from expired
             assert result["events"][-1]["payload"]["attempt_id"] == external["attempt_id"]
             assert result["events"][-1]["payload"]["status"] == "failed"
             assert result["next_after"] > after and "reason" not in result
@@ -221,7 +241,13 @@ async def test_quiet_recovery_release_allows_fresh_disposition(system, monkeypat
                 await asyncio.wait_for(asyncio.shield(waiter), .12)
             release.set()
             # Must complete: the released waiter must reach its disposition.
-            result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+            try:
+                result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+            except asyncio.TimeoutError as expired:
+                raise AssertionError(
+                    f"must-complete wait 'quiet_recovery_release' never completed within "
+                    f"{HANDSHAKE_SECONDS}s: the released waiter did not reach its "
+                    f"disposition") from expired
             assert not result["timed_out"] and not result["events"]
             assert result["reason"] == ("nothing_to_wait" if state == "empty" else "action_required")
             if target:
@@ -320,7 +346,13 @@ async def test_busy_nonzero_recovery_cursor_waits_without_hotspin_and_reaches_la
             release.set()
         # Must complete: the released waiter has to reach the last page, however
         # long the pages it walked to get there took.
-        result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+        try:
+            result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
+        except asyncio.TimeoutError as expired:
+            raise AssertionError(
+                f"must-complete wait 'slow_page_walk_last_page' never completed within "
+                f"{HANDSHAKE_SECONDS}s: the released waiter did not reach the last of "
+                f"the {len(calls)} recovery pages it walked") from expired
         assert result["events"][-1]["payload"]["attempt_id"] == runs[-1][0]["attempt_id"]
         assert result["events"][-1]["payload"]["status"] == "paused"
         assert "reason" not in result
@@ -347,9 +379,15 @@ async def test_reentrant_observation_does_not_deadlock_or_lose_outer_result(syst
     # Must complete: this is the reentrant product call itself. A correct page
     # that reconciles for a couple of seconds is not a deadlock, so it gets the
     # same bound as every other must-complete wait in this file.
-    result = await asyncio.wait_for(service.wait_for_state_change("owner",
-        after=cursor(service, "owner"), attempt_ids=[owner["attempt_id"]],
-        return_when_idle=True, timeout_seconds=1), HANDSHAKE_SECONDS)
+    try:
+        result = await asyncio.wait_for(service.wait_for_state_change("owner",
+            after=cursor(service, "owner"), attempt_ids=[owner["attempt_id"]],
+            return_when_idle=True, timeout_seconds=1), HANDSHAKE_SECONDS)
+    except asyncio.TimeoutError as expired:
+        raise AssertionError(
+            f"must-complete wait 'reentrant_observation' never completed within "
+            f"{HANDSHAKE_SECONDS}s: the reentrant product call did not return the "
+            f"paused result it had already observed") from expired
     assert calls
     assert result["events"][-1]["payload"]["status"] == "paused"
 
@@ -389,9 +427,10 @@ async def test_a_slow_but_correct_page_does_not_decide_the_wait_verdict(system, 
             # within the wait's own budget, so no guard outlives this test.
             await asyncio.wait({waiter}, timeout=budget)
             pytest.fail(
-                f"fixture handshake 'slow_pages' did not complete within {HANDSHAKE_SECONDS:.1f}s "
-                f"while awaiting the follow wait over slow but correct recovery pages "
-                f"({len(served)} served, {delay:.1f}s each; wait finished={waiter.done()})")
+                f"must-complete wait 'slow_pages' never completed within "
+                f"{HANDSHAKE_SECONDS}s: the follow wait did not finish walking slow but "
+                f"correct recovery pages ({len(served)} served, {delay:.1f}s each; "
+                f"wait finished={waiter.done()})")
         result = waiter.result()
     finally:
         if not waiter.done():
@@ -403,3 +442,39 @@ async def test_a_slow_but_correct_page_does_not_decide_the_wait_verdict(system, 
     assert not result["timed_out"] and "reason" not in result
     assert result["events"][-1]["payload"]["attempt_id"] == runs[-1][0]["attempt_id"]
     assert result["events"][-1]["payload"]["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_an_expired_must_complete_wait_names_its_site_and_seconds(system, monkeypatch):
+    # Witness for the messages the must-complete sites raise: shorten the bound in
+    # force (the module constant), make the waiter the awaited site owns unable to
+    # finish, and expire the REAL site instead of formatting the message somewhere
+    # else. The site driven here is test_reentrant_observation_does_not_deadlock_or_
+    # lose_outer_result's own must-complete wait -- called, not re-implemented, so
+    # the try/except under test is the one this file ships. Neither that call nor
+    # this test adds an asyncio.wait/wait_for site: the shape the bounds audit
+    # counts is exactly the ten sites the module already had.
+    module = sys.modules[__name__]
+    scan, release = state_changes.scan, threading.Event()
+
+    def stalled_scan(*args):
+        # Every observation cycle a waiter needs begins with this scan; this one
+        # does not return within the shortened bound, so the wait cannot either.
+        release.wait(.5)
+        return scan(*args)
+
+    monkeypatch.setattr(state_changes, "scan", stalled_scan)
+    monkeypatch.setattr(module, "HANDSHAKE_SECONDS", .05)
+    try:
+        with pytest.raises(AssertionError) as expired:
+            await test_reentrant_observation_does_not_deadlock_or_lose_outer_result(
+                system, monkeypatch)
+        message = str(expired.value)
+        assert "reentrant_observation" in message, message
+        assert "0.05" in message, message
+        assert isinstance(expired.value.__cause__, asyncio.TimeoutError), (
+            f"the failure must come from the expired bound, got {expired.value!r}")
+    finally:
+        # The stalled scan finishes off the event loop; let it return now instead
+        # of when its own wait elapses.
+        release.set()

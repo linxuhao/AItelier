@@ -7,16 +7,26 @@
   "corrections": [
     {
       "path": "class_d_mutation_instrument.result",
-      "quoted": "tests/api/test_admin_routers.py:67 and tests/unit/test_novel_model_routes.py:1591",
-      "defect": "Both are the MUTATED COPY's line numbers, not the tree's: each arm deletes three lines above the assertion, so the retained tree carries the admin assert at tests/api/test_admin_routers.py:70 and the novel-route assert at tests/unit/test_novel_model_routes.py:1594. The report's own phrasing ('as the retained arm logs print them') is literally true; a reader opening the tree at :67 or :1591 lands on the line above the assertion.",
-      "replacement": "cite each site with both numbers: the mutated copy the log printed and the tree line it corresponds to (test_admin_routers.py:67 in the mutant = :70 in the tree; test_novel_model_routes.py:1591 in the mutant = :1594 in the tree)",
+      "subject_lines": [
+        ".skip-inventory.json:2855",
+        ".skip-inventory.json:2891",
+        ".skip-inventory.json:3110"
+      ],
+      "quoted": "admin_routers `assert 404 == 403` at tests/api/test_admin_routers.py:67 (the write gate the row bypasses is not built), quiescence `assert False is True` at tests/unit/test_deployment_quiescence.py:1591 (no /proc/2 kernel-thread entry), novel_model_routes `expected ['novel', 'novel_alt'], got []` at tests/unit/test_novel_model_routes.py:44 (the gitignored model_routes.json is absent), owned_coding_shell `assert PosixPath('/tmp/mut/core/repository_executor.py') == PosixPath('/src/core/repository_executor.py')` at tests/integration/test_owned_coding_shell.py:357 (the row asserts the /src layout)",
+      "defect": "Two of the four cited numbers are the MUTATED COPY's lines, and neither the sentence nor the file says so: the two arms whose mutant deleted three lines above the assertion — admin_routers and quiescence — print :67 and :1591, which are lines of the /tmp/mut copy, not of the tree. The quiescence number in particular cannot be read as a tree line — tree tests/unit/test_deployment_quiescence.py:1591 is the first line of the removed in-body skip (tree :1591-1593) and the kthreadd assertion is at :1594; the document's own arms[quiescence_kthread].fail_line at .skip-inventory.json:2891 prints the mutated path /tmp/mut/tests/unit/test_deployment_quiescence.py:1591, and revision 3's change-list entry at :3110 repeats the numbers 'as the retained arm logs print them', which is true of the logs and silent about the copy. The other two numbers are the SAME line in both copies: tests/unit/test_novel_model_routes.py:44 (the novelty assertion, inside the helper _assert_specialized_alias_parity, def at :41) and tests/integration/test_owned_coding_shell.py:357 (the exact-source-identity assertion) have no deleted line above them, so they coincide with the tree and need no pair. A tree reader who follows admin :67 lands on the test's def line (the removed skip decorator is tree :63-65; the assertion is tree :70), and one who follows quiescence :1591 lands on a skip guard, not on any assertion.",
+      "replacement": "admin_routers `assert 404 == 403` at tests/api/test_admin_routers.py:67 in the mutated copy = :70 in the tree (the removed skip decorator is tree :63-65); quiescence `assert False is True` at tests/unit/test_deployment_quiescence.py:1591 in the mutated copy = :1594 in the tree (the removed in-body skip is tree :1591-1593); novel_model_routes `expected ['novel', 'novel_alt'], got []` at tests/unit/test_novel_model_routes.py:44, the same line in both copies because the assert lives in the helper _assert_specialized_alias_parity and no deleted line sits above it; owned_coding_shell at tests/integration/test_owned_coding_shell.py:357, likewise the same line in both copies",
       "affects_measured_values": false
     },
     {
       "path": "revisions",
-      "quoted": "revision 3's change list and revision 2's parenthetical 'names the attempt that delivered this revision'",
-      "defect": "Revision 3's own change list does not disclose that it moved the document's root attempt_id from attempt-44746c6280ec4253ba00fd81cf8ecc8c to attempt-2b208e544bc0492c866fe31a122a28ab, and revision 2's parenthetical reads as current while the root field now names revision 3's attempt.",
-      "replacement": "state the root attempt_id move in revision 3's change list, and make revision 2's clause past-tense ('named the attempt that delivered that revision')",
+      "subject_lines": [
+        ".skip-inventory.json:3",
+        ".skip-inventory.json:3094",
+        ".skip-inventory.json:3107-3112"
+      ],
+      "quoted": "root attempt_id: names the attempt that delivered this revision (the parent revision's attempt is named in this block)",
+      "defect": "The root attempt_id at .skip-inventory.json:3 now names revision 3's attempt (attempt-2b208e544bc0492c866fe31a122a28ab) while revision 2's clause at :3094 still reads in the present tense ('names the attempt that delivered this revision'), and revision 3's five changes at :3107-3112 never disclose that the move happened in revision 3 — revision 2's own attempt, attempt-44746c6280ec4253ba00fd81cf8ecc8c, is stated only at :3083. The old entry named the JSON paths only and gave an instruction where the criterion wants text, so a reader could neither see which lines are wrong nor what to write instead.",
+      "replacement": "At .skip-inventory.json:3094, replace the clause with: `root attempt_id: named the attempt that delivered that revision (attempt-44746c6280ec4253ba00fd81cf8ecc8c); revision 3 moved the document's root attempt_id to its own attempt, see revisions[revision 3].changes`. Add to revision 3's changes list (.skip-inventory.json:3107-3112) this literal entry: `root attempt_id: the document-level attempt_id at .skip-inventory.json:3 moved from attempt-44746c6280ec4253ba00fd81cf8ecc8c (revision 2's attempt) to attempt-2b208e544bc0492c866fe31a122a28ab (this revision's attempt), and revision 2's clause is now past tense`.",
       "affects_measured_values": false
     }
   ]

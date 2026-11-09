@@ -23,6 +23,11 @@
       "line": 898,
       "status": "no correction needed",
       "why": "That occurrence sits in `what_changed_from_revision_4`, which records what an earlier revision said. History is not a live claim and is left as written."
+    },
+    {
+      "line": 1214,
+      "status": "no correction needed",
+      "why": "That occurrence sits in `what_changed_from_revision_6` (field `4_pre_reclass_counts`), which records what the PREVIOUS revision carried: 'the previous revision's 4 b / 4 c (and 8 - 4 - 4 = 0, 4/4, four-from-the-seam)'. It is accurate history about the prior revision's words, not a live claim about this report's classes, and it is left as written for the same reason the :898 history entry is."
     }
   ]
 }

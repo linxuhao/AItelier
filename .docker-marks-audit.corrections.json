@@ -1,0 +1,33 @@
+{
+  "schema": "aitelier.report-corrections.v1",
+  "subject": ".docker-marks-audit.json",
+  "subject_artifact": "ab08872c1e38e974e4ac1f6e2e33b51e7b6c05aa",
+  "subject_verified_receipt": "receipt-532a025d70e94740a48dd2d065a9c20f",
+  "why_a_sibling_file": "The subject is the verified artifact of that receipt: a reader who re-hashes it must still get ab08872c1e. This file therefore carries the corrections and leaves the subject's bytes untouched. No measured value, arm, class, row flag or count is changed by any correction below; every one is a wording or label defect found by the non-author review (evidence/docker-audit-r8-review-20261109/REVIEW-VERDICT.md) and recorded as iss-83ac4084381546b0.",
+  "corrections": [
+    {
+      "line": 1034,
+      "quoted": "class counts, 8 - 4 - 4 = 0",
+      "defect": "The string '8 - 4 - 4 = 0' is the stale LABEL of the retained verifier `evidence/docker-audit-r5-20261109/verify-report.py:97`, whose computation is `mc['predicted_docker_marked_after_edits'] == 8 - len(cls['b']) - len(cls['c']) == 0`. This report's own classes are 3 b / 5 c, so the expansion a reader should see is 8 - 3 - 5 = 0. The sentence describes what the verifier checks, and the check is the formula, not the frozen triple.",
+      "replacement": "class counts, 8 - len(class b) - len(class c) = 8 - 3 - 5 = 0",
+      "affects_measured_values": false
+    },
+    {
+      "line": 1080,
+      "quoted": "class counts, 8 - 4 - 4 = 0",
+      "defect": "Same stale verifier label as :1034, in the second enumeration of what this attempt's verifier run checked.",
+      "replacement": "class counts, 8 - len(class b) - len(class c) = 8 - 3 - 5 = 0",
+      "affects_measured_values": false
+    },
+    {
+      "line": 898,
+      "status": "no correction needed",
+      "why": "That occurrence sits in `what_changed_from_revision_4`, which records what an earlier revision said. History is not a live claim and is left as written."
+    },
+    {
+      "line": 1214,
+      "status": "no correction needed",
+      "why": "That occurrence sits in `what_changed_from_revision_6` (field `4_pre_reclass_counts`), which records what the PREVIOUS revision carried: 'the previous revision's 4 b / 4 c (and 8 - 4 - 4 = 0, 4/4, four-from-the-seam)'. It is accurate history about the prior revision's words, not a live claim about this report's classes, and it is left as written for the same reason the :898 history entry is."
+    }
+  ]
+}

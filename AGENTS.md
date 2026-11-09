@@ -58,7 +58,7 @@ aitelier server
 # Only in a throwaway container (docker run --rm ... aitelier:latest, network none,
 # 2 CPU/2 GiB, <=4 at once), never in the production aitelier container (OOM 2026-09-23)
 pytest tests/unit -v        # 10,050 tests (default addopts selection)
-pytest tests/ -v            # full suite: 11,528 tests (default addopts selection)
+pytest tests/ -v            # full suite: 11,529 tests (default addopts selection)
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
 
 # Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest

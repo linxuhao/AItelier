@@ -28,6 +28,82 @@
       "defect": "The root attempt_id at .skip-inventory.json:3 now names revision 3's attempt (attempt-2b208e544bc0492c866fe31a122a28ab) while revision 2's clause at :3094 still reads in the present tense ('names the attempt that delivered this revision'), and revision 3's five changes at :3107-3112 never disclose that the move happened in revision 3 — revision 2's own attempt, attempt-44746c6280ec4253ba00fd81cf8ecc8c, is stated only at :3083. The old entry named the JSON paths only and gave an instruction where the criterion wants text, so a reader could neither see which lines are wrong nor what to write instead.",
       "replacement": "At .skip-inventory.json:3094, replace the clause with: `root attempt_id: named the attempt that delivered that revision (attempt-44746c6280ec4253ba00fd81cf8ecc8c); revision 3 moved the document's root attempt_id to its own attempt, see revisions[revision 3].changes`. Add to revision 3's changes list (.skip-inventory.json:3107-3112) this literal entry: `root attempt_id: the document-level attempt_id at .skip-inventory.json:3 moved from attempt-44746c6280ec4253ba00fd81cf8ecc8c (revision 2's attempt) to attempt-2b208e544bc0492c866fe31a122a28ab (this revision's attempt), and revision 2's clause is now past tense`.",
       "affects_measured_values": false
+    },
+    {
+      "subject": ".skip-inventory.json",
+      "subject_artifact": "61e8573d63a2f654a68d52416c125e2db700b460",
+      "path": "rows[50].minimal_edit.what_it_would_measure",
+      "line": 1220,
+      "subject_lines": [
+        ".skip-inventory.json:1220"
+      ],
+      "quoted": "Mutation arm E1: 1 passed; the skip-removal-only arm fails at :1591 with 'assert False is True' because the real /proc/2 is not a kernel thread - the absence, not a product red.",
+      "defect": "The bare :1591 is the MUTATED copy's line: the skip-removal-only arm deletes the three-line skip above the assertion, so in that copy the assertion is at :1591. In the tree, :1591 is the in-body guard `if comm != 'kthreadd':` (tree :1591-1593 is the removed skip) and the kthreadd assertion is at tree :1594, so a reader who opens tree :1591 lands on a guard, not an assertion. The same fact is marked correctly at .skip-inventory.json:2891, which prints the mutated path /tmp/mut/tests/unit/test_deployment_quiescence.py:1591. The replacement adds only the marker and the tree number; the arm's result, the sentence's claim (the absence, not a product red), the row, the class and every count are unchanged.",
+      "replacement": "Mutation arm E1: 1 passed; the skip-removal-only arm fails at :1591 in the mutated copy (tree :1594) with 'assert False is True' because the real /proc/2 is not a kernel thread - the absence, not a product red.",
+      "affects_measured_values": false
     }
-  ]
+  ],
+  "class_scan": {
+    "scan": "Enumeration of the mutated-copy line-number class in .skip-inventory.json: every line matching fails? at :NNN, and every occurrence of :1591 and :67, each with its own opening text and a classification. Enumerated here rather than fixed one site at a time.",
+    "subject": ".skip-inventory.json",
+    "subject_artifact": "61e8573d63a2f654a68d52416c125e2db700b460",
+    "commands": [
+      "grep -n 'fails\\? at :[0-9]\\+' .skip-inventory.json",
+      "grep -n ':1591\\|:67' .skip-inventory.json"
+    ],
+    "fails_at_hits": [
+      {
+        "line": 1220,
+        "opening": "that dq._kernel_thread() classifies a real-shaped ps line for a kernel thread as",
+        "classification": "mutated-copy",
+        "status": "unmarked before this file; corrected by corrections[2]"
+      }
+    ],
+    "occurrences": [
+      {
+        "number": ":1591",
+        "line": 1220,
+        "opening": "that dq._kernel_thread() classifies a real-shaped ps line for a kernel thread as",
+        "classification": "mutated-copy",
+        "status": "unmarked before this file; corrected by corrections[2]"
+      },
+      {
+        "number": ":67",
+        "line": 2855,
+        "opening": "0 rows hide a red. Eleven of the fifteen mutation arms end in an exception that",
+        "classification": "mutated-copy",
+        "status": "marked by corrections[0] (its subject_lines lists 2855)"
+      },
+      {
+        "number": ":1591",
+        "line": 2855,
+        "opening": "0 rows hide a red. Eleven of the fifteen mutation arms end in an exception that",
+        "classification": "mutated-copy",
+        "status": "marked by corrections[0] (its subject_lines lists 2855)"
+      },
+      {
+        "number": ":1591",
+        "line": 2891,
+        "opening": "/tmp/mut/tests/unit/test_deployment_quiescence.py:1591: AssertionError: assert F",
+        "classification": "mutated-copy",
+        "status": "already marked by its /tmp/mut/ path; also listed in corrections[0]"
+      },
+      {
+        "number": ":1591",
+        "line": 3090,
+        "opening": "class_d_mutation_instrument.result: the blanket sentence 'Every mutated row's fa",
+        "classification": "mutated-copy",
+        "status": "uncovered: no corrections entry lists line 3090; not corrected in this commit; flagged for the owner"
+      },
+      {
+        "number": ":67",
+        "line": 3110,
+        "opening": "class_d_mutation_instrument.result: two of the four AssertionError arms had no f",
+        "classification": "mutated-copy",
+        "status": "covered by corrections[0] (its subject_lines lists 3110)"
+      }
+    ],
+    "tree_copy_hits": 0,
+    "uncovered_hits": [3090]
+  }
 }

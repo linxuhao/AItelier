@@ -46,8 +46,10 @@ read from a name, as in ``event.wait(HANDSHAKE_SECONDS, 20.0)``) and
 ``event.wait(-1)`` (a negative bound whose subtree literal is ``1``, not
 ``-1``) are each refused exactly once.  These are the shapes
 ``test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound``
-pins.  Each refusal names the site: its line number, the form it was written in,
-and the bound's source text.
+pins.  Each refusal names the site: its line number and the form it was written
+in, plus whatever text the audit read there -- the bound's source text (recorded
+as ``<no bound>`` when the call declares none), the callee it could not resolve,
+or the numeric literal that triggered the rule.
 
 FAIL-CLOSED ON AN UNRESOLVED AWAIT.  A chained spelling is closed by resolution,
 and the shapes left unresolved are caught by one rule of last resort: an
@@ -465,8 +467,8 @@ def _refused_wait_literal(call, func):
     its name-bound form -- the guarded module's handshake is exactly that shape --
     nor for one with no argument at all or a sub-second literal: the trigger is a
     numeric literal of 1.0 or more, which is the defect this audit exists to see, so
-    that form is refused as unclassified instead of skipped.  The exclusion is for
-    the other API, not for large numbers.
+    that form is refused (:data:`FORM_WAIT_OTHER_API`) instead of skipped.  The
+    exclusion is for the other API, not for large numbers.
     """
     if _argument_literal(call) is None:
         return None
@@ -1454,11 +1456,12 @@ def test_a_shape_the_prose_calls_silent_is_measured_silent(tmp_path, shape, sour
 
 # The exclusion in BOUNDARY (i) is for the API, not for large numbers: the same
 # ``x.wait(...)`` shape with an argument carrying a numeric literal of 1.0 or more
-# is refused as unclassified instead of skipped, so a blocking handshake cannot
-# hide behind "it is a different API".  The predicate reads argument subtrees, not
-# bound values, so a sub-second COMPUTED bound, an extra argument that refuses a
-# call even when its first argument is a bound read from a name, and a negative
-# bound are refused too -- the last four rows pin those fail-closed shapes.
+# is refused (:data:`FORM_WAIT_OTHER_API`) instead of skipped, so a blocking
+# handshake cannot hide behind "it is a different API".  The predicate reads
+# argument subtrees, not bound values, so a sub-second COMPUTED bound, an extra
+# argument that refuses a call even when its first argument is a bound read from a
+# name, and a negative bound are refused too -- the last four rows pin those
+# fail-closed shapes.
 WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
     pytest.param(
         "threading-literal",

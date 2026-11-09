@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import HarnessRig, red_report, write_gate
+from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env,
+                                install_entry_executor, red_report, write_gate)
 
 
 @pytest.fixture
@@ -33,6 +34,10 @@ def _run(tmp_path, name):
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
     write_gate(repo)
+    # The executor entry scrubs the child environment, so the noise the run
+    # needs to pass the bounded tail must be carried by the gate program
+    # (`embed_env`), not by the pytest process's environment.
+    (repo / "gate.py").write_text(embed_env(GATE_PY, FIXTURE_GATE_NOISE="6000"))
     state = tmp_path / f"state-{name}"
     baseline_dir = Path(rt._baseline_dir(str(state), repo.resolve()))
     baseline_dir.mkdir(parents=True)
@@ -48,8 +53,8 @@ def _identities(report):
     return [rt._failure_key(f) for f in report["new_failures"]]
 
 
-@pytest.mark.docker  # run_tests only ever runs the gate in the bounded CPU container
-def test_a_long_red_output_still_names_every_failure(rig, tmp_path):
+def test_a_long_red_output_still_names_every_failure(rig, tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     result, report = _run(tmp_path, "repo")
     gate = report["repo_gate"]
     assert gate["returncode"] == 1
@@ -67,10 +72,10 @@ def test_a_long_red_output_still_names_every_failure(rig, tmp_path):
         assert text in joined
 
 
-@pytest.mark.docker  # run_tests only ever runs the gate in the bounded CPU container
 def test_the_identities_do_not_depend_on_the_retained_tail(rig, tmp_path, monkeypatch):
     """The same failure, read with the 2000-character tail and with a tail
     larger than the whole output: the same entries, one for one."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     _, bounded = _run(tmp_path, "bounded")
     monkeypatch.setattr(rt, "OUTPUT_TAIL_CHARS", 10 ** 9)
     _, whole = _run(tmp_path, "whole")

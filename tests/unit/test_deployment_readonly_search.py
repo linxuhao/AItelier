@@ -13,7 +13,15 @@ if os.environ.get('READONLY_BASELINE') == '1':
     spec.loader.exec_module(dq)
 
 
-pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
+# Every test in this file keeps the marker: measured 2026-11-09 in the disposable
+# image, arm (a) `pytest -m docker` and arm (b) the same command plus a recording
+# `docker` shim first on PATH (shim log EMPTY — nothing here invokes docker), all
+# 35 fail inside `fixture()` with
+#   FileNotFoundError: [Errno 2] No such file or directory:
+#   '/reports/original-attribution.json'
+# i.e. on the original attribution and baseline this file measures against, which
+# live on a /reports mount the image does not carry.
+pytestmark = pytest.mark.docker
 
 def fixture(tmp_path, monkeypatch):
     root=tmp_path/'proc'

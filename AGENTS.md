@@ -57,13 +57,15 @@ aitelier server
 # Tests
 # Only in a throwaway container (docker run --rm ... aitelier:latest, network none,
 # 2 CPU/2 GiB, <=4 at once), never in the production aitelier container (OOM 2026-09-23)
-pytest tests/unit -v        # ~700 unit tests
-pytest tests/ -v            # full suite: ~985 unit+integration tests
+pytest tests/unit -v        # 10,050 tests (default addopts selection)
+pytest tests/ -v            # full suite: 11,528 tests (default addopts selection)
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
 
 # Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest
 cd web && npm install && npm test   # tests web/__tests__/ pure logic + component tests
 ```
+
+Counts above are what `pytest --collect-only -q <path>` reports on this tree, measured 2026-11-09 at `d8557cf073`; each number belongs to the path named on its own line, and they drift as tests are added.
 
 Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network and not docker and not baked_toolchain"`). Suites live in `tests/{unit,integration,e2e,skillflow}`. The default run deselects all three registered opt-in marks — `network` (live external services), `docker` (needs a daemon and a frozen clean Source) and `baked_toolchain` (needs binaries the shipped image does not carry, so those rows cannot pass anywhere until that gap is closed) — so a row carrying any of them does NOT run under plain `pytest tests/`; ask for `network` or `docker` rows with `pytest -m network` / `pytest -m docker` in a throwaway container. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's Svelte components and utility modules are unit-tested under `web/__tests__/` and `web/src/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
 

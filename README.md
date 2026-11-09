@@ -549,10 +549,12 @@ Building on the foundation that works today ([Project status](#project-status) a
 ## Tests
 
 ```bash
-pytest tests/unit/ -v          # ~700 unit tests
-pytest tests/integration/ -v   # ~245 integration tests
-pytest tests/ -v               # full suite (~945 tests)
+pytest tests/unit/ -v          # 10,050 tests (default addopts selection)
+pytest tests/integration/ -v   # 1,031 tests (default addopts selection)
+pytest tests/ -v               # full suite: 11,528 tests (default addopts selection)
 ```
+
+Counts are what `pytest --collect-only -q <path>` reports on this tree, measured 2026-11-09 at `d8557cf073`; each number belongs to the path named on its own line, and they drift as tests are added. Run them only in a throwaway container (see `AGENTS.md`), never inside the production container.
 
 ## Web Frontend
 

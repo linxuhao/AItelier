@@ -115,7 +115,22 @@ def test_detached_writer():
     return record, repo / "main.json"
 
 
-@pytest.mark.docker  # needs the owned capsule's init reaper: a container run WITHOUT --init leaves the killed escaped holder a zombie, so the fixture's own cleanup assertion cannot hold
+def _pytest_is_pid_one():
+    """True when nothing above this process reaps orphans: pytest itself is pid 1.
+
+    The owned capsule's init reaper is what the fixture's cleanup assertion needs.
+    A `docker run` WITHOUT `--init` makes the test process the namespace's pid 1,
+    so the killed escaped holder is left a zombie and no reaper exists to collect
+    it. With `--init`, pid 1 is the container's init and the premise holds.
+    """
+    return os.getpid() == 1
+
+
+@pytest.mark.skipif(
+    _pytest_is_pid_one(),
+    reason="needs an init process: this test process is pid 1, so the killed escaped "
+           "holder is left a zombie with no reaper (run the container with --init)",
+)
 @pytest.mark.parametrize("blocked,ignore_sigchld", [(False, False), (False, True), (True, False)])
 def test_detached_output_cannot_erase_or_outlive_entry_deadline(tmp_path, blocked, ignore_sigchld):
     """Exited main, genuinely absent group, and still-blocked main are distinct."""

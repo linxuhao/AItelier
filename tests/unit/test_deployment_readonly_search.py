@@ -1,4 +1,19 @@
-"""Bounded causal process-reader classification controls."""
+"""Bounded causal process-reader classification controls.
+
+Self-contained. This file used to read three absolute paths under `/reports`: the
+measured attribution record, the `causal-guard.json` receipt, and `baseline.py`
+(the pre-recognizer `core/deployment_quiescence.py` at 6d89b025). No repository
+file supplies `/reports` and the production container does not mount it either, so
+the module carried `pytestmark = pytest.mark.docker` on account of 35 failures
+that were missing fixtures rather than anything docker-related.
+
+What it now carries itself: the 420-byte attribution record is inlined verbatim
+below (`ATTRIBUTION`), the receipt is written to `tmp_path`, and the
+pre-recognizer module is checked in beside this file as
+`deployment_quiescence_baseline_6d89b025.py` (96104 bytes, sha256
+61174ca8ff105b4cb752730ef5ed50d45a2b205eb35a672ad842b18d35c6b1bb, the real
+module, not a stub). Nothing here invokes docker, so there is no docker mark.
+"""
 import json
 import shlex
 from pathlib import Path
@@ -7,25 +22,27 @@ import pytest
 import os
 import importlib.util
 from core import deployment_quiescence as dq
+BASELINE = Path(__file__).with_name('deployment_quiescence_baseline_6d89b025.py')
 if os.environ.get('READONLY_BASELINE') == '1':
-    spec=importlib.util.spec_from_file_location('readonly_baseline', '/reports/baseline.py')
+    spec=importlib.util.spec_from_file_location('readonly_baseline', BASELINE)
     dq=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dq)
 
 
-# Every test in this file keeps the marker: measured 2026-11-09 in the disposable
-# image, arm (a) `pytest -m docker` and arm (b) the same command plus a recording
-# `docker` shim first on PATH (shim log EMPTY — nothing here invokes docker), all
-# 35 fail inside `fixture()` with
-#   FileNotFoundError: [Errno 2] No such file or directory:
-#   '/reports/original-attribution.json'
-# i.e. on the original attribution and baseline this file measures against, which
-# live on a /reports mount the image does not carry.
-pytestmark = pytest.mark.docker
+# Verbatim text of the measured record at /reports/original-attribution.json
+# (420 bytes, sha256 b4716b42cc2ce8587e126eaeda54c1cbc04275b353b8f15ff7b924feaae3cd88).
+# Only `cmdline` is consumed (by `fixture`), and it must keep the literal
+# `tail -3`: test_unproven_wrapper_remains_full_scan[future_worker] rewrites that
+# exact substring to insert the future evaluator worker.
+ATTRIBUTION = r'''{
+ "cmdline": "/bin/bash -c source /home/linxuhao/.claude/shell-snapshots/snapshot-bash-1759871234-abc123.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'rg -n -i \"reference video|参考视频|<Video\" --glob \"*.md\" --glob \"*.py\" -l | head; tail -3' && pwd -P >| /tmp/claude-1759871234-cwd"
+}
+'''
+
 
 def fixture(tmp_path, monkeypatch):
     root=tmp_path/'proc'
-    raw=json.loads(Path('/reports/original-attribution.json').read_text())
+    raw=json.loads(ATTRIBUTION)
     shell=['/bin/bash','-c', raw['cmdline'].split('/bin/bash -c ',1)[1]]
     # Attribution stores flattened argv: the shell code remains one argument.
     cmds={3233295:shell,3233297:['rg','-n','-i','reference video|参考视频|<Video','--glob','*.md','--glob','*.py','-l'],3233298:['head']}
@@ -100,7 +117,7 @@ def test_old_new_collector_guard_fence_and_journal(tmp_path,monkeypatch):
     from core import deployment_quiescence as current
     from tests.unit.test_deployment_quiescence import _db
     root,cmds,line=fixture(tmp_path,monkeypatch)
-    spec=importlib.util.spec_from_file_location('guard_baseline','/reports/baseline.py')
+    spec=importlib.util.spec_from_file_location('guard_baseline',BASELINE)
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
     monkeypatch.setattr(old,'PROC_ROOT',root)
     monkeypatch.setattr(current,'admission_fence_path',lambda:tmp_path/'admission.lock')
@@ -122,7 +139,7 @@ def test_old_new_collector_guard_fence_and_journal(tmp_path,monkeypatch):
         clearance=current.authorize('restart',observations['new'],journal=tmp_path/'journal.json')
         terminal=current.finalize(clearance,success=False,error='fixture performed no restart',journal=tmp_path/'journal.json')
         assert terminal['event']['pending'] is False
-        Path('/reports/causal-guard.json').write_text(json.dumps({'observations':observations,'original_refusal':refused,'terminal':terminal},indent=2))
+        (tmp_path/'causal-guard.json').write_text(json.dumps({'observations':observations,'original_refusal':refused,'terminal':terminal},indent=2))
     finally:
         current.release_cutover_fence(fence)
     assert fence.closed
@@ -135,7 +152,16 @@ def test_old_new_collector_guard_fence_and_journal(tmp_path,monkeypatch):
     'rg video; python evaluator_worker.py',
     'rg video | python evaluator_worker.py',
     'rg video |& python evaluator_worker.py',
-    'rg video ||| head', 'rg video ;; head', 'rg video |',
+    # These three used to be `'rg video ||| head'`, `'rg video ;; head'` and
+    # `'rg video |'`. d139d30caa removed the bare-`eval` alternative from the
+    # measurement-name recognizer (witness: test_deployment_gate_measures_work.py
+    # ::test_a_claude_code_shell_wrapper_is_not_an_evaluator), so a payload with
+    # no `python evaluator_worker.py` is no longer a measurement at all and the
+    # rows' `assert owners and errors` could no longer hold. Re-aimed, not deleted:
+    # each keeps its own continuation shape (|||, ;;, |;) and is a measurement.
+    'rg video ||| python evaluator_worker.py',
+    'rg video ;; python evaluator_worker.py',
+    'rg video |; python evaluator_worker.py',
     'rg video; head <(python evaluator_worker.py)',
     'rg video; head (python evaluator_worker.py)',
 ])

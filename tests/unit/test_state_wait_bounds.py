@@ -33,8 +33,10 @@ cannot place -- a primitive's bare name it does not know, or one of ``wait_for``
 / ``timeout`` / ``timeout_at`` used as a method of an object it cannot identify --
 is refused as unclassified rather than skipped and assumed harmless.  The one
 exception is the different API BOUNDARY (i) describes, ``x.wait(...)`` on
-something that is not ``asyncio``: its form without a numeric literal bound
-carries no record, and its literal-bound form is refused.  Each refusal names the
+something that is not ``asyncio``, and it has two sides, not one: a numeric
+literal bound of 1.0 or more is refused, while a bound read from a name, no
+argument at all, and a sub-second literal all carry no record -- the same
+threshold as everywhere else in this file.  Each refusal names the
 site: its line number, the form it was written in, and the bound's source text.
 
 FAIL-CLOSED ON AN UNRESOLVED AWAIT.  A chained spelling is closed by resolution,
@@ -60,14 +62,14 @@ that runs the audit on exactly that snippet and gets zero records, and that case
 also requires the shape's phrase to still be here, so prose and probe cannot
 drift apart.
 (i) ``x.wait(...)`` on something that is not ``asyncio`` is a DIFFERENT API
-(``threading.Event.wait``, ``asyncio.Event.wait``) and every form of it WITHOUT a
-numeric literal bound is deliberately unaudited -- a bound read from a name, and
-no argument at all: the ``handshake`` helper in the guarded module reads
-``observed = event.wait(HANDSHAKE_SECONDS)``, ``await event.wait()`` is unaudited
-too, and no site for either appears in the
-audit.  The exclusion is for the API, not for large numbers: the same shape
-carrying a numeric literal of 1.0 or more -- ``event.wait(20.0)``,
-``event.wait(timeout=5)``, ``getattr(event, "wait")(20.0)`` -- is refused as
+(``threading.Event.wait``, ``asyncio.Event.wait``) recorded ONLY when one of its
+arguments is a numeric literal of 1.0 or more; below that threshold it carries no
+record.  The ``handshake`` helper in the guarded module reads
+``observed = event.wait(HANDSHAKE_SECONDS)``, and neither that name-bound form nor
+``await event.wait()`` nor a sub-second ``event.wait(0.5)`` appears in the audit.
+So the exclusion is for the API above that one threshold: the same shape carrying
+``event.wait(20.0)``, ``event.wait(timeout=5)`` or
+``getattr(event, "wait")(20.0)`` is refused as
 unclassified rather than skipped, which
 ``test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound``
 measures.
@@ -165,8 +167,11 @@ FORM_DUNDER_CALL = "asyncio.{name}.__call__"
 # The rule of last resort: an await whose callee the resolver cannot place, and
 # whose arguments carry a numeric literal bound of SUB_SECOND_LIMIT or more.
 FORM_UNRESOLVED_LITERAL = "unresolved await, numeric literal bound"
-# ``x.wait(...)`` on something that is not ``asyncio``: a different API whose
-# name-bound form is deliberately unaudited, and whose literal-bound form is refused.
+# ``x.wait(...)`` on something that is not ``asyncio``: a different API, recorded
+# only when one of its arguments is a numeric literal of SUB_SECOND_LIMIT or more.
+# Below that threshold it carries no record -- the guarded module's name-bound
+# handshake, a call with no argument at all, and ``event.wait(0.5)`` are all
+# unrecorded, each carried by a probe in ``SILENT_SHAPES``.
 FORM_WAIT_OTHER_API = "wait() on a non-asyncio object, numeric literal bound"
 
 # The must-complete waits the guarded module is known to hold, as
@@ -445,10 +450,11 @@ def _refused_wait_literal(call, func):
 
     ``x.wait(...)`` on something that is not ``asyncio`` is a different API
     (``threading.Event.wait``, ``asyncio.Event.wait``) and no site is recorded for
-    its name-bound form -- the guarded module's handshake is exactly that shape.
-    A blocking wait bounded by a numeric literal of 1.0 or more is the defect this
-    audit exists to see, so that form is refused as unclassified instead of
-    skipped: the exclusion is for the other API, not for large numbers.
+    its name-bound form -- the guarded module's handshake is exactly that shape --
+    nor for one with no argument at all or a sub-second literal: the trigger is a
+    numeric literal of 1.0 or more, which is the defect this audit exists to see, so
+    that form is refused as unclassified instead of skipped.  The exclusion is for
+    the other API, not for large numbers.
     """
     if _argument_literal(call) is None:
         return None
@@ -1292,6 +1298,16 @@ SILENT_SHAPES = [
         id="threading-event-wait",
     ),
     pytest.param(
+        "threading-event-wait-sub-second",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return event.wait(0.5)\n",
+        "event.wait(0.5)",
+        id="threading-event-wait-sub-second",
+    ),
+    pytest.param(
         "exec-built-alias",
         "import asyncio\n"
         "\n"
@@ -1479,7 +1495,7 @@ WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
                          WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL)
 def test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound(
         tmp_path, shape, source, line, callee):
-    """A different API's name-bound form is silent; its literal-bound form is refused."""
+    """A different API is refused at a 1.0-or-more literal; below that it is silent."""
     sites = _audit_synthetic(tmp_path, source, f"outside_vocabulary_{shape}.py")
     refused = [site for site in sites if site.classification == REFUSED]
     assert len(refused) == 1, (

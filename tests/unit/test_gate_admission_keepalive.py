@@ -81,21 +81,45 @@ def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch
     What the row pins is the record: the render must still be running when
     `stop()` cuts the upstream, or the harness answers first and the record
     reads `answered` instead of `abandoned`. That is a race between what is
-    left of the render after the 2 s client timeout and the teardown; the
-    render value is the margin, and 6.0 s is headroom so that boundary is not
-    a race -- not the repair of a reproduced failure.
+    left of the render after the 2 s client timeout and the teardown, so the
+    render value is the margin that keeps the race from deciding the row --
+    not a constant that only has to beat the timeout.
 
-    The row is green at the original 3.0 s as well as at 6.0 s, three runs
-    each: 3.0 s in a scratch copy of 9eeb9f00c5 with only this value reverted,
-    `.../evidence/docker-rows-unmark-director-20261109/render30-run{1,2,3}.log`
-    (4.27s / 4.51s / 4.25s), and 6.0 s in `.../evidence/docker-audit-r5-
-    20261109/corrected/keepalive-render-bound-run{1,2,3}/stdout-stderr.log`
-    (4.76s / 4.23s / 4.24s).
+    At the original 3.0 s the race decides the row in both directions, and the
+    record holds eight failures and five passes of that construction. All
+    eight end `assert 'answered' == 'abandoned'` with exit 1: three on the
+    audit base 98e8007e11 carrying the embed_env client timeout (`.../work/
+    docker-audit-r3-evidence-20261109/logs/arm3/keepalive-render-bound-
+    run{1,2,3}/stdout-stderr.log`, the `:87` of that carrier tree), three on
+    a scratch archive of 9eeb9f00c5 with only this render value reverted to
+    3.0 (`.../evidence/dead-env-20261109/render30b-run{1,2,3}.log`), and two
+    on the un-widened corrected tree (`.../work/docker-audit-r3-evidence-
+    20261109/r4/logs/corrected-not-widened/render-bound-run{1,2}/
+    stdout-stderr.log`, 4.72s / 4.71s). The five passes are the same
+    construction landing the other way: three at `.../evidence/docker-rows-
+    unmark-director-20261109/render30-run{1,2,3}.log` (4.27s / 4.51s / 4.25s)
+    and two at `.../evidence/docker-audit-r5-20261109/narrow/keepalive-
+    render-bound-run{1,2}/stdout-stderr.log` (4.25s / 4.21s).
 
-    The one teardown figure that was measured is the relay's own shutdown,
-    0.5 s (`relay.stop took 0.5`, PROBE-7 in `.../evidence/docker-audit-r5-
-    20261109/diff-98e8007e11-e32d5d16.diff`); no executor-entry teardown
-    figure was measured, so none is claimed here."""
+    At 6.0 s the row is green in every retained run, and each run is named
+    with the tree that printed it: the audit tree's r4 corrected rows
+    (`.../work/docker-audit-r3-evidence-20261109/r4/logs/corrected/render-
+    bound-run{1,2,3}/stdout-stderr.log`, 4.22s / 4.24s / 4.75s), the same
+    three retained again at `.../evidence/docker-audit-r5-20261109/corrected/
+    keepalive-render-bound-run{1,2,3}/stdout-stderr.log` (4.76s / 4.23s /
+    4.24s), and two 11-row passes whose own header names the tree
+    `9eeb9f00c5 + working-tree edits` with the three dead setenv lines already
+    deleted (`.../evidence/dead-env-20261109/impl-test.log`, and
+    `director-remesaure.log` beside it, which states no tree of its own).
+
+    The teardown figures are measured, and the audit's probe file is where
+    they live: `PROBE-7 _run_node_cmd took 4.051`, which that file labels
+    entry teardown, and `PROBE-7 relay.stop took 0.5`, both under
+    `teardown_budget_measured` in `.../evidence/docker-audit-r5-20261109/
+    diff-98e8007e11-e32d5d16.diff`. The `~1 s` this docstring used to claim as
+    "0.5 s of executor-entry teardown plus 0.5 s of relay shutdown" was
+    neither: the entry teardown that probe recorded is 4.051 s, and the 0.5 s
+    belongs to relay.stop."""
     install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=6.0,
                                        queue=1.5, client_timeout=2)

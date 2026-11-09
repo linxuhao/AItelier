@@ -585,9 +585,10 @@ def test_a_missing_workspace_still_refuses_a_duplicate_and_the_note_does_not_cla
 
 
 def test_a_missing_workspace_note_names_every_refusal_that_still_ran(cli, repo, base, tmp_path):
-    # TWO refusals read the PLAN and need no workspace: a duplicate spelling, and a path outside the
-    # workspace. The note named only the first, so a director read the second as one of the checks
-    # the missing directory had cost them - and only a workspace-dependent check may be said to cost.
+    # THREE refusals read the PLAN and need no workspace: a duplicate spelling, a path outside the
+    # workspace, and a declared path no glob of the same item's changes_within scope matches. The note
+    # named only the first, so a director read the others as checks the missing directory had cost
+    # them - and only a workspace-dependent check may be said to cost.
     ghost = tmp_path / "not-a-workspace"
 
     def create(params):
@@ -599,11 +600,16 @@ def test_a_missing_workspace_note_names_every_refusal_that_still_ran(cli, repo, 
     assert code == 2 and out["refused"] == "invalid_plan", out
     assert "/etc/passwd" in out["reason"] and "inside the workspace" in out["reason"], out["reason"]
 
+    code, out = create({**CODE, "scope": ["app*"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert "other.py" in out["reason"] and repr(["app*"]) in out["reason"], out["reason"]
+
     code, out = create(CODE)
     assert code == 0, out
     note = out["paths"]["notes"][0]
     assert "duplicate" in note and "outside the workspace" in note, note
     assert "still refused" in note and "neither needs a directory" in note, note
+    assert "changes_within" in note and "reads the plan too" in note, note
     assert "could not be looked up" in note and "nothing was assumed" in note, \
         "the workspace-dependent checks that did not run are still said out loud"
 
@@ -726,3 +732,116 @@ def test_every_no_digest_shape_is_refused_by_the_audit_function_itself(tmp_path,
     assert (caught.value.extra["item"], caught.value.extra["predicate"]) == ("edit", "files_changed")
     assert caught.value.extra["path"] == paths[-1], "the refusal names the no-digest path, not the one before it"
     assert named in caught.value.reason, caught.value.reason
+
+
+# -- the pair: a declared delta path and the SAME item's changes_within scope ------------------
+#
+# `code_change`'s `implement` item requires `paths` to change (`files_changed`) AND requires the
+# whole change to fall inside `scope` (`changes_within`). A path no scope glob matches cannot do
+# both: change it and `changes_within` fails, leave it and `files_changed` fails. The plan used to
+# freeze anyway and the attempt hung until it was abandoned (attempt-048f928d8ce343799a3fd9b508e17eb1:
+# `tests/unit/test_repo_gate_admission.py` against scope `tests/unit/test_gate_admission_*.py`).
+
+@pytest.mark.parametrize("paths, scope, named", [
+    (["app.py", "other.py"], ["app*"], "other.py"),
+    # The real attempt's shape: a NESTED path against a glob whose `*` stays inside one segment.
+    (["tests/unit/test_repo_gate_admission.py"], ["tests/unit/test_gate_admission_*.py"],
+     "tests/unit/test_repo_gate_admission.py"),
+])
+def test_a_declared_path_the_same_items_scope_cannot_match_is_refused(cli, repo, base, paths, scope, named):
+    """Refused at freeze, naming the offending PATH and the declared SCOPE list, on the real route.
+
+    Measured through `create --template code_change` (the route the director's tool drives): on the
+    base commit such a plan FREEZES and no attempt is saved from the hang, so this test is red there.
+    """
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": paths, "scope": scope})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "implement" and out["path"] == named, out
+    assert out["scope"] == scope, out
+    assert named in out["reason"] and repr(scope) in out["reason"], out["reason"]
+    assert "changes_within" in out["reason"] and "files_changed" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+@pytest.mark.parametrize("scope", [
+    ["app.py", "docs/"],          # a trailing `/` takes the tree under it
+    ["app.py", "./docs/"],        # `./` is stripped, as the run strips it
+    ["app.py", "**/new.md"],      # `**/` crosses segments
+    ["app.py", "docs/**"],
+])
+def test_a_path_the_same_items_scope_can_match_still_freezes(cli, repo, base, scope):
+    """The refusal borrows the run's matcher, so its acceptances must be the run's too.
+
+    A trailing `/`, a leading `./` and `**/` are exactly what `core.todo_runtime._scope_regex`
+    handles and a hand-rolled glob rule would refuse: these plans must freeze as they always did.
+    """
+    code, out = create_from(cli, repo, base, params={**CODE, "paths": ["app.py", "docs/new.md"], "scope": scope})
+    assert code == 0, out
+    assert out["paths"]["declared"] == ["app.py", "docs/new.md"], out["paths"]
+
+
+DELTA_ONLY = """\
+name: t
+version: 1
+description: an item that requires a delta and names no scope of its own
+params:
+  scope:
+    type: list[str]
+    required: true
+  paths:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change ${paths}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths}
+"""
+
+SCOPE_IN_ANOTHER_ITEM = """\
+name: t
+version: 1
+description: one item requires a delta, a LATER item declares a scope that excludes it
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    needs: [change]
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+
+def test_an_item_with_no_scope_of_its_own_is_not_judged_against_one(cli, repo, base, custom):
+    """Only items carrying BOTH predicates are judged: no `changes_within`, no pair, no refusal.
+
+    The plan-level `scope` (here `["app.py"]`, which cannot match `other.py`) is the appended
+    `deliver` item's, and it must not be read back into an item that never bound it.
+    """
+    write_template(custom, "t", DELTA_ONLY)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"], "paths": ["app.py", "other.py"]})
+    assert code == 0, out
+    assert out["paths"]["declared"] == ["app.py", "other.py"], out["paths"]
+
+
+def test_a_scope_declared_by_another_item_is_not_paired_with_this_items_paths(cli, repo, base, custom):
+    """The pair is per ITEM: a scope a different item declares constrains only that item.
+
+    `change` requires `app.py` to change; `judge` binds a scope that excludes it. Both items are
+    satisfiable - `judge` runs after the delta and only reads what changed - so the plan freezes.
+    A plan-wide pairing would refuse this, which is the false refusal this test pins.
+    """
+    write_template(custom, "t", SCOPE_IN_ANOTHER_ITEM)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"]})
+    assert code == 0, out
+    assert out["items"] == ["change", "judge", "deliver"], out

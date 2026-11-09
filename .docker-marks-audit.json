@@ -1,0 +1,1073 @@
+{
+ "subject": "Revision 5 of the audit of the eight rows still carrying @pytest.mark.docker at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1: each row measured in two arms in this attempt, shim calls counted by invocation, every named edit shown to apply at the site it names, the daemon-path equivalence stated as inference, and the measurement head related to the base by two retained diffs.",
+ "revision": 5,
+ "node": "tests.the-remaining-docker-marks-classified-by-what-actually-blocks-them-20261109",
+ "attempt": "attempt-97a13d9532594ff2b8ff85e6504ad951",
+ "base_sha": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
+ "head_at_measurement": "f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
+ "checkout": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109",
+ "measured_at_utc": "2026-11-09T07:53:17Z",
+ "measured_at_utc_note": "the latest `# written_utc:` header among the retained runs of this attempt; each run carries its own",
+ "measured_this_attempt_note": "Every quoted outcome line below was produced by a container run of THIS attempt and is extracted from the log named beside it at build time (/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py); the build aborts if a quoted line is absent from its log. The previous revision's logs are cited only where they are explicitly labelled as the previous attempt.",
+ "head_and_base_relation": {
+  "this_attempt": "measured at its own base f9481ccf0875a1d945b4ffa713238c25ea4de0c1 (HEAD of the r5 worktree); head_at_measurement is that same commit, so for this revision base and head coincide and the \"unexplained hash\" of revision 4 is gone",
+  "revision_4_hashes_explained": {
+   "base_sha_was": "98e8007e116574bfb49912d000e149bb47b4af51",
+   "head_at_measurement_was": "e32d5d162fa9e5f1c6847c0f46ad5d8d681de4d7",
+   "relation": "e32d5d16 is 98e8007e11 with one file added, .docker-marks-audit.json (493 insertions), i.e. the report itself; it changes no product or test file, so the measured surface is the same tree. Its child 9e8a113276 is the re-shaped 718-line report and likewise adds only that file.",
+   "retained_diff_98e8_to_e32d": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16-stat.txt",
+   "retained_full_diff_98e8_to_e32d": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16.diff",
+   "retained_diff_98e8_to_this_base": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08-stat.txt",
+   "retained_full_diff_98e8_to_this_base": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08.diff",
+   "what_changed_between_98e8_and_this_base": "exactly two test rows rejoined the default run: tests/unit/test_driver_callers_actual.py (baked_toolchain mark removed, header fixture checked in) and tests/unit/test_gate_consumer_composition.py (baked_toolchain mark removed, _acquire_repo_gate stub widened to *a, **k). Neither file is one of the eight docker-marked rows, and `-m docker --collect-only` at this base still collects 8 rows."
+  },
+  "self_check_counts_tie_to_the_diff": "the only measured count that moved with the base is the DEFAULT-run collection: 11520/11573 tests collected (53 deselected) in 21.48s at this base versus 11518/11573 (55 deselected) at 98e8007e11 in revision 4 - 55 - 53 = 2, exactly the two baked_toolchain rows that rejoined. The docker-marked count is unchanged at 8."
+ },
+ "environment": {
+  "image": "aitelier:latest",
+  "container_shape": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v <tree>:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PATH=/shim:/usr/local/bin:/usr/bin:/bin -v <run>/shim:/shim:ro -v <run>/shim:/shimlog:rw -w /app aitelier:latest /usr/local/bin/python -m pytest ...",
+  "container_argv_verbatim": "argv: docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /tmp/docker-audit-r5/tree-base:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PATH=/shim:/usr/local/bin:/usr/bin:/bin -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim:/shim:ro -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim:/shimlog:rw -w /app aitelier:latest /usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+  "container_argv_note": "the verbatim argv of this attempt's delivered/diag-artifact run; every run used the same shape with only the tree, the pytest arguments and the run's own shim directory changed, and every run's argv is retained in its own container-argv.txt. One addition to the shape the assignment prescribes is deliberate: the shim directory is mounted a second time writable at /shimlog, because a read-only /shim cannot hold the log the shape asks for. The shim binary itself stays read-only at /shim.",
+  "shim": {
+   "path": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/shim/docker",
+   "script": "#!/bin/sh\n# Recording shim: no docker daemon exists in this disposable container.\n# Every INVOCATION appends one record starting with `ts=`; an argv that itself\n# contains newlines (a `sh -c` script) continues on the following lines, so the\n# invocation count is `grep -c '^ts='` and NOT `wc -l`.\n# The shim itself is mounted read-only at /shim; its log lands on a writable\n# mount of the same host directory at /shimlog/.\n{\n  printf 'ts=%s pid=%s cwd=%s argv=' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$$\" \"$PWD\"\n  printf '%s ' \"$@\"\n  printf '\\n'\n} >> /shimlog/docker-calls.log 2>&1\necho \"docker shim: no docker daemon in this disposable container (call recorded)\" >&2\nexit 127\n",
+   "mounting": "the shim is mounted read-only at /shim and its log lands in the same host directory mounted writable at /shimlog, so the record survives with the shim itself immutable; the log is retained as <run>/shim/docker-calls.log",
+   "observed": "first on PATH, so core.repository_executor's shutil.which(\"docker\") finds it; measured inside this attempt's shape: docker_on_PATH=/shim/docker; the shim records the argv and exits 127, so every acceptance is recorded intent, never an execution"
+  },
+  "trees": {
+   "delivered": "/tmp/docker-audit-r5/tree-base = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 of /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109 (no edit)",
+   "seam": "/tmp/docker-audit-r5/tree-seam = tree-base + arm2.patch (sha256 f3935f49530e9ac97b494237ce7c354727c808c474243ab00efb1b5eb2bb2df3)",
+   "narrow": "/tmp/docker-audit-r5/tree-narrow = tree-base + arm3.patch (sha256 4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f)",
+   "corrected": "/tmp/docker-audit-r5/tree-corrected = tree-base + arm4.patch (sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0)",
+   "patches_are_extracted_from": "work/review-audits-20261109/docker-logs/edits.diff (its tree-arm2 / tree-arm3 / tree-arm4 hunk sets, retained here as arm2.patch / arm3.patch / arm4.patch)",
+   "patches_reproduce_the_previous_trees": "the five patched files are byte-identical to the previous attempt's tree-arm2 / tree-arm4 copies (cmp), so this attempt re-ran the same edit set rather than a paraphrase of it"
+  },
+  "measured_inside_this_shape": {
+   "uid_gid": "uid 1000 gid 1000 (measured inside; the container was started with -u 1000:1000)",
+   "nproc_sched_affinity": "16 (the host's affinity; --cpus 2 is enforced as a quota, not as a CPU count)",
+   "cgroup_cpu_max": "200000 100000 (200000/100000 = 2 CPUs)",
+   "cgroup_memory_max": "2147483648 (2 GiB)",
+   "cgroup_memory_current": "6938624",
+   "cgroup_pids_max": "27855",
+   "docker_on_PATH": "/shim/docker",
+   "executor_entry_shipped": "True (/app/core/repository_executor_entry.py)",
+   "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/environment/inside/stdout-stderr.log",
+   "caveat": "the values are read, not exercised: they say what the container was allowed, not that the executor's own container is bounded the same way."
+  },
+  "seam": {
+   "what": "tests.gate_fixture.install_entry_executor(monkeypatch)",
+   "site": "tests/gate_fixture.py:255",
+   "does": "monkeypatches core.repository_executor.execute to call the real core.repository_executor_entry.run(payload) in this container: a real subprocess, the real scrubbed environment, the real JUnit/report_dir, and the entry's own relay bridge to the gate's admission socket; a killed command raises subprocess.TimeoutExpired as the real executor does. It makes no host-launcher acceptance claim."
+  }
+ },
+ "how_shim_calls_were_counted": {
+  "rule": "one invocation = one record that starts with `ts=`; an argv containing newlines (a `sh -c` script, for instance) continues on the following lines, so the invocation count is `grep -c '^ts=' shim/docker-calls.log` and NOT `wc -l`",
+  "why_this_revision_changes_it": "revision 4 reported log LINES as \"docker_shim_calls_recorded\". For the two rows whose one recorded invocation is a 27-line `sh -c` git script, that printed 27 for what is one call. Both numbers are now reported per row (docker_shim_invocations and docker_shim_log_lines) so the difference is visible instead of hidden.",
+  "rows_whose_number_changed": [
+   {
+    "row": 1,
+    "nodeid": "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "previous_revision_count": 27,
+    "invocation_count_now": 1,
+    "log_lines_now": 27,
+    "why": "the previous revision counted log LINES; this record's argv is a multi-line `sh -c` git script, so one invocation occupies 27 lines",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim/docker-calls.log"
+   },
+   {
+    "row": 8,
+    "nodeid": "tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "previous_revision_count": 27,
+    "invocation_count_now": 1,
+    "log_lines_now": 27,
+    "why": "the previous revision counted log LINES; this record's argv is a multi-line `sh -c` git script, so one invocation occupies 27 lines",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/scoped-gate-survives/shim/docker-calls.log"
+   }
+  ],
+  "rows_unchanged": [
+   {
+    "row": 2,
+    "invocations": 1,
+    "log_lines": 1
+   },
+   {
+    "row": 3,
+    "invocations": 1,
+    "log_lines": 1
+   },
+   {
+    "row": 4,
+    "invocations": 1,
+    "log_lines": 1
+   },
+   {
+    "row": 5,
+    "invocations": 2,
+    "log_lines": 2
+   },
+   {
+    "row": 6,
+    "invocations": 4,
+    "log_lines": 4
+   },
+   {
+    "row": 7,
+    "invocations": 2,
+    "log_lines": 2
+   }
+  ],
+  "seam_and_corrected_arms": "every seam, narrow and corrected run recorded 0 invocations: the seam replaces core.repository_executor.execute, so the docker binary was never invoked (the shim log is empty, which is exactly what it records). The claim is about invocation, not about whether any code called shutil.which(\"docker\").",
+  "recheck": "recheck any row with `grep -c '^ts=' <run>/shim/docker-calls.log` and compare with `wc -l`; for rows 1, 8 the two disagree by the multi-line argv"
+ },
+ "rows": [
+  {
+   "row": 1,
+   "nodeid": "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+   "mark_site": "tests/unit/test_diagnostic_output_targets.py:15",
+   "mark_comment": "needs the docker CPU execution facility: run_tests reports `infrastructure_unavailable` without it, and this asserts a REAL pytest report became an artifact",
+   "class": "b",
+   "measured_as_delivered": {
+    "run": "delivered/diag-artifact",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_diagnostic_output_targets.py:40: AssertionError: {'passed': False, 'baseline_persisted': None, 'baseline_error': None, 'evidence_state': 'infrastructure_unavailable', ...}",
+    "nodeid_line": "FAILED tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "text": "1 failed, 1 warning in 0.51s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 1,
+    "docker_shim_log_lines": 27
+   },
+   "measured_with_seam": {
+    "run": "seam/diag-artifact",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/shim/docker-calls.log",
+    "line": "PASSED tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "nodeid_line": "PASSED tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+    "text": "1 passed, 1 warning in 1.04s",
+    "exit": "EXIT=0",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "nothing beyond the seam: a real pytest session and a real test_report.json are produced by core.repository_executor_entry.run() inside the outer disposable container.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 0.51s` at `/app/tests/unit/test_diagnostic_output_targets.py:40: AssertionError: {'passed': False, 'baseline_persisted': None, 'baseline_error': None, 'evidence_state': 'infrastructure_unavailable', ...}`; seam: `1 passed, 1 warning in 1.04s` - the seam alone is the edit",
+   "measured_with_seam_plus_named_edit": null,
+   "smallest_edit": {
+    "file": "tests/unit/test_diagnostic_output_targets.py",
+    "site": "tests/unit/test_diagnostic_output_targets.py:15 (decorator) and :16 (the def the edit rewrites)",
+    "imports_added": "no module-level import change: the module imports no gate_fixture name. The edit adds the function-local line `    from tests.gate_fixture import install_entry_executor` as the first statement of the row body (edits.diff tree-arm4, hunk @@ -12,8 +12,9 @@).",
+    "fixture_parameter_added": "`monkeypatch`: the def at :16 is `def test_run_tests_report_is_an_artifact_not_a_code_change(tmp_path):`; the edit rewrites it to `(tmp_path, monkeypatch)` - the row takes no monkeypatch today.",
+    "mechanism": "Delete the decorator on :15. Rewrite the def at :16 as `def test_run_tests_report_is_an_artifact_not_a_code_change(tmp_path, monkeypatch):`. Add `from tests.gate_fixture import install_entry_executor` and `install_entry_executor(monkeypatch)` as the new first two statements of the body (tests/gate_fixture.py:255).",
+    "what_it_would_prove": "run_tests' pytest leg runs for real through the entry, writes the JUnit record and test_report.json into the artifact directory, and leaves the code repo clean - without any docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 1.04s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/diag-artifact/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 1.04s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": null
+  },
+  {
+   "row": 2,
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+   "mark_site": "tests/unit/test_gate_admission_keepalive.py:54",
+   "mark_comment": "_run_repo_gate only ever runs the gate in the bounded CPU container",
+   "class": "b",
+   "measured_as_delivered": {
+    "run": "delivered/keepalive-queue",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-queue/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-queue/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-queue/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_gate_admission_keepalive.py:60: assert 0.5039098099805415 > 4.0",
+    "nodeid_line": "FAILED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+    "text": "1 failed, 1 warning in 1.20s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 1,
+    "docker_shim_log_lines": 1
+   },
+   "measured_with_seam": {
+    "run": "seam/keepalive-queue",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/shim/docker-calls.log",
+    "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+    "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+    "text": "1 passed, 1 warning in 5.27s",
+    "exit": "EXIT=0",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "nothing beyond the seam: the real harness admission code and the real entry run inside the outer disposable container.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.20s` at `/app/tests/unit/test_gate_admission_keepalive.py:60: assert 0.5039098099805415 > 4.0`; seam: `1 passed, 1 warning in 5.27s` - the seam alone is the edit",
+   "measured_with_seam_plus_named_edit": null,
+   "smallest_edit": {
+    "file": "tests/unit/test_gate_admission_keepalive.py",
+    "site": "tests/unit/test_gate_admission_keepalive.py:54 (decorator) and :55-56 (the body the edit opens)",
+    "imports_added": "the module import at :26, `from tests.gate_fixture import HarnessRig, write_gate`, becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,` + `                                write_gate)` (one edit serving rows 2, 3 and 4 of this module; install_entry_executor is the name this row calls, GATE_PY/embed_env are the names the _repo() correction rows 3 and 4 need).",
+    "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:55-56).",
+    "mechanism": "Delete the decorator on :54. Add `install_entry_executor(monkeypatch)` as the first statement of the body, after the docstring; the name comes from the rewritten import at :26.",
+    "what_it_would_prove": "a render queued 4 s behind the harness is admitted after >3 s with the gate's 2 s client timeout still satisfied - the relay keeps the socket alive - with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 5.27s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-queue/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 5.27s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": null
+  },
+  {
+   "row": 3,
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+   "mark_site": "tests/unit/test_gate_admission_keepalive.py:72",
+   "mark_comment": "_run_repo_gate only ever runs the gate in the bounded CPU container",
+   "class": "c",
+   "measured_as_delivered": {
+    "run": "delivered/keepalive-render-bound",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-render-bound/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-render-bound/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-render-bound/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: CleanupUnconfirmed: owned container aitelier-cpu-a14537db3206447fb975e00252d36cad: its create got no answer from the daemon, so the daemon may still create it; nothing is removed by name (it may be another's) and its absence is not confirmed",
+    "nodeid_line": "FAILED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+    "text": "1 failed, 1 warning in 1.14s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 1,
+    "docker_shim_log_lines": 1
+   },
+   "measured_with_seam": {
+    "run": "seam/keepalive-render-bound",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: unit suite OK",
+    "nodeid_line": "FAILED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+    "text": "1 failed, 1 warning in 5.74s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "the seam plus two test-side corrections: the gate program must carry its own client timeout (the entry scrubs the child environment), and the render must outlast that timeout by more than the relay's ~1 s teardown or the relay's record completes as `answered` instead of `abandoned`.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.14s` at `/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: CleanupUnconfirmed: owned container aitelier-cpu-a14537db3206447fb975e00252d36cad: its create got no answer from the daemon, so the daemon may still create it; nothing is removed by name (it may be another's) and its absence is not confirmed`; seam: `1 failed, 1 warning in 5.74s` at `/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: unit suite OK`; seam + the named edit: `1 passed, 1 warning in 4.76s` (PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself), 3 run(s) this attempt",
+   "measured_with_seam_plus_named_edit": [
+    {
+     "run": "corrected/keepalive-render-bound-run1",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "text": "1 passed, 1 warning in 4.76s",
+     "exit": "EXIT=0"
+    },
+    {
+     "run": "corrected/keepalive-render-bound-run2",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run2/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run2/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run2/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "text": "1 passed, 1 warning in 4.23s",
+     "exit": "EXIT=0"
+    },
+    {
+     "run": "corrected/keepalive-render-bound-run3",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run3/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run3/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run3/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "text": "1 passed, 1 warning in 4.24s",
+     "exit": "EXIT=0"
+    }
+   ],
+   "smallest_edit": {
+    "file": "tests/unit/test_gate_admission_keepalive.py",
+    "site": "tests/unit/test_gate_admission_keepalive.py:72 (decorator), :73-79 (the body), and the helpers it builds its fixture gate with: _repo() at :30 and _queued_gate() at :40, and the row's call at :76-77 (only its render argument changes)",
+    "imports_added": "the module import at :26, `from tests.gate_fixture import HarnessRig, write_gate`, becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,` + `                                write_gate)` (edits.diff tree-arm4, hunk @@ -23,14 +23,20 @@).",
+    "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:73).",
+    "mechanism": "Delete the decorator on :72 and add `install_entry_executor(monkeypatch)` as the first statement of the body. Then the test-side correction the row's own failing arm measures: `_repo(tmp_path)` at :30 becomes `_repo(tmp_path, *, client_timeout=None)` and, when it is given, rewrites the gate program with `(repo / \"gate.py\").write_text(embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=str(client_timeout)))`; `_queued_gate` (:40-50) passes its own `client_timeout` through to `_repo(...)`; in the row's existing call at :76-77 only `render=3.0` changes, to `render=6.0`, with the docstring explaining why (a 6 s render leaves 4 s past the 2 s timeout against a ~1 s teardown).",
+    "what_it_would_prove": "once admitted, the gate's OWN timeout runs again: the gate exits 2 while the render is still in flight and the relay records the request as `abandoned` - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 4.76s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 4.76s",
+     "1 passed, 1 warning in 4.23s",
+     "1 passed, 1 warning in 4.24s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": {
+    "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
+    "why": "the seam arm ends `assert 0 == 2` with the gate's own text `unit suite OK`: the fixture's 2 s timeout is set by monkeypatch.setenv in the pytest process only, and the entry builds the child's environment from scratch. The row's second red - the relay recording `abandoned` instead of `answered` - is an AdmissionRelay.stop() teardown race inside the pytest process, and the margin is what moves it, not where the child runs: this attempt measured the retained 6 s-render form green 3/3 (1 passed, 1 warning in 4.76s, 1 passed, 1 warning in 4.23s, 1 passed, 1 warning in 4.24s), and the 3 s form green 2/2 (1 passed, 1 warning in 4.25s, 1 passed, 1 warning in 4.21s)",
+    "measured_basis": [
+     "/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: unit suite OK",
+     "1 failed, 1 warning in 5.74s",
+     "1 passed, 1 warning in 4.76s",
+     "1 passed, 1 warning in 4.23s",
+     "1 passed, 1 warning in 4.24s"
+    ],
+    "measured_basis_logs": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-render-bound/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run2/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run3/stdout-stderr.log"
+    ]
+   },
+   "narrow_variant_this_attempt": {
+    "what": "the same named correction with the render left at 3.0 s (edits.diff tree-arm3 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm3.patch, sha256 4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f), on /tmp/docker-audit-r5/tree-narrow",
+    "measured": [
+     {
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/narrow/keepalive-render-bound-run1/stdout-stderr.log",
+      "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+      "text": "1 passed, 1 warning in 4.25s"
+     },
+     {
+      "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/narrow/keepalive-render-bound-run2/stdout-stderr.log",
+      "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+      "text": "1 passed, 1 warning in 4.21s"
+     }
+    ],
+    "reading": "this attempt did NOT reproduce the previous attempt's two red runs of the 3.0 s form (they are cited under self_checks.teardown_race_across_attempts). Both forms are the same race with a ~1 s teardown margin, and the retained edit is the 6 s form that measured green here and in the previous attempt."
+   }
+  },
+  {
+   "row": 4,
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+   "mark_site": "tests/unit/test_gate_admission_keepalive.py:110",
+   "mark_comment": "_run_repo_gate only ever runs the gate in the bounded CPU container",
+   "class": "c",
+   "measured_as_delivered": {
+    "run": "delivered/keepalive-nolifecycle",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-nolifecycle/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-nolifecycle/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/keepalive-nolifecycle/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_gate_admission_keepalive.py:123: assert -1 == 2",
+    "nodeid_line": "FAILED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+    "text": "1 failed, 1 warning in 1.10s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 1,
+    "docker_shim_log_lines": 1
+   },
+   "measured_with_seam": {
+    "run": "seam/keepalive-nolifecycle",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_gate_admission_keepalive.py:123: assert 0 == 2",
+    "nodeid_line": "FAILED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+    "text": "1 failed, 1 warning in 3.66s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "the seam plus one test-side correction: the gate program must carry its own 1 s client timeout, because the entry scrubs the child environment.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.10s` at `/app/tests/unit/test_gate_admission_keepalive.py:123: assert -1 == 2`; seam: `1 failed, 1 warning in 3.66s` at `/app/tests/unit/test_gate_admission_keepalive.py:123: assert 0 == 2`; seam + the named edit: `1 passed, 1 warning in 2.16s` (PASSED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen), 2 run(s) this attempt",
+   "measured_with_seam_plus_named_edit": [
+    {
+     "run": "corrected/keepalive-nolifecycle-run1",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run1/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run1/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run1/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "text": "1 passed, 1 warning in 2.16s",
+     "exit": "EXIT=0"
+    },
+    {
+     "run": "corrected/keepalive-nolifecycle-run2",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run2/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run2/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run2/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+     "text": "1 passed, 1 warning in 2.15s",
+     "exit": "EXIT=0"
+    }
+   ],
+   "smallest_edit": {
+    "file": "tests/unit/test_gate_admission_keepalive.py",
+    "site": "tests/unit/test_gate_admission_keepalive.py:110 (decorator), :111-125 (the body), and its call to _repo() at :121 (helper at :30)",
+    "imports_added": "the same module import at :26 becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,` + `                                write_gate)`.",
+    "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:111).",
+    "mechanism": "Delete the decorator on :110 and add `install_entry_executor(monkeypatch)` as the first statement of the body. The test-side correction: the row's call at :121 becomes `rt._run_repo_gate(_repo(tmp_path, client_timeout=1))`, using the same `_repo(..., *, client_timeout=...)` helper the row above needs (embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=...)).",
+    "what_it_would_prove": "with an upstream that has no owner table to read, the relay sends no keepalives and the gate's own 1 s timeout still bounds it - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 2.16s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run1/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 2.16s",
+     "1 passed, 1 warning in 2.15s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": {
+    "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
+    "why": "the seam arm ends `assert 0 == 2`: the gate never receives the 1 s timeout the row sets with monkeypatch.setenv, because the entry scrubs the child environment; its other two assertions (`admission_observed is False`, no `keepalives`) are properties of the relay's _NoLifecycle upstream, exercised byte for byte by the seam.",
+    "measured_basis": [
+     "/app/tests/unit/test_gate_admission_keepalive.py:123: assert 0 == 2",
+     "1 failed, 1 warning in 3.66s",
+     "1 passed, 1 warning in 2.16s",
+     "1 passed, 1 warning in 2.15s"
+    ],
+    "measured_basis_logs": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/keepalive-nolifecycle/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run1/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-nolifecycle-run2/stdout-stderr.log"
+    ]
+   }
+  },
+  {
+   "row": 5,
+   "nodeid": "tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+   "mark_site": "tests/unit/test_repo_gate_identity_from_report_dir.py:51",
+   "mark_comment": "run_tests only ever runs the gate in the bounded CPU container",
+   "class": "c",
+   "measured_as_delivered": {
+    "run": "delivered/identity-long-red",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-long-red/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-long-red/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-long-red/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:55: assert -1 == 1",
+    "nodeid_line": "FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+    "text": "1 failed, 1 warning in 1.14s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 2,
+    "docker_shim_log_lines": 2
+   },
+   "measured_with_seam": {
+    "run": "seam/identity-long-red",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:57: assert False is True",
+    "nodeid_line": "FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+    "text": "1 failed, 1 warning in 1.64s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "the seam plus one test-side correction: the gate program must print the 6000-character progress noise itself, because the entry scrubs the child environment.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.14s` at `/app/tests/unit/test_repo_gate_identity_from_report_dir.py:55: assert -1 == 1`; seam: `1 failed, 1 warning in 1.64s` at `/app/tests/unit/test_repo_gate_identity_from_report_dir.py:57: assert False is True`; seam + the named edit: `1 passed, 1 warning in 1.56s` (PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure), 2 run(s) this attempt",
+   "measured_with_seam_plus_named_edit": [
+    {
+     "run": "corrected/identity-long-red-run1",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run1/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run1/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run1/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "nodeid_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "text": "1 passed, 1 warning in 1.56s",
+     "exit": "EXIT=0"
+    },
+    {
+     "run": "corrected/identity-long-red-run2",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run2/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run2/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run2/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "nodeid_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+     "text": "1 passed, 1 warning in 1.07s",
+     "exit": "EXIT=0"
+    }
+   ],
+   "smallest_edit": {
+    "file": "tests/unit/test_repo_gate_identity_from_report_dir.py",
+    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:51 (decorator), :52 (the def the edit rewrites) and the module-level _run() helper both identity rows share, right after write_gate(repo) at :35",
+    "imports_added": "the module import at :18, `from tests.gate_fixture import HarnessRig, red_report, write_gate`, becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env,` + `                                install_entry_executor, red_report, write_gate)`.",
+    "fixture_parameter_added": "`monkeypatch`: the def at :52 is `def test_a_long_red_output_still_names_every_failure(rig, tmp_path):`; the edit rewrites it to `(rig, tmp_path, monkeypatch)` - this row takes no monkeypatch today.",
+    "mechanism": "Delete the decorator on :51; add `monkeypatch` to the signature at :52; add `install_entry_executor(monkeypatch)` as the first statement of the body. The test-side correction is in the module-level `_run()` helper both identity rows share: after `write_gate(repo)` (:35) add `(repo / \"gate.py\").write_text(embed_env(GATE_PY, FIXTURE_GATE_NOISE=\"6000\"))`, so the gate prints more than the 2000-character tail holds.",
+    "what_it_would_prove": "a red gate whose output is truncated to OUTPUT_TAIL_CHARS still names every failing case, because identities come from the structured report under GATE_REPORT_DIR, not from the tail - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 1.56s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run1/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 1.56s",
+     "1 passed, 1 warning in 1.07s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": {
+    "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
+    "why": "the seam arm ends `assert False is True` on the truncation precondition: FIXTURE_GATE_NOISE=6000 is set in the pytest process by the `rig` fixture, so the gate prints nothing and `gate[\"output_truncated\"]` stays False.",
+    "measured_basis": [
+     "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:57: assert False is True",
+     "1 failed, 1 warning in 1.64s",
+     "1 passed, 1 warning in 1.56s",
+     "1 passed, 1 warning in 1.07s"
+    ],
+    "measured_basis_logs": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-long-red/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run1/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-long-red-run2/stdout-stderr.log"
+    ]
+   }
+  },
+  {
+   "row": 6,
+   "nodeid": "tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+   "mark_site": "tests/unit/test_repo_gate_identity_from_report_dir.py:70",
+   "mark_comment": "run_tests only ever runs the gate in the bounded CPU container",
+   "class": "c",
+   "measured_as_delivered": {
+    "run": "delivered/identity-tail-independent",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-tail-independent/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-tail-independent/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/identity-tail-independent/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:77: KeyError: 'output_truncated'",
+    "nodeid_line": "FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+    "text": "1 failed, 1 warning in 1.63s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 4,
+    "docker_shim_log_lines": 4
+   },
+   "measured_with_seam": {
+    "run": "seam/identity-tail-independent",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:78: assert False is True",
+    "nodeid_line": "FAILED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+    "text": "1 failed, 1 warning in 3.73s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "the seam plus the same `_run()` correction as the row above (the gate must carry FIXTURE_GATE_NOISE=6000 itself), so the bounded run truncates and the whole-output run does not.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.63s` at `/app/tests/unit/test_repo_gate_identity_from_report_dir.py:77: KeyError: 'output_truncated'`; seam: `1 failed, 1 warning in 3.73s` at `/app/tests/unit/test_repo_gate_identity_from_report_dir.py:78: assert False is True`; seam + the named edit: `1 passed, 1 warning in 3.57s` (PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail), 2 run(s) this attempt",
+   "measured_with_seam_plus_named_edit": [
+    {
+     "run": "corrected/identity-tail-independent-run1",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run1/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run1/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run1/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "nodeid_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "text": "1 passed, 1 warning in 3.57s",
+     "exit": "EXIT=0"
+    },
+    {
+     "run": "corrected/identity-tail-independent-run2",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run2/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run2/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run2/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "nodeid_line": "PASSED tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+     "text": "1 passed, 1 warning in 3.52s",
+     "exit": "EXIT=0"
+    }
+   ],
+   "smallest_edit": {
+    "file": "tests/unit/test_repo_gate_identity_from_report_dir.py",
+    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:70 (decorator), :71-78 (the body) and the module-level _run() helper both identity rows share, right after write_gate(repo) at :35",
+    "imports_added": "the same module import at :18 becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env,` + `                                install_entry_executor, red_report, write_gate)`.",
+    "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:71).",
+    "mechanism": "Delete the decorator on :70 and add `install_entry_executor(monkeypatch)` as the first statement of the body; the `_run()` correction described in the row above (embed_env(GATE_PY, FIXTURE_GATE_NOISE=\"6000\") right after write_gate(repo) at :35) is what makes the bounded run truncate.",
+    "what_it_would_prove": "the same failure read through a 2000-character tail and through a tail larger than the whole output yields the same identity entries, one for one - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 3.57s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run1/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 3.57s",
+     "1 passed, 1 warning in 3.52s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": {
+    "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
+    "why": "the seam arm ends `assert False is True` at the bounded-run truncation precondition; the tail arithmetic itself (rt.OUTPUT_TAIL_CHARS 2000 vs 10**9) already runs in this process.",
+    "measured_basis": [
+     "/app/tests/unit/test_repo_gate_identity_from_report_dir.py:78: assert False is True",
+     "1 failed, 1 warning in 3.73s",
+     "1 passed, 1 warning in 3.57s",
+     "1 passed, 1 warning in 3.52s"
+    ],
+    "measured_basis_logs": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/identity-tail-independent/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run1/stdout-stderr.log",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/identity-tail-independent-run2/stdout-stderr.log"
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "nodeid": "tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+   "mark_site": "tests/unit/test_repo_gate_identity_is_stable.py:153",
+   "mark_comment": "two REAL gate runs: run_tests executes the gate only in the bounded CPU container",
+   "class": "b",
+   "measured_as_delivered": {
+    "run": "delivered/stable-two-runs",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/stable-two-runs/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/stable-two-runs/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/stable-two-runs/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_repo_gate_identity_is_stable.py:173: KeyError: 'failure_cases'",
+    "nodeid_line": "FAILED tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+    "text": "1 failed, 1 warning in 1.13s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 2,
+    "docker_shim_log_lines": 2
+   },
+   "measured_with_seam": {
+    "run": "seam/stable-two-runs",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/shim/docker-calls.log",
+    "line": "PASSED tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+    "nodeid_line": "PASSED tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+    "text": "1 passed, 1 warning in 2.19s",
+    "exit": "EXIT=0",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "nothing beyond the seam: two real gate runs through the entry inside the outer disposable container.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.13s` at `/app/tests/unit/test_repo_gate_identity_is_stable.py:173: KeyError: 'failure_cases'`; seam: `1 passed, 1 warning in 2.19s` - the seam alone is the edit",
+   "measured_with_seam_plus_named_edit": null,
+   "smallest_edit": {
+    "file": "tests/unit/test_repo_gate_identity_is_stable.py",
+    "site": "tests/unit/test_repo_gate_identity_is_stable.py:153 (decorator), :156 (the function-local import the edit rewrites) and :157 (the body)",
+    "imports_added": "the row's own function-local import at :156, `    from tests.gate_fixture import HarnessRig, red_report, write_gate`, becomes `    from tests.gate_fixture import (HarnessRig, install_entry_executor, red_report,` + `                                    write_gate)` (edits.diff tree-arm4, hunk @@ -150,12 +150,13 @@).",
+    "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:154-155).",
+    "mechanism": "Delete the decorator on :153; extend the function-local import at :156 with install_entry_executor; add `install_entry_executor(monkeypatch)` as the first statement after the docstring, before the two-run loop.",
+    "what_it_would_prove": "two REAL gate runs whose summary text differs produce the same failure ids, because the ids come from the retained report and not from the summary text - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 2.19s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/stable-two-runs/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 2.19s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": null
+  },
+  {
+   "row": 8,
+   "nodeid": "tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+   "mark_site": "tests/unit/test_scoped_gate.py:250",
+   "mark_comment": "run_tests' pytest leg needs the bounded CPU executor (docker + a host-visible repo)",
+   "class": "b",
+   "measured_as_delivered": {
+    "run": "delivered/scoped-gate-survives",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "argv_note": "`-m docker` is required because pytest.ini addopts deselect the row even when it is named explicitly (control run this attempt: 1 deselected, 1 warning in 0.06s).",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/scoped-gate-survives/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/scoped-gate-survives/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/scoped-gate-survives/shim/docker-calls.log",
+    "line": "/app/tests/unit/test_scoped_gate.py:274: AssertionError: assert 'infrastructure_unavailable' == 'skipped'",
+    "nodeid_line": "FAILED tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "text": "1 failed, 1 warning in 0.20s",
+    "exit": "EXIT=1",
+    "docker_shim_invocations": 1,
+    "docker_shim_log_lines": 27
+   },
+   "measured_with_seam": {
+    "run": "seam/scoped-gate-survives",
+    "seam": "tests.gate_fixture.install_entry_executor(monkeypatch) at the row's own site on a scratch tree (/tmp/docker-audit-r5/tree-seam = git archive f9481ccf0875a1d945b4ffa713238c25ea4de0c1 + arm2.patch), no `-m` override",
+    "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/stdout-stderr.log",
+    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/container-argv.txt",
+    "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/shim/docker-calls.log",
+    "line": "PASSED tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "nodeid_line": "PASSED tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+    "text": "1 passed, 1 warning in 0.61s",
+    "exit": "EXIT=0",
+    "docker_shim_invocations": 0,
+    "docker_shim_log_lines": 0
+   },
+   "what_it_needs": "nothing beyond the seam: run_tests' pytest leg runs through the entry inside the outer disposable container.",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 0.20s` at `/app/tests/unit/test_scoped_gate.py:274: AssertionError: assert 'infrastructure_unavailable' == 'skipped'`; seam: `1 passed, 1 warning in 0.61s` - the seam alone is the edit",
+   "measured_with_seam_plus_named_edit": null,
+   "smallest_edit": {
+    "file": "tests/unit/test_scoped_gate.py",
+    "site": "tests/unit/test_scoped_gate.py:250 (decorator) and :251-253 (the body)",
+    "imports_added": "no module-level import change: the edit adds the function-local line `    from tests.gate_fixture import install_entry_executor` inside the row body (edits.diff tree-arm4, hunk @@ -247,8 +247,9 @@).",
+    "fixture_parameter_added": "none - the row already takes `graph, tmp_path, monkeypatch` (:251).",
+    "mechanism": "Delete the decorator on :250; add `from tests.gate_fixture import install_entry_executor` and `install_entry_executor(monkeypatch)` as the new first two statements of the body.",
+    "what_it_would_prove": "the scope of a test report survives the report/current/cycle/audit round trip while the pytest leg really runs through the entry - measured with no docker daemon.",
+    "removes_from_deselected_set": true,
+    "measured_green_line": "1 passed, 1 warning in 0.61s",
+    "measured_green_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/seam/scoped-gate-survives/stdout-stderr.log",
+    "measured_green_repeats": [
+     "1 passed, 1 warning in 0.61s"
+    ],
+    "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
+   },
+   "no_container_capability_would_change_it": null
+  }
+ ],
+ "classification": {
+  "definitions": {
+   "a": "the seam arm fails and no edit without a real daemon or a second executor container was measured to fix it",
+   "b": "the seam alone frees it: mark removed + install_entry_executor(monkeypatch) at the row's own site, measured PASSED in this attempt with no docker binary",
+   "c": "the seam arm still FAILS; a NAMED test-side correction measures PASSED in this attempt with no docker binary, and no container capability would change that outcome"
+  },
+  "b": [
+   "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+   "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+   "tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+   "tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit"
+  ],
+  "c": [
+   "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+   "tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+   "tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+   "tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail"
+  ],
+  "counts": {
+   "a": 0,
+   "b": 4,
+   "c": 4,
+   "total": 8
+  },
+  "class_a": {
+   "rows": [],
+   "statement": "No row in this set needs a real docker daemon or the executor's own container: all eight were measured green in a disposable container with no docker binary, four of them after the named test-side correction. This is this attempt's measurement, not an inference."
+  }
+ },
+ "measured_counts": {
+  "base_docker_collect": {
+   "argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider --collect-only -m docker",
+   "docker_marked": 8,
+   "collected_total": 11573,
+   "deselected_by_the_default_addopts": 11565,
+   "line": "8/11573 tests collected (11565 deselected) in 21.57s",
+   "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/collect/docker-marked/stdout-stderr.log",
+   "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/collect/docker-marked/container-argv.txt",
+   "docker_shim_invocations": 0
+  },
+  "base_collect_all": {
+   "argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider --collect-only",
+   "line": "11520/11573 tests collected (53 deselected) in 21.48s",
+   "collected": 11520,
+   "deselected": 53,
+   "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/collect/all/stdout-stderr.log",
+   "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/collect/all/container-argv.txt"
+  },
+  "rows_per_class": {
+   "b": 4,
+   "c": 4
+  },
+  "rows_that_would_lose_the_mark": 8,
+  "predicted_docker_marked_after_edits": 0,
+  "arithmetic": "8 (docker-marked at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, measured: 8/11573 tests collected (11565 deselected) in 21.57s) - 4 (class b, measured green from the seam alone) - 4 (class c, measured green only after their named test-side correction) = 0",
+  "if_only_the_seam_lands_and_no_test_side_correction": {
+   "predicted_docker_marked": 4,
+   "arithmetic": "8 - 4 (class b) = 4; the four class-(c) rows keep their mark",
+   "what_docker_would_give_them": "nothing: their red is not a container property (see each class-c row's no_container_capability_would_change_it). This is inference from the shared entry.run() code path; no docker-path run exists in this attempt."
+  },
+  "control_no_override": {
+   "argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+   "line": "1 deselected, 1 warning in 0.06s",
+   "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/control-no-override/stdout-stderr.log",
+   "means": "the default suite does not execute the row even when it is named explicitly; pytest.ini addopts `-m \"not network and not docker and not baked_toolchain\"` deselect it, which is why the delivered arm passes `-m docker` and the seam/corrected arms pass no override"
+  }
+ },
+ "boundary_stated": {
+  "daemon_path_is_inference": {
+   "statement": "INFERENCE, NOT MEASUREMENT. No docker-path run exists in this attempt.",
+   "what_is_inferred": "that the daemon path and the seam agree, because both reach core.repository_executor_entry.run(): the seam calls it in this process and the docker path would call the same function through the executor. Nothing in this attempt accepted a container: every docker invocation was recorded by the shim and refused with exit 127.",
+   "what_would_settle_it": "one run of any row under a real daemon, or one run of the executor's own container on a host with docker, neither of which this attempt has.",
+   "where_the_revision_4_report_overclaimed": "it called the daemon-path equivalence \"measured, not assumed\" in the class-(c) rows while its own boundary section called it inference; this revision states it once, as inference, and every class-(c) row points here."
+  },
+  "recorded_intent_not_execution": {
+   "what": "a shim-refused `docker create` is recorded intent: argv, pid, cwd and timestamp, followed by exit 127. Example from this attempt (delivered/diag-artifact):",
+   "example_first_record_first_line": "ts=2026-11-09T07:48:03Z pid=37 cwd=/app argv=create --rm --init --network none --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:size=16m --ulimit fsize=268435456:268435456 --user 1000:1000 --name aitelier-git-32b967f44323422ebc9f8ecec6f627e1 -v /tmp/pytest-of-unknown/pytest-0/test_run_tests_report_is_an_ar0/code/.git/objects:/tmp/pytest-of-unknown/pytest-0/test_run_tests_report_is_an_ar0/code/.git/objects:ro -v /tmp/aitelier-test-home-rkjtr5qj/cpu-git/git-lx7im582:/tmp/aitelier-test-home-rkjtr5qj/cpu-git/git-lx7im582:rw --entrypoint sh aitelier:latest -c set -eu",
+   "example_record_length": "this one record continues for 27 lines in total (the argv is a multi-line `sh -c` git script); the full record is in the log below",
+   "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim/docker-calls.log"
+  },
+  "not_measured": [
+   "the executor's own container: the shim refuses it, so its cgroups, mounts and entry argv come from the recorded argv only",
+   "the container-to-container relay shape (a gate in a second container talking to a relay socket in this one)",
+   "effective cgroup enforcement: cpu.max/memory.max were read inside this container, not exercised",
+   "the host launcher's acceptance of a real docker invocation (there is no launcher or daemon in the disposable container)",
+   "whether a real daemon would change any class-(c) outcome: inferred, not measured - see daemon_path_is_inference"
+  ]
+ },
+ "what_changed_from_revision_4": {
+  "1_shim_calls_counted_by_invocation": {
+   "done": "every row now reports docker_shim_invocations (a `ts=` record start) beside docker_shim_log_lines, and this attempt's runs reproduce the defect: row 1 27 lines / 1 invocation(s), row 8 27 lines / 1 invocation(s). The previous revision's 27s were line counts.",
+   "old_counts_replaced_by_this_attempts_own": true
+  },
+  "2_every_named_edit_applicable_as_written": {
+   "done": "each row's smallest_edit names the exact import change (file:line, the line before and after) and the exact fixture parameter it adds, and names none it does not use. The four additions the reviewer flagged are now explicit: the keepalive module import at :26, the identity module import at :18, the identity row at :52 gaining `monkeypatch`, and the two function-local imports in rows 1, 7 and 8. edits.diff is the source of truth and its tree-arm4 hunks are retained as arm4.patch; a patched tree built in this attempt is byte-identical to the previous attempt's tree-arm4, and every row ran green from it."
+  },
+  "3_daemon_path_stated_as_inference": {
+   "done": "boundary_stated.daemon_path_is_inference says plainly that no docker-path run exists in this attempt, and every class-(c) row refers to it."
+  },
+  "4_head_at_measurement_related_to_base": {
+   "done": "head_at_measurement is now this attempt's own base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the two revision-4 hashes are explained in head_and_base_relation with both diffs retained as files (98e8 -> e32d5d16 adds only the report; 98e8 -> f9481ccf08 changes only the two baked_toolchain rows)."
+  },
+  "5_corrected_arms_rerun_in_this_attempt": {
+   "done": "all eight delivered arms, all eight seam arms, all four class-(c) corrected arms and the two narrow probes were run in this attempt; every green line quoted comes from a log written by this attempt, and the class counts (0 a, 4 b, 4 c) and the 8 - 4 - 4 = 0 arithmetic rest on those runs.",
+   "one_previous_claim_not_reproduced": "the previous revision reported the 3 s-render form of row 3 red twice; this attempt measured it green twice (narrow/keepalive-render-bound-run1/2). See self_checks.teardown_race_across_attempts - the row's correct statement is that the abandoned-vs-answered record is a race settled by the margin, and the retained edit is the 6 s form."
+  }
+ },
+ "retained_evidence": {
+  "root": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109",
+  "layout": "one directory per run: <root>/<arm>/<name>/ holding container-argv.txt (a `# tree:`, `# tree_note:`, `# written_utc:` header and the literal argv), stdout-stderr.log (the whole container output, ending with its EXIT= code) and shim/docker-calls.log (that run's own recording shim log, empty when the run never consulted docker)",
+  "arms": {
+   "delivered": 8,
+   "seam": 8,
+   "corrected": 9,
+   "narrow": 2,
+   "collect": 2,
+   "control-no-override": 1,
+   "environment": 1
+  },
+  "helpers_retained_beside_the_logs": [
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/run-one.sh",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/run-all.sh",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/shim/docker",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm2.patch",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm3.patch",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch"
+  ],
+  "boundary_diffs": [
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16-stat.txt",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16.diff",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08-stat.txt",
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08.diff"
+  ],
+  "none_written_inside_the_worktree": "this attempt wrote no log, scratch tree or patch inside /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109; the only change this revision makes to the worktree is the report file it commits. (The base tree does carry tracked .log files from an earlier probe, under evidence/gate-not-run-r3-remeasure-20261108/; they are unmodified and are not this attempt's.)"
+ },
+ "files_this_attempt_wrote": {
+  "inside_the_workspace": [
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109/.docker-marks-audit.json (the declared artifact; `git status --porcelain` lists nothing else in /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109)"
+  ],
+  "outside_the_workspace": [
+   "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109 (run logs, patches, diffs, driver scripts)",
+   "/tmp/docker-audit-r5/tree-base, tree-seam, tree-narrow, tree-corrected (scratch trees built with `git archive` + the retained patches; disposable, and the patches that rebuild them are retained)"
+  ],
+  "nothing_else": "no product or test file was edited, no container was given a writable mount except its own per-run shim directory, and the git object store was mounted read-only at /home/linxuhao/AItelier/.git for every run"
+ },
+ "row_to_runs": {
+  "1": {
+   "nodeid": "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
+   "delivered": "delivered/diag-artifact",
+   "seam": "seam/diag-artifact",
+   "corrected": []
+  },
+  "2": {
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+   "delivered": "delivered/keepalive-queue",
+   "seam": "seam/keepalive-queue",
+   "corrected": []
+  },
+  "3": {
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+   "delivered": "delivered/keepalive-render-bound",
+   "seam": "seam/keepalive-render-bound",
+   "corrected": [
+    "corrected/keepalive-render-bound-run1",
+    "corrected/keepalive-render-bound-run2",
+    "corrected/keepalive-render-bound-run3"
+   ]
+  },
+  "4": {
+   "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
+   "delivered": "delivered/keepalive-nolifecycle",
+   "seam": "seam/keepalive-nolifecycle",
+   "corrected": [
+    "corrected/keepalive-nolifecycle-run1",
+    "corrected/keepalive-nolifecycle-run2"
+   ]
+  },
+  "5": {
+   "nodeid": "tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
+   "delivered": "delivered/identity-long-red",
+   "seam": "seam/identity-long-red",
+   "corrected": [
+    "corrected/identity-long-red-run1",
+    "corrected/identity-long-red-run2"
+   ]
+  },
+  "6": {
+   "nodeid": "tests/unit/test_repo_gate_identity_from_report_dir.py::test_the_identities_do_not_depend_on_the_retained_tail",
+   "delivered": "delivered/identity-tail-independent",
+   "seam": "seam/identity-tail-independent",
+   "corrected": [
+    "corrected/identity-tail-independent-run1",
+    "corrected/identity-tail-independent-run2"
+   ]
+  },
+  "7": {
+   "nodeid": "tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
+   "delivered": "delivered/stable-two-runs",
+   "seam": "seam/stable-two-runs",
+   "corrected": []
+  },
+  "8": {
+   "nodeid": "tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit",
+   "delivered": "delivered/scoped-gate-survives",
+   "seam": "seam/scoped-gate-survives",
+   "corrected": []
+  }
+ },
+ "self_checks": {
+  "every_line_quoted_from_this_attempts_logs": {
+   "rule": "each row's line/text/green lines are extracted at build time from the log named beside them by /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/build-report.py, and the build aborts if a quoted line is not in that log",
+   "runs_retained": [
+    "corrected/identity-long-red-run1",
+    "corrected/identity-long-red-run2",
+    "corrected/identity-tail-independent-run1",
+    "corrected/identity-tail-independent-run2",
+    "corrected/keepalive-nolifecycle-run1",
+    "corrected/keepalive-nolifecycle-run2",
+    "corrected/keepalive-render-bound-run1",
+    "corrected/keepalive-render-bound-run2",
+    "corrected/keepalive-render-bound-run3",
+    "delivered/diag-artifact",
+    "delivered/identity-long-red",
+    "delivered/identity-tail-independent",
+    "delivered/keepalive-nolifecycle",
+    "delivered/keepalive-queue",
+    "delivered/keepalive-render-bound",
+    "delivered/scoped-gate-survives",
+    "delivered/stable-two-runs",
+    "seam/diag-artifact",
+    "seam/identity-long-red",
+    "seam/identity-tail-independent",
+    "seam/keepalive-nolifecycle",
+    "seam/keepalive-queue",
+    "seam/keepalive-render-bound",
+    "seam/scoped-gate-survives",
+    "seam/stable-two-runs"
+   ]
+  },
+  "rows_unique": "8 rows, 8 distinct node ids; they are exactly the ids `-m docker --collect-only` marks at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1 (8/11573 tests collected (11565 deselected) in 21.57s)",
+  "class_counts_sum_to_8": "a 0 + b 4 + c 4 = 8",
+  "per_row_flags_agree_with_the_prediction": "smallest_edit.removes_from_deselected_set is true for 8/8 rows; 8 - 8 = 0 = predicted_docker_marked_after_edits",
+  "each_class_c_row_states_the_container_capability_that_would_not_help": "4/4: every class-(c) row carries no_container_capability_would_change_it with a row-specific why and its own measured basis.",
+  "edits_applicable_at_the_named_site": {
+   "how": "patches applied with `patch -p1` to a git archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the resulting files were cmp-identical to the previous attempt's tree-arm4 copies, and every row then ran from the patched tree",
+   "patch_sha256": {
+    "arm2": "f3935f49530e9ac97b494237ce7c354727c808c474243ab00efb1b5eb2bb2df3",
+    "arm3": "4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f",
+    "arm4": "120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0"
+   },
+   "names_in_scope": "install_entry_executor at tests/gate_fixture.py:255, embed_env at :315, GATE_PY at :33, read from the base tree; every row that calls one of them names the import line that brings it into scope, and the two rows without a monkeypatch parameter name the signature that adds it"
+  },
+  "shim_recording_verified_in_this_attempt": {
+   "what": "the multi-line argv is reproduced by this attempt, not carried over",
+   "rows_with_a_multiline_record": [
+    {
+     "row": 1,
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/diag-artifact/shim/docker-calls.log",
+     "lines": 27,
+     "invocations": 1
+    },
+    {
+     "row": 8,
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/delivered/scoped-gate-survives/shim/docker-calls.log",
+     "lines": 27,
+     "invocations": 1
+    }
+   ],
+   "all_other_arms": "seam / narrow / corrected runs recorded 0 invocations (empty docker-calls.log)"
+  },
+  "teardown_race_across_attempts": {
+   "this_attempt_3s_form": [
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/narrow/keepalive-render-bound-run1/stdout-stderr.log",
+     "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "text": "1 passed, 1 warning in 4.25s"
+    },
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/narrow/keepalive-render-bound-run2/stdout-stderr.log",
+     "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
+     "text": "1 passed, 1 warning in 4.21s"
+    }
+   ],
+   "this_attempt_6s_form": [
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run1/stdout-stderr.log",
+     "text": "1 passed, 1 warning in 4.76s"
+    },
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run2/stdout-stderr.log",
+     "text": "1 passed, 1 warning in 4.23s"
+    },
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run3/stdout-stderr.log",
+     "text": "1 passed, 1 warning in 4.24s"
+    }
+   ],
+   "previous_attempt_3s_form": [
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/docker-audit-r3-evidence-20261109/r4/logs/corrected-not-widened/render-bound-run1/stdout-stderr.log",
+     "line": "/app/tests/unit/test_gate_admission_keepalive.py:87: AssertionError: assert 'answered' == 'abandoned'",
+     "text": "1 failed, 1 warning in 4.72s"
+    },
+    {
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/docker-audit-r3-evidence-20261109/r4/logs/corrected-not-widened/render-bound-run2/stdout-stderr.log",
+     "line": "/app/tests/unit/test_gate_admission_keepalive.py:87: AssertionError: assert 'answered' == 'abandoned'",
+     "text": "1 failed, 1 warning in 4.71s"
+    }
+   ],
+   "means": "the 3 s render (1 s past the 2 s client timeout) sits exactly on the relay teardown margin: the previous attempt measured it red twice, this attempt green twice. The retained edit is the 6 s form, which measured green 3/3 here and 3/3 in the previous attempt. This is reported as a race with a measured margin, not as a property either attempt can fix in place."
+  },
+  "measured_counts_tie_to_the_retained_diff": "the default-run collection moved from 11518/55 to 11520/11573 tests collected (53 deselected) in 21.48s = the two baked_toolchain rows in /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08.diff; the docker-marked count stayed 8",
+  "report_is_a_single_json_object": "this file parses as one object (json.load) and is the only artifact this revision adds",
+  "no_product_or_test_file_changed": {
+   "how": "the worktree was never edited: all edits were applied to /tmp scratch trees built with `git archive`; the only file this attempt writes into the workspace is the declared report path"
+  }
+ }
+}

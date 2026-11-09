@@ -763,7 +763,11 @@ req = cw.CodingRequest(db, scope)
 mode = sys.argv[4]
 if mode == "crash_before_bind":
     real = sf.start_run
-    def start_and_die(rid):
+    # The host dispatches get_skillflow()'s AItelierSkillFlow through
+    # core/skillflow_host.py:44 -> sf.start_run(run_id, db=db), and that class
+    # defines start_run(self, run_id, *, db=None) at :809. Accept the keyword or
+    # the TypeError fires before this child can reach its crash point.
+    def start_and_die(rid, *, db=None):
         os._exit(17)
     sf.start_run = start_and_die
 ws = req.workspace()

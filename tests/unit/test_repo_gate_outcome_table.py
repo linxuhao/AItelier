@@ -370,8 +370,8 @@ ROWS = {
         "red: exit 1", 1, PY_RED + SCRIPT_RED),
 }
 
-# Every row below runs in the DEFAULT shape. They were once kept behind
-# `pytest.mark.docker`, measured 2026-11-09 with two arms: (a) `pytest -m docker`
+# Every row below runs in the DEFAULT shape. They were once kept behind the
+# `docker` marker, measured 2026-11-09 with two arms: (a) `pytest -m docker`
 # in the disposable image, which has no docker binary, and (b) the same command
 # plus a recording `docker` shim first on PATH. Both arms failed exactly these
 # ids and passed every other row, and the shim log stayed EMPTY for the whole

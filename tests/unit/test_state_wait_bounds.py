@@ -175,7 +175,7 @@ FORM_DEFAULT_PARAMETER = "default-parameter binding: asyncio.{name}"
 # ``asyncio.wait_for.__call__(...)``: the primitive's own dunder, in callee position.
 FORM_DUNDER_CALL = "asyncio.{name}.__call__"
 # The rule of last resort: an await whose callee the resolver cannot place, and
-# whose arguments carry a numeric literal bound of SUB_SECOND_LIMIT or more.
+# one of whose arguments carries a numeric literal of SUB_SECOND_LIMIT or more.
 FORM_UNRESOLVED_LITERAL = "unresolved await, numeric literal bound"
 # ``x.wait(...)`` on something that is not ``asyncio``: a different API, recorded
 # only when one of its arguments carries a numeric literal of SUB_SECOND_LIMIT or
@@ -653,7 +653,7 @@ def _awaited_calls(tree):
 
 
 def _argument_literal(call):
-    """The first numeric literal bound of 1.0 or more among *call*'s arguments.
+    """The first numeric literal of 1.0 or more in one of *call*'s arguments.
 
     The walk covers each argument's subtree, so a literal wrapped in a keyword or a
     helper call is still read; a comprehension's or lambda's own numbers are not

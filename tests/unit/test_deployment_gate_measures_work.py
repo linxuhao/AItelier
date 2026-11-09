@@ -34,11 +34,26 @@ def _stat(root, pid, ppid, comm="bash"):
     (entry / "stat").write_text(f"{pid} ({comm}) S {ppid} 1 1 0 -1 4194560 0\n")
 
 
+def _pytest_is_pid_one():
+    """True when nothing above this process reaps orphans: pytest itself is pid 1.
+
+    A `docker run` WITHOUT `--init` makes the test process the namespace's pid 1,
+    so the fabricated ancestor chain below has no real init to end at (and a
+    killed escaped holder stays a zombie). With `--init`, pid 1 is the
+    container's init and the row's premise holds.
+    """
+    return os.getpid() == 1
+
+
 # ===========================================================================
 # 1. the measurer's own pid chain is not an owner
 # ===========================================================================
 
-@pytest.mark.docker  # fabricated ancestor chain needs a real init: under `docker run` pytest IS pid 1
+@pytest.mark.skipif(
+    _pytest_is_pid_one(),
+    reason="needs an init process: this test process is pid 1, so no init ends the "
+           "fabricated ancestor chain (run the container with --init)",
+)
 def test_the_gate_does_not_measure_its_own_shell(tmp_path, monkeypatch):
     root = tmp_path / "proc"
     me = os.getpid()

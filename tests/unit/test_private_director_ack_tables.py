@@ -23,6 +23,23 @@ BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
 # PRIVATE and has its own denied-reader canary in tests/support/state_canaries.py.
 CONTEXT_PROTECTION_PRIVATE={'state_context_run_protection_retirements'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
+# Both history rows replay a pre-policy source out of the git object store, so
+# they need a checkout WITH history, not a docker daemon.
+BASELINE_PRIVACY_OBJECT=BASE+':core/state_privacy.py'
+LEGACY_MAILBOX_OBJECT='100a1886f435c3da76aab2bcf2f28c46649bb037:core/director_messaging.py'
+
+def _git_object_present(revision_path):
+    """True when this checkout can read `<revision>:<path>` out of its object store.
+
+    A linked worktree mounted without the shared repository has no objects, so the
+    row's `git show` would fail; skip and name the object instead.
+    """
+    root=Path(__file__).resolve().parents[2]
+    try:
+        return subprocess.run(['git','-C',str(root),'cat-file','-e',revision_path],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+    except OSError:
+        return False
 
 def old_sets():
     root=Path(__file__).resolve().parents[2]
@@ -31,7 +48,10 @@ def old_sets():
             if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)
             and n.targets[0].id in {'PRIVATE_STATE_TABLES','PUBLIC_STATE_TABLES'}}
 
-@pytest.mark.docker  # needs a frozen Source WITH history: `git show BASE:core/state_privacy.py` is the pre-policy baseline, and a linked worktree mounted alone has no repository
+@pytest.mark.skipif(not _git_object_present(BASELINE_PRIVACY_OBJECT),
+    reason=f"needs a checkout with history: the git object {BASELINE_PRIVACY_OBJECT} is "
+           "absent from this checkout, so the pre-policy baseline cannot be read (a "
+           "worktree mounted without the shared repository has no objects)")
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
     assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE
@@ -101,7 +121,10 @@ def test_actual_quorum_history_trusted_positive_untrusted_and_foreign_acker_nega
         execute(anonymous,'list_director_messages',{'project_id':'beta','protocol_version':'v3'})
     assert ack_ledger(s['bob'].db)==before
 
-@pytest.mark.docker  # needs a frozen Source WITH history: `git show 100a1886:core/director_messaging.py` is the pre-ack mailbox, and a linked worktree mounted alone has no repository
+@pytest.mark.skipif(not _git_object_present(LEGACY_MAILBOX_OBJECT),
+    reason=f"needs a checkout with history: the git object {LEGACY_MAILBOX_OBJECT} is "
+           "absent from this checkout, so the pre-ack mailbox cannot be read (a "
+           "worktree mounted without the shared repository has no objects)")
 def test_actual_legacy_migration_retains_acknowledged_history_and_stays_private(tmp_path):
     root=Path(__file__).resolve().parents[2]
     original=tmp_path/'old_director_mailbox.py'

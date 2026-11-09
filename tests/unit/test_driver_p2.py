@@ -7,6 +7,24 @@ from core.state_graph import StateGraphError
 from core.drivers import DriverRegistry
 from core.director_messaging_protocol import DirectorMessageError
 
+# The pre-ack mailbox the migration row replays. It is read out of the git object
+# store, so the row needs a checkout WITH history, not a docker daemon.
+HISTORY_MAILBOX_OBJECT="100a1886f435c3da76aab2bcf2f28c46649bb037:core/director_messaging.py"
+
+def _git_object_present(revision_path):
+ """True when this checkout can read `<revision>:<path>` out of its object store.
+
+ A linked worktree mounted without the shared repository has no objects, so the
+ row's `git show` would fail; skip and name the object instead.
+ """
+ import pathlib,subprocess
+ root=pathlib.Path(__file__).resolve().parents[2]
+ try:
+  return subprocess.run(["git","-C",str(root),"cat-file","-e",revision_path],
+      stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+ except OSError:
+  return False
+
 @pytest.fixture
 def peers(tmp_path):
  db=StateDatabase(str(tmp_path/"state.sqlite"))
@@ -161,7 +179,10 @@ def test_quorum_guard_still_refuses_and_still_delivers(peers):
  assert delivered["result"]["deliveries"][0]["target_project_id"]=="beta"
  assert total("state_director_deliveries")==before+1 and total("state_director_messages")==messages+1
 
-@pytest.mark.docker  # needs a frozen Source WITH history: `git show 100a1886:core/director_messaging.py` is the pre-ack mailbox, and a linked worktree mounted alone has no repository
+@pytest.mark.skipif(not _git_object_present(HISTORY_MAILBOX_OBJECT),
+    reason=f"needs a checkout with history: the git object {HISTORY_MAILBOX_OBJECT} is "
+           "absent from this checkout, so the pre-ack mailbox cannot be read (a "
+           "worktree mounted without the shared repository has no objects)")
 def test_migration_preserves_existing_status_version_events_and_idempotency(tmp_path):
  import subprocess,importlib.util
  from core.state_graph import StateGraphStore

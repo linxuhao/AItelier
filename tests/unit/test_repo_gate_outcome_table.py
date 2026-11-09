@@ -23,11 +23,15 @@ rewrite the doc's table with `python -m tests.unit.test_repo_gate_outcome_table`
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import errno
+import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -366,20 +370,69 @@ ROWS = {
         "red: exit 1", 1, PY_RED + SCRIPT_RED),
 }
 
-# The rows that cannot run in the disposable image, measured 2026-11-09 with two
-# arms: (a) `pytest -m docker` in the image, which has no docker binary, and
-# (b) the same command plus a recording `docker` shim first on PATH. Both arms
-# fail exactly these ids and pass every other row, and the shim log stayed EMPTY
-# for the whole file — nothing here reaches docker. What they keep failing with
-# is the ticket's admission relay, not an engine call:
+# Every row below runs in the DEFAULT shape. They were once kept behind the
+# `docker` marker, measured 2026-11-09 with two arms: (a) `pytest -m docker`
+# in the disposable image, which has no docker binary, and (b) the same command
+# plus a recording `docker` shim first on PATH. Both arms failed exactly these
+# ids and passed every other row, and the shim log stayed EMPTY for the whole
+# file -- nothing here reaches docker. What they failed with was the gate's
+# admission relay, not an engine call:
 #   repository gate not started: admission relay unavailable (ValueError: owned
 #   relay path exceeds Linux AF_UNIX's 107-byte filesystem budget)
-# The relay path is `<AITELIER_HOME>/r/<32 hex>.s` (aitelier/gate_admission.py),
-# and `AITELIER_HOME` is this row's pytest tmp dir, so the longest row ids
-# overflow the 107-byte budget first. Measured on the same rows: the same
-# command with `--basetemp=/tmp/t` passes the sampled ids (5 passed).
-# The three parametrize decorators below name these rows inline; every other row
-# runs and passes in the default shape.
+# `_run_repo_gate` binds the relay at `<AITELIER_HOME>/r/<32 hex>.s`
+# (aitelier/gate_admission.py:relay_socket_path), and the fixture's home used to
+# sit inside pytest's tmp tree, which repeats the row id -- so the longest ids
+# overran the budget before the gate ever launched, and the row read "no gate
+# call". `--basetemp=/tmp/t` made the same ids pass (5 sampled, 5 passed).
+#
+# That is the FIXTURE's environment, not the product's: the deployed home is
+# short (`~/.AItelier`). Each row gets a home of its own under one short root
+# outside the pytest tmp tree (`_row_home`), named by a digest of its row id so
+# the homes stay distinct and short enough for the longest id. The root is
+# removed when the session ends.
+_HOMES_ROOT: Path | None = None
+# What `_run_repo_gate` appends to the home: `/r/` + 32 hex digits + `.s`.
+_RELAY_SOCKET_BYTES = len("/r/") + 32 + len(".s")
+
+
+def _home_name(row_id: str) -> str:
+    """A short, stable directory name for one row's home (10 hex chars)."""
+    return hashlib.blake2s(row_id.encode("utf-8"), digest_size=5).hexdigest()
+
+
+def _homes_root() -> Path:
+    """The one short root the rows' homes live under; removed at session end.
+
+    Chosen by MEASURING the socket path the longest row id will actually get,
+    so a too-long temp root fails here -- naming the budget and the measured
+    bytes -- instead of quietly turning every gate into "not started" again.
+    """
+    global _HOMES_ROOT
+    if _HOMES_ROOT is None:
+        longest = max(ROWS, key=len)
+        measured = []
+        # The environment's temp dir first, then the short conventional ones.
+        for candidate in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp")):
+            if not os.path.isdir(candidate):
+                continue
+            root = Path(tempfile.mkdtemp(prefix="rt-homes-", dir=candidate)).resolve()
+            probe = root / _home_name(longest) / "r" / ("0" * 32 + ".s")
+            measured.append((len(os.fsencode(probe)), str(root)))
+            if len(os.fsencode(probe)) < 108:
+                _HOMES_ROOT = root
+                atexit.register(shutil.rmtree, root, ignore_errors=True)
+                return root
+            shutil.rmtree(root, ignore_errors=True)
+        raise RuntimeError(
+            f"no temp root short enough for the longest row id {longest!r}: its "
+            f"owned relay socket needs {_RELAY_SOCKET_BYTES} bytes under the home "
+            f"and Linux allows 107; measured {measured}")
+    return _HOMES_ROOT
+
+
+def _row_home(row_id: str) -> Path:
+    """One row's own `AITELIER_HOME`, below the AF_UNIX socket path budget."""
+    return _homes_root() / _home_name(row_id)
 
 
 NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
@@ -463,7 +516,7 @@ def _next_node(result: dict, report: dict) -> str:
 
 def _drive_row(tmp_path, monkeypatch, row_id):
     row = ROWS[row_id]
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_HOME", str(_row_home(row_id)))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     inotify = "real"
     if row.leg in _INOTIFY_LEGS:
@@ -574,23 +627,7 @@ def _driven(row_id, tmp_path_factory):
     return _DRIVEN[row_id]
 
 
-@pytest.mark.parametrize("row_id", [
-    pytest.param(
-        name, id=name,
-        marks=pytest.mark.docker if name in {
-            "declared_failed_is_not_an_absence",
-            "first_entry_names_other_repo_red_refused",
-            "first_entry_names_this_repo_clean_refused",
-            "foreign_names_repo_gate_wrote_none",
-            "inotify_unavailable_red_gate_exit_0",
-            "inotify_unavailable_red_gate_exit_1",
-            "node_runner_unavailable_beside_refused_gate",
-            "other_repo_reports_beside_green_gate",
-            "pytest_runner_unavailable_beside_refused_gate",
-            "pytest_runner_unavailable_beside_unattributable_red",
-            "report_without_manifest_red_refused",
-        } else ())
-    for name in ROWS])
+@pytest.mark.parametrize("row_id", [pytest.param(name, id=name) for name in ROWS])
 def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
     row = ROWS[row_id]
     result, report, observed, identity_error = _driven(row_id, tmp_path_factory)
@@ -632,23 +669,7 @@ def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
                 row_id, identity, report["failures"])
 
 
-@pytest.mark.parametrize("row_id", [
-    pytest.param(
-        name, id=name,
-        marks=pytest.mark.docker if name in {
-            "declared_failed_is_not_an_absence",
-            "first_entry_names_other_repo_red_refused",
-            "first_entry_names_this_repo_clean_refused",
-            "foreign_names_repo_gate_wrote_none",
-            "inotify_unavailable_red_gate_exit_0",
-            "inotify_unavailable_red_gate_exit_1",
-            "node_runner_unavailable_beside_refused_gate",
-            "other_repo_reports_beside_green_gate",
-            "pytest_runner_unavailable_beside_refused_gate",
-            "pytest_runner_unavailable_beside_unattributable_red",
-            "report_without_manifest_red_refused",
-        } else ())
-    for name in ROWS])
+@pytest.mark.parametrize("row_id", [pytest.param(name, id=name) for name in ROWS])
 def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
     row = ROWS[row_id]
     _result, report, _observed, _identity = _driven(row_id, tmp_path_factory)
@@ -669,13 +690,8 @@ _BREAKS_THE_REQUIREMENT = ("lockfile_first_red_refused",
                            "first_entry_names_other_repo_red_refused")
 
 
-@pytest.mark.parametrize("row_id", [
-    pytest.param(
-        name, id=name,
-        marks=pytest.mark.docker if name in {
-            "first_entry_names_other_repo_red_refused",
-        } else ())
-    for name in _BREAKS_THE_REQUIREMENT])
+@pytest.mark.parametrize("row_id", [pytest.param(name, id=name)
+                                   for name in _BREAKS_THE_REQUIREMENT])
 def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
                                                          row_id):
     """A gate that creates anything else under its ticket first leaves its

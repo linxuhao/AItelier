@@ -22,7 +22,12 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   non-regular file, a path under an existing non-directory, a repeat) is refused
   there, each refusal naming what to declare instead, and the ones that do not exist
   yet - legal, since creating a file is a change - are announced in the result the
-  director reads. The remaining containment refusal, a path outside the workspace
+  director reads. It ALSO judges the paths against the SAME item's `changes_within`
+  scope, with the run's own matcher (`core.todo_runtime._scope_regex`): a path no
+  scope glob matches is refused, because then no tree can satisfy both predicates -
+  changing the file fails `changes_within`, leaving it alone fails `files_changed` -
+  and the plan would freeze an item that can never pass. The remaining containment
+  refusal, a path outside the workspace
   (absolute, or holding a `..` component), is NOT this audit's on the production
   route: the plan's own binding validation (`TodoPlan._binding`, inside
   `TodoPlan.from_json`) applies `todo_plan._relative` to every `path`/`paths`/
@@ -54,7 +59,11 @@ from typing import Any, Mapping
 # escapes through a symlink. `core.security_jail` imports nothing from `core`, so no cycle.
 from core.security_jail import SecurityException, verify_path_safe
 from core.todo_plan import Refusal, TodoPlan, _relative
-from core.todo_runtime import PredicateLibrary
+# `_scope_regex` is reused, not restated: at run time `changes_within` compiles each scope glob with
+# this function and matches every changed path with `rx.match(p)`. A second, hand-rolled glob rule
+# here could refuse a plan the run would accept, or accept one the run can never satisfy - exactly
+# the disagreement this audit exists to end. The audit's scope check below calls THIS function.
+from core.todo_runtime import PredicateLibrary, _scope_regex
 
 TYPES = ("str", "int", "list[str]")
 _NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -433,7 +442,7 @@ def _report_parent_contained(plan: TodoPlan, report: str, where: str) -> None:
 def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
-    Two things are judged here, and only one of them is a delta:
+    Three things are judged here, and two of them are about a delta:
 
     * The paths a predicate requires to CHANGE. The item's own predicate is "every listed path
       differs from its state at the start of the step". A path whose change that predicate cannot
@@ -464,6 +473,23 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       - the same path twice in one list, compared in normalised form so `./a` and `a` collide -
         a list that repeats one file names fewer files than it looks like it does. This one reads
         the plan, not the workspace, so it is refused whether or not the workspace exists.
+
+    * The PAIR an item declares when it carries BOTH a delta over `paths` (`files_changed`, or
+      `file_changed`) and a `changes_within` scope: every declared path must match at least one
+      glob in every scope the SAME item declares. At run time `files_changed` requires each
+      declared path to differ from its pre-state, while `changes_within` fails on any path changed
+      since the base that no scope glob matches. A declared path matching NONE of the scope globs
+      is therefore unsatisfiable in both directions - change it and `changes_within` fails, leave
+      it and `files_changed` fails - so it is refused at freeze time (`invalid_plan`), naming the
+      path and the declared scope list. The refusal is per ITEM: an item with `files_changed` and
+      no `changes_within`, or a scope declared by a DIFFERENT item, is not judged here and freezes
+      exactly as before (the plan-level `scope` the appended `deliver` item binds is that
+      different-item case). The match is made by `core.todo_runtime._scope_regex` - the function
+      `changes_within` itself compiles its globs with at run time - imported rather than restated,
+      so the freeze and the run cannot apply two different glob rules. Like the duplicate rule,
+      this reads the plan and not the workspace, so it runs whether or not the workspace exists.
+      This is a refusal, never an announcement: a path that does not exist yet is still legal when
+      the scope can match it.
 
     * The REPORT a binding names (`REPORT_ARG`; `command_exit`'s `report`, today the only one).
       It is judged by containment only, in two steps. First `_relative` - the plan's rule, and here
@@ -500,9 +526,10 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
 
     A workspace that is not a directory is said out loud rather than skipped, and nothing is
     assumed about it: the paths cannot be looked up, so they are not judged by a guess. The note
-    says which checks that cost - and which ones it did not: BOTH refusals that read the plan
-    rather than the workspace (a duplicate spelling in one list, and a path outside the workspace
-    via `todo_plan._relative`) still run there and still refuse, so neither is one of the checks a
+    says which checks that cost - and which ones it did not: the THREE refusals that read the plan
+    rather than the workspace (a duplicate spelling in one list, a path outside the workspace
+    via `todo_plan._relative`, and a declared path no glob of the same item's `changes_within`
+    scope matches) still run there and still refuse, so none is one of the checks a
     missing directory cost. The outside-workspace one is the backstop again: on the production route
     `TodoPlan.from_json` has already refused such a path before this audit is entered - workspace or
     not - and the audit's own `_relative` call is what answers only for a plan built without
@@ -518,6 +545,12 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     existing: list[str] = []
     created: list[str] = []
     for item in plan.items:
+        # The pair this ITEM declares: the paths it requires to change, and the scopes it requires
+        # the whole change to fall inside. They constrain each other only when the same item carries
+        # both (the `code_change`/`docs_change` shape: `files_changed.paths` + `changes_within.scope`),
+        # so both are collected per item and judged after its bindings have been read.
+        item_delta: list[tuple[str, str, str]] = []      # (where, normalised path, delta predicate)
+        item_scopes: list[tuple[str, tuple[str, ...]]] = []   # (where, declared scope list)
         for binding in item.predicates:
             # The report a command declares, judged by the PLAN's rule and before the delta logic,
             # which only ever looks at DELTA_PATHS predicates and would skip `command_exit` outright.
@@ -541,6 +574,15 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                 # `from_json`, so loosening the type check cannot happen unnoticed.
                 _relative(binding.args[REPORT_ARG], where)
                 _report_parent_contained(plan, binding.args[REPORT_ARG], where)
+            # The scope this binding demands the whole change fall inside. `changes_within` is the
+            # only predicate that takes one; its `scope` is a required non-empty list[str] (the
+            # library types it in `_STR_LISTS`), so a frozen plan always arrives here with one.
+            # `str(g)` per element is how the run builds its own patterns, so this reads the scope
+            # exactly as the run will.
+            if binding.predicate == "changes_within" and isinstance(binding.args.get("scope"), list):
+                scope = tuple(str(g) for g in binding.args["scope"])
+                if scope:
+                    item_scopes.append((f"item {item.id}: changes_within.scope", scope))
             arg = DELTA_PATHS.get(binding.predicate)
             if arg is None or arg not in binding.args:
                 continue
@@ -563,6 +605,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         f"shorter list than intended",
                         item=item.id, predicate=binding.predicate, path=rel)
                 seen[rel] = str(value)
+                item_delta.append((where, rel, binding.predicate))
                 if rel in declared:
                     continue
                 declared.append(rel)
@@ -604,6 +647,31 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         f"file: declare that regular file instead",
                         item=item.id, predicate=binding.predicate, path=rel)
                 (existing if target.exists() else created).append(rel)
+        # The pair, judged only when the SAME item declares both halves. A declared path no scope glob
+        # matches is unsatisfiable in both directions at run time: `files_changed` requires it to differ
+        # from its pre-state, `changes_within` fails on any changed path outside the scope. Every scope
+        # the item binds must admit the path, since the item passes only when all its predicates pass.
+        # SAME MATCHER AS THE RUN: `changes_within` builds its patterns with
+        # `core.todo_runtime._scope_regex` and tests `rx.match(p)` against each changed path, so this
+        # calls that imported function on the normalised declared path. Nothing about globbing is
+        # restated here, so the freeze cannot disagree with the run about what a scope matches.
+        if item_delta:
+            for scope_where, scope in item_scopes:
+                patterns = [_scope_regex(glob) for glob in scope]
+                for where, rel, predicate in item_delta:
+                    if any(pattern.match(rel) for pattern in patterns):
+                        continue
+                    raise Refusal(
+                        "invalid_plan",
+                        f"{where} declares {rel!r}, which matches no glob in the {scope_where} it must also "
+                        f"satisfy: the declared scope is {list(scope)}. The same item requires every declared path "
+                        f"to differ from its state at the start of the step ({predicate}) AND every path changed "
+                        f"since the base to fall inside that scope (changes_within). A path no scope glob matches "
+                        f"cannot satisfy both: changing it fails changes_within, and leaving it unchanged fails "
+                        f"{predicate}. No tree can make this item pass as written, so the plan is refused here "
+                        f"rather than frozen into an attempt that can only hang. Declare {rel!r} inside the scope, "
+                        f"or add a scope glob that matches it",
+                        item=item.id, predicate=predicate, path=rel, scope=list(scope))
     notes: list[str] = []
     if not measured:
         notes.append(
@@ -611,7 +679,8 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             f"could not be looked up: no directory, parent, non-regular-file or existence check was made about them, "
             f"and nothing was assumed about them (the refusals that read the PLAN still ran: a duplicate spelling of "
             f"one path in one list is still refused, and so is a path outside the workspace - neither needs a "
-            f"directory to decide)")
+            f"directory to decide. So is a declared path that no glob of the same item's changes_within scope "
+            f"matches: that rule reads the plan too)")
     elif created:
         notes.append(
             f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "

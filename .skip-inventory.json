@@ -1,6 +1,6 @@
 {
  "schema": "skip-inventory/1",
- "attempt_id": "attempt-447e568e71bc49fcadad4b63a7e2993d",
+ "attempt_id": "attempt-44746c6280ec4253ba00fd81cf8ecc8c",
  "base_sha": "9eeb9f00c51643308d59f97dbb03c87a0aad139f",
  "worktree": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-skip-audit-20261109",
  "scope_statement": "In scope: every row the default pytest selection SELECTS and then skips; out of scope and not counted as skips here: the marker-deselected groups docker / baked_toolchain / network, 45 rows at this base (measured '45/11573 tests collected (11528 deselected)').",
@@ -220,7 +220,7 @@
   "skip_sites_not_executed": 21,
   "skip_sites_not_executed_test_file_only": 20,
   "conftest_hooks_in_scan": 1,
-  "skip_sites_in_scan_reconciliation": "38 = 17 executed + 20 not executed; the 21st entry in skipped_sites_not_executed is the conftest-driven skip in tests/host_gate_queue (owned_support.py:86 supplied by tests/host_gate_queue/conftest.py).",
+  "skip_sites_in_scan_reconciliation": "38 = 17 executed as skips + 21 not executed as skips, and those 21 are listed in skipped_sites_not_executed: 20 test-file sites plus the conftest-driven skip in tests/host_gate_queue (owned_support.py:86 supplied by tests/host_gate_queue/conftest.py). No site is unaccounted for and 'sites found' is not equated with 'skips taken'.",
   "textual_grep_matches_not_skip_sites": 5,
   "grep_matches_total": 43,
   "files_matching_the_grep": 33,
@@ -896,7 +896,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -912,7 +912,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -928,7 +928,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -944,7 +944,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -976,7 +976,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -992,7 +992,7 @@
    "minimal_edit": {
     "file": "tests/integration/test_dsh_project_work.py",
     "line": 41,
-    "mechanism": "same two-part edit as S2, plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
+    "mechanism": "same two-part edit as S2 (= the 29 rows at tests/integration/test_coding_workspace_integration.py:29: conftest sets CODING_WORKSPACE_FIXTURE / CODING_WORKSPACE_RAW before the module-level skipif at :29, and the three hardcoded /src uses at :92, :780 and :1026 become Path(__file__).resolve().parents[2]), plus _CAPSULE at :41 becomes Path(__file__).resolve().parents[2] / 'core/coding_workspace.py' so the import-time probe stops requiring a /src mount.",
     "what_it_would_measure": "the DSH project-work path (dsh work open/write/deliver/push over a real repository, pipeline_source binding, an expected_head refusal). 6 rows that today run nowhere.",
     "evidence": "estimate"
    }
@@ -2852,7 +2852,7 @@
  },
  "class_d_mutation_instrument": {
   "method": "for each of the 17 sites that produced a taken skip, the skip condition was removed (or replaced by the absent object) on a /tmp copy of the tree and the rows were re-run with `pytest -q -rs --tb=line`.",
-  "result": "0 rows hide a red. Every mutated row's failure is the absence itself, not a product assertion: FileNotFoundError('/src/core/coding_workspace.py') x29+x7, FileNotFoundError('godot'/'None') x10+x58, 'Failed: native PNG proof requires Xvfb/software rendering' x26, FileNotFoundError('systemd-analyze'), FileNotFoundError(<normal-binding.json>), KeyError('OWNED_SHELL_FIXTURE') x10, KeyError('AITELIER_HOST_LAUNCHER_SOCKET') x2, KeyError('EXPECTED_SOURCE') x3, KeyError('REVIEW_AUTHORED_GODOT_GATE'). The three rows whose object the test can build itself PASS once it is built (E1/E2/E3), and the one recorded-decision row fails with a drift assertion only because the private table is absent, which is exactly what iss-db2d0ae735e44c90 says to preserve.",
+  "result": "0 rows hide a red. Eleven of the fifteen mutation arms end in an exception that names the absent object and four end in an AssertionError; in all four the assertion is the absent object, not a product red: FileNotFoundError('/src/core/coding_workspace.py') x29+x7, FileNotFoundError('godot'/'None') x10+x58, 'Failed: native PNG proof requires Xvfb/software rendering' x26, FileNotFoundError('systemd-analyze'), FileNotFoundError(<normal-binding.json>), KeyError('OWNED_SHELL_FIXTURE') x10, KeyError('AITELIER_HOST_LAUNCHER_SOCKET') x2, KeyError('EXPECTED_SOURCE') x3, KeyError('REVIEW_AUTHORED_GODOT_GATE'), and the four AssertionErrors - admin_routers `assert 404 == 403` (the write gate the row bypasses is not built), quiescence `assert False is True` at test_deployment_quiescence.py:1591 (no /proc/2 kernel-thread entry), novel_model_routes `expected ['novel', 'novel_alt'], got []` (the gitignored model_routes.json is absent), owned_coding_shell `assert PosixPath('/tmp/mut/core/repository_executor.py') == PosixPath('/src/core/repository_executor.py')` at test_owned_coding_shell.py:357 (the row asserts the /src layout). The three rows whose object the test can build itself PASS once it is built (E1/E2/E3), and the one recorded-decision row fails with a drift assertion only because the private table is absent, which is exactly what iss-db2d0ae735e44c90 says to preserve.",
   "arms": [
    {
     "arm": "admin_routers",
@@ -2876,7 +2876,7 @@
     "arm": "owned_coding_shell",
     "what": "module skipif -> False",
     "result": "10 errors, 1 failed",
-    "fail_line": "E   KeyError: 'OWNED_SHELL_FIXTURE'"
+    "fail_line": "E   KeyError: 'OWNED_SHELL_FIXTURE' (10 errors); 1 failed: /tmp/mut/tests/integration/test_owned_coding_shell.py:357: AssertionError: assert PosixPath('/tmp/mut/core/repository_executor.py') == PosixPath('/src/core/repository_executor.py') - the absent /src layout, not a product red"
    },
    {
     "arm": "tool_operation",
@@ -3072,9 +3072,29 @@
   }
  ],
  "notes": [
-  "The brief says 45 skip sites across 33 files. Measured with the same grep: 43 matches in 33 files, of which 5 are inside string literals that synthesize test files, so 38 real skip sites in 32 test files plus 1 conftest-driven site (tests/host_gate_queue/owned_support.py:86 supplied by tests/host_gate_queue/conftest.py) = 39 mechanisms. The difference is a counting convention, not a missing site: every match is listed either as a row, in skipped_sites_not_executed, or in textual_matches_that_are_not_skip_sites.",
-  "152 rows were selected and skipped in this selection, not 90: the earlier 20-file pass measured a subset. 94 of the 152 (61.8%) are the Godot binary, 11 the owned-shell launcher, 3 the EXPECTED_SOURCE capsule, 2 the host launcher, 1 systemd-analyze, 1 an authored gate artifact: 113 rows (74.3%) are class (a) and no test edit can recover them.",
+  "The brief says 45 skip sites across 33 files. Measured with the same grep: 43 matches in 33 files, of which 5 are inside string literals that synthesize test files, so 38 real skip sites in 29 test files, plus the conftest-driven site tests/host_gate_queue/owned_support.py:86 supplied by tests/host_gate_queue/conftest.py - which is itself one of those 43 matches and one of the 38, so the sites total 38, not 39. 33 grep files = 29 test files carrying a real site + 3 test files whose only matches are string literals + that 1 helper. The difference from the brief is a counting convention, not a missing site: every match is listed either as a row, in skipped_sites_not_executed, or in textual_matches_that_are_not_skip_sites.",
+  "152 rows were selected and skipped in this selection, not 90: the earlier 20-file pass measured a subset. 94 of the 152 (61.8%) are the Godot binary (68 the binary itself, 26 the Xvfb/software-rendering proof), 11 the owned-shell launcher, 3 the EXPECTED_SOURCE capsule, 3 the host launcher (2 tool_operation + 1 dsh_project_work), 1 systemd-analyze, 1 an authored gate artifact: 94+11+3+3+1+1 = 113 rows (74.3%) are class (a) and no test edit can recover them.",
   "Class (c) was searched against the live State stores: state_issues (1328 rows) and state_driver_note_entries for 'skip', 'native acceptance', 'systemd-analyze', 'kthreadd', 'installation artifact', 'EXPECTED_SOURCE', 'private route parity', 'test_cli_middleware', 'require_writer'. Exactly one address qualifies (iss-db2d0ae735e44c90, S16); every other skip has no recorded decision - the reasons live in code comments only.",
   "Not measured here: whether the 35 estimated rows (S2+S3) actually pass once the fixture root is built. The mutation shows only that their current failure is the missing /src mount, not an assertion."
+ ],
+ "revisions": [
+  {
+   "revision": 2,
+   "attempt_id": "attempt-44746c6280ec4253ba00fd81cf8ecc8c",
+   "parent": "603010b861defb216b2fb04f1a1722abd5b39508",
+   "answers_review": "evidence/skip-audit-review-2-20261109/REVIEW-VERDICT.md - C1/C2/C3 all PASS, with two must-fix defects, two should-fix defects and three notes, every one of them in a derived string or a per-row sentence rather than in the rows or the counts the rows support",
+   "changes": [
+    "counts.skip_sites_in_scan_reconciliation: was '38 = 17 executed + 20 not executed' plus a 21st-entry clause (17+20=37); now 17 executed as skips + 21 not executed as skips = 38, naming that the 21 are 20 test-file sites plus the conftest-driven owned_support.py:86 site",
+    "notes[0]: was '38 real skip sites in 32 test files plus 1 conftest-driven site ... = 39 mechanisms'; the conftest site is one of the 43 grep matches and therefore already inside the 38, the real-site files are 29 test files + that 1 helper, and 33 grep files = 29 + 3 string-literal-only test files + 1 helper",
+    "class_d_mutation_instrument.result: the blanket sentence 'Every mutated row's failure is the absence itself, not a product assertion' is now a statement that eleven of the fifteen arms end in the absent-object exception and four end in an AssertionError, naming all four assertion lines (admin_routers 404 == 403, quiescence :1591, novel drift, owned_coding_shell :357) and saying each is the absent object",
+    "class_d_mutation_instrument.arms[owned_coding_shell].fail_line: quoted only KeyError('OWNED_SHELL_FIXTURE') for an arm whose summary is '10 errors, 1 failed'; now quotes both the 10 KeyErrors and the 1 failed assertion at test_owned_coding_shell.py:357 with the retained log line",
+    "notes[1]: the class-(a) groups summed to 112 (94+11+3+2+1+1) against a_absent_capability 113; the missing row is test_dsh_project_work.py::test_real_host_executor_runs_child_tests, so the groups are 94 (68 binary + 26 Xvfb proof) + 11 + 3 + 3 (2 tool_operation + 1 dsh) + 1 + 1 = 113",
+    "the six class-(b) rows at tests/integration/test_dsh_project_work.py:42 now define the 'S2' they refer to instead of pointing at a label that only exists in most_valuable_three_edits",
+    "root attempt_id: names the attempt that delivered this revision (the parent revision's attempt is named in this block)"
+   ],
+   "unchanged": "no row, class, nodeid, reason, run log, per-row flag or surviving count changed: rows (152), classes (113 a / 38 b / 1 c / 0 d / 0 unclassified), rows_by_site (17), skipped_sites_not_executed (21), textual_matches_that_are_not_skip_sites (5), proposed_turns_into_measurement (38), remaining_after_edits (114), run_argv, run_pytest_argv, run_selected_files, run_summary and the run log digest are byte-identical to the parent commit",
+   "test_tree_identity": "no test or product file differs between 9eeb9f00c51643308d59f97dbb03c87a0aad139f (the base the run measured) and this revision: .skip-inventory.json is the only path this commit changes, so run1.log remains the measurement of the same test tree",
+   "not_byte_exact": "decision.quoted (class-c row, iss-db2d0ae735e44c90) keeps the issue's words and directive but normalises the spacing of the body as stored in state_issues; it is not byte-exact and is left as delivered"
+  }
  ]
 }

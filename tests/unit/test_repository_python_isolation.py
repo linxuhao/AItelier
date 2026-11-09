@@ -45,7 +45,9 @@ def test_missing_facility_never_runs_local_pytest(rt, tmp_path, monkeypatch):
     assert not marker.exists(), "authored pytest ran without the isolated facility"
 
 
-@pytest.mark.docker  # needs the reviewed authored Godot gate (`tools/godot_gate.py`, which defines run_python_suite) mounted at REVIEW_AUTHORED_GODOT_GATE; that file is not in this tree
+@pytest.mark.skipif(not os.environ.get('REVIEW_AUTHORED_GODOT_GATE'), reason=(
+    'needs REVIEW_AUTHORED_GODOT_GATE=<path to the reviewed authored tools/godot_gate.py '
+    '(defines run_python_suite); that file is not in this tree>'))
 def test_authored_godot_python_leg_is_not_a_backend_child(rt, tmp_path, monkeypatch):
     marker = tmp_path / "unsafe-authored-test"
     repo = _fixture(tmp_path, f"open({str(marker)!r}, 'w').write('ran')")

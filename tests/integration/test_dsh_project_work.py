@@ -17,11 +17,12 @@ The invocation that runs them, one worker:
         -e CODING_WORKSPACE_RAW=/tmp/raw <image> \
         python3 -m pytest tests/integration/test_dsh_project_work.py -q
 
-``test_real_host_executor_runs_child_tests`` needs more than that and carries the
-``docker`` marker: an external stdlib controller serving a disposable owned
-launcher socket (``DSH_WORK_HOST_FIXTURE``) and a test image
-(``DSH_WORK_TEST_IMAGE``), because the child bash/test execution runs as a real
-container.
+``test_real_host_executor_runs_child_tests`` needs more than that: an external
+stdlib controller serving a disposable owned launcher socket
+(``DSH_WORK_HOST_FIXTURE``) and a test image (``DSH_WORK_TEST_IMAGE``), because
+the child bash/test execution runs as a real container. The row carries its own
+``skipif`` on those two variables, so a default run reports it as skipped and
+names them.
 """
 import json
 import os
@@ -134,7 +135,9 @@ def test_delivered_commit_pushes_to_configured_local_origin(work, tmp_path):
     assert not work['service'].db.get_project(work['dag'])  # State id is not a run id.
 
 
-@pytest.mark.docker  # needs DSH_WORK_HOST_FIXTURE (an external disposable owned launcher) + DSH_WORK_TEST_IMAGE and a real docker binary for the child execution
+@pytest.mark.skipif(not (os.environ.get('DSH_WORK_HOST_FIXTURE') and os.environ.get('DSH_WORK_TEST_IMAGE')), reason=(
+    'needs DSH_WORK_HOST_FIXTURE=<disposable owned launcher root with launcher.sock> and '
+    'DSH_WORK_TEST_IMAGE=<test image> (plus the Coding Mode fixture above)'))
 def test_real_host_executor_runs_child_tests(work, env):
     # The external stdlib controller starts only our disposable launcher. No
     # Docker socket, production data, secrets or host pytest enter this fixture.

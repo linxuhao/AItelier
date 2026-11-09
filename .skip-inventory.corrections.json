@@ -41,6 +41,19 @@
       "defect": "The bare :1591 is the MUTATED copy's line: the skip-removal-only arm deletes the three-line skip above the assertion, so in that copy the assertion is at :1591. In the tree, :1591 is the in-body guard `if comm != 'kthreadd':` (tree :1591-1593 is the removed skip) and the kthreadd assertion is at tree :1594, so a reader who opens tree :1591 lands on a guard, not an assertion. The same fact is marked correctly at .skip-inventory.json:2891, which prints the mutated path /tmp/mut/tests/unit/test_deployment_quiescence.py:1591. The replacement adds only the marker and the tree number; the arm's result, the sentence's claim (the absence, not a product red), the row, the class and every count are unchanged.",
       "replacement": "Mutation arm E1: 1 passed; the skip-removal-only arm fails at :1591 in the mutated copy (tree :1594) with 'assert False is True' because the real /proc/2 is not a kernel thread - the absence, not a product red.",
       "affects_measured_values": false
+    },
+    {
+      "subject": ".skip-inventory.json",
+      "subject_artifact": "61e8573d63a2f654a68d52416c125e2db700b460",
+      "path": "revisions[0].changes[2]",
+      "line": 3090,
+      "subject_lines": [
+        ".skip-inventory.json:3090"
+      ],
+      "quoted": "quiescence :1591",
+      "defect": "The bare :1591 in this change-list entry is the MUTATED copy's line: the skip-removal-only arm deletes the three-line in-body skip above the assertion, so in that copy the kthreadd assertion sits at :1591. In the tree the same assertion is at :1594, and tree :1591 is the first line of the removed in-body guard `if comm != 'kthreadd':` (the removed skip is tree :1591-1593), so a reader who opens tree :1591 lands on a guard, not on the assertion. The same fact IS marked at .skip-inventory.json:2891, whose arms[quiescence_kthread].fail_line prints the mutated path /tmp/mut/tests/unit/test_deployment_quiescence.py:1591. The replacement adds only the marker and the tree number: the four assertion lines it names, the arm's result, the row, the class and every count are unchanged.",
+      "replacement": "quiescence :1591 in the mutated copy (tree :1594)",
+      "affects_measured_values": false
     }
   ],
   "class_scan": {
@@ -93,7 +106,7 @@
         "line": 3090,
         "opening": "class_d_mutation_instrument.result: the blanket sentence 'Every mutated row's fa",
         "classification": "mutated-copy",
-        "status": "uncovered: no corrections entry lists line 3090; not corrected in this commit; flagged for the owner"
+        "status": "unmarked before this file; corrected by corrections[3]"
       },
       {
         "number": ":67",
@@ -104,6 +117,6 @@
       }
     ],
     "tree_copy_hits": 0,
-    "uncovered_hits": [3090]
+    "uncovered_hits": []
   }
 }

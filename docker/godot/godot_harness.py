@@ -390,19 +390,34 @@ def _acquire_render_owner_waiting_inner(project_id: str, run_id: str, operation_
     the deployment-admission fence held (the fence is tried without blocking) or
     the owner table locked. The returned row carries `waited_sec` and
     `waited_for_owner_ids` (every live holder this request queued behind, in
-    order). do_POST checks both conditions again once it owns the render, before
+    order), plus `waited_blocked_by` (the class of the last thing in the way, or
+    None). do_POST checks both conditions again once it owns the render, before
     the render starts.
+
+    `waited_sec` is the QUEUE WAIT and nothing else: its clock starts when an
+    admission attempt first finds SOMETHING ELSE in the way -- a live render
+    owner, the deployment-admission fence, or another writer holding the owner
+    table -- so a request's own owner-table transaction (connect,
+    `CREATE TABLE IF NOT EXISTS`, `BEGIN IMMEDIATE`, commit) is never charged to
+    its caller's budget, and a request admitted on its first attempt records
+    exactly 0.0. That transaction is cheap on a quiet box and can be slow enough
+    to matter on a loaded one -- which is precisely the cost this budget must
+    not charge, because nothing was in the way.
     """
     if wait_timeout is not None and wait_timeout <= 0:
         return _acquire_render_owner_without_queuing(
             project_id, run_id, operation_id, wait_timeout=wait_timeout)
-    started = time.monotonic()
+    # Set the moment another holder is found: until then this request has not
+    # waited for anybody, so its own admission transaction is its own cost.
+    queue_started = None
     waited_for: list[str] = []
+    blocked_by = None
     fence_held = False
     while True:
+        queued = 0.0 if queue_started is None else time.monotonic() - queue_started
         if should_abort is not None and should_abort():
             raise RenderWaitAbandoned(
-                f"caller disconnected after {time.monotonic() - started:.2f}s "
+                f"caller disconnected after {queued:.2f}s "
                 f"queued behind render owner(s) {waited_for}"
                 + (" and the deployment-admission fence" if fence_held else ""))
         try:
@@ -410,40 +425,69 @@ def _acquire_render_owner_waiting_inner(project_id: str, run_id: str, operation_
                                        blocking_fence=False)
         except BlockingIOError:
             fence_held = True
+            blocked_by = "deployment_fence"
         except sqlite3.OperationalError as exc:
             if "locked" not in str(exc):
                 raise
+            blocked_by = "owner_table_locked"
         except RenderOwnerConflict as exc:
             fence_held = False
             if exc.payload["needs_reconciliation"]:
                 raise
+            blocked_by = "render_owner"
             if exc.payload["owner_id"] not in waited_for:
                 waited_for.append(exc.payload["owner_id"])
         else:
             row = dict(row)
-            row["waited_sec"] = round(time.monotonic() - started, 4)
+            row["waited_sec"] = round(
+                0.0 if queue_started is None else time.monotonic() - queue_started, 4)
             row["waited_for_owner_ids"] = waited_for
+            row["waited_blocked_by"] = blocked_by
             return row
-        elapsed = time.monotonic() - started
+        if queue_started is None:
+            queue_started = time.monotonic()
+        elapsed = time.monotonic() - queue_started
         if wait_timeout is not None and elapsed >= wait_timeout:
             raise RenderOwnerConflict(_wait_timed_out(
-                elapsed, wait_timeout, waited_for, fence_held=fence_held))
+                elapsed, wait_timeout, waited_for, fence_held=fence_held,
+                blocked_by=blocked_by))
         time.sleep(RENDER_OWNER_WAIT_POLL_SEC)
 
 
 def _wait_timed_out(elapsed: float, wait_timeout: float, waited_for: list,
-                    *, fence_held: bool = False, owned: bool = False) -> dict:
-    """The refusal for a request whose own render_wait_timeout_sec ran out."""
+                    *, fence_held: bool = False, owned: bool = False,
+                    blocked_by: str | None = None) -> dict:
+    """The refusal for a request whose own render_wait_timeout_sec ran out.
+
+    `elapsed` is the wait this request spent on SOMEONE ELSE -- the owner-row
+    QUEUE WAIT it spent behind another holder, plus, when it already owned the
+    row, the post-ownership wait for the render locks -- never its own
+    owner-table admission transaction, so the body's `waited_sec` and the
+    `where` it names describe the same thing.
+
+    `owner_kind` / `owner_id` name the REAL blocker: the last live render owner
+    this request queued behind, or -- when no owner id exists -- the class of
+    what actually held it up ("deployment_fence", "owner_table_locked",
+    "post_ownership_lock"). It is "active" only alongside a non-empty
+    `waited_for_owner_ids`, so no reader can see a live-owner refusal that names
+    no owner.
+    """
     behind = []
     if waited_for:
         behind.append(f"live render owner {waited_for[-1]}")
     if fence_held:
         behind.append("the deployment-admission fence")
+    if blocked_by == "owner_table_locked" and not waited_for:
+        behind.append("another writer holding the render-owner table")
+    if blocked_by == "post_ownership_lock" and not waited_for:
+        behind.append("a render lock another render held after this request "
+                      "owned the render row")
     where = " and ".join(behind) or "the render lock"
     tail = ("it took ownership only after the limit, so its owner row was "
             "released and nothing was rendered" if owned
             else "nothing was rendered and no owner row was made")
-    return {"error": "render owner wait timed out", "owner_kind": "active",
+    return {"error": "render owner wait timed out",
+            "owner_kind": "active" if waited_for else (blocked_by or "active"),
             "owner_id": waited_for[-1] if waited_for else None,
             "waited_for_owner_ids": waited_for, "deployment_fence_held": fence_held,
             "needs_reconciliation": False,
@@ -492,7 +536,11 @@ def _acquire_render_owner_without_queuing(project_id: str, run_id: str,
 
     Nothing is polled and nothing is slept, so a request refused here can never
     be charged a queue wait it was not allowed to start, and one admitted here
-    can never be refused for time it spent after taking ownership.
+    can never be refused for time it spent after taking ownership. It also
+    never queued for anybody, so the row it returns carries `waited_sec` 0.0 --
+    the one admission attempt's own duration is that attempt's cost, not a wait,
+    and it is reported as `admission_attempt_sec` only when the attempt was
+    refused (`_may_not_queue_refusal`).
     """
     started = time.monotonic()
     blocked_by, holder_ids = "render_owner", []
@@ -512,8 +560,9 @@ def _acquire_render_owner_without_queuing(project_id: str, run_id: str,
         holder_ids = [exc.payload["owner_id"]]
     else:
         owner = dict(owner)
-        owner["waited_sec"] = round(time.monotonic() - started, 4)
+        owner["waited_sec"] = 0.0
         owner["waited_for_owner_ids"] = []
+        owner["waited_blocked_by"] = None
         return owner
     raise RenderOwnerConflict(_may_not_queue_refusal(
         wait_timeout, holder_ids, blocked_by=blocked_by,
@@ -7487,8 +7536,10 @@ class _Handler(BaseHTTPRequestHandler):
         # (owner_lost, or active with a stale heartbeat) is refused at once with
         # a 409 that names its kind.
         #
-        # N is a QUEUE wait, so N <= 0 means "may not queue at all" and is
-        # decided by one non-blocking admission attempt: a free render lock
+        # N is a QUEUE wait -- the seconds this request spends waiting for
+        # SOMEONE ELSE, never its own admission transaction and never the
+        # post-ownership lock setup -- so N <= 0 means "may not queue at all" and
+        # is decided by one non-blocking admission attempt: a free render lock
         # renders, and a holder in the way is refused at once with
         # `_may_not_queue_refusal` (never with `_wait_timed_out`, whose wording
         # is a wait that really ran out).
@@ -7522,7 +7573,6 @@ class _Handler(BaseHTTPRequestHandler):
                 wait_timeout = None if wait_timeout is None else max(0.0, float(wait_timeout))
             except (TypeError, ValueError):
                 return self._send(400, {"error": "render_wait_timeout_sec must be a number"})
-            admission_started = time.monotonic()
             try:
                 owner = acquire_render_owner_waiting(
                     project_id, run_id, operation_id, wait_timeout=wait_timeout,
@@ -7536,6 +7586,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(exc)})
             owner_wait = {"render_owner_wait_sec": owner.pop("waited_sec"),
                           "render_owner_waited_for_owner_ids": owner.pop("waited_for_owner_ids")}
+            # What the queue was waiting for, if anything: the class of blocker
+            # the admission's clock was started by. The refusal below names it,
+            # so a request held up by the deployment fence or by a writer on the
+            # owner table cannot answer as a generic live render owner.
+            queue_blocked_by = owner.pop("waited_blocked_by", None)
             if owner_wait["render_owner_wait_sec"] > 1.0:
                 print(f"[harness] {self.path} waited "
                       f"{owner_wait['render_owner_wait_sec']:.0f}s for render owner(s) "
@@ -7603,27 +7658,51 @@ class _Handler(BaseHTTPRequestHandler):
         _publish_request_abandon(self._render_client_abandoned)
         try:
             if held:
-                elapsed = time.monotonic() - admission_started
+                queued = owner_wait["render_owner_wait_sec"]
                 if self._render_client_abandoned():
                     release_reason = ("not rendered: the caller disconnected "
                                       "before the render started")
                     print(f"[harness] {self.path} {operation_id}: {release_reason}",
                           flush=True)
                     return
-                # Only a POSITIVE limit is charged here. The limit bounds the
-                # QUEUE WAIT, and a non-positive one was already enforced as
-                # "may not queue at all" at admission (`owner` above): either it
-                # was handed the render lock at once -- so no queue wait ran,
-                # and the time since admission_started is the render's own
-                # setup, which this field never spoke about -- or it was refused
-                # there with `_may_not_queue_refusal`. Measuring `elapsed` here
-                # is what refused a zero-limit request holding a FREE lock.
-                if wait_timeout is not None and wait_timeout > 0 and elapsed > wait_timeout:
+                # What this request has spent waiting for SOMEONE ELSE since it
+                # arrived: the owner-row QUEUE WAIT the admission counted (a live
+                # render owner, the deployment-admission fence, a writer on the
+                # owner table) plus `lock_wait`, the post-ownership wait for the
+                # process render lock and the cross-process render-effect lock,
+                # which another render held. It deliberately does NOT include
+                # this request's own admission transaction (connect, CREATE TABLE
+                # IF NOT EXISTS, BEGIN IMMEDIATE, commit: its own cost, however
+                # slow the box makes it) -- measuring `monotonic() -
+                # admission_started` charged that too, and refused a request
+                # holding a FREE render lock with `owner_kind: active` and an
+                # EMPTY owner list purely for being slow to admit itself. Only a
+                # POSITIVE limit is charged: a non-positive one was already
+                # enforced as "may not queue at all" at admission (`owner`
+                # above) -- either it was handed the render lock at once, or it
+                # was refused there with `_may_not_queue_refusal` -- so it is
+                # never re-measured here. The check itself stays: a request that
+                # really waited for another render past its budget and only then
+                # took ownership is still refused, and the refusal names what it
+                # waited behind.
+                charged = queued + lock_wait
+                if wait_timeout is not None and wait_timeout > 0 and charged > wait_timeout:
+                    # Which wait ran the limit out: the queue (and then the
+                    # blocker the admission recorded), or a render lock held by
+                    # another render once this request already owned the row.
+                    blocked_by = (queue_blocked_by if queued > wait_timeout
+                                  else "post_ownership_lock")
                     release_reason = ("not rendered: render_wait_timeout_sec ran "
                                       "out before the render started")
+                    print(f"[harness] {self.path} {operation_id}: {release_reason} "
+                          f"(waited {charged:.2f}s of a {wait_timeout}s limit: "
+                          f"{queued:.2f}s queued for render owner(s) "
+                          f"{owner_wait['render_owner_waited_for_owner_ids']}, "
+                          f"{lock_wait:.2f}s for the render locks)", flush=True)
                     return self._send(409, _wait_timed_out(
-                        elapsed, wait_timeout,
-                        owner_wait["render_owner_waited_for_owner_ids"], owned=True))
+                        charged, wait_timeout,
+                        owner_wait["render_owner_waited_for_owner_ids"], owned=True,
+                        blocked_by=blocked_by))
             if self.path == "/compile":
                 # Only the identity the request actually carried is passed, so
                 # a plain request reaches compile_project exactly as before.

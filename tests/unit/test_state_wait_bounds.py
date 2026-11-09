@@ -33,11 +33,17 @@ cannot place -- a primitive's bare name it does not know, or one of ``wait_for``
 / ``timeout`` / ``timeout_at`` used as a method of an object it cannot identify --
 is refused as unclassified rather than skipped and assumed harmless.  The one
 exception is the different API BOUNDARY (i) describes, ``x.wait(...)`` on
-something that is not ``asyncio``, and it has two sides, not one: a numeric
-literal bound of 1.0 or more is refused, while a bound read from a name, no
-argument at all, and a sub-second literal all carry no record -- the same
-threshold as everywhere else in this file.  Each refusal names the
-site: its line number, the form it was written in, and the bound's source text.
+something that is not ``asyncio``, and it has two sides, not one: a call one of
+whose arguments carries a numeric literal of 1.0 or more is refused, while a
+bound read from a name, no argument at all, and a sub-second literal all carry
+no record -- the same threshold as everywhere else in this file.  That literal is
+read anywhere in an argument's subtree, not only as the bound itself, so
+``event.wait(2 * 0.1)`` (a sub-second computed bound carrying the constant ``2``)
+and ``event.wait(0.5, 99)`` (an extra argument) are each refused exactly once --
+the shapes
+``test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound``
+pins.  Each refusal names the site: its line number, the form it was written in,
+and the bound's source text.
 
 FAIL-CLOSED ON AN UNRESOLVED AWAIT.  A chained spelling is closed by resolution,
 and the shapes left unresolved are caught by one rule of last resort: an
@@ -168,7 +174,9 @@ FORM_DUNDER_CALL = "asyncio.{name}.__call__"
 # whose arguments carry a numeric literal bound of SUB_SECOND_LIMIT or more.
 FORM_UNRESOLVED_LITERAL = "unresolved await, numeric literal bound"
 # ``x.wait(...)`` on something that is not ``asyncio``: a different API, recorded
-# only when one of its arguments is a numeric literal of SUB_SECOND_LIMIT or more.
+# only when one of its arguments carries a numeric literal of SUB_SECOND_LIMIT or
+# more -- read anywhere in that argument's subtree, not as the bound's value, so
+# ``event.wait(2 * 0.1)`` and ``event.wait(0.5, 99)`` are refused once each too.
 # Below that threshold it carries no record -- the guarded module's name-bound
 # handshake, a call with no argument at all, and ``event.wait(0.5)`` are all
 # unrecorded, each carried by a probe in ``SILENT_SHAPES``.
@@ -533,7 +541,8 @@ def _resolve_call(call, names):
                                f"asyncio.{func.attr}")
         if func.attr == "wait":
             # Another API (see :func:`_refused_wait_literal`): silent when its bound is
-            # a name, refused when its bound is a literal of 1.0 or more.
+            # a name, refused when one of its arguments carries a literal of 1.0 or
+            # more.
             return _refused_wait_literal(call, func)
         return _Resolution(None, FORM_UNCLASSIFIED, ast.unparse(func))
     if isinstance(func, ast.Name):
@@ -627,10 +636,10 @@ def _wait_other_api_message(call, resolution, line):
     text = ast.unparse(literal) if literal is not None else "<no bound>"
     return (f"line {line}: {resolution.form} -- {resolution.callee}(..., {text}) is "
             f"refused: ``x.wait(...)`` on something that is not ``asyncio`` is a "
-            f"different API, and its name-bound form is deliberately not audited, but a "
-            f"numeric literal bound >= {SUB_SECOND_LIMIT:.1f} is refused rather than "
-            f"skipped (fail-closed); a wait must be written so the audit can read which "
-            f"bound it uses")
+            f"different API, and its name-bound form is deliberately not audited, but one "
+            f"of its arguments carrying a numeric literal >= {SUB_SECOND_LIMIT:.1f} is "
+            f"refused rather than skipped (fail-closed); a wait must be written so the "
+            f"audit can read which bound it uses")
 
 
 def _awaited_calls(tree):
@@ -1440,9 +1449,11 @@ def test_a_shape_the_prose_calls_silent_is_measured_silent(tmp_path, shape, sour
 
 
 # The exclusion in BOUNDARY (i) is for the API, not for large numbers: the same
-# ``x.wait(...)`` shape carrying a numeric literal bound of 1.0 or more is refused
-# as unclassified instead of skipped, so a blocking handshake cannot hide behind
-# "it is a different API".
+# ``x.wait(...)`` shape with an argument carrying a numeric literal of 1.0 or more
+# is refused as unclassified instead of skipped, so a blocking handshake cannot
+# hide behind "it is a different API".  The predicate reads argument subtrees, not
+# bound values, so a sub-second COMPUTED bound and an extra argument are refused
+# too -- the last two rows pin those fail-closed shapes.
 WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
     pytest.param(
         "threading-literal",
@@ -1488,6 +1499,30 @@ WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
         "event.wait",
         id="awaited-event-literal",
     ),
+    # The predicate reads the whole argument subtree for a 1.0-or-more literal, so
+    # these two are refused even though neither bound VALUE reaches the threshold.
+    pytest.param(
+        "sub-second-computed-bound",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return event.wait(2 * 0.1)\n",
+        5,
+        "event.wait",
+        id="sub-second-computed-bound",
+    ),
+    pytest.param(
+        "extra-argument",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(event):\n"
+        "    return await event.wait(0.5, 99)\n",
+        5,
+        "event.wait",
+        id="extra-argument",
+    ),
 ]
 
 
@@ -1495,7 +1530,14 @@ WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
                          WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL)
 def test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound(
         tmp_path, shape, source, line, callee):
-    """A different API is refused at a 1.0-or-more literal; below that it is silent."""
+    """A different API is refused at a 1.0-or-more literal; below that it is silent.
+
+    The literal is read anywhere in an argument's subtree rather than as the bound's
+    value, so ``event.wait(2 * 0.1)`` -- a sub-second COMPUTED bound carrying the
+    constant ``2`` -- and ``event.wait(0.5, 99)`` -- an extra argument carrying
+    ``99`` -- are each refused exactly once, on the same threshold as a bound
+    written at 1.0 or more.
+    """
     sites = _audit_synthetic(tmp_path, source, f"outside_vocabulary_{shape}.py")
     refused = [site for site in sites if site.classification == REFUSED]
     assert len(refused) == 1, (

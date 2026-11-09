@@ -35,6 +35,9 @@ def _repo(tmp_path, *, client_timeout=None):
     if client_timeout is not None:
         # The executor entry scrubs the child environment, so a fixture value
         # reaches the gate only when the gate program carries it (`embed_env`).
+        # Every row below passes its timeout down to here, so none of them runs
+        # on the gate's own default (`tests/gate_fixture.py:37`, "60") by
+        # accident -- a parent-side setting would have reached nothing.
         (repo / "gate.py").write_text(
             embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=str(client_timeout)))
     return repo
@@ -43,7 +46,6 @@ def _repo(tmp_path, *, client_timeout=None):
 def _queued_gate(tmp_path, monkeypatch, *, render, queue, client_timeout):
     rig = HarnessRig(tmp_path / "harness", monkeypatch, render_seconds=render)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", str(client_timeout))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "60")
     monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.5")
     try:
@@ -124,7 +126,6 @@ def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("GODOT_BUILDER_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "1")
     monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.2")
     try:
         gate = rt._run_repo_gate(_repo(tmp_path, client_timeout=1))

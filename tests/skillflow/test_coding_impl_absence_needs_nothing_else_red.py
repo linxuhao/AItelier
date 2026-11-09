@@ -27,7 +27,12 @@ from tests.gate_fixture import (GATE_PY, HarnessRig, assert_repo_gate_calls,
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
 
-# The entry scrubs parent env; the gate owns its controlled fixture settings.
+# The gate owns its controlled fixture settings: `core/repository_executor_entry`
+# builds the gate child's environment from scratch (HOME, PATH, PYTHONPATH,
+# PYTHONDONTWRITEBYTECODE, GATE_REPORT_DIR, GODOT_BUILDER_URL) and Popens with
+# it, so this tail is the ONLY carrier for them. A `monkeypatch.setenv` here
+# would set nothing the gate can read;
+# tests/unit/test_fixture_gate_settings_have_a_carrier.py reddens on one.
 _GATE_TAIL = ("export FIXTURE_GATE_OP=coding-impl-gate\n"
               "export FIXTURE_GATE_CLIENT_TIMEOUT=30\n"
               "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n")
@@ -37,8 +42,6 @@ def test_pole_4_a_pytest_red_behind_a_busy_gate_goes_back_to_implement(
         tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
-    monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     counter = tmp_path / "calls.txt"
     try:
@@ -77,8 +80,6 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
         tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
-    monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     counter = tmp_path / "calls.txt"
     try:

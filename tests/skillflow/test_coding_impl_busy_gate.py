@@ -19,7 +19,11 @@ from tests.code_output_fixture import commit_count
 from tests.gate_fixture import GATE_PY, HarnessRig
 from tests.skillflow.test_coding_impl_gate_absence import _drive, _wire
 
-# The entry scrubs parent env; the gate owns its controlled fixture settings.
+# The gate owns its controlled fixture settings: `core/repository_executor_entry`
+# builds the gate child's environment from scratch and Popens with it, so this
+# tail is the ONLY carrier for them. A `monkeypatch.setenv` here would set
+# nothing the gate can read;
+# tests/unit/test_fixture_gate_settings_have_a_carrier.py reddens on one.
 _GATE_TAIL = ("export FIXTURE_GATE_OP=coding-impl-gate\n"
               "export FIXTURE_GATE_CLIENT_TIMEOUT=3\n"
               "exec python3 - <<'PYGATE'\n" + GATE_PY + "\nPYGATE\n")
@@ -44,8 +48,6 @@ def _inventory(sf, run_id):
 def test_a_busy_gate_never_sends_the_run_back_to_implement(tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "3")
-    monkeypatch.setenv("FIXTURE_GATE_OP", "coding-impl-gate")
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     counter = tmp_path / "calls.txt"
     try:

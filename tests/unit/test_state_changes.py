@@ -104,6 +104,76 @@ async def test_replayed_event_precedes_slow_recovery(service, monkeypatch):
     assert result["events"]
 
 
+def failing_recovery_page(monkeypatch, service, commit=None):
+    """Install the `recovery_ok is False` page: observed, not reconciled.
+
+    Seam: `_wait_for_state_change` resolves `recover_page` by module global name
+    on every observation cycle, so replacing it produces a page that WAS observed
+    and could not be reconciled — the `(after, False)` answer. That is the branch
+    that owns the replay decision. `(after, None)` is a DIFFERENT answer: another
+    observer holds the recovery, no fresh page or failure was observed, and the
+    wait neither replays nor answers — a test that returned it would not exercise
+    this branch at all. `runtime_factory` is only what makes the wait attempt a
+    recovery page (it needs an engine or a runtime factory); it is never called,
+    because the replaced `recover_page` is the seam.
+    """
+    from core import state_changes
+
+    def unreachable(*_args, **_kwargs):
+        raise AssertionError("recover_page is the seam under test; nothing may build a runtime")
+
+    def page(_service, _project_id, after, *_args, **_kwargs):
+        pages.append(after)
+        if commit is not None:
+            commit()
+        return after, False
+
+    pages = []
+    service.runtime_factory = unreachable
+    monkeypatch.setattr(state_changes, "recover_page", page)
+    return pages
+
+
+@pytest.mark.asyncio
+async def test_director_recovery_failure_replays_an_event_committed_above_the_cursor(service, monkeypatch):
+    """A failed page must not swallow an event another row committed meanwhile.
+
+    The commit lands WHILE the page runs, not before the wait: a commit already
+    on the table when the first `scan` runs is answered by the replay branch
+    above this one, so it would never reach the recovery-failure decision. The
+    re-scan exists exactly for the write that lands while this row is
+    unreconciled — drop its return and this test answers observation_unavailable
+    with the event still committed.
+    """
+    cursor = service.store.events("p")[-1]["seq"]
+    pages = failing_recovery_page(monkeypatch, service, commit=lambda: service.store.revise_node(
+        "p", "a", 1, "committed by another row during the page", goal="Changed"))
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True,
+                                                timeout_seconds=2)
+    assert len(pages) == 1, "the failure must come from an observed page, not an unobserved cycle"
+    assert [e["event_type"] for e in result["events"]] == ["node_revised"], result
+    assert result["timed_out"] is False
+    assert "reason" not in result
+    assert result["next_after"] == result["events"][0]["seq"] > cursor
+
+
+@pytest.mark.asyncio
+async def test_director_recovery_failure_without_an_event_answers_observation_unavailable(service, monkeypatch):
+    """The same failed page with nothing committed above the cursor decides nothing.
+
+    Arm B of the same branch, through the same seam: the answer names the
+    watermark the re-scan reached and says the observation was unavailable,
+    rather than reading cached attempt rows as an idle project.
+    """
+    cursor = service.store.events("p")[-1]["seq"]
+    pages = failing_recovery_page(monkeypatch, service)
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True,
+                                                timeout_seconds=2)
+    assert len(pages) == 1, "the failure must come from an observed page, not an unobserved cycle"
+    assert result == {"events": [], "next_after": cursor, "timed_out": False,
+                      "reason": "observation_unavailable"}
+
+
 @pytest.mark.asyncio
 async def test_http_wait_contract(service):
     from fastapi import FastAPI

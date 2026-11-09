@@ -2,7 +2,9 @@
 
 Dockerfile.godot COPYs docker/godot/*.py to /srv at build time and the container's
 CMD is `python3 /srv/godot_harness.py --serve` (docker-compose.yml `godot-builder`
-service, container aitelier-godot). Until now that was the only source of /srv, so:
+service, container aitelier-godot). Before commit 1726456def the compose file declared
+no /srv mount for `godot-builder`, so those COPY lines were the only source of /srv,
+and:
 
   * merging a change to docker/godot/godot_harness.py into main changed nothing the
     sidecar EXECUTED until somebody rebuilt the image or hand-copied the file into
@@ -10,14 +12,11 @@ service, container aitelier-godot). Until now that was the only source of /srv, 
   * any ordinary recreate (`docker compose up -d`, or the host rebooting and the
     container coming back) silently returned to whatever bytes the image baked.
 
-Both happened. The image aitelier-godot (created 2026-11-08T16:03:58Z) bakes the
+The image aitelier-godot (created 2026-11-08T16:03:58Z) bakes the
 docker/godot/godot_harness.py of commit db8c97855724 (committed 2026-11-08T15:51:41Z;
 sha256 157aff350699ccee681ef179ba17eb0a6d22716b6a2423c0019f4f764276749b). Commit
 20c31f4fa516 (committed 2026-11-08T16:31:46Z, after that image) is not what the image
-holds, so the image cannot have been built from it: its bytes got into a container by
-some other route, such as a hand copy. The
-render-wait fix merged as e0367fc4aa only took effect because the director copied the
-file into the container by hand at 18:40Z. The fix is a read-only bind of the
+holds, so the image cannot have been built from it. The fix is a read-only bind of the
 checkout's docker/godot directory at /srv, in the compose file, so the declaration
 travels with the repository and a plain `up -d` cannot drop it.
 
@@ -42,10 +41,11 @@ file's own location, never a copy of the file) and REFUSES — never skips:
     (`…:/srv/clock_sensitivity.py:ro`). Both shapes passed on 2026-11-09 before
     this refusal existed: the directory mount above was present and read-only
     exactly as intended, and one file inside /srv was still served from somewhere
-    else. The container runs /srv/godot_harness.py and imports its /srv siblings,
-    so a shadow at either destination makes the executed harness a mixture of this
-    checkout and bytes no repository holds — the mount declaration is then true
-    about the directory and false about the files the gate is measured against.
+    else. The container runs /srv/godot_harness.py directly, and the two probe scripts
+    beside it load that same path by file, so a shadow at either destination makes the
+    executed harness a mixture of this checkout and bytes no repository holds — the
+    mount declaration is then true about the directory and false about the files the
+    gate is measured against.
 
 Declaring the mount is also not the same as the serving user being able to READ it.
 `user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"` runs the sidecar as uid/gid

@@ -663,7 +663,10 @@ def test_the_audit_is_one_function_over_the_frozen_plan(tmp_path):
     (workspace / "a.py").write_text("x = 1\n")
     (workspace / "dir").mkdir()
     data = {"attempt_id": "att-1", "node_key": "execution.demo", "context_hash": "c" * 64, "base_sha": "0" * 40,
-            "workspace": str(workspace), "scope": ["a.py"], "goal": "g",
+            # The plan scope admits both declared paths: since the deliver item binds this scope, a
+            # plan whose delta falls outside it is refused at freeze (the cases further down pin that),
+            # and this test is about the AUDIT RESULT the accepted plan comes back with.
+            "workspace": str(workspace), "scope": ["a.py", "later.py"], "goal": "g",
             "items": [item("edit", [{"predicate": "files_changed", "args": {"paths": ["a.py", "later.py"]}}])]}
     audit = check_declared_paths(TodoPlan.from_json(data, builtin_library()))
     assert (audit.declared, audit.existing, audit.not_yet_existing) == (("a.py", "later.py"), ("a.py",), ("later.py",))
@@ -734,13 +737,24 @@ def test_every_no_digest_shape_is_refused_by_the_audit_function_itself(tmp_path,
     assert named in caught.value.reason, caught.value.reason
 
 
-# -- the pair: a declared delta path and the SAME item's changes_within scope ------------------
+# -- the pair: a declared delta path and the changes_within scope it is judged under -------------
 #
 # `code_change`'s `implement` item requires `paths` to change (`files_changed`) AND requires the
 # whole change to fall inside `scope` (`changes_within`). A path no scope glob matches cannot do
 # both: change it and `changes_within` fails, leave it and `files_changed` fails. The plan used to
 # freeze anyway and the attempt hung until it was abandoned (attempt-048f928d8ce343799a3fd9b508e17eb1:
 # `tests/unit/test_repo_gate_admission.py` against scope `tests/unit/test_gate_admission_*.py`).
+#
+# The same contradiction exists between DIFFERENT items, because an item is judged only after the
+# items it NEEDS have passed, and `changes_within` measures the whole tree since the base:
+#   * the harness-appended `deliver` item needs every item and binds the plan's own `scope`, so a
+#     declared path that scope cannot match makes `deliver` impossible (the shipped `investigate`
+#     template's report path was exactly that: it froze, and its deliver item could never pass);
+#   * any other item that needs the declaring item is judged with the declared change already in
+#     the tree, so its own scope must admit that path too.
+# The audit refuses both at freeze time. What it must NOT do is pair by DECLARATION ORDER: an item
+# that does not need the declaring item may be judged before the change exists, which is why the
+# `SCOPE_IN_AN_INDEPENDENT_ITEM` case below freezes and is then driven end to end, every item passing.
 
 @pytest.mark.parametrize("paths, scope, named", [
     (["app.py", "other.py"], ["app*"], "other.py"),
@@ -802,7 +816,7 @@ items:
 SCOPE_IN_ANOTHER_ITEM = """\
 name: t
 version: 1
-description: one item requires a delta, a LATER item declares a scope that excludes it
+description: one item requires a delta, a LATER item needs it and declares a scope that excludes it
 params:
   scope:
     type: list[str]
@@ -821,27 +835,133 @@ items:
         args: {scope: ["other.py"]}
 """
 
+SCOPE_IN_AN_INDEPENDENT_ITEM = """\
+name: t
+version: 1
+description: an EARLIER item requires a delta, a LATER item declares a scope that excludes it and does not need it
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: judge
+    title: "judge other.py before anything has changed"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
 
-def test_an_item_with_no_scope_of_its_own_is_not_judged_against_one(cli, repo, base, custom):
-    """Only items carrying BOTH predicates are judged: no `changes_within`, no pair, no refusal.
 
-    The plan-level `scope` (here `["app.py"]`, which cannot match `other.py`) is the appended
-    `deliver` item's, and it must not be read back into an item that never bound it.
+def test_a_delta_outside_the_plan_scope_is_refused_by_the_deliver_item_that_needs_it(cli, repo, base, custom):
+    """An item with no scope of its OWN is still judged against the scope `deliver` binds.
+
+    The earlier version of this test pinned the opposite - that `["app.py", "other.py"]` under the
+    plan scope `["app.py"]` freezes, because only an item carrying BOTH predicates was judged - and
+    that plan measurably CANNOT be delivered: its `deliver` item fails with "1 changed path(s)
+    outside scope ['app.py']: other.py". The `deliver` item is the constraint here because it needs
+    every item and binds the plan's own `scope`, so `other.py` is already in the tree when it is
+    measured. Refused at freeze, naming the path and the scope list.
     """
     write_template(custom, "t", DELTA_ONLY)
     code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"], "paths": ["app.py", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "deliver" and out["declared_by"] == "change", out
+    assert out["path"] == "other.py" and out["scope"] == ["app.py"] and out["predicate"] == "files_changed", out
+    assert "'other.py'" in out["reason"] and "['app.py']" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_the_same_delta_freezes_once_the_plan_scope_admits_it(cli, repo, base, custom):
+    """The other side of the refusal: the SAME template and paths, a scope that matches both.
+
+    Nothing about an item having no scope of its own refuses it - the constraint is the scope it is
+    judged under, and this plan satisfies it.
+    """
+    write_template(custom, "t", DELTA_ONLY)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"], "paths": ["app.py", "other.py"]})
     assert code == 0, out
     assert out["paths"]["declared"] == ["app.py", "other.py"], out["paths"]
 
 
-def test_a_scope_declared_by_another_item_is_not_paired_with_this_items_paths(cli, repo, base, custom):
-    """The pair is per ITEM: a scope a different item declares constrains only that item.
+def test_a_scope_an_item_needs_that_excludes_the_earlier_delta_is_refused(cli, repo, base, custom):
+    """`judge` needs `change`, so `app.py` is already changed when `judge` measures its own scope.
 
-    `change` requires `app.py` to change; `judge` binds a scope that excludes it. Both items are
-    satisfiable - `judge` runs after the delta and only reads what changed - so the plan freezes.
-    A plan-wide pairing would refuse this, which is the false refusal this test pins.
+    The plan cannot be delivered as written: `judge`'s `changes_within` fails on `app.py` while the
+    work `change` was required to do is present, and undoing it means the delivery carries no such
+    work. Refused at freeze, naming the offending path and `judge`'s declared scope list.
     """
     write_template(custom, "t", SCOPE_IN_ANOTHER_ITEM)
     code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "app.py" and out["scope"] == ["other.py"] and out["predicate"] == "files_changed", out
+    assert "'app.py'" in out["reason"] and "['other.py']" in out["reason"], out["reason"]
+    assert "changes_within" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_later_item_that_does_not_need_the_delta_is_not_judged_against_it_and_the_plan_runs(
+        cli, repo, base, custom):
+    """The rule follows `needs`, not declaration order - and the plan it spares really does pass.
+
+    `judge` binds a scope that excludes `app.py` but does not need `change`, so it may be judged
+    first, when nothing has changed since the base yet ("0 changed path(s), all inside scope").
+    Driving the shipped predicates on a real tree - `changes_within` for judge, `files_changed` for
+    change, `git_delivered` and `changes_within` for deliver - EVERY item of the frozen plan passes,
+    so pairing a later item's scope with an earlier delta it does not depend on would be a false
+    refusal. Every verdict asserted below is a shipped predicate's, run by the CLI against the real
+    tree: the audit's share is only to let the plan freeze.
+    """
+    write_template(custom, "t", SCOPE_IN_AN_INDEPENDENT_ITEM)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"]})
+    assert code == 0 and out["items"] == ["change", "judge", "deliver"], out
+    judge = begin_done(cli, "judge")
+    assert judge["outcome"] == "pass", judge
+    assert "0 changed path(s)" in judge["results"][0]["detail"], judge["results"]
+    cli.ok("begin", "--attempt", "att-1", "--item", "change")
+    (repo / "app.py").write_text("x = 2\n")
+    change = cli.ok("done", "--attempt", "att-1", "--item", "change")
+    assert change["outcome"] == "pass" and "all 1 file(s) changed as intended" in change["results"][0]["detail"], change
+    commit_all(repo)
+    got = deliver_results(cli)
+    assert got["_outcome"] == "pass", got
+    assert (got["git_delivered"]["outcome"], got["changes_within"]["outcome"]) == ("pass", "pass"), got
+    assert "all inside scope" in got["changes_within"]["detail"], got["changes_within"]
+
+
+# The shipped `investigate` template is the shape the plan-level half exists for: its `investigate`
+# item requires `report_path` to change (`files_changed`) and says nothing about a scope, while its
+# `deliver` item binds the same `scope` param - so the template's own param description ("Globs the
+# delivery may touch (include the report's path)") was the only thing asking a director to keep the
+# report inside it, and nothing enforced it.
+
+def test_an_investigate_plan_whose_report_path_lies_outside_its_scope_is_refused_at_freeze(cli, repo, base):
+    """The report path the shipped `investigate` template writes must be inside the scope it delivers.
+
+    `{report_path: "reports/findings.json", scope: ["src/**"]}` froze (created true) and its `deliver`
+    item could never pass: "changes_within fail | 1 changed path(s) outside scope ['src/**']:
+    reports/findings.json". Measured through the production route (`create --template investigate`);
+    on the base commit (c475b603eb) this plan FREEZES, so this test is red there.
+    """
+    params = {"report_path": "reports/findings.json", "require_keys": ["passed"], "scope": ["src/**"]}
+    code, out = create_from(cli, repo, base, "investigate", params)
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "deliver" and out["declared_by"] == "investigate", out
+    assert out["path"] == "reports/findings.json" and out["scope"] == ["src/**"], out
+    assert out["predicate"] == "files_changed", out
+    assert "'reports/findings.json'" in out["reason"] and "['src/**']" in out["reason"], out["reason"]
+    assert "changes_within" in out["reason"] and "files_changed" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+    # The same plan freezes once the scope admits the report it has to write - the audit refuses the
+    # contradiction, not the report path, and a report under an accepted scope still announces itself.
+    code, out = create_from(cli, repo, base, "investigate", {**params, "scope": ["src/**", "reports/"]},
+                            attempt="att-2")
     assert code == 0, out
-    assert out["items"] == ["change", "judge", "deliver"], out
+    assert out["paths"]["declared"] == ["reports/findings.json"], out["paths"]
+    assert "reports/findings.json" in out["paths"]["notes"][0], out["paths"]["notes"]

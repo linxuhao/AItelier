@@ -65,7 +65,7 @@ pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may 
 cd web && npm install && npm test   # tests web/__tests__/ pure logic + component tests
 ```
 
-Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's Svelte components and utility modules are unit-tested under `web/__tests__/` and `web/src/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
+Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network and not docker and not baked_toolchain"`). Suites live in `tests/{unit,integration,e2e,skillflow}`. The default run deselects all three registered opt-in marks — `network` (live external services), `docker` (needs a daemon and a frozen clean Source) and `baked_toolchain` (needs binaries the shipped image does not carry, so those rows cannot pass anywhere until that gap is closed) — so a row carrying any of them does NOT run under plain `pytest tests/`; ask for `network` or `docker` rows with `pytest -m network` / `pytest -m docker` in a throwaway container. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's Svelte components and utility modules are unit-tested under `web/__tests__/` and `web/src/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
 
 ### Docker deployment & secrets
 

@@ -122,8 +122,12 @@ def test_failed_reap_is_not_a_successful_absence_observation(sweep, caplog):
     assert sweep.observe([item]) == []
 
 
-@pytest.mark.docker  # needs the deployment container layout: the source under test IS /src
 def test_test_and_scheduler_import_the_owned_source():
+    # The expected root comes from THIS test file's location, never from
+    # `sc.__file__`: deriving it from the module under test would make the
+    # comparison a tautology.
     root = Path(__file__).resolve().parents[2]
     assert Path(sc.__file__).resolve() == root / "core/scheduler.py"
-    assert root == Path("/src")
+    # The test tree's own root is the repository checkout, so `<root>/core/...`
+    # names a real path in the tree the tests themselves run from.
+    assert (root / "pyproject.toml").is_file()

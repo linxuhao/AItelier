@@ -155,10 +155,13 @@ RENDER_OWNER_WAIT_POLL_SEC = 0.25
 # process render lock, then the cross-process render-effect lock. They are
 # bounded so a request that owns the row cannot hang past its caller's socket
 # (the play-test tool then reports a gate_timeout for a render that never ran).
-# They are NOT render_wait_timeout_sec: that bounds the queue wait for the owner
-# row only, and a free lock is never charged to it. The defaults are generous
-# on purpose -- a legitimate render holds these locks for minutes -- so they
-# only bite on a genuinely wedged holder.
+# They are NOT render_wait_timeout_sec: that bounds what a request may wait
+# through -- the queue wait for the owner row, whose clock starts at the first
+# FAILED admission attempt, so a requester that queued also carries the
+# transaction that won it, plus these bounded post-ownership lock waits. A lock
+# that is free costs about nothing, so nothing is charged for it. The defaults
+# are generous on purpose -- a legitimate render holds these locks for minutes --
+# so they only bite on a genuinely wedged holder.
 RENDER_PROCESS_LOCK_WAIT_SEC = 3600.0  # postlock-wait: bound on the process lock after ownership
 RENDER_EFFECT_LOCK_WAIT_SEC = 3600.0   # postlock-wait: bound on the effect flock after ownership
 # How often a bounded post-ownership wait re-tries its lock.
@@ -394,21 +397,35 @@ def _acquire_render_owner_waiting_inner(project_id: str, run_id: str, operation_
     None). do_POST checks both conditions again once it owns the render, before
     the render starts.
 
-    `waited_sec` is the QUEUE WAIT and nothing else: its clock starts when an
-    admission attempt first finds SOMETHING ELSE in the way -- a live render
-    owner, the deployment-admission fence, or another writer holding the owner
-    table -- so a request's own owner-table transaction (connect,
-    `CREATE TABLE IF NOT EXISTS`, `BEGIN IMMEDIATE`, commit) is never charged to
-    its caller's budget, and a request admitted on its first attempt records
-    exactly 0.0. That transaction is cheap on a quiet box and can be slow enough
-    to matter on a loaded one -- which is precisely the cost this budget must
-    not charge, because nothing was in the way.
+    `waited_sec` measures from the first FAILED admission attempt and is read
+    after the admission that finally SUCCEEDS returns. Its clock starts when an
+    attempt first finds SOMETHING ELSE in the way -- a live render owner, the
+    deployment-admission fence, or another writer holding the owner table -- and
+    stops once the request holds the row, which gives two facts a reader can
+    rely on:
+
+    * a request admitted on its FIRST attempt records exactly 0.0, however slow
+      its own owner-table transaction (connect, `CREATE TABLE IF NOT EXISTS`,
+      `BEGIN IMMEDIATE`, commit) was, because nothing was in its way;
+    * a request that queued AT LEAST ONCE also carries its own WINNING
+      owner-table transaction inside `waited_sec`, because the clock is still
+      running while the attempt that wins the row executes it (measured on a
+      loaded box: +0.297 s median on top of the time it queued).
+
+    `RENDER_OWNER_WAIT_POLL_SEC` (0.25 s) is the poll between attempts, so 0.25 s
+    is the smallest wait a request can record once it has queued at all. The
+    winning transaction of a queued request is cheap on a quiet box and can be
+    slow enough to matter on a loaded one; only the transaction of an
+    UNCONTENDED request is deliberately kept out of the budget, because for that
+    request nothing was in the way.
     """
     if wait_timeout is not None and wait_timeout <= 0:
         return _acquire_render_owner_without_queuing(
             project_id, run_id, operation_id, wait_timeout=wait_timeout)
-    # Set the moment another holder is found: until then this request has not
-    # waited for anybody, so its own admission transaction is its own cost.
+    # Stamped only after an admission attempt FAILS: a request admitted on its
+    # first attempt keeps this None and records exactly 0.0, because nothing was
+    # in its way. From the second attempt on the clock is running, so the attempt
+    # that finally wins the row has its own transaction charged too.
     queue_started = None
     waited_for: list[str] = []
     blocked_by = None
@@ -459,11 +476,16 @@ def _wait_timed_out(elapsed: float, wait_timeout: float, waited_for: list,
                     blocked_by: str | None = None) -> dict:
     """The refusal for a request whose own render_wait_timeout_sec ran out.
 
-    `elapsed` is the wait this request spent on SOMEONE ELSE -- the owner-row
-    QUEUE WAIT it spent behind another holder, plus, when it already owned the
-    row, the post-ownership wait for the render locks -- never its own
-    owner-table admission transaction, so the body's `waited_sec` and the
-    `where` it names describe the same thing.
+    `elapsed` is what this request spent with its wait clock running: the clock
+    starts at its first FAILED admission attempt -- the first moment something
+    else was in the way -- and is read either after a later failed attempt (the
+    queue's own refusal) or after the attempt that won the row, so it carries
+    the further admission attempts the request itself made, including the
+    transaction that won it, plus, when it already owned the row, the
+    post-ownership wait for the render locks. It never reaches back before that
+    first failed attempt, so a refusal can never be charged for an admission
+    that had nothing in its way; the body's `waited_sec` and the `where` it
+    names describe the same thing.
 
     `owner_kind` / `owner_id` name the REAL blocker: the last live render owner
     this request queued behind, or -- when no owner id exists -- the class of
@@ -7536,10 +7558,14 @@ class _Handler(BaseHTTPRequestHandler):
         # (owner_lost, or active with a stale heartbeat) is refused at once with
         # a 409 that names its kind.
         #
-        # N is a QUEUE wait -- the seconds this request spends waiting for
-        # SOMEONE ELSE, never its own admission transaction and never the
-        # post-ownership lock setup -- so N <= 0 means "may not queue at all" and
-        # is decided by one non-blocking admission attempt: a free render lock
+        # N bounds what this request may wait through. The queue wait in it
+        # starts at the first FAILED admission attempt and stops when the
+        # admission that wins the row returns, so a request that queued also
+        # carries its own winning owner-table transaction, while one admitted on
+        # its first attempt was charged nothing for its admission (it records
+        # exactly 0.0). The post-ownership lock setup below is BOUNDED, and what
+        # it costs is charged too. N <= 0 means "may not queue at all" and is
+        # decided by one non-blocking admission attempt: a free render lock
         # renders, and a holder in the way is refused at once with
         # `_may_not_queue_refusal` (never with `_wait_timed_out`, whose wording
         # is a wait that really ran out).
@@ -7665,18 +7691,24 @@ class _Handler(BaseHTTPRequestHandler):
                     print(f"[harness] {self.path} {operation_id}: {release_reason}",
                           flush=True)
                     return
-                # What this request has spent waiting for SOMEONE ELSE since it
-                # arrived: the owner-row QUEUE WAIT the admission counted (a live
-                # render owner, the deployment-admission fence, a writer on the
-                # owner table) plus `lock_wait`, the post-ownership wait for the
+                # What this request has spent waiting since it arrived: the
+                # owner-row QUEUE WAIT the admission counted (a live render
+                # owner, the deployment-admission fence, a writer on the owner
+                # table) plus `lock_wait`, the post-ownership wait for the
                 # process render lock and the cross-process render-effect lock,
-                # which another render held. It deliberately does NOT include
-                # this request's own admission transaction (connect, CREATE TABLE
-                # IF NOT EXISTS, BEGIN IMMEDIATE, commit: its own cost, however
-                # slow the box makes it) -- measuring `monotonic() -
-                # admission_started` charged that too, and refused a request
-                # holding a FREE render lock with `owner_kind: active` and an
-                # EMPTY owner list purely for being slow to admit itself. Only a
+                # which another render held. The queue wait reads from the first
+                # FAILED admission attempt to the admission that SUCCEEDS, so a
+                # request admitted on its first attempt contributes exactly 0.0
+                # -- its own admission transaction (connect, CREATE TABLE IF NOT
+                # EXISTS, BEGIN IMMEDIATE, commit: its own cost, however slow the
+                # box makes it) is then not charged, and measuring
+                # `monotonic() - admission_started` charged it and refused a
+                # request holding a FREE render lock with `owner_kind: active`
+                # and an EMPTY owner list purely for being slow to admit itself.
+                # A request that DID queue carries the transaction that won it,
+                # because the clock runs until that attempt returns (measured on
+                # a loaded box: +0.297 s median over the time it queued, and
+                # never under RENDER_OWNER_WAIT_POLL_SEC = 0.25 s). Only a
                 # POSITIVE limit is charged: a non-positive one was already
                 # enforced as "may not queue at all" at admission (`owner`
                 # above) -- either it was handed the render lock at once, or it

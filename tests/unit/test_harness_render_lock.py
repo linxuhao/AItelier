@@ -10,12 +10,16 @@ negative value, which the request path clamps to 0) therefore means "may not
 queue at all" -- not "may not render", which is what the code measured when it
 charged the time spent AFTER ownership to the same limit.
 
-The third section is the same limit from the other side: the queue wait it
-bounds is the time a request spends waiting for SOMEONE ELSE. A request's own
-owner-table admission transaction (connect, `CREATE TABLE IF NOT EXISTS`,
-`BEGIN IMMEDIATE`, commit) is that request's own cost -- cheap on a quiet box,
-slow enough to matter on a loaded one -- and charging it refused a request
-whose render lock was FREE.
+The third section is the same limit from the other side: `render_wait_timeout_sec`
+is about waiting for SOMETHING ELSE. A request's own owner-table admission
+transaction (connect, `CREATE TABLE IF NOT EXISTS`, `BEGIN IMMEDIATE`, commit) is
+that request's own cost -- cheap on a quiet box, slow enough to matter on a loaded
+one -- so charging EVERY request's admission refused one whose render lock was
+FREE. The clock therefore starts at the first FAILED admission attempt: a request
+admitted on its first attempt records exactly 0.0, and a request that queued at
+least once carries its winning admission transaction inside the number, because
+the clock runs until that attempt returns (+0.297 s median over the queued time
+on a loaded box).
 """
 import ast
 import pathlib
@@ -305,16 +309,21 @@ def test_an_absent_or_null_limit_keeps_the_ordinary_bounded_queue(rig, limit):
 # ── a-the-wait-budget-bounds-only-waiting-for-someone-else ──────────────────
 # The defect (found in the 2026-11-09 whole-suite gate row):
 # `render_wait_timeout_sec` bounds the QUEUE WAIT -- the seconds a request
-# spends waiting for SOMEONE ELSE -- but
+# spends waiting for something else, its clock starting at the first FAILED
+# admission attempt -- and a request with nothing in its way must therefore be
+# charged nothing for its own admission. What the code did instead:
 # `_acquire_render_owner_waiting_inner` started its clock immediately before
-# the FIRST `acquire_render_owner(...)` call, so the request's own owner-table
-# transaction (connect + `CREATE TABLE IF NOT EXISTS` + `BEGIN IMMEDIATE` +
-# commit) was charged to its caller's budget. do_POST then re-checked
-# `monotonic() - admission_started` AFTER the request already owned the render,
-# and refused 409 `_wait_timed_out(..., owned=True)` -- `owner_kind: active`,
-# `owner_id: null`, `waited_for_owner_ids: []` -- for a request nothing was
-# ever in the way of. The gate row then read that 409 as "godot-builder
-# unreachable" (exit 2) and reported a red for a render that never ran.
+# the FIRST `acquire_render_owner(...)` call, so even an UNCONTENDED request's
+# own owner-table transaction (connect + `CREATE TABLE IF NOT EXISTS` + `BEGIN
+# IMMEDIATE` + commit) was charged to its caller's budget. do_POST then
+# re-checked `monotonic() - admission_started` AFTER the request already owned
+# the render, and refused 409 `_wait_timed_out(..., owned=True)` --
+# `owner_kind: active`, `owner_id: null`, `waited_for_owner_ids: []` -- for a
+# request nothing was ever in the way of. The gate row then read that 409 as
+# "godot-builder unreachable" (exit 2) and reported a red for a render that
+# never ran. A request that DOES queue keeps its winning transaction inside the
+# number, since the clock runs until the winning attempt returns; that is the
+# wait it really had.
 #
 # Every test below drives the real served `do_POST` through `rig`. The slowness
 # lives in the PROBE (a wrapper around the module's `acquire_render_owner`), so

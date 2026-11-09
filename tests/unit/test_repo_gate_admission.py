@@ -538,10 +538,14 @@ def test_a_real_uncontended_gate_run_records_no_contention(tmp_path, monkeypatch
     clean one and the summary never mentions contention.
 
     This is the case `_render_contention`'s wait floor exists for. The harness
-    starts its wait clock when the request begins TAKING ownership, so an
-    uncontended acquisition still records a few milliseconds (measured 0.0115s
-    through this rig); without the floor every clean run would report `waited`
-    and prefix its summary with a contention sentence.
+    starts its wait clock at the first FAILED admission attempt -- the first
+    moment something else is in the way -- so an uncontended acquisition records
+    exactly 0.0 and names no owner: nothing was charged for its own owner-table
+    transaction, and the block reads `none` on a run that waited for nobody. The
+    floor still bites where it was written for: a request that queued briefly
+    behind the deployment fence, say, records a wait that names no owner id, so
+    without the per-request floor a busy run would report `waited` and prefix
+    its summary with a contention sentence.
     """
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
@@ -564,9 +568,13 @@ def test_a_real_uncontended_gate_run_records_no_contention(tmp_path, monkeypatch
 
 
 def test_a_sub_second_recorded_wait_is_not_contention():
-    """The floor, on the number the harness really records for an uncontended
-    acquisition: taking ownership cost 0.0115s, nobody was queued, and that is
-    NOT a wait behind anybody. The raw number stays in the admission summary."""
+    """The floor, on a hand-supplied sub-second wait: 0.0115s, nobody queued.
+
+    The number is an INPUT here, not the harness's uncontended figure -- that is
+    exactly 0.0, since the clock starts at the first FAILED admission attempt --
+    and it stands for a small recorded wait that is not a wait behind anybody.
+    The raw number stays in the admission summary.
+    """
     admission = gate_admission.admission_summary(
         [_answered(0, waited_for=[], wait=0.0115)])
     assert admission["render_owner_wait_sec"] == 0.011

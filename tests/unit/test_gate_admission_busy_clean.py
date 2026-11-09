@@ -2,18 +2,22 @@
 
 The render-contention judgement used to compare the SUMMED `render_owner_wait_sec`
 of a run against the per-request floor (`RENDER_CONTENTION_WAIT_FLOOR_SEC`, one
-second). An uncontended render acquisition still records about 0.0115 s (the
-owner-table round trip), so a run with ~90 clean requests summed past one second
-without any request waiting at all, and the report claimed a wait behind "no
-owner id recorded". The judgement is now per request: the largest single
-recorded wait of the run must reach the floor, or a named owner must be present.
+second). Summed over a busy run, small per-request numbers add up: a request that
+queued at all records at least `RENDER_OWNER_WAIT_POLL_SEC` (0.25 s), so a run of
+many requests that each queued only briefly summed past one second without any
+single request waiting a second, and the report claimed a wait behind "no owner
+id recorded". The judgement is now per request: the largest single recorded wait
+of the run must reach the floor, or a named owner must be present.
 
 Two poles, both through the REAL `AdmissionRelay` (`gate_admission`) against a
 fake upstream that answers each request with a render-queue answer:
 
-  * `a-clean-busy-run-reads-clean`: N uncontended requests, each recording
-    0.0115 s and naming no owner. The summed wait is past the floor, yet the
-    block reads `none` and the report summary carries no contention sentence.
+  * `a-clean-busy-run-reads-clean`: N requests, each answered with 0.0115 s and
+    naming no owner -- that number is this rig's INPUT, not a measurement of the
+    harness's uncontended acquisition, which records exactly 0.0 because its
+    clock starts at the first FAILED admission attempt. The summed wait is past
+    the floor, yet the block reads `none` and the report summary carries no
+    contention sentence.
   * `a-real-wait-is-still-named`: a request that queued behind a live owner
     reads `waited`, names that owner, carries the recorded wait, and prints the
     contention sentence. A run that queued and was also busy keeps the summed
@@ -39,8 +43,11 @@ from pathlib import Path
 from aitelier import gate_admission
 from aitelier.tools.run_tests import impl as rt
 
-# The uncontended acquisition the harness really records (measured 0.0115 s),
-# and enough of them that their SUM is past the one-second floor.
+# A hand-supplied sub-second wait this rig's fake upstream ANSWERS with (0.0115 s
+# is not what the harness records for an uncontended acquisition -- that is
+# exactly 0.0, its clock starting at the first FAILED admission attempt -- it is
+# the number fed in here), and enough of them that their SUM is past the
+# one-second floor.
 UNCONTENDED_WAIT_SEC = 0.0115
 UNCONTENDED_ACQUISITIONS = 100
 OWNER = "8dc68cf4e96847a8b3df40e7d3752c5c"

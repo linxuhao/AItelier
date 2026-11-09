@@ -273,6 +273,19 @@ services:
       # its project view remains read-only at the application layer.
       - ${HOME}/.AItelier:${HOME}/.AItelier:ro
       - ${HOME}/.AItelier/godot-control:/var/lib/aitelier-godot
+      # The harness this container RUNS is the checkout's, not only the image's.
+      # The image COPYs docker/godot/*.py to /srv at build time, so a merged
+      # harness change otherwise reached the running sidecar only through an
+      # image rebuild or a hand copy: the 2026-11-08 recreate silently went back
+      # to the baked bytes, and the 2026-11-09 render-wait fix took effect only
+      # because the file was copied in by hand. Read-only — the harness writes
+      # nothing here, its owner ledger lives under /var/lib/aitelier-godot. The
+      # baked copy stays as the fallback for a container started without this
+      # compose file. The harness also imports its /srv siblings
+      # (game_time_probe.py, clock_sensitivity.py), so this must be the whole
+      # directory, not one file. See
+      # tests/unit/test_godot_sidecar_serves_the_checkout.py.
+      - ./docker/godot:/srv:ro
     networks:
       - default
     restart: unless-stopped

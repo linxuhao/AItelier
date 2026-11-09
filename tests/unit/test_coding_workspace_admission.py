@@ -179,7 +179,12 @@ def test_process_exit_and_pending_marker_preserve_exact_row_until_explicit_retir
     assert ri.write_admissions(reopened) == []
 
 
-@pytest.mark.docker  # needs the deployment container layout: the source under test IS /src
 def test_owned_source_identity():
-    assert Path(__file__).resolve().parents[2] == Path("/src")
-    assert Path(ri.__file__).resolve() == Path("/src/core/run_isolation.py")
+    # The expected root comes from THIS test file's location, never from
+    # `ri.__file__`: deriving it from the module under test would make the
+    # comparison a tautology.
+    root = Path(__file__).resolve().parents[2]
+    assert Path(ri.__file__).resolve() == root / "core/run_isolation.py"
+    # The test tree's own root is the repository checkout, so `<root>/core/...`
+    # names a real path in the tree the tests themselves run from.
+    assert (root / "pyproject.toml").is_file()

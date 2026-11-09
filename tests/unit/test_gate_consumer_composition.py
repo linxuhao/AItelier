@@ -11,7 +11,6 @@ from tests.unit import test_repo_gate_early_contract_red as early
 
 
 
-@pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
 def test_early_contract_red_retains_full_raw_and_bounded_diagnostic(tmp_path, monkeypatch):
     diagnostic = "SCRIPT ERROR: generic authored schema contract failed"
     noisy = early.GATE.replace(
@@ -35,7 +34,7 @@ def test_early_contract_red_retains_full_raw_and_bounded_diagnostic(tmp_path, mo
     assert diagnostic.encode() in raw and raw.count(b"suite ok") == 900
     assert hashlib.sha256(raw).hexdigest() == gate["output_ref"]["sha256"]
     Path(gate["repo"], "gate.py").unlink()
-    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda _: gate)
+    monkeypatch.setattr(rt, "_acquire_repo_gate", lambda *a, **k: gate)
     out = tmp_path / "writer"
     result = rt.run_tests(project_root=gate["repo"], out_dir=str(out))
     report = json.loads((out / "test_report.json").read_text())

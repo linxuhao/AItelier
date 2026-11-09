@@ -1,59 +1,87 @@
 """Guard the shared bound on the must-complete waits in the wait-contention tests.
 
 ``tests/unit/test_state_wait_contention.py`` waits on real SQLite/SkillFlow work,
-so a correct-but-slow recovery page must never decide a verdict.  That is why its
+so a correct-but-slow recovery page must not decide a verdict.  That is why its
 must-complete handshakes are bounded by the module constant
 ``HANDSHAKE_SECONDS`` instead of a number: the constant is the single place to
 raise the bound, and raising it is exactly what the slow-page witness needed.
 A few sites are deliberate non-must-complete bounds -- the sub-second poll
 intervals and the ``budget`` drain.
 
-A must-complete wait has more than one spelling, and each one the resolver reads
-has to reach the same classification: ``asyncio.wait_for(waiter, 20.0)``, a bare
+A must-complete wait has more than one spelling, and the spellings this resolver
+reads reach the same classification: ``asyncio.wait_for(waiter, 20.0)``, a bare
 ``wait_for(waiter, 20.0)`` after ``from asyncio import wait_for``, name aliases
 (``wf = asyncio.wait_for``, its annotated form ``wf: object = asyncio.wait_for``,
 a ``functools.partial(asyncio.wait_for)``,
 ``getattr(asyncio, "wait_for")``, and the mapping subscripts
 ``asyncio.__dict__["wait_for"]`` / ``vars(asyncio)["wait_for"]``), an
-attribute-target alias ``A.wf = asyncio.wait_for`` awaited as ``A.wf(...)``,
-``getattr(asyncio, "wait_for")(waiter, 20.0)`` inlined, and
-``asyncio.timeout(20.0)`` / ``asyncio.timeout_at(deadline, 20.0)`` used as an
-async context manager.  :func:`audit_wait_bounds` parses the module, resolves
-each spelling above to a wait site, and classifies the site's bound as
+attribute-target alias (``A.wf = asyncio.wait_for`` awaited as ``A.wf(...)``,
+where ``A`` is a class or a second name for the module, ``A = asyncio``), the
+CHAINED spellings (``wf = wait_for`` off a direct import, ``wf2 = wf`` -- an alias
+of an alias --, a default-parameter binding
+``async def spelled(waiter, wf=asyncio.wait_for)`` and its own chain
+``async def spelled(waiter, *, wf=P)`` off ``P = asyncio.wait_for``, a
+``functools.partial(asyncio.wait_for)`` left unnamed in callee position, and
+``asyncio.wait_for.__call__``), ``getattr(asyncio, "wait_for")(waiter, 20.0)``
+inlined, and ``asyncio.timeout(20.0)`` / ``asyncio.timeout_at(deadline, 20.0)``
+used as an async context manager.  :func:`audit_wait_bounds` parses the module,
+resolves each spelling above to a wait site, and classifies the site's bound as
 ``must-complete`` (the Name ``HANDSHAKE_SECONDS``), ``allowed`` (a numeric
 literal strictly below 1.0, i.e. a sub-second poll interval, or the Name
 ``budget``, the drain bound) or ``refused``.  A wait-shaped call the resolver
 cannot place -- a primitive's bare name it does not know, or that name used as a
 method of an object it cannot identify -- is refused as unclassified rather than
-skipped and assumed harmless.  Every refusal names the site: its line number, the
+skipped and assumed harmless.  Each refusal names the site: its line number, the
 form it was written in, and the bound's source text.
 
+FAIL-CLOSED ON AN UNRESOLVED AWAIT.  A chained spelling is closed by resolution,
+and the shapes left unresolved are caught by one rule of last resort: an
+``await`` whose callee the resolver cannot place, and whose arguments carry a
+numeric literal of 1.0 or more, is recorded and refused as
+:data:`FORM_UNRESOLVED_LITERAL` -- the site names the unresolved callee and the
+literal it read.  A name built by ``exec``, a callee returned from another
+module, or any chained spelling nobody has written a resolver branch for is
+therefore refused on the literal rather than skipped.  Measured on the guarded
+module with the rule in place: its unresolved awaited calls are
+``other_service(service).wait_for_state_change(..., timeout_seconds=.12)`` and
+``...=.04`` (both sub-second) plus bare ``await waiter`` names, so the rule
+records 0 refused sites there and the real module audits clean.
+
 BOUNDARY.  This is a reading of one module's syntax, not a proof that no wait
-escapes it.  Two measured edges.  (i) The ``threading.Event().wait(...)``
-handshake is deliberately unaudited: ``tests/unit/test_state_wait_contention.py``
-line 38 reads ``observed = event.wait(HANDSHAKE_SECONDS)``, a threading
-primitive rather than an asyncio one, and no site for it appears in the audit.
-(ii) Three call shapes resolve to no site at all -- measured 0 sites each by
-probing this resolver: a name built by ``exec`` (``exec("wf =
-asyncio.wait_for")``, then ``await wf(...)``), a callee returned from another
-module's function (``wf = helpers.pick()``, then ``await wf(...)``), and
-``getattr(asyncio.wait_for, "__call__")(...)``.  The resolver follows names and
-expressions this module binds itself; it does not follow a value through
-``exec``, through another module, or through a ``getattr`` whose target is
-already an attribute.
+escapes it.  Two measured edges, each carried by an executed probe in
+``SILENT_SHAPES`` below: a claim of silence in this prose is backed by a case
+that runs the audit on exactly that snippet and gets zero records.
+(i) The ``threading.Event().wait(...)`` handshake is deliberately unaudited: the
+``handshake`` helper in the guarded module reads
+``observed = event.wait(HANDSHAKE_SECONDS)``, a threading primitive rather than
+an asyncio one, and no site for it appears in the audit.  (ii) Three call shapes
+resolve to no site at all -- measured 0 sites each by probing this resolver with
+an argument that carries no literal bound of 1.0 or more: a name built by
+``exec`` (``exec("wf = asyncio.wait_for")``, then ``await wf(...)``), a callee
+returned from another module's function (``wf = helpers.pick()``, then
+``await wf(...)``), and ``getattr(asyncio.wait_for, "__call__")(...)``.  The
+resolver follows names and expressions this module binds itself; it does not
+follow a value through ``exec``, through another module, or through a ``getattr``
+whose target is already an attribute.  Each of those three carries no record
+only while its arguments stay sub-second; give the same call a literal of 1.0 or
+more and the fail-closed rule above refuses it, which the
+``UNRESOLVED_LITERAL`` cases exercise.
 
 The counts are DERIVED from the audit's own output, never asserted as literals:
-the tests check the invariant -- every recorded site is exactly one of the
-shared bound or the named deliberate bounds, and no numeric literal bound
-reaches 1.0 -- so adding a compliant wait to the guarded module cannot redden
-the guard.  A derived invariant cannot see a DELETION, though (nine sites and ten
-satisfy it alike), so the audit's ``(enclosing fixture, primitive)`` keys are also
-held to a superset of ``KNOWN_MUST_COMPLETE_SITES``.  Two companions make both
-directions visible on ``tmp_path`` copies: one inserts a compliant
+the tests check the invariant over the records the audit returned -- each such
+record is the shared bound or one of the named deliberate bounds, and none
+reaches a numeric literal bound of 1.0 -- so a compliant addition to the guarded
+module stays green.  A derived invariant cannot see a DELETION, though (nine
+sites and ten satisfy it alike), so the audit's ``(enclosing function,
+primitive)`` keys are also held to a superset of ``KNOWN_MUST_COMPLETE_SITES``.
+That table is keyed by the guarded module's TEST-FUNCTION NAME (``held_recovery``
+is a fixture, the rest are test functions), so renaming or moving a guarded test
+-- or moving its wait into a different function -- requires updating those keys;
+a stale key shows up as a missing known site, never as silence.  Two companions
+make both directions visible on ``tmp_path`` copies: one inserts a compliant
 ``await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)`` and asserts one more
-must-complete site with no refusal, the other deletes the ``held_recovery``
-handshake and asserts the superset check goes false with the census one site
-smaller.
+must-complete site with no refusal, the other deletes the ``held_recovery`` wait
+and asserts the superset check goes false with the census one site smaller.
 
 Run this module directly to print the audit for a reader.
 """
@@ -72,7 +100,7 @@ MUST_COMPLETE = "must-complete"
 ALLOWED = "allowed"
 REFUSED = "refused"
 
-# The one shared bound every must-complete handshake must be written against.
+# The one shared bound the must-complete handshakes are written against.
 MUST_COMPLETE_BOUNDS = {"HANDSHAKE_SECONDS"}
 # Deliberate, named non-must-complete bounds: the drain bound of the slow-page test.
 ALLOWED_BOUND_NAMES = {"budget"}
@@ -100,12 +128,25 @@ FORM_DICT_SUBSCRIPT = 'asyncio.__dict__["{name}"] alias'
 FORM_VARS_SUBSCRIPT = 'vars(asyncio)["{name}"] alias'
 FORM_GETATTR_DYNAMIC = "getattr(asyncio, <dynamic>)"
 FORM_UNCLASSIFIED = "unclassified wait-shaped call"
+# Chained spellings: a name bound to a name that already names a primitive, so the
+# refusal says which link of the chain it read.
+FORM_CHAINED_ALIAS = "chained alias via {source}: asyncio.{name}"
+FORM_CHAINED_DEFAULT = "default-parameter binding via {source}: asyncio.{name}"
+FORM_DEFAULT_PARAMETER = "default-parameter binding: asyncio.{name}"
+# ``asyncio.wait_for.__call__(...)``: the primitive's own dunder, in callee position.
+FORM_DUNDER_CALL = "asyncio.{name}.__call__"
+# The rule of last resort: an await whose callee the resolver cannot place, and
+# whose arguments carry a numeric literal bound of SUB_SECOND_LIMIT or more.
+FORM_UNRESOLVED_LITERAL = "unresolved await, numeric literal bound"
 
 # The must-complete waits the guarded module is known to hold, as
 # ``(enclosing function or fixture, primitive)``.  The derived invariant cannot see
-# a DELETION -- nine sites and ten both satisfy "every site is the shared bound or a
+# a DELETION -- nine sites and ten both satisfy "each site is the shared bound or a
 # named deliberate bound" -- so the audit's site keys are held to a superset of this
-# set instead, and adding a compliant wait stays green.
+# set instead, and adding a compliant wait stays green.  The keys are the guarded
+# module's TEST-FUNCTION names (``held_recovery`` is a fixture), so renaming or
+# moving a guarded test requires updating its key here; a stale key fails the
+# superset check rather than passing quietly.
 KNOWN_MUST_COMPLETE_SITES = {
     ("held_recovery", "wait_for"),
     ("test_external_only_wait_survives_other_recovery_and_replays_own_event", "wait_for"),
@@ -155,10 +196,13 @@ class _Names(NamedTuple):
     local_defs: frozenset
     # (receiver name, attribute) -> (primitive, form) for ``A.wf = asyncio.wait_for``
     attribute_aliases: dict
+    # local name -> primitive, the names a chain can be followed from: the direct
+    # imports plus the resolved aliases, chained ones included.
+    bound_names: dict
 
 
 def _asyncio_names(tree):
-    """Every name bound to the ``asyncio`` module: ``asyncio``, ``import asyncio as``, ``x = asyncio``."""
+    """The names bound to the ``asyncio`` module: ``asyncio``, ``import asyncio as``, ``x = asyncio``."""
     names = {"asyncio"}
     assignments = []
     for node in ast.walk(tree):
@@ -208,13 +252,16 @@ def _is_mapping_of_asyncio(node, asyncio_names):
             and node.args[0].id in asyncio_names)
 
 
-def _value_resolves_to_wait(value, asyncio_names):
+def _value_resolves_to_wait(value, asyncio_names, bound_names=None):
     """``(primitive, form)`` when *value* spells an asyncio wait primitive, else None.
 
     The right-hand sides a name can be given a primitive through: the attribute
     itself, ``functools.partial(<that attribute>)``,
-    ``getattr(asyncio, "<literal>")``, and the mapping subscripts
-    ``asyncio.__dict__["<name>"]`` / ``vars(asyncio)["<name>"]``.
+    ``getattr(asyncio, "<literal>")``, the mapping subscripts
+    ``asyncio.__dict__["<name>"]`` / ``vars(asyncio)["<name>"]``, and -- when
+    *bound_names* is given -- a bare name that already resolves to one
+    (``wf = wait_for`` off a direct import, ``wf2 = wf``, a parameter default
+    naming another alias), which is the chained spelling.
     """
     if isinstance(value, ast.Attribute):
         if (value.attr in WAIT_PRIMITIVES and isinstance(value.value, ast.Name)
@@ -224,7 +271,7 @@ def _value_resolves_to_wait(value, asyncio_names):
     if isinstance(value, ast.Call):
         if (isinstance(value.func, ast.Attribute) and value.func.attr == "partial"
                 and value.args):
-            inner = _value_resolves_to_wait(value.args[0], asyncio_names)
+            inner = _value_resolves_to_wait(value.args[0], asyncio_names, bound_names)
             if inner is None:
                 return None
             return inner[0], FORM_PARTIAL.format(name=inner[0])
@@ -241,42 +288,107 @@ def _value_resolves_to_wait(value, asyncio_names):
         template = (FORM_VARS_SUBSCRIPT if isinstance(value.value, ast.Call)
                     else FORM_DICT_SUBSCRIPT)
         return key, template.format(name=key)
+    if isinstance(value, ast.Name) and bound_names is not None:
+        primitive = bound_names.get(value.id)
+        if primitive is not None:
+            return (primitive,
+                    FORM_CHAINED_ALIAS.format(name=primitive, source=value.id))
     return None
 
 
-def _assigned_aliases(tree, asyncio_names):
+def _parameter_defaults(tree):
+    """``(parameter name, default node)`` for the defaults of each def and lambda.
+
+    A default that binds a primitive is how ``async def spelled(waiter,
+    wf=asyncio.wait_for)`` escapes a resolver that only reads assignments.
+    """
+    pairs = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        args = node.args
+        positional = list(getattr(args, "posonlyargs", [])) + list(args.args)
+        pairs.extend((argument.arg, default)
+                     for argument, default in zip(
+                         positional[len(positional) - len(args.defaults):],
+                         args.defaults))
+        pairs.extend((argument.arg, default)
+                     for argument, default in zip(args.kwonlyargs, args.kw_defaults)
+                     if default is not None)
+    return pairs
+
+
+def _assigned_aliases(tree, asyncio_names, direct_imports=()):
     """The names this module binds an asyncio wait primitive to, and to what.
 
     Returns ``({name: (primitive, form)}, {(receiver, attribute): (primitive, form)})``.
-    Every binding shape :func:`_value_resolves_to_wait` reads is covered -- a plain
+    The binding shapes :func:`_value_resolves_to_wait` reads are covered -- a plain
     assignment, an annotated one (``wf: object = asyncio.wait_for``), a
-    ``functools.partial``, a ``getattr``, a ``__dict__``/``vars`` subscript, and an
-    attribute target (``A.wf = asyncio.wait_for``, awaited as ``A.wf(...)``).
+    ``functools.partial``, a ``getattr``, a ``__dict__``/``vars`` subscript, an
+    attribute target (``A.wf = asyncio.wait_for``, awaited as ``A.wf(...)``), and
+    the chained name bindings (``wf = wait_for``, ``wf2 = wf``), which are followed
+    to a fixed point, so a chain resolves link by link to the primitive at its
+    head.  A default-parameter binding is followed too; a parameter name is
+    recorded module-wide, which refuses more call sites rather than fewer.
     """
     aliases = {}
     attribute_aliases = {}
+    pending = []
+
+    def record(targets, primitive, form):
+        for target in targets:
+            if isinstance(target, ast.Name):
+                aliases[target.id] = (primitive, form)
+            elif (isinstance(target, ast.Attribute)
+                  and isinstance(target.value, ast.Name)):
+                attribute_aliases[(target.value.id, target.attr)] = (
+                    primitive, FORM_ATTRIBUTE_TARGET_ALIAS.format(name=primitive))
+
+    def bind(targets, value, template, plain_form=None):
+        """Record *value* for *targets*, or queue it when it names another name.
+
+        *template* names the chain link the binding came through; *plain_form*
+        renames the plain ``alias of ...`` reading when the binding's own shape
+        deserves to be in the refusal (an annotation, a parameter default).
+        """
+        resolved = _value_resolves_to_wait(value, asyncio_names)
+        if resolved is not None:
+            primitive, form = resolved
+            if (plain_form is not None
+                    and form == FORM_ASSIGNMENT_ALIAS.format(name=primitive)):
+                form = plain_form.format(name=primitive)
+            record(targets, primitive, form)
+            return
+        if isinstance(value, ast.Name):
+            pending.append((targets, value.id, template))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            value_form = _value_resolves_to_wait(node.value, asyncio_names)
-            if value_form is None:
-                continue
-            primitive, form = value_form
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    aliases[target.id] = (primitive, form)
-                elif (isinstance(target, ast.Attribute)
-                      and isinstance(target.value, ast.Name)):
-                    attribute_aliases[(target.value.id, target.attr)] = (
-                        primitive,
-                        FORM_ATTRIBUTE_TARGET_ALIAS.format(name=primitive))
+            bind(node.targets, node.value, FORM_CHAINED_ALIAS)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            value_form = _value_resolves_to_wait(node.value, asyncio_names)
-            if value_form is None or not isinstance(node.target, ast.Name):
+            bind([node.target], node.value, FORM_CHAINED_ALIAS,
+                 plain_form=FORM_ANNOTATED_ALIAS)
+    for parameter, default in _parameter_defaults(tree):
+        bind([ast.Name(id=parameter)], default, FORM_CHAINED_DEFAULT,
+             plain_form=FORM_DEFAULT_PARAMETER)
+
+    known = dict(direct_imports)
+    known.update({name: primitive for name, (primitive, _form) in aliases.items()})
+    for _ in range(len(pending) + 1):
+        progressed = False
+        for entry in list(pending):
+            targets, source, template = entry
+            primitive = known.get(source)
+            if primitive is None:
                 continue
-            primitive, form = value_form
-            if form == FORM_ASSIGNMENT_ALIAS.format(name=primitive):
-                form = FORM_ANNOTATED_ALIAS.format(name=primitive)
-            aliases[node.target.id] = (primitive, form)
+            record(targets, primitive, template.format(name=primitive, source=source))
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    known[target.id] = primitive
+            pending.remove(entry)
+            progressed = True
+        if not progressed:
+            break
     return aliases, attribute_aliases
 
 
@@ -289,9 +401,13 @@ def _local_defs(tree):
 
 def _names(tree):
     asyncio_names = _asyncio_names(tree)
-    aliases, attribute_aliases = _assigned_aliases(tree, asyncio_names)
-    return _Names(asyncio_names, _direct_imports(tree), aliases, _local_defs(tree),
-                  attribute_aliases)
+    direct_imports = _direct_imports(tree)
+    aliases, attribute_aliases = _assigned_aliases(tree, asyncio_names, direct_imports)
+    bound_names = dict(direct_imports)
+    bound_names.update({name: primitive
+                        for name, (primitive, _form) in aliases.items()})
+    return _Names(asyncio_names, direct_imports, aliases, _local_defs(tree),
+                  attribute_aliases, bound_names)
 
 
 def _resolve_getattr(getattr_call, asyncio_names):
@@ -334,13 +450,29 @@ def _resolve_call(call, names):
     """
     func = call.func
     if isinstance(func, ast.Call):
-        return _resolve_getattr(func, names.asyncio_names)
+        resolution = _resolve_getattr(func, names.asyncio_names)
+        if resolution is not None:
+            return resolution
+        # A ``functools.partial(<primitive>)`` left unnamed in callee position.
+        resolved = _value_resolves_to_wait(func, names.asyncio_names, names.bound_names)
+        if resolved is None:
+            return None
+        return _Resolution(resolved[0], resolved[1], ast.unparse(func))
     if isinstance(func, ast.Attribute):
         if isinstance(func.value, ast.Name):
             known = names.attribute_aliases.get((func.value.id, func.attr))
             if known is not None:
                 primitive, form = known
                 return _Resolution(primitive, form, ast.unparse(func))
+        if func.attr == "__call__":
+            # ``asyncio.wait_for.__call__(...)``: the primitive's own dunder.
+            resolved = _value_resolves_to_wait(func.value, names.asyncio_names,
+                                               names.bound_names)
+            if resolved is not None:
+                return _Resolution(resolved[0],
+                                   FORM_DUNDER_CALL.format(name=resolved[0]),
+                                   ast.unparse(func))
+            return None
         if func.attr not in WAIT_PRIMITIVES:
             return None
         if isinstance(func.value, ast.Name) and func.value.id in names.asyncio_names:
@@ -417,7 +549,7 @@ def classify_bound(bound, line, callee, form):
     if value is not None and value < SUB_SECOND_LIMIT:
         return ALLOWED, text, ""
     if value is not None:
-        reason = (f"a numeric literal bound >= {SUB_SECOND_LIMIT:.1f} silently escapes "
+        reason = (f"a numeric literal bound >= {SUB_SECOND_LIMIT:.1f} would escape "
                   f"the shared bound the slow-page witness raised")
     else:
         reason = "the audit cannot classify this bound expression"
@@ -431,6 +563,46 @@ def classify_bound(bound, line, callee, form):
 def _unresolved_message(resolution, line):
     return (f"line {line}: {resolution.form} -- the audit cannot resolve "
             f"{resolution.callee} to an asyncio wait primitive, so it refuses the call "
+            f"instead of silently skipping it (fail-closed); a wait must be written so the "
+            f"audit can read which bound it uses")
+
+
+def _awaited_calls(tree):
+    """``id(node)`` for each ``Call`` that is the value of an ``await``."""
+    return {id(node.value) for node in ast.walk(tree)
+            if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)}
+
+
+def _argument_literal(call):
+    """The first numeric literal bound of 1.0 or more among *call*'s arguments.
+
+    The walk covers each argument's subtree, so a literal wrapped in a keyword or a
+    helper call is still read; a comprehension's or lambda's own numbers are not
+    arguments of this call and are skipped.
+    """
+    def literals(node):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                             ast.GeneratorExp, ast.Lambda)):
+            return []
+        found = []
+        value = _numeric_value(node)
+        if value is not None and value >= SUB_SECOND_LIMIT:
+            found.append(node)
+        for child in ast.iter_child_nodes(node):
+            found.extend(literals(child))
+        return found
+
+    for argument in list(call.args) + [keyword.value for keyword in call.keywords]:
+        found = literals(argument)
+        if found:
+            return found[0]
+    return None
+
+
+def _unresolved_literal_message(callee, literal, line):
+    return (f"line {line}: {FORM_UNRESOLVED_LITERAL} -- the audit cannot resolve {callee} "
+            f"to an asyncio wait primitive, and the awaited call passes the numeric "
+            f"literal {literal} (>= {SUB_SECOND_LIMIT:.1f}), so it refuses the call "
             f"instead of silently skipping it (fail-closed); a wait must be written so the "
             f"audit can read which bound it uses")
 
@@ -456,7 +628,7 @@ def _enclosing_functions(tree):
 
 
 def _must_complete_site_keys(sites):
-    """``{(enclosing function or fixture, primitive)}`` for every must-complete site.
+    """``{(enclosing function or fixture, primitive)}`` for each must-complete site.
 
     The primitive is the callee's last dotted segment, so ``asyncio.wait_for`` gives
     ``wait_for``.  A site spelled through an alias reports its local name in that
@@ -474,22 +646,37 @@ def audit_wait_bounds(module_path=DEFAULT_MODULE):
     the tests assert on, and :func:`print_audit` renders the same records.
 
     Not every wait in the file: see BOUNDARY in the module docstring.  The
-    ``threading.Event().wait(...)`` handshake in the guarded module is a threading
-    primitive and is deliberately outside this vocabulary, and the call shapes named
-    there resolve to no site.
+    ``threading.Event().wait(...)`` handshake in the guarded module's ``handshake``
+    helper is a threading primitive and is deliberately outside this vocabulary, and
+    the call shapes named there resolve to no site -- each of them carried by a case
+    in ``SILENT_SHAPES``.
+    One rule of last resort is applied here: an ``await`` whose callee this resolver
+    cannot place, and whose arguments carry a numeric literal of 1.0 or more, is
+    recorded and refused, so an unresolved spelling that carries a large literal is
+    refused rather than passed over.
     """
     path = Path(module_path)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names = _names(tree)
     enclosing = _enclosing_functions(tree)
+    awaited = _awaited_calls(tree)
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         resolution = _resolve_call(node, names)
-        if resolution is None:
-            continue
         function = enclosing.get(id(node), "")
+        if resolution is None:
+            literal = _argument_literal(node) if id(node) in awaited else None
+            if literal is None:
+                continue
+            sites.append(WaitSite(
+                node.lineno, node.col_offset, ast.unparse(node.func),
+                FORM_UNRESOLVED_LITERAL, ast.unparse(literal), REFUSED,
+                _unresolved_literal_message(ast.unparse(node.func),
+                                            ast.unparse(literal), node.lineno),
+                function))
+            continue
         if resolution.primitive is None:
             sites.append(WaitSite(node.lineno, node.col_offset, resolution.callee,
                                   resolution.form, "<unresolved>", REFUSED,
@@ -537,7 +724,7 @@ def _audit_synthetic(tmp_path, source, name):
     return audit_wait_bounds(path)
 
 
-def test_every_must_complete_wait_uses_the_shared_bound():
+def test_must_complete_waits_are_bounded_by_the_shared_bound():
     sites = audit_wait_bounds()
     refused = [site for site in sites if site.classification == REFUSED]
     assert not refused, "the audit refused these wait bounds:\n" + "\n".join(
@@ -548,7 +735,7 @@ def test_every_must_complete_wait_uses_the_shared_bound():
                            "at the wait-contention module")
 
 
-def test_every_site_is_the_shared_bound_or_a_named_deliberate_bound():
+def test_each_audited_site_is_the_shared_bound_or_a_named_deliberate_bound():
     """The invariant, derived from the audit -- no expected site count is written down.
 
     Adding a fully compliant wait to the guarded module adds one must-complete
@@ -602,12 +789,12 @@ def test_every_site_is_the_shared_bound_or_a_named_deliberate_bound():
         f"{sorted(ALLOWED_BOUND_NAMES)}: {sorted({site.bound for site in drains})}")
 
 
-def test_every_known_must_complete_site_is_still_audited():
+def test_each_known_must_complete_site_is_still_audited():
     """The audit's site keys must still cover the must-complete waits we know of.
 
     A SUPERSET check, not an equality and not a total count: a compliant addition
-    adds a key and stays green, while deleting a known wait -- which every derived
-    invariant above accepts -- reddens this.
+    adds a key and stays green, while deleting a known wait -- which the derived
+    invariants above accept -- reddens this.
     """
     sites = audit_wait_bounds()
     keys = _must_complete_site_keys(sites)
@@ -629,7 +816,7 @@ def test_a_deleted_must_complete_wait_is_visible_as_a_missing_known_site(tmp_pat
 
     The derived invariant accepts a shorter module, so the detector is the named-key
     superset check.  The guarded module is copied to ``tmp_path`` and its
-    ``held_recovery`` handshake replaced by the bare await it was bounding: the
+    ``held_recovery`` wait replaced by the bare await it was bounding: the
     known-site check must become false and the census must lose exactly one site.
     Without this, a reader would have to take both claims on faith.
     """
@@ -642,7 +829,7 @@ def test_a_deleted_must_complete_wait_is_visible_as_a_missing_known_site(tmp_pat
 
     original = DEFAULT_MODULE.read_text(encoding="utf-8")
     assert original.count(DELETED_WAIT) == 1, (
-        "the guarded module must contain the held_recovery handshake exactly once, "
+        "the guarded module must contain the held_recovery wait exactly once, "
         f"found {original.count(DELETED_WAIT)}")
     line_number = original.count("\n", 0, original.index(DELETED_WAIT)) + 1
     mutated = original.replace(DELETED_WAIT, DELETED_WAIT_REPLACEMENT)
@@ -657,8 +844,8 @@ def test_a_deleted_must_complete_wait_is_visible_as_a_missing_known_site(tmp_pat
     after = audit_wait_bounds(copy)
     lost = KNOWN_MUST_COMPLETE_SITES - _must_complete_site_keys(after)
     assert lost == {("held_recovery", "wait_for")}, (
-        f"deleting the handshake at line {line_number} must make the known-site check "
-        f"false for exactly that key, lost {sorted(lost)} of "
+        f"deleting the held_recovery wait (copy line {line_number}) must make the "
+        f"known-site check false for exactly that key, lost {sorted(lost)} of "
         f"{sorted(KNOWN_MUST_COMPLETE_SITES)}")
     assert len(after) == len(baseline) - 1, (
         f"the census must lose exactly one wait site ({len(baseline)} -> "
@@ -699,11 +886,12 @@ def test_the_audit_refuses_a_literal_must_complete_bound(tmp_path):
         "the witness must not write to the guarded module itself")
 
 
-# The four spellings a must-complete wait can escape through, each with a tiny
-# synthetic module carrying it and the sites the audit must report.  ``{bound}``
-# is filled with a literal (which must be refused) and with the shared constant
-# (which must be classified, proving the spelling resolves to a normal wait site
-# rather than merely being refused as unknown).
+# The spellings a must-complete wait can be written in, each with a tiny synthetic
+# module carrying it and the sites the audit must report.  ``{bound}`` is filled
+# with a literal (which must be refused) and with the shared constant (which must
+# be classified, proving the spelling resolves to a normal wait site rather than
+# merely being refused as unknown) -- so a chained spelling that resolves is
+# refused on a big literal and still counted when it carries the shared bound.
 SPELLINGS = [
     pytest.param(
         "direct-import",
@@ -817,6 +1005,86 @@ SPELLINGS = [
         [(9, 'asyncio.__dict__["wait_for"]'),
          (10, 'vars(asyncio)["wait_for"]')],
         id="h-mapping-subscript-aliases",
+    ),
+    pytest.param(
+        "chained-direct-import-alias",
+        "from asyncio import wait_for\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = wait_for\n"
+        "    return await wf(waiter, {bound})\n",
+        [(6, "chained alias via wait_for: asyncio.wait_for")],
+        id="i-chained-direct-import-alias",
+    ),
+    pytest.param(
+        "alias-of-an-alias",
+        "import asyncio\n"
+        "\n"
+        "wf = asyncio.wait_for\n"
+        "wf2 = wf\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await wf2(waiter, {bound})\n",
+        [(8, "chained alias via wf: asyncio.wait_for")],
+        id="j-alias-of-an-alias",
+    ),
+    pytest.param(
+        "alias-of-the-asyncio-module",
+        "import asyncio\n"
+        "\n"
+        "A = asyncio\n"
+        "A.wf = asyncio.wait_for\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await A.wf(waiter, {bound})\n",
+        [(8, "class-attribute alias: asyncio.wait_for")],
+        id="k-alias-of-the-asyncio-module",
+    ),
+    pytest.param(
+        "partial-in-callee-position",
+        "import asyncio\n"
+        "import functools\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await functools.partial(asyncio.wait_for)(waiter, {bound})\n",
+        [(6, "functools.partial of asyncio.wait_for")],
+        id="l-partial-in-callee-position",
+    ),
+    pytest.param(
+        "dunder-call",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await asyncio.wait_for.__call__(waiter, {bound})\n",
+        [(5, "asyncio.wait_for.__call__")],
+        id="m-dunder-call",
+    ),
+    pytest.param(
+        "default-parameter-binding",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter, wf=asyncio.wait_for):\n"
+        "    return await wf(waiter, {bound})\n",
+        [(5, "default-parameter binding: asyncio.wait_for")],
+        id="n-default-parameter-binding",
+    ),
+    pytest.param(
+        "chained-default-parameter-binding",
+        "import asyncio\n"
+        "\n"
+        "P = asyncio.wait_for\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter, *, wf=P):\n"
+        "    return await wf(waiter, {bound})\n",
+        [(7, "default-parameter binding via P: asyncio.wait_for")],
+        id="o-chained-default-parameter-binding",
     ),
 ]
 
@@ -937,6 +1205,178 @@ def test_a_wait_shaped_call_the_audit_cannot_resolve_is_refused_not_skipped(
     assert fragment in refused[0].message and phrase in refused[0].message, (
         f"the refusal must say why it could not classify the site ({phrase!r} and "
         f"{fragment!r} in {refused[0].message})")
+
+
+# The shapes this audit still resolves to NO record, each with a tiny synthetic
+# module carrying it.  A silence claim in the module docstring's BOUNDARY section
+# is backed by one of these: the case runs the audit on exactly that snippet and
+# requires zero records, and it requires the shape's phrase to still be in the
+# docstring, so the prose and its probe cannot drift apart.
+SILENT_SHAPES = [
+    pytest.param(
+        "threading-event-wait",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return event.wait(HANDSHAKE_SECONDS)\n",
+        "event.wait(HANDSHAKE_SECONDS)",
+        id="threading-event-wait",
+    ),
+    pytest.param(
+        "exec-built-alias",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "def build():\n"
+        "    exec(\"wf = asyncio.wait_for\", globals())\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await wf(waiter, .25)\n",
+        'exec("wf = asyncio.wait_for")',
+        id="exec-built-alias",
+    ),
+    pytest.param(
+        "callee-from-another-module",
+        "import helpers\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, .25)\n",
+        "another module's function",
+        id="callee-from-another-module",
+    ),
+    pytest.param(
+        "getattr-dunder-call",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await getattr(asyncio.wait_for, \"__call__\")(waiter, .25)\n",
+        'getattr(asyncio.wait_for, "__call__")',
+        id="getattr-dunder-call",
+    ),
+]
+
+
+@pytest.mark.parametrize("shape, source, phrase", SILENT_SHAPES)
+def test_a_shape_the_prose_calls_silent_is_measured_silent(tmp_path, shape, source, phrase):
+    """Zero records for exactly this snippet: the prose may not claim it on its own."""
+    sites = _audit_synthetic(tmp_path, source, f"silent_{shape}.py")
+    assert not sites, (
+        f"the {shape} shape is described as unrecorded, but the audit returned "
+        f"{[(s.line, s.form, s.bound, s.classification) for s in sites]}")
+    assert phrase in __doc__, (
+        f"the {shape} probe backs the prose phrase {phrase!r}, which is no longer in "
+        f"the module docstring")
+
+
+# The rule of last resort, exercised: a callee the resolver cannot place, on a call
+# whose arguments carry a literal bound of 1.0 or more, is recorded and refused.
+UNRESOLVED_LITERAL = [
+    pytest.param(
+        "exec-built-alias",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "def build():\n"
+        "    exec(\"wf = asyncio.wait_for\", globals())\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await wf(waiter, 20.0)\n",
+        9,
+        "wf",
+        "20.0",
+        id="exec-built-alias-with-a-big-literal",
+    ),
+    pytest.param(
+        "callee-from-another-module",
+        "import helpers\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, 20.0)\n",
+        6,
+        "wf",
+        "20.0",
+        id="another-module-callee-with-a-big-literal",
+    ),
+    pytest.param(
+        "getattr-dunder-call",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await getattr(asyncio.wait_for, \"__call__\")(waiter, 20.0)\n",
+        5,
+        'getattr(asyncio.wait_for, "__call__")',
+        "20.0",
+        id="getattr-dunder-call-with-a-big-literal",
+    ),
+    pytest.param(
+        "keyword-literal",
+        "import helpers\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, timeout=20.0)\n",
+        6,
+        "wf",
+        "20.0",
+        id="keyword-literal-on-an-unresolved-callee",
+    ),
+]
+
+
+@pytest.mark.parametrize("shape, source, line, callee, literal", UNRESOLVED_LITERAL)
+def test_an_unresolved_await_with_a_big_literal_is_refused(
+        tmp_path, shape, source, line, callee, literal):
+    """The literal bound of an await the resolver cannot place is refused, not skipped."""
+    sites = _audit_synthetic(tmp_path, source, f"unresolved_literal_{shape}.py")
+    refused = [site for site in sites if site.classification == REFUSED]
+    assert len(refused) == 1, (
+        f"the {shape} shape must be refused once, audited "
+        f"{[(s.line, s.form, s.bound, s.classification) for s in sites]}")
+    site = refused[0]
+    assert site.line == line, f"the audit refused line {site.line}, not line {line}"
+    assert site.form == FORM_UNRESOLVED_LITERAL, (
+        f"the refusal must name the rule it applied, got {site.form!r}")
+    # ``ast.unparse`` picks its own quote style, so compare the spelling modulo quotes.
+    assert (callee.replace('"', "'") == site.callee.replace('"', "'")), (
+        f"the refusal must name the unresolved callee {callee!r}, got {site.callee!r}")
+    assert site.callee in site.message, (
+        f"the refusal message must name the unresolved callee {site.callee!r}: "
+        f"{site.message}")
+    assert literal in site.bound, (
+        f"the refusal must carry the literal it read, got {site.bound!r}")
+    assert literal in site.message and "1.0" in site.message, (
+        f"the refusal must say the literal reached the 1.0 threshold: {site.message}")
+
+
+# The known-site table is keyed by function name; this is what that means in practice.
+RENAMED_GUARDED_TEST = "test_quiet_recovery_release_allows_fresh_disposition"
+
+
+def test_renaming_a_guarded_test_loses_its_known_site_key(tmp_path):
+    """A rename in the guarded module is a table edit here, not a silent census."""
+    original = DEFAULT_MODULE.read_text(encoding="utf-8")
+    assert original.count(RENAMED_GUARDED_TEST) == 1, (
+        f"the guarded module must name {RENAMED_GUARDED_TEST} exactly once, found "
+        f"{original.count(RENAMED_GUARDED_TEST)}")
+    copy = tmp_path / "test_state_wait_contention.py"
+    copy.write_text(original.replace(RENAMED_GUARDED_TEST, RENAMED_GUARDED_TEST + "_renamed"),
+                    encoding="utf-8")
+    lost = KNOWN_MUST_COMPLETE_SITES - _must_complete_site_keys(audit_wait_bounds(copy))
+    assert lost == {(RENAMED_GUARDED_TEST, "wait_for")}, (
+        f"renaming {RENAMED_GUARDED_TEST} must lose exactly its own known-site key, "
+        f"lost {sorted(lost)} of {sorted(KNOWN_MUST_COMPLETE_SITES)}")
+    assert DEFAULT_MODULE.read_text(encoding="utf-8") == original, (
+        "the witness must not write to the guarded module itself")
 
 
 INSERTED_WAIT = "await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)"

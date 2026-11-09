@@ -22,7 +22,9 @@ from core.workspace_manager import WorkspaceManager
 # database work -- a correction page reconciles up to ten attempts -- so a
 # correct page that is merely slow (a loaded host) must never decide a verdict.
 # A handshake that never completes still fails, well inside this bound and with
-# a message saying which wait it was.
+# a message saying which wait it was. The same bound covers the must-complete
+# watchdogs below: they await the very same work, so a smaller number would let
+# a slow-but-correct page, not the claim under test, decide the verdict.
 HANDSHAKE_SECONDS = 20.0
 
 
@@ -130,7 +132,9 @@ async def held_recovery(system, monkeypatch):
         yield release
     finally:
         release.set()
-        result = await asyncio.wait_for(owner_wait, 2)
+        # Must complete: the owner wait is the work under test, and a page that
+        # is correct but slow must not decide this verdict.
+        result = await asyncio.wait_for(owner_wait, HANDSHAKE_SECONDS)
         assert result["events"][-1]["payload"]["status"] == "paused"
 
 
@@ -148,7 +152,9 @@ async def test_external_only_wait_survives_other_recovery_and_replays_own_event(
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(waiter), .12)
             observe(service, external, "failed")
-            result = await asyncio.wait_for(waiter, 1)
+            # Must complete: this waiter owns the observed event, and the page
+            # behind it being slow is not a verdict on the replay.
+            result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
             assert result["events"][-1]["payload"]["attempt_id"] == external["attempt_id"]
             assert result["events"][-1]["payload"]["status"] == "failed"
             assert result["next_after"] > after and "reason" not in result
@@ -214,7 +220,8 @@ async def test_quiet_recovery_release_allows_fresh_disposition(system, monkeypat
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(waiter), .12)
             release.set()
-            result = await asyncio.wait_for(waiter, 2)
+            # Must complete: the released waiter must reach its disposition.
+            result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
             assert not result["timed_out"] and not result["events"]
             assert result["reason"] == ("nothing_to_wait" if state == "empty" else "action_required")
             if target:
@@ -311,7 +318,9 @@ async def test_busy_nonzero_recovery_cursor_waits_without_hotspin_and_reaches_la
             assert 2 <= len(calls) <= 4, "busy page must sleep rather than spin"
             assert calls[1] > 0, "fixture must exercise an existing page cursor"
             release.set()
-        result = await asyncio.wait_for(waiter, 2)
+        # Must complete: the released waiter has to reach the last page, however
+        # long the pages it walked to get there took.
+        result = await asyncio.wait_for(waiter, HANDSHAKE_SECONDS)
         assert result["events"][-1]["payload"]["attempt_id"] == runs[-1][0]["attempt_id"]
         assert result["events"][-1]["payload"]["status"] == "paused"
         assert "reason" not in result
@@ -335,8 +344,11 @@ async def test_reentrant_observation_does_not_deadlock_or_lose_outer_result(syst
         return get_run(run_id)
 
     monkeypatch.setattr(service.sf, "get_run", reentrant)
+    # Must complete: this is the reentrant product call itself. A correct page
+    # that reconciles for a couple of seconds is not a deadlock, so it gets the
+    # same bound as every other must-complete wait in this file.
     result = await asyncio.wait_for(service.wait_for_state_change("owner",
         after=cursor(service, "owner"), attempt_ids=[owner["attempt_id"]],
-        return_when_idle=True, timeout_seconds=1), 2)
+        return_when_idle=True, timeout_seconds=1), HANDSHAKE_SECONDS)
     assert calls
     assert result["events"][-1]["payload"]["status"] == "paused"

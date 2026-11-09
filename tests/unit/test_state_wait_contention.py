@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import threading
+import time
 
 import pytest
 from skillflow.core import SkillFlow, StepResult
@@ -15,6 +16,34 @@ from core.state_database import StateDatabase
 from core.db_manager import DBManager
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+
+
+# One generous bound for every fixture handshake. These tests wait on real
+# database work -- a correction page reconciles up to ten attempts -- so a
+# correct page that is merely slow (a loaded host) must never decide a verdict.
+# A handshake that never completes still fails, well inside this bound and with
+# a message saying which wait it was.
+HANDSHAKE_SECONDS = 20.0
+
+
+def handshake(event, name, purpose):
+    """Block the calling thread until *event* is set, or fail naming the wait.
+
+    Blocks, so call it from a worker thread (or through awaited_handshake()
+    from async code, as the original waits did). Returns the seconds waited.
+    """
+    started = time.monotonic()
+    observed = event.wait(HANDSHAKE_SECONDS)
+    waited = time.monotonic() - started
+    assert observed, (
+        f"fixture handshake {name!r} never completed: waited {waited:.1f}s of a "
+        f"{HANDSHAKE_SECONDS:.1f}s bound while awaiting {purpose}")
+    return waited
+
+
+async def awaited_handshake(event, name, purpose):
+    """handshake() for an async caller: block in a worker thread, as before."""
+    return await asyncio.to_thread(handshake, event, name, purpose)
 
 
 def node(name):
@@ -89,7 +118,7 @@ async def held_recovery(system, monkeypatch):
     def held_get_run(run_id):
         if run_id == rid:
             entered.set()
-            assert release.wait(4), "fixture must release the actual observer thread"
+            handshake(release, "release", "fixture must release the actual observer thread")
         return get_run(run_id)
 
     monkeypatch.setattr(service.sf, "get_run", held_get_run)
@@ -97,7 +126,7 @@ async def held_recovery(system, monkeypatch):
         after=cursor(service, "owner"), attempt_ids=[owner["attempt_id"]],
         return_when_idle=True, timeout_seconds=3))
     try:
-        assert await asyncio.to_thread(entered.wait, 1), "owner must hold real recovery"
+        await awaited_handshake(entered, "entered", "owner must hold real recovery")
         yield release
     finally:
         release.set()
@@ -163,7 +192,7 @@ async def test_busy_wait_cancellation_leaves_owner_recovery_intact(system, monke
     async with held_recovery(system, monkeypatch):
         waiter = asyncio.create_task(other_service(service).wait_for_state_change("follow",
             after=cursor(service, "follow"), return_when_idle=True, timeout_seconds=2))
-        assert await asyncio.to_thread(called.wait, 1)
+        await awaited_handshake(called, "called", "recovery must reach the follow project")
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
@@ -267,14 +296,14 @@ async def test_busy_nonzero_recovery_cursor_waits_without_hotspin_and_reaches_la
             calls.append(args[2])
             if len(calls) == 1:
                 page_done.set()
-                assert return_page.wait(4)
+                handshake(return_page, "return_page", "the first recovery page must be released")
         return result
 
     monkeypatch.setattr(state_changes, "recover_page", observed)
     waiter = asyncio.create_task(other_service(service).wait_for_state_change("follow",
         after=after, return_when_idle=True, timeout_seconds=3))
     try:
-        assert await asyncio.to_thread(page_done.wait, 1)
+        await awaited_handshake(page_done, "page_done", "the first recovery page must complete")
         async with held_recovery(system, monkeypatch) as release:
             return_page.set()
             with pytest.raises(asyncio.TimeoutError):

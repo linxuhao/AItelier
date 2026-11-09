@@ -352,3 +352,54 @@ async def test_reentrant_observation_does_not_deadlock_or_lose_outer_result(syst
         return_when_idle=True, timeout_seconds=1), HANDSHAKE_SECONDS)
     assert calls
     assert result["events"][-1]["payload"]["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_a_slow_but_correct_page_does_not_decide_the_wait_verdict(system, monkeypatch):
+    # Every follow-project recovery page is correct but takes `delay` seconds.
+    # The verdict must still be the product's own: the paused run found by
+    # walking the pages, not a timeout and not a cached idle decision. The product
+    # budget is far larger than the slow pages, so only the slowness is waited on;
+    # the handshake bound is what fails a wait that never ends.
+    service = system[0]
+    delay, budget = 1.5, 30.0
+    service.store.add_nodes("follow", [node("n" + str(i)) for i in range(11)])
+    runs = [workflow(service, "follow", "n" + str(i)) for i in range(11)]
+    service.sf.pause_run(runs[-1][1])  # Actual last-page change, not a cached projection.
+    after = cursor(service, "follow")
+    recover = state_changes.recover_page
+    served = []
+
+    def slow(*args):
+        if args[1] != "follow":
+            return recover(*args)
+        started = time.monotonic()
+        time.sleep(delay)
+        result = recover(*args)  # The real page, served late.
+        served.append(time.monotonic() - started)
+        return result
+
+    monkeypatch.setattr(state_changes, "recover_page", slow)
+    waiter = asyncio.create_task(other_service(service).wait_for_state_change("follow",
+        after=after, return_when_idle=True, timeout_seconds=budget))
+    try:
+        done, _ = await asyncio.wait({waiter}, timeout=HANDSHAKE_SECONDS)
+        if not done:
+            # A slow page is in flight and holds the recovery guard. Let it finish
+            # within the wait's own budget, so no guard outlives this test.
+            await asyncio.wait({waiter}, timeout=budget)
+            pytest.fail(
+                f"fixture handshake 'slow_pages' did not complete within {HANDSHAKE_SECONDS:.1f}s "
+                f"while awaiting the follow wait over slow but correct recovery pages "
+                f"({len(served)} served, {delay:.1f}s each; wait finished={waiter.done()})")
+        result = waiter.result()
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+    assert len(served) >= 2, "the wait must walk more than one slow page"
+    assert all(seconds >= delay for seconds in served), served
+    assert not result["timed_out"] and "reason" not in result
+    assert result["events"][-1]["payload"]["attempt_id"] == runs[-1][0]["attempt_id"]
+    assert result["events"][-1]["payload"]["status"] == "paused"

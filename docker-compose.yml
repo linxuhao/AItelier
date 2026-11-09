@@ -274,16 +274,24 @@ services:
       - ${HOME}/.AItelier:${HOME}/.AItelier:ro
       - ${HOME}/.AItelier/godot-control:/var/lib/aitelier-godot
       # The harness this container RUNS is the checkout's, not only the image's.
-      # The image COPYs docker/godot/*.py to /srv at build time, so a merged
-      # harness change otherwise reached the running sidecar only through an
-      # image rebuild or a hand copy: the 2026-11-08 recreate silently went back
-      # to the baked bytes, and the 2026-11-09 render-wait fix took effect only
-      # because the file was copied in by hand. Read-only — the harness writes
-      # nothing here, its owner ledger lives under /var/lib/aitelier-godot. The
-      # baked copy stays as the fallback for a container started without this
-      # compose file. The harness also imports its /srv siblings
-      # (game_time_probe.py, clock_sensitivity.py), so this must be the whole
-      # directory, not one file. See
+      # The image COPYs each of the three docker/godot scripts to /srv at build
+      # time and its CMD is `python3 /srv/godot_harness.py --serve`, so without
+      # this mount a merged harness change reaches the running sidecar only
+      # through an image rebuild or a hand copy — and a hand copy is no longer
+      # available either: this mount is read-only, so `touch /srv/...` inside
+      # the container returns "Read-only file system" (measured 2026-11-09).
+      # Read-only on purpose — the harness writes nothing here, its owner ledger
+      # lives under /var/lib/aitelier-godot. The mount is the whole DIRECTORY,
+      # not one file, because the two sibling probes are separate programs that
+      # LOAD the harness BY FILE: game_time_probe.py and clock_sensitivity.py
+      # each reads GODOT_HARNESS_PY (default /srv/godot_harness.py) and loads
+      # it with importlib.util.spec_from_file_location("godot_harness", path),
+      # while godot_harness.py itself imports neither sibling — so a per-file
+      # mount would pair one checkout's harness with the image's probes. The
+      # baked copies stay as the fallback for a container started without this
+      # compose file; they are not this checkout's (measured 2026-11-09: the
+      # image built 2026-11-08T16:03:58Z bakes sha256 157aff35… for
+      # /srv/godot_harness.py, the checkout's is 9345946f…). See
       # tests/unit/test_godot_sidecar_serves_the_checkout.py.
       - ./docker/godot:/srv:ro
     networks:

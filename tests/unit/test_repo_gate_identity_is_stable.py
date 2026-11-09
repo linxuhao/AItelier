@@ -150,12 +150,13 @@ def test_a_behavior_key_nested_after_the_real_one_is_not_read(
     assert not any(i.endswith("@7") for i in ids), ids
 
 
-@pytest.mark.docker  # two REAL gate runs: run_tests executes the gate only in the bounded CPU container
 def test_two_real_gate_runs_whose_summary_differs_get_the_same_ids(
         tmp_path, monkeypatch):
     """Two runs of the fixture gate against the real harness: its findings
     carry the report's summary, and the summary differs between the runs."""
-    from tests.gate_fixture import HarnessRig, red_report, write_gate
+    from tests.gate_fixture import (HarnessRig, install_entry_executor, red_report,
+                                    write_gate)
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     ids = []
     for n, summary in enumerate(("0 passed, 2 failed", "0 passed, 2 failed (run 2)")):
         rig = HarnessRig(tmp_path / f"harness-{n}", monkeypatch)

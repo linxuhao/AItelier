@@ -12,8 +12,9 @@ from skillflow.output_targets import git
 from tests.code_output_fixture import init_code_repo
 
 
-@pytest.mark.docker  # needs the docker CPU execution facility: run_tests reports `infrastructure_unavailable` without it, and this asserts a REAL pytest report became an artifact
-def test_run_tests_report_is_an_artifact_not_a_code_change(tmp_path):
+def test_run_tests_report_is_an_artifact_not_a_code_change(tmp_path, monkeypatch):
+    from tests.gate_fixture import install_entry_executor
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     root = init_code_repo(tmp_path / "code")
     (root / "tests").mkdir()
     (root / "tests/test_smoke.py").write_text("def test_smoke():\n    assert 2 + 2 == 4\n")

@@ -23,14 +23,20 @@ import pytest
 
 from aitelier import gate_admission
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import HarnessRig, write_gate
+from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,
+                                write_gate)
 
 
-def _repo(tmp_path):
+def _repo(tmp_path, *, client_timeout=None):
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
     write_gate(repo)
+    if client_timeout is not None:
+        # The executor entry scrubs the child environment, so a fixture value
+        # reaches the gate only when the gate program carries it (`embed_env`).
+        (repo / "gate.py").write_text(
+            embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=str(client_timeout)))
     return repo
 
 
@@ -44,17 +50,17 @@ def _queued_gate(tmp_path, monkeypatch, *, render, queue, client_timeout):
         rig.hold()
         threading.Timer(queue, rig.release.set).start()
         started = time.monotonic()
-        gate = rt._run_repo_gate(_repo(tmp_path))
+        gate = rt._run_repo_gate(_repo(tmp_path, client_timeout=client_timeout))
         elapsed = time.monotonic() - started
     finally:
         rig.close()
     return gate, elapsed, rig
 
 
-@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered(
         tmp_path, monkeypatch):
     """Queue 4 s, render 1 s, client timeout 2 s."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     gate, elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=1.0,
                                       queue=4.0, client_timeout=2)
     assert elapsed > 4.0
@@ -69,11 +75,16 @@ def test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered(
     assert rig.rendered == ["op-holder", "repo"]
 
 
-@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_the_client_timeout_still_bounds_the_render_itself(tmp_path, monkeypatch):
-    """Queue 1.5 s, render 3 s, client timeout 2 s: once admitted, the gate's
-    own timeout runs again, and a render longer than it is not waited out."""
-    gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=3.0,
+    """Queue 1.5 s, render 6 s, client timeout 2 s: once admitted, the gate's
+    own timeout runs again, and a render longer than it is not waited out.
+
+    The render must outlast the timeout by more than the relay's teardown
+    (measured: 0.5 s of executor-entry teardown plus 0.5 s of relay
+    shutdown, ~1 s), or the harness's answer lands before `stop()` and the
+    record reads `answered` instead of `abandoned`."""
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
+    gate, _elapsed, rig = _queued_gate(tmp_path, monkeypatch, render=6.0,
                                        queue=1.5, client_timeout=2)
     assert gate["returncode"] == 2, gate["output"]
     (request,) = gate["admission"]["requests"]
@@ -107,8 +118,8 @@ class _NoLifecycle(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.mark.docker  # _run_repo_gate only ever runs the gate in the bounded CPU container
 def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     server = ThreadingHTTPServer(("127.0.0.1", 0), _NoLifecycle)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -116,7 +127,7 @@ def test_no_keepalive_when_admission_cannot_be_seen(tmp_path, monkeypatch):
     monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "1")
     monkeypatch.setenv("AITELIER_REPO_GATE_KEEPALIVE_SECONDS", "0.2")
     try:
-        gate = rt._run_repo_gate(_repo(tmp_path))
+        gate = rt._run_repo_gate(_repo(tmp_path, client_timeout=1))
     finally:
         server.shutdown()
         server.server_close()

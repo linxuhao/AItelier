@@ -247,8 +247,9 @@ def test_attributed_manifest_carries_coverage_whole_and_missing_marker_is_unmeas
                                   "retained_findings": 1}) == rt.REPO_GATE_MEASURED_FAIL
 
 
-@pytest.mark.docker  # run_tests' pytest leg needs the bounded CPU executor (docker + a host-visible repo)
 def test_scope_survives_test_report_current_cycle_and_audit(graph, tmp_path, monkeypatch):
+    from tests.gate_fixture import install_entry_executor
+    install_entry_executor(monkeypatch)  # Real entry inside the outer test capsule.
     repo, _, _, _ = graph
     scope = plan(graph)
     gate = {"script": "run_tests.sh", "returncode": 0, "passed": True,

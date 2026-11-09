@@ -377,21 +377,9 @@ ROWS = {
 # The relay path is `<AITELIER_HOME>/r/<32 hex>.s` (aitelier/gate_admission.py),
 # and `AITELIER_HOME` is this row's pytest tmp dir, so the longest row ids
 # overflow the 107-byte budget first. Measured on the same rows: the same
-# command with `--basetemp=/tmp/t` passes all five sampled ids (5 passed).
-# Every row NOT listed here runs and passes in the default shape.
-_KEPT_MARKED_ROWS = frozenset({
-    "declared_failed_is_not_an_absence",
-    "first_entry_names_other_repo_red_refused",
-    "first_entry_names_this_repo_clean_refused",
-    "foreign_names_repo_gate_wrote_none",
-    "inotify_unavailable_red_gate_exit_0",
-    "inotify_unavailable_red_gate_exit_1",
-    "node_runner_unavailable_beside_refused_gate",
-    "other_repo_reports_beside_green_gate",
-    "pytest_runner_unavailable_beside_refused_gate",
-    "pytest_runner_unavailable_beside_unattributable_red",
-    "report_without_manifest_red_refused",
-})
+# command with `--basetemp=/tmp/t` passes the sampled ids (5 passed).
+# The three parametrize decorators below name these rows inline; every other row
+# runs and passes in the default shape.
 
 
 NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
@@ -587,8 +575,21 @@ def _driven(row_id, tmp_path_factory):
 
 
 @pytest.mark.parametrize("row_id", [
-    pytest.param(name, id=name,
-                 marks=pytest.mark.docker if name in _KEPT_MARKED_ROWS else ())
+    pytest.param(
+        name, id=name,
+        marks=pytest.mark.docker if name in {
+            "declared_failed_is_not_an_absence",
+            "first_entry_names_other_repo_red_refused",
+            "first_entry_names_this_repo_clean_refused",
+            "foreign_names_repo_gate_wrote_none",
+            "inotify_unavailable_red_gate_exit_0",
+            "inotify_unavailable_red_gate_exit_1",
+            "node_runner_unavailable_beside_refused_gate",
+            "other_repo_reports_beside_green_gate",
+            "pytest_runner_unavailable_beside_refused_gate",
+            "pytest_runner_unavailable_beside_unattributable_red",
+            "report_without_manifest_red_refused",
+        } else ())
     for name in ROWS])
 def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
     row = ROWS[row_id]
@@ -632,8 +633,21 @@ def test_the_outcome_of_every_report_shape(tmp_path_factory, row_id):
 
 
 @pytest.mark.parametrize("row_id", [
-    pytest.param(name, id=name,
-                 marks=pytest.mark.docker if name in _KEPT_MARKED_ROWS else ())
+    pytest.param(
+        name, id=name,
+        marks=pytest.mark.docker if name in {
+            "declared_failed_is_not_an_absence",
+            "first_entry_names_other_repo_red_refused",
+            "first_entry_names_this_repo_clean_refused",
+            "foreign_names_repo_gate_wrote_none",
+            "inotify_unavailable_red_gate_exit_0",
+            "inotify_unavailable_red_gate_exit_1",
+            "node_runner_unavailable_beside_refused_gate",
+            "other_repo_reports_beside_green_gate",
+            "pytest_runner_unavailable_beside_refused_gate",
+            "pytest_runner_unavailable_beside_unattributable_red",
+            "report_without_manifest_red_refused",
+        } else ())
     for name in ROWS])
 def test_the_attribution_of_every_report_shape(tmp_path_factory, row_id):
     row = ROWS[row_id]
@@ -656,8 +670,11 @@ _BREAKS_THE_REQUIREMENT = ("lockfile_first_red_refused",
 
 
 @pytest.mark.parametrize("row_id", [
-    pytest.param(name, id=name,
-                 marks=pytest.mark.docker if name in _KEPT_MARKED_ROWS else ())
+    pytest.param(
+        name, id=name,
+        marks=pytest.mark.docker if name in {
+            "first_entry_names_other_repo_red_refused",
+        } else ())
     for name in _BREAKS_THE_REQUIREMENT])
 def test_the_gate_must_create_its_report_directory_first(tmp_path_factory,
                                                          row_id):

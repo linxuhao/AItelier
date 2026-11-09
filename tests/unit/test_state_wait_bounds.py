@@ -1602,14 +1602,24 @@ RENAMED_GUARDED_TEST = "test_quiet_recovery_release_allows_fresh_disposition"
 
 
 def test_renaming_a_guarded_test_loses_its_known_site_key(tmp_path):
-    """A rename in the guarded module is a table edit here, not a silent census."""
+    """A rename of the guarded DEFINITION is a table edit here, not a silent census.
+
+    The table is keyed by the enclosing ``async def``'s name, so the definition is
+    the only thing a rename has to be able to reach: it has to exist exactly once
+    and be the thing that disappears from the census.  Counting every occurrence of
+    the name instead made this gate red as soon as the guarded module legitimately
+    called its own case again (``await <test>(...)`` inside a witness, added in
+    22d5c32aaf) — a second occurrence that changes no census entry at all.
+    """
+    definition = f"async def {RENAMED_GUARDED_TEST}("
     original = DEFAULT_MODULE.read_text(encoding="utf-8")
-    assert original.count(RENAMED_GUARDED_TEST) == 1, (
-        f"the guarded module must name {RENAMED_GUARDED_TEST} exactly once, found "
-        f"{original.count(RENAMED_GUARDED_TEST)}")
+    assert original.count(definition) == 1, (
+        f"the guarded module must define {RENAMED_GUARDED_TEST} exactly once, found "
+        f"{original.count(definition)}")
     copy = tmp_path / "test_state_wait_contention.py"
-    copy.write_text(original.replace(RENAMED_GUARDED_TEST, RENAMED_GUARDED_TEST + "_renamed"),
-                    encoding="utf-8")
+    copy.write_text(
+        original.replace(definition, f"async def {RENAMED_GUARDED_TEST}_renamed("),
+        encoding="utf-8")
     lost = KNOWN_MUST_COMPLETE_SITES - _must_complete_site_keys(audit_wait_bounds(copy))
     assert lost == {(RENAMED_GUARDED_TEST, "wait_for")}, (
         f"renaming {RENAMED_GUARDED_TEST} must lose exactly its own known-site key, "

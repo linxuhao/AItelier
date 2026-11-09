@@ -22,8 +22,6 @@ QUOTAS = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912
           "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
 
 
-pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
-
 @pytest.fixture
 def bound(tmp_path, monkeypatch, request):
     requested_sdk = getattr(request, "param", "1.5.99")
@@ -54,7 +52,18 @@ def bound(tmp_path, monkeypatch, request):
     shutil.rmtree(fixture)
 
 
-@pytest.mark.parametrize("bound", ["1.5.85", "1.5.99", "actual-image"], indirect=True)
+# Measured 2026-11-09 in the disposable image, arm (a) `pytest -m docker` with no
+# docker binary and arm (b) the same command plus a recording `docker` shim first
+# on PATH (its log stayed empty for every test in this file): only the
+# `actual-image` row below cannot run there. It asserts the image's baked engine
+# is 1.5.99 and this image bakes 1.5.100 (`assert '1.5.100' == '1.5.99'` at the
+# capture assertion), so it keeps the marker; the other two rows rejoin the
+# default run.
+@pytest.mark.parametrize("bound", [
+    "1.5.85",
+    "1.5.99",
+    pytest.param("actual-image", id="actual-image", marks=pytest.mark.docker),
+], indirect=True)
 def test_capture_measures_actual_imports_and_both_coordinates(bound):
     manifest, binding, fixture = bound
     frozen, sha256 = gb.read_binding(manifest)

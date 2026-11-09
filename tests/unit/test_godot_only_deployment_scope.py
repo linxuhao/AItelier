@@ -26,8 +26,13 @@ from tests.unit.test_normal_gate_preparation import QUOTAS, bound  # noqa: F401 
 
 RESEARCH = ("research-a", "research-b")
 
+# No file-level `pytest.mark.docker` here, measured 2026-11-09 in the disposable
+# image: arm (a) `pytest -m docker` with no docker binary passes all 135 tests,
+# and arm (b), the same command plus a recording `docker` shim first on PATH,
+# also passes all 135 with the shim log EMPTY (nothing in this file reaches
+# docker — the docker effects these tests meet are replaced at their boundary).
+# Only Docker-less guards live here, so they run in the default shape.
 
-pytestmark = pytest.mark.docker  # needs docker + a frozen clean Source
 
 def godot_packet():
     """Current-shaped Godot mix: retained ready demand, the own deployment controller,

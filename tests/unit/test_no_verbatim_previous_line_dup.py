@@ -67,6 +67,13 @@ TEST_INTENTIONAL_REPEATS = [
     # expected-messages list quotes one line per case, so the repeat is the
     # point, not a splice.
     ("tests/unit/test_state_issue_moot_resolution.py", '"moot takes exactly: artifact",', 1),
+    # The blank line inside a parametrized SOURCE STRING. Every snippet in
+    # tests/unit/test_state_wait_bounds.py keeps one source line per literal so
+    # that the line number it expects to be refused at stays 5 (or 7), which
+    # means two consecutive '"\\n"' lines per case are input data, not a splice.
+    # Collapsing them into one literal would move the refused call's line and
+    # break that expectation, so the repeat is named here instead.
+    ("tests/unit/test_state_wait_bounds.py", '"\\n"', 52),
     ("tests/unit/test_tick_log.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
     ("tests/unit/test_waiting_tick_log_coalescing.py", 'await tick("p1")', 1),
     ("tests/writing_bench/test_early_semantic_refusal.py", 'adapter.publish_review_materials(bench, "run1", "literary", out)', 1),
@@ -113,7 +120,10 @@ def test_named_test_repeats_are_pinned_and_current():
         f"only-in-tree={sorted(set(derived) - set(listed))} "
         f"only-in-list={sorted(set(listed) - set(derived))} "
         f"count-mismatch={[(k, derived[k], listed.get(k)) for k in derived if k in listed and derived[k] != listed[k]]}")
-    assert len(TEST_INTENTIONAL_REPEATS) == 21
+    # The length is pinned as well: a silently DROPPED entry is invisible to the
+    # equality above (its site would simply stop being a repeat), so the list's
+    # size is written down here too.
+    assert len(TEST_INTENTIONAL_REPEATS) == 22
 
 
 

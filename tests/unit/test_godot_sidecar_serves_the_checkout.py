@@ -10,9 +10,14 @@ service, container aitelier-godot). Until now that was the only source of /srv, 
   * any ordinary recreate (`docker compose up -d`, or the host rebooting and the
     container coming back) silently returned to whatever bytes the image baked.
 
-Both happened. The 2026-11-08 recreate baked commit 20c31f4fa516's harness, and the
-render-wait fix merged as e0367fc4aa only took effect because the director copied
-the file into the container by hand at 18:40Z. The fix is a read-only bind of the
+Both happened. The image aitelier-godot (created 2026-11-08T16:03:58Z) bakes the
+docker/godot/godot_harness.py of commit db8c97855724 (committed 2026-11-08T15:51:41Z;
+sha256 157aff350699ccee681ef179ba17eb0a6d22716b6a2423c0019f4f764276749b). Commit
+20c31f4fa516 (committed 2026-11-08T16:31:46Z, after that image) is not what the image
+holds, so the image cannot have been built from it: its bytes got into a container by
+some other route, such as a hand copy. The
+render-wait fix merged as e0367fc4aa only took effect because the director copied the
+file into the container by hand at 18:40Z. The fix is a read-only bind of the
 checkout's docker/godot directory at /srv, in the compose file, so the declaration
 travels with the repository and a plain `up -d` cannot drop it.
 
@@ -23,8 +28,10 @@ file's own location, never a copy of the file) and REFUSES — never skips:
     whose `volumes` is not the list compose expects;
   * a service with no volume mapping THIS checkout's docker/godot directory onto
     /srv — a copy kept somewhere else, or a mount at a different target, does not
-    count: the container runs /srv/godot_harness.py and that harness imports its
-    /srv siblings (game_time_probe.py, clock_sensitivity.py), so a per-file mount
+    count: the container runs /srv/godot_harness.py directly, and the sibling probes
+    game_time_probe.py and clock_sensitivity.py load that same path by file
+    (importlib, GODOT_HARNESS_PY defaulting to /srv/godot_harness.py), so mounting
+    the whole directory keeps every file in /srv from one checkout; a per-file mount
     or a relocated directory would mix a checkout's file with the image's;
   * that mount being writable instead of read-only — the sidecar only renders into
     its own tmp dirs and writes its owner ledger under /var/lib/aitelier-godot, so
@@ -173,7 +180,8 @@ def _missing_mount_message(service: dict) -> str | None:
     return (f"service `{SERVICE}` in docker-compose.yml declares no volume mapping "
             f"this checkout's {CHECKOUT_SOURCE} directory onto {TARGET}: it mounts "
             f"{[mount.describe() for mount in mounts] or 'nothing'}. The sidecar runs "
-            f"{TARGET}/godot_harness.py (and imports its {TARGET} siblings), so "
+            f"{TARGET}/godot_harness.py directly, and its probe scripts load that "
+            f"same path by file, so "
             f"without that mount a merged harness change reaches the container only "
             f"through an image rebuild or a hand copy, and any recreate silently "
             f"returns to the baked image's bytes. Add `- ./{CHECKOUT_SOURCE}:"

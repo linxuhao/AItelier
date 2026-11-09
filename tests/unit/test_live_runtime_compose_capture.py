@@ -183,7 +183,9 @@ def _runtime_db_modules_pulled_by_import():
     return json.loads(proc.stdout)
 
 
-@pytest.mark.docker  # needs the owned CPU capsule: the frozen Source at /src, EXPECTED_SOURCE, --pids-limit 512
+@pytest.mark.skipif(not os.environ.get('EXPECTED_SOURCE'), reason=(
+    'needs EXPECTED_SOURCE=<frozen Source checkout> run inside the owned CPU capsule '
+    '(cgroup memory.max=2147483648 and pids.max=512 under /sys/fs/cgroup)'))
 def test_source_imports_and_owned_container_caps():
     root = Path(os.environ['EXPECTED_SOURCE']).resolve()
     for module in (server, dq):

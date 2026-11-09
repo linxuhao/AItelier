@@ -36,23 +36,51 @@ file's own location, never a copy of the file) and REFUSES — never skips:
   * that mount being writable instead of read-only — the sidecar only renders into
     its own tmp dirs and writes its owner ledger under /var/lib/aitelier-godot, so
     nothing legitimately writes to /srv, and a writable mount would let an
-    LLM-driven play-test rewrite the code the gate is measured against.
+    LLM-driven play-test rewrite the code the gate is measured against;
+  * that service mounting ANYTHING ELSE at or under /srv — a per-file shadow
+    (`/tmp/shadow/godot_harness.py:/srv/godot_harness.py`) or a sibling
+    (`…:/srv/clock_sensitivity.py:ro`). Both shapes passed on 2026-11-09 before
+    this refusal existed: the directory mount above was present and read-only
+    exactly as intended, and one file inside /srv was still served from somewhere
+    else. The container runs /srv/godot_harness.py and imports its /srv siblings,
+    so a shadow at either destination makes the executed harness a mixture of this
+    checkout and bytes no repository holds — the mount declaration is then true
+    about the directory and false about the files the gate is measured against.
+
+Declaring the mount is also not the same as the serving user being able to READ it.
+`user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"` runs the sidecar as uid/gid
+1000, and measured on this host 2026-11-09: `docker/godot/godot_harness.py` is mode
+0600 owned by uid 1000 gid 1000 (same for `game_time_probe.py` and
+`clock_sensitivity.py`), and `docker/godot/` itself is a 0700 directory 1000:1000 —
+so uid 1000 may read them through the owner bits. A 0600 file owned by ROOT at the
+same path would be mounted just as successfully (compose cannot see modes) and the
+sidecar would then die at import, having served nothing. So this module MEASURES,
+from the mounted tree's own bytes, that the uid/gid the service runs as can read
+every file (and traverse every directory) under docker/godot, and refuses
+otherwise. The uid/gid are resolved the way compose resolves them: `${VAR:-default}`
+from the process environment, else the declared default, and a `user:` that does not
+spell out both numbers is refused rather than assumed. Not measured, and not claimed:
+a bind mount's access-control layers beyond POSIX mode bits (SELinux labels, ACLs).
 
 The baked image copy is deliberately still allowed to exist: it is the fallback for
 a container started without this compose file (a bare `docker run`). What this test
 refuses is it being the ONLY copy the sidecar can ever run.
 
-It reads the compose file as data, never starts Docker: a disposable test container
-has no docker binary, and the property under test is what the file DECLARES.
+It reads the compose file as data and the mounted tree's modes from disk, never
+starts Docker: a disposable test container has no docker binary, and the properties
+under test are what the file DECLARES about /srv plus whether the uid it names can
+actually open what it mounts.
 """
 from __future__ import annotations
 
 import os
 import posixpath
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -167,8 +195,32 @@ def _is_checkout_godot(source: str | None) -> bool:
     return Path(os.path.realpath(path)) == CHECKOUT_GODOT
 
 
+def _normalised_target(target: str) -> str:
+    """A container path with `//`, `.` and `..` folded away, still absolute."""
+    normalised = posixpath.normpath(target)
+    # POSIX normpath keeps a leading `//` (an implementation-defined root); compose
+    # passes it to the runtime, which resolves it to `/`, so fold it here too.
+    return "/" + normalised.lstrip("/") if normalised.startswith("/") else normalised
+
+
 def _is_srv_target(mount: Mount) -> bool:
-    return mount.target is not None and posixpath.normpath(mount.target) == TARGET
+    return mount.target is not None and _normalised_target(mount.target) == TARGET
+
+
+def _shadowed_srv_path(mount: Mount) -> str | None:
+    """The path this mount puts UNDER /srv, or None when it is not under it.
+
+    `/srv` itself is the directory mount the tests above own: a mount at exactly
+    /srv is judged by `_missing_mount_message` / `_writable_mount_messages`, not
+    here. Anything deeper — /srv/godot_harness.py, /srv/clock_sensitivity.py —
+    lands inside that directory and replaces one entry of it.
+    """
+    if mount.target is None:
+        return None
+    target = _normalised_target(mount.target)
+    if target.startswith(TARGET + "/"):
+        return target
+    return None
 
 
 def _missing_mount_message(service: dict) -> str | None:
@@ -203,6 +255,156 @@ def _writable_mount_messages(service: dict) -> list[str]:
     ]
 
 
+# ── Nothing else may live under /srv ────────────────────────────────────────
+
+def _srv_shadow_messages(service: dict) -> list[str]:
+    """One refusal per volume whose destination is inside /srv, below /srv itself.
+
+    A per-file mount (`…/godot_harness.py:/srv/godot_harness.py`, or the same
+    read-only) does not remove the directory mount and is invisible to the checks
+    above: they ask whether the intended mount EXISTS, and it does. But docker
+    applies the more specific destination last, so that one file is served from
+    outside this checkout while its siblings still come from it — the sidecar then
+    runs a harness this repository does not contain, and the gate measures the
+    bytes nobody reviewed.
+    """
+    return [
+        f"service `{SERVICE}` in docker-compose.yml also mounts "
+        f"{mount.describe()}: {_shadowed_srv_path(mount)} is inside {TARGET}, so it "
+        f"shadows an entry of the checkout's {CHECKOUT_SOURCE} directory that the "
+        f"sidecar must serve. Docker resolves the more specific destination last, so "
+        f"that path alone would come from {mount.source or '<anonymous>'} while its "
+        f"{TARGET} siblings still come from this checkout — the container would run "
+        f"a mixture of the repository and bytes no repository holds, and the gate "
+        f"would be measured against code a recreate can silently change. Mount only "
+        f"./{CHECKOUT_SOURCE}:{TARGET}:ro, and nothing else at or under {TARGET}"
+        for mount in _mounts(service)
+        if _shadowed_srv_path(mount) is not None
+    ]
+
+
+# ── The serving uid must be able to READ what it mounts ─────────────────────
+#
+# Declaring the mount says which directory the sidecar sees, not that the process
+# can open the files: a root-owned 0600 file at docker/godot/godot_harness.py is
+# mounted just as successfully and then fails at import, with the sidecar serving
+# nothing. These read the modes from the mounted tree itself, and the uid/gid from
+# the service's own `user:` line.
+
+_COMPOSE_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand(value: str) -> str | None:
+    """Compose's `${VAR}` / `${VAR:-default}` against this process's environment.
+
+    None when the value needs a variable that is neither set nor defaulted: the
+    number then depends on the shell that runs `docker compose up`, which is not a
+    property this test can read.
+    """
+    unresolved = False
+
+    def substitute(match: re.Match[str]) -> str:
+        nonlocal unresolved
+        name, default = match.group(1), match.group(2)
+        from_env = os.environ.get(name)
+        if from_env:
+            return from_env
+        if default is not None:
+            return default
+        unresolved = True
+        return ""
+
+    expanded = _COMPOSE_VAR.sub(substitute, value).strip()
+    return None if unresolved else expanded
+
+
+def _service_uid_gid(service: dict) -> tuple[int, int]:
+    """The uid/gid the sidecar's process runs as, from its own `user:`.
+
+    Refuses rather than assumes: an absent `user:` means the IMAGE's default, and a
+    lone uid leaves the gid to the image's /etc/passwd — in both cases the two
+    numbers the readability check needs are not in this file.
+    """
+    raw = service.get("user")
+    assert raw is not None, (
+        f"service `{SERVICE}` in docker-compose.yml declares no `user:`, so the "
+        f"uid/gid the sidecar runs as (the image's default) cannot be read from the "
+        f"compose file, and whether that user can read the {TARGET} files it mounts "
+        f"cannot be measured. Declare `user: \"<uid>:<gid>\"`")
+    expanded = _expand(str(raw))
+    assert expanded is not None, (
+        f"`services.{SERVICE}.user` in docker-compose.yml is {raw!r}, which needs a "
+        f"variable neither set here nor defaulted, so the serving uid/gid cannot be "
+        f"resolved. Give the numbers, or a `:-<default>`")
+    uid_text, separator, gid_text = expanded.partition(":")
+    assert separator and uid_text.isdigit() and gid_text.isdigit(), (
+        f"`services.{SERVICE}.user` in docker-compose.yml resolves to {expanded!r}, "
+        f"not `<uid>:<gid>` with both numbers — the readability of the {TARGET} "
+        f"files cannot be measured against a uid or gid taken from the image")
+    return int(uid_text), int(gid_text)
+
+
+def _permission_class(mode: int, file_uid: int, file_gid: int,
+                      uid: int, gid: int) -> int:
+    """The rwx bits POSIX applies for this uid/gid — exactly one class.
+
+    Owner bits when the uids match, else group bits when the gids match, else the
+    other bits; the classes never combine, so a 0600 file owned by root grants a
+    uid-1000 process nothing (its group and other triplets are both empty).
+    """
+    if file_uid == uid:
+        return (mode >> 6) & 0o7
+    if file_gid == gid:
+        return (mode >> 3) & 0o7
+    return mode & 0o7
+
+
+def _unreadable_harness_messages(service: dict,
+                                 directory: Path = CHECKOUT_GODOT) -> list[str]:
+    """One refusal per entry under docker/godot the serving uid/gid cannot use.
+
+    `directory` defaults to this checkout's real docker/godot; the self-check
+    points it at a throwaway tree so the mode/ownership arithmetic is exercised on
+    real stat() output rather than only on made-up numbers.
+    """
+    uid, gid = _service_uid_gid(service)
+    assert directory.is_dir(), (
+        f"{directory} is not a directory, so the {TARGET} mount of "
+        f"{CHECKOUT_SOURCE} has nothing to serve")
+    problems: list[str] = []
+    for entry in (directory, *sorted(directory.rglob("*"))):
+        try:
+            shown = str(entry.relative_to(REPO_ROOT))
+        except ValueError:
+            shown = str(entry)
+        if entry.is_symlink():
+            resolved = Path(os.path.realpath(entry))
+            if resolved != directory and directory not in resolved.parents:
+                problems.append(
+                    f"{shown} is a symlink to {resolved}, "
+                    f"which is outside the directory mounted at {TARGET}: inside the "
+                    f"sidecar that link resolves against the container's own "
+                    f"filesystem, not this checkout. Replace it with the file")
+                continue
+        stated = entry.stat()
+        klass = _permission_class(stated.st_mode & 0o777, stated.st_uid,
+                                  stated.st_gid, uid, gid)
+        needed = 0o5 if entry.is_dir() else 0o4          # r-x for dirs, r for files
+        which = ("owner" if stated.st_uid == uid
+                 else "group" if stated.st_gid == gid else "other")
+        if klass & needed != needed:
+            problems.append(
+                f"{shown} is mode {stated.st_mode & 0o777:04o} owned by uid "
+                f"{stated.st_uid} gid {stated.st_gid}, and service `{SERVICE}` in "
+                f"docker-compose.yml runs as uid {uid} gid {gid}: that uid gets the "
+                f"{which} bits {klass:o}, so it cannot "
+                f"{'traverse (r-x)' if entry.is_dir() else 'read'} it. Docker mounts "
+                f"it anyway and the sidecar fails when it opens the path inside "
+                f"{TARGET} — the mount would be declared correct and serve nothing. "
+                f"Make it readable by uid {uid} (chmod o+r, or o+rx on a directory)")
+    return problems
+
+
 # ── The real compose file ───────────────────────────────────────────────────
 
 def test_the_compose_file_declares_the_godot_builder_service():
@@ -215,8 +417,24 @@ def test_the_compose_file_declares_the_godot_builder_service():
 
 
 def test_the_godot_builder_mounts_the_checkout_docker_godot_directory_at_srv():
-    message = _missing_mount_message(_godot_builder(_compose()))
+    service = _godot_builder(_compose())
+    message = _missing_mount_message(service)
     assert message is None, message
+    # A file mounted INSIDE /srv leaves this mount present, so the mount existing
+    # is not enough: what is at /srv must be this checkout's directory alone.
+    shadows = _srv_shadow_messages(service)
+    assert not shadows, "\n".join(shadows)
+
+
+def test_no_other_volume_puts_anything_at_or_under_srv():
+    problems = _srv_shadow_messages(_godot_builder(_compose()))
+    assert not problems, "\n".join(problems)
+
+
+def test_the_sidecar_can_read_every_file_it_mounts_at_srv():
+    """The mounted tree's own modes, against the uid/gid the service runs as."""
+    problems = _unreadable_harness_messages(_godot_builder(_compose()))
+    assert not problems, "\n".join(problems)
 
 
 def test_that_mount_is_read_only():
@@ -278,3 +496,110 @@ def test_the_checks_refuse_every_wrong_shape_and_accept_both_explicit_forms():
         assert message is not None, volumes
         assert SERVICE in message and TARGET in message, message
         assert _writable_mount_messages(service) == [], volumes
+
+
+def test_the_checks_refuse_a_shadow_at_or_under_srv():
+    """Self-check: a per-file mount INSIDE a correct /srv mount is refused.
+
+    This is the shape that passed on 2026-11-09: the directory mount below is
+    present and read-only, and one file inside /srv is served from somewhere else.
+    Each refusal must name the service and the shadowed path, so a mutation of the
+    real compose file says which path was taken over."""
+    intended = f"./{CHECKOUT_SOURCE}:{TARGET}:ro"
+
+    # The intended declaration, mounts elsewhere, and the same directory named
+    # absolutely or in long form are not shadows.
+    for volumes in ((intended,),
+                    (intended, "/tmp/state:/var/lib/aitelier-godot"),
+                    (intended,
+                     "${HOME}/.AItelier/godot-control:/var/lib/aitelier-godot"),
+                    (intended, "./docker:/app:ro"),
+                    (f"{CHECKOUT_GODOT}:{TARGET}:ro",),
+                    ({"type": "bind", "source": f"./{CHECKOUT_SOURCE}",
+                      "target": TARGET, "read_only": True},)):
+        assert _srv_shadow_messages(_service_with(*volumes)) == [], volumes
+
+    # A destination at or under /srv, other than /srv itself, is a shadow — read
+    # only or writable, short or long form, and however the path is spelled.
+    for volumes, shadowed in (
+            ((intended, "/tmp/shadow/godot_harness.py:/srv/godot_harness.py"),
+             "/srv/godot_harness.py"),
+            ((intended, "/tmp/shadow/x.py:/srv/clock_sensitivity.py:ro"),
+             "/srv/clock_sensitivity.py"),
+            ((intended, {"type": "bind", "source": "/tmp/shadow/x.py",
+                         "target": "/srv/game_time_probe.py", "read_only": True}),
+             "/srv/game_time_probe.py"),
+            ((intended, "/tmp/shadow/x.py:/srv//game_time_probe.py:ro"),
+             "/srv/game_time_probe.py"),
+            ((intended, "/tmp/shadow/x.py:/srv/./clock_sensitivity.py:ro"),
+             "/srv/clock_sensitivity.py"),
+            ((intended, "/tmp/shadow/x.py:/srv/../srv/godot_harness.py:ro"),
+             "/srv/godot_harness.py"),
+            ((intended, "godot_harness:/srv/godot_harness.py"),
+             "/srv/godot_harness.py")):
+        service = _service_with(*volumes)
+        # The directory mount is still exactly right — which is why the shadow
+        # needs its own check rather than riding on the ones above.
+        assert _missing_mount_message(service) is None, volumes
+        assert _writable_mount_messages(service) == [], volumes
+        problems = _srv_shadow_messages(service)
+        assert len(problems) == 1, (volumes, problems)
+        assert SERVICE in problems[0] and shadowed in problems[0], problems[0]
+
+
+def test_the_checks_read_the_serving_uid_and_refuse_modes_it_cannot_read(tmp_path):
+    """Self-check: modes and ownership decide the verdict, not a file existing.
+
+    Measured on this host 2026-11-09: `docker/godot/*.py` are mode 0600 owned by uid
+    1000 gid 1000 and `docker/godot` is a 0700 directory 1000:1000, while the
+    godot-builder service runs `user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"`
+    — so uid 1000 reads them through the OWNER bits. The mutation is the same 0600
+    file owned by root: uid 1000 then matches no class that grants anything, and the
+    refusal must name the file and both uid numbers."""
+    # uid/gid are read from the service, resolved like compose resolves them.
+    assert _service_uid_gid(
+        {"user": "${AITELIER_TEST_ONLY_UID:-1000}:${AITELIER_TEST_ONLY_GID:-1000}"}
+    ) == (1000, 1000)
+    assert _service_uid_gid({"user": "1000:1000"}) == (1000, 1000)
+    for unusable in ({}, {"user": "1000"}, {"user": "app"},
+                     {"user": "${AITELIER_TEST_ONLY_UID}"}):
+        with pytest.raises(AssertionError) as refusal:
+            _service_uid_gid(unusable)
+        assert SERVICE in str(refusal.value), (unusable, refusal.value)
+
+    # POSIX applies exactly one class: owner, else group, else other.
+    assert _permission_class(0o600, 1000, 1000, 1000, 1000) == 0o6
+    assert _permission_class(0o600, 0, 0, 1000, 1000) == 0o0      # root-owned 0600
+    assert _permission_class(0o640, 0, 1000, 1000, 1000) == 0o4   # group bits only
+    assert _permission_class(0o604, 0, 0, 1000, 1000) == 0o4      # other bits only
+    assert _permission_class(0o700, 1000, 1000, 1000, 1000) == 0o7
+    assert _permission_class(0o644, 0, 0, 0, 0) == 0o6            # owner wins
+
+    tree = tmp_path / "godot"
+    tree.mkdir()
+    harness = tree / "godot_harness.py"
+    harness.write_text("print('harness')\n", encoding="utf-8")
+    harness.chmod(0o600)
+    owner = harness.stat()
+    serving_uid = 1000 if owner.st_uid != 1000 else 1001     # never the owner
+    serving = {"user": f"{serving_uid}:{owner.st_gid}"}
+
+    # The same bytes and mode, owned by the uid the sidecar runs as, are accepted.
+    assert _unreadable_harness_messages({"user": f"{owner.st_uid}:{owner.st_gid}"},
+                                       directory=tree) == []
+    # Owned by somebody else with only owner bits, they are refused, and the
+    # refusal names the file, its mode, its owner and the serving uid.
+    problems = _unreadable_harness_messages(serving, directory=tree)
+    assert len(problems) == 1, problems
+    assert "godot_harness.py" in problems[0], problems[0]
+    assert "0600" in problems[0] and str(owner.st_uid) in problems[0], problems[0]
+    assert str(serving_uid) in problems[0], problems[0]
+
+    # A directory the serving uid cannot traverse is refused too, even when every
+    # file in it is world-readable: docker mounts it and the sidecar cannot reach
+    # the file inside.
+    tree.chmod(0o700)
+    harness.chmod(0o644)
+    problems = _unreadable_harness_messages(serving, directory=tree)
+    assert len(problems) == 1 and "godot" in problems[0], problems
+    assert "0700" in problems[0], problems[0]

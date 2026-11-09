@@ -6,6 +6,7 @@ import json
 import subprocess
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,26 @@ QUOTAS = {"GODOT_RETAIN_MAX_FILES": "4096", "GODOT_RETAIN_MAX_BYTES": "536870912
           "GODOT_RETAIN_MAX_PATTERNS": "16", "GODOT_RETAIN_MAX_SEARCH_ENTRIES": "4096"}
 
 
+def declared_skillflow_version() -> str:
+    """The skillflow-py version this repository PINS, read from pyproject.toml.
+
+    The `actual-image` row is the one place where the installed metadata is NOT
+    monkeypatched, so its binding's `sdk` has to be the repository's own
+    declaration: `capture` reads `importlib.metadata.version("skillflow-py")`
+    from the running image, and the row asserts the two agree. A literal here
+    (`1.5.99`) described the image that predated the pin's move to 1.5.100, so
+    the row went red on a stale constant -- and would have gone red on every
+    future pin bump -- instead of on a real image-versus-pin disagreement.
+    Read the declaration; do not restate it.
+    """
+    project = tomllib.loads((SOURCE / "pyproject.toml").read_text(encoding="utf-8"))
+    pins = [dependency.removeprefix("skillflow-py==")
+            for dependency in project["project"]["dependencies"]
+            if dependency.startswith("skillflow-py==")]
+    assert len(pins) == 1, f"pyproject.toml must pin skillflow-py exactly once: {pins}"
+    return pins[0]
+
+
 @pytest.fixture
 def bound(tmp_path, monkeypatch, request):
     requested_sdk = getattr(request, "param", "1.5.99")
@@ -30,7 +51,10 @@ def bound(tmp_path, monkeypatch, request):
     manifest = tmp_path / "binding.json"
     binding = {"source": str(SOURCE), "head": gb.git(SOURCE, "rev-parse", "HEAD"),
                "tree": gb.git(SOURCE, "rev-parse", "HEAD^{tree}"), "image": "sha256:" + "a" * 64,
-               "sdk": "1.5.99" if requested_sdk == "actual-image" else requested_sdk,
+               # `actual-image` compares the repository pin against what the
+               # image really installs; every other row declares its own value.
+               "sdk": (declared_skillflow_version() if requested_sdk == "actual-image"
+                       else requested_sdk),
                "files": {name: gb.digest(SOURCE / name) for name in gb.FILES},
                "engine_sha256": gb.digest(SOURCE / gb.FILES[0])}
     manifest.write_text(json.dumps(binding))
@@ -52,17 +76,15 @@ def bound(tmp_path, monkeypatch, request):
     shutil.rmtree(fixture)
 
 
-# Measured 2026-11-09 in the disposable image, arm (a) `pytest -m docker` with no
-# docker binary and arm (b) the same command plus a recording `docker` shim first
-# on PATH (its log stayed empty for every test in this file): only the
-# `actual-image` row below cannot run there. It asserts the image's baked engine
-# is 1.5.99 and this image bakes 1.5.100 (`assert '1.5.100' == '1.5.99'` at the
-# capture assertion), so it keeps the marker; the other two rows rejoin the
-# default run.
+# `actual-image` is not a docker row: nothing here reaches docker, and the row's
+# only real boundary is the image's INSTALLED skillflow-py (unlike the literal
+# rows below, whose metadata is monkeypatched). It reds on a stale literal, not
+# on a missing docker binary, so its binding sdk is the repository's own pin
+# (`declared_skillflow_version`) and the row runs in the default shape.
 @pytest.mark.parametrize("bound", [
     "1.5.85",
     "1.5.99",
-    pytest.param("actual-image", id="actual-image", marks=pytest.mark.docker),
+    pytest.param("actual-image", id="actual-image"),
 ], indirect=True)
 def test_capture_measures_actual_imports_and_both_coordinates(bound):
     manifest, binding, fixture = bound

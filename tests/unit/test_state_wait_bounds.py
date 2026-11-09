@@ -29,10 +29,13 @@ resolves each spelling above to a wait site, and classifies the site's bound as
 ``must-complete`` (the Name ``HANDSHAKE_SECONDS``), ``allowed`` (a numeric
 literal strictly below 1.0, i.e. a sub-second poll interval, or the Name
 ``budget``, the drain bound) or ``refused``.  A wait-shaped call the resolver
-cannot place -- a primitive's bare name it does not know, or that name used as a
-method of an object it cannot identify -- is refused as unclassified rather than
-skipped and assumed harmless.  Each refusal names the site: its line number, the
-form it was written in, and the bound's source text.
+cannot place -- a primitive's bare name it does not know, or one of ``wait_for``
+/ ``timeout`` / ``timeout_at`` used as a method of an object it cannot identify --
+is refused as unclassified rather than skipped and assumed harmless.  The one
+exception is the different API BOUNDARY (i) describes, ``x.wait(...)`` on
+something that is not ``asyncio``: its form without a numeric literal bound
+carries no record, and its literal-bound form is refused.  Each refusal names the
+site: its line number, the form it was written in, and the bound's source text.
 
 FAIL-CLOSED ON AN UNRESOLVED AWAIT.  A chained spelling is closed by resolution,
 and the shapes left unresolved are caught by one rule of last resort: an
@@ -41,38 +44,62 @@ numeric literal of 1.0 or more, is recorded and refused as
 :data:`FORM_UNRESOLVED_LITERAL` -- the site names the unresolved callee and the
 literal it read.  A name built by ``exec``, a callee returned from another
 module, or any chained spelling nobody has written a resolver branch for is
-therefore refused on the literal rather than skipped.  Measured on the guarded
-module with the rule in place: its unresolved awaited calls are
-``other_service(service).wait_for_state_change(..., timeout_seconds=.12)`` and
-``...=.04`` (both sub-second) plus bare ``await waiter`` names, so the rule
-records 0 refused sites there and the real module audits clean.
+therefore refused as soon as its arguments carry such a literal, rather than
+skipped.  Measured on the guarded module with the rule in place, 0 refused sites
+are recorded -- i.e. no awaited call the resolver cannot place there carries a
+numeric literal of 1.0 or more -- and
+``test_must_complete_waits_are_bounded_by_the_shared_bound`` asserts that count.
+The module's own inventory of unresolved callees is deliberately NOT restated
+here: the executed count is what has to stay true when that module changes, and a
+list in this prose is a second copy of it that only rots.
 
 BOUNDARY.  This is a reading of one module's syntax, not a proof that no wait
 escapes it.  Two measured edges, each carried by an executed probe in
 ``SILENT_SHAPES`` below: a claim of silence in this prose is backed by a case
-that runs the audit on exactly that snippet and gets zero records.
-(i) The ``threading.Event().wait(...)`` handshake is deliberately unaudited: the
-``handshake`` helper in the guarded module reads
-``observed = event.wait(HANDSHAKE_SECONDS)``, a threading primitive rather than
-an asyncio one, and no site for it appears in the audit.  (ii) Three call shapes
-resolve to no site at all -- measured 0 sites each by probing this resolver with
-an argument that carries no literal bound of 1.0 or more: a name built by
-``exec`` (``exec("wf = asyncio.wait_for")``, then ``await wf(...)``), a callee
-returned from another module's function (``wf = helpers.pick()``, then
-``await wf(...)``), and ``getattr(asyncio.wait_for, "__call__")(...)``.  The
-resolver follows names and expressions this module binds itself; it does not
-follow a value through ``exec``, through another module, or through a ``getattr``
-whose target is already an attribute.  Each of those three carries no record
-only while its arguments stay sub-second; give the same call a literal of 1.0 or
-more and the fail-closed rule above refuses it, which the
-``UNRESOLVED_LITERAL`` cases exercise.
+that runs the audit on exactly that snippet and gets zero records, and that case
+also requires the shape's phrase to still be here, so prose and probe cannot
+drift apart.
+(i) ``x.wait(...)`` on something that is not ``asyncio`` is a DIFFERENT API
+(``threading.Event.wait``, ``asyncio.Event.wait``) and every form of it WITHOUT a
+numeric literal bound is deliberately unaudited -- a bound read from a name, and
+no argument at all: the ``handshake`` helper in the guarded module reads
+``observed = event.wait(HANDSHAKE_SECONDS)``, ``await event.wait()`` is unaudited
+too, and no site for either appears in the
+audit.  The exclusion is for the API, not for large numbers: the same shape
+carrying a numeric literal of 1.0 or more -- ``event.wait(20.0)``,
+``event.wait(timeout=5)``, ``getattr(event, "wait")(20.0)`` -- is refused as
+unclassified rather than skipped, which
+``test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound``
+measures.
+(ii) The resolver follows what this module's own syntax binds and it can read:
+direct imports and their aliases, name aliases and their chains, attribute-target
+aliases, the mapping subscripts ``asyncio.__dict__[...]`` / ``vars(asyncio)[...]``,
+parameter defaults, ``functools.partial``, and ``asyncio.timeout(...)``.  It does
+not follow a value through ``exec`` (``exec("wf = asyncio.wait_for")``, then
+``await wf(...)``), a callee returned from another module's function
+(``wf = helpers.pick()``), a ``getattr`` whose target is already an attribute
+(``getattr(asyncio.wait_for, "__call__")(...)``), a tuple-unpacked alias,
+a list subscript, or a conditional expression picking the primitive.  Nor does it
+follow a ``getattr`` whose name is not a literal.  ``SILENT_SHAPES`` below is this
+audit's census of exactly
+those shapes, each measured to produce zero records: a census of the classes this
+audit KNOWS it skips, not a proof that no other spelling escapes -- which is why
+the fail-closed rule exists for the shapes nobody wrote down.
+THE FAIL-CLOSED RULE READS NUMERIC LITERALS, NOT VALUES.  An unresolved ``await``
+is refused when its arguments carry a literal of 1.0 or more; a bound that is a
+name or an expression -- a bound read from a name (``bound = 20.0``, then
+``await wf(waiter, bound)``), a bound computed from a name (``H * 0.5``), or
+a bound from a lambda call (``(lambda: 20.0)()``) -- is NOT refused, because the
+rule reads the argument subtree for numeric literals and not what they evaluate
+to.  Those three are in ``SILENT_SHAPES`` too, so this edge is a measurement
+rather than a hedge.
 
 The counts are DERIVED from the audit's own output, never asserted as literals:
 the tests check the invariant over the records the audit returned -- each such
 record is the shared bound or one of the named deliberate bounds, and none
 reaches a numeric literal bound of 1.0 -- so a compliant addition to the guarded
-module stays green.  A derived invariant cannot see a DELETION, though (nine
-sites and ten satisfy it alike), so the audit's ``(enclosing function,
+module stays green.  A derived invariant cannot see a DELETION, though (a census
+one site smaller satisfies it just as well), so the audit's ``(enclosing function,
 primitive)`` keys are also held to a superset of ``KNOWN_MUST_COMPLETE_SITES``.
 That table is keyed by the guarded module's TEST-FUNCTION NAME (``held_recovery``
 is a fixture, the rest are test functions), so renaming or moving a guarded test
@@ -138,12 +165,15 @@ FORM_DUNDER_CALL = "asyncio.{name}.__call__"
 # The rule of last resort: an await whose callee the resolver cannot place, and
 # whose arguments carry a numeric literal bound of SUB_SECOND_LIMIT or more.
 FORM_UNRESOLVED_LITERAL = "unresolved await, numeric literal bound"
+# ``x.wait(...)`` on something that is not ``asyncio``: a different API whose
+# name-bound form is deliberately unaudited, and whose literal-bound form is refused.
+FORM_WAIT_OTHER_API = "wait() on a non-asyncio object, numeric literal bound"
 
 # The must-complete waits the guarded module is known to hold, as
 # ``(enclosing function or fixture, primitive)``.  The derived invariant cannot see
-# a DELETION -- nine sites and ten both satisfy "each site is the shared bound or a
-# named deliberate bound" -- so the audit's site keys are held to a superset of this
-# set instead, and adding a compliant wait stays green.  The keys are the guarded
+# a DELETION -- a census one site smaller both satisfy "each site is the shared bound
+# or a named deliberate bound" -- so the audit's site keys are held to a superset of
+# this set instead, and adding a compliant wait stays green.  The keys are the guarded
 # module's TEST-FUNCTION names (``held_recovery`` is a fixture), so renaming or
 # moving a guarded test requires updating its key here; a stale key fails the
 # superset check rather than passing quietly.
@@ -410,7 +440,22 @@ def _names(tree):
                   attribute_aliases, bound_names)
 
 
-def _resolve_getattr(getattr_call, asyncio_names):
+def _refused_wait_literal(call, func):
+    """Refuse a deliberately-unaudited ``*.wait(...)`` call carrying a big literal.
+
+    ``x.wait(...)`` on something that is not ``asyncio`` is a different API
+    (``threading.Event.wait``, ``asyncio.Event.wait``) and no site is recorded for
+    its name-bound form -- the guarded module's handshake is exactly that shape.
+    A blocking wait bounded by a numeric literal of 1.0 or more is the defect this
+    audit exists to see, so that form is refused as unclassified instead of
+    skipped: the exclusion is for the other API, not for large numbers.
+    """
+    if _argument_literal(call) is None:
+        return None
+    return _Resolution(None, FORM_WAIT_OTHER_API, ast.unparse(func))
+
+
+def _resolve_getattr(getattr_call, asyncio_names, outer_call=None):
     """Resolve ``getattr(<obj>, "<name>")(...)``, or None when it is not a wait shape.
 
     *getattr_call* is the inner ``getattr(...)`` Call node, i.e. the callee of the
@@ -438,7 +483,9 @@ def _resolve_getattr(getattr_call, asyncio_names):
     if literal == "wait":
         # ``x.wait(...)`` on something else is a different API (asyncio.Event.wait,
         # threading.Event.wait), not an escape from the asyncio bound vocabulary.
-        return None
+        # Its name-bound form stays silent; a literal of 1.0 or more is refused.
+        return (_refused_wait_literal(outer_call, getattr_call)
+                if outer_call is not None else None)
     return _Resolution(None, FORM_UNCLASSIFIED, callee)
 
 
@@ -450,7 +497,7 @@ def _resolve_call(call, names):
     """
     func = call.func
     if isinstance(func, ast.Call):
-        resolution = _resolve_getattr(func, names.asyncio_names)
+        resolution = _resolve_getattr(func, names.asyncio_names, call)
         if resolution is not None:
             return resolution
         # A ``functools.partial(<primitive>)`` left unnamed in callee position.
@@ -479,7 +526,9 @@ def _resolve_call(call, names):
             return _Resolution(func.attr, FORM_ATTRIBUTE.format(name=func.attr),
                                f"asyncio.{func.attr}")
         if func.attr == "wait":
-            return None
+            # Another API (see :func:`_refused_wait_literal`): silent when its bound is
+            # a name, refused when its bound is a literal of 1.0 or more.
+            return _refused_wait_literal(call, func)
         return _Resolution(None, FORM_UNCLASSIFIED, ast.unparse(func))
     if isinstance(func, ast.Name):
         if func.id in names.direct_imports:
@@ -565,6 +614,17 @@ def _unresolved_message(resolution, line):
             f"{resolution.callee} to an asyncio wait primitive, so it refuses the call "
             f"instead of silently skipping it (fail-closed); a wait must be written so the "
             f"audit can read which bound it uses")
+
+
+def _wait_other_api_message(call, resolution, line):
+    literal = _argument_literal(call)
+    text = ast.unparse(literal) if literal is not None else "<no bound>"
+    return (f"line {line}: {resolution.form} -- {resolution.callee}(..., {text}) is "
+            f"refused: ``x.wait(...)`` on something that is not ``asyncio`` is a "
+            f"different API, and its name-bound form is deliberately not audited, but a "
+            f"numeric literal bound >= {SUB_SECOND_LIMIT:.1f} is refused rather than "
+            f"skipped (fail-closed); a wait must be written so the audit can read which "
+            f"bound it uses")
 
 
 def _awaited_calls(tree):
@@ -678,9 +738,12 @@ def audit_wait_bounds(module_path=DEFAULT_MODULE):
                 function))
             continue
         if resolution.primitive is None:
+            message = (_wait_other_api_message(node, resolution, node.lineno)
+                       if resolution.form == FORM_WAIT_OTHER_API
+                       else _unresolved_message(resolution, node.lineno))
             sites.append(WaitSite(node.lineno, node.col_offset, resolution.callee,
                                   resolution.form, "<unresolved>", REFUSED,
-                                  _unresolved_message(resolution, node.lineno), function))
+                                  message, function))
             continue
         bound = _bound_node(node, resolution.primitive)
         classification, text, message = classify_bound(
@@ -1215,11 +1278,16 @@ def test_a_wait_shaped_call_the_audit_cannot_resolve_is_refused_not_skipped(
 SILENT_SHAPES = [
     pytest.param(
         "threading-event-wait",
+        "import asyncio\n"
         "import threading\n"
         "\n"
         "\n"
         "def spelled(event):\n"
-        "    return event.wait(HANDSHAKE_SECONDS)\n",
+        "    return event.wait(HANDSHAKE_SECONDS)\n"
+        "\n"
+        "\n"
+        "async def spelled_without_a_bound(event):\n"
+        "    return await event.wait()\n",
         "event.wait(HANDSHAKE_SECONDS)",
         id="threading-event-wait",
     ),
@@ -1258,6 +1326,88 @@ SILENT_SHAPES = [
         'getattr(asyncio.wait_for, "__call__")',
         id="getattr-dunder-call",
     ),
+    pytest.param(
+        "tuple-unpacked-alias",
+        "import asyncio\n"
+        "from asyncio import wait_for\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf, = (wait_for,)\n"
+        "    return await wf(waiter, .25)\n",
+        "a tuple-unpacked alias",
+        id="tuple-unpacked-alias",
+    ),
+    pytest.param(
+        "list-subscript-alias",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = [asyncio.wait_for][0]\n"
+        "    return await wf(waiter, .25)\n",
+        "a list subscript",
+        id="list-subscript-alias",
+    ),
+    pytest.param(
+        "conditional-alias",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter, flag):\n"
+        "    wf = asyncio.wait_for if flag else asyncio.wait_for\n"
+        "    return await wf(waiter, .25)\n",
+        "a conditional expression picking the primitive",
+        id="conditional-alias",
+    ),
+    pytest.param(
+        "dynamic-getattr-name",
+        "import helpers\n"
+        "\n"
+        "NAME = \"wait_for\"\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    return await getattr(helpers, NAME)(waiter, .25)\n",
+        "a ``getattr`` whose name is not a literal",
+        id="dynamic-getattr-name",
+    ),
+    pytest.param(
+        "named-bound",
+        "import helpers\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    bound = 20.0\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, bound)\n",
+        "a bound read from a name",
+        id="named-bound",
+    ),
+    pytest.param(
+        "computed-bound",
+        "import helpers\n"
+        "\n"
+        "H = 40.0\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, H * 0.5)\n",
+        "a bound computed from a name",
+        id="computed-bound",
+    ),
+    pytest.param(
+        "lambda-bound",
+        "import helpers\n"
+        "\n"
+        "\n"
+        "async def spelled(waiter):\n"
+        "    wf = helpers.pick()\n"
+        "    return await wf(waiter, (lambda: 20.0)())\n",
+        "a bound from a lambda call",
+        id="lambda-bound",
+    ),
 ]
 
 
@@ -1271,6 +1421,79 @@ def test_a_shape_the_prose_calls_silent_is_measured_silent(tmp_path, shape, sour
     assert phrase in __doc__, (
         f"the {shape} probe backs the prose phrase {phrase!r}, which is no longer in "
         f"the module docstring")
+
+
+# The exclusion in BOUNDARY (i) is for the API, not for large numbers: the same
+# ``x.wait(...)`` shape carrying a numeric literal bound of 1.0 or more is refused
+# as unclassified instead of skipped, so a blocking handshake cannot hide behind
+# "it is a different API".
+WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL = [
+    pytest.param(
+        "threading-literal",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return event.wait(20.0)\n",
+        5,
+        "event.wait",
+        id="threading-literal",
+    ),
+    pytest.param(
+        "threading-keyword",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return event.wait(timeout=5)\n",
+        5,
+        "event.wait",
+        id="threading-keyword",
+    ),
+    pytest.param(
+        "getattr-literal",
+        "import threading\n"
+        "\n"
+        "\n"
+        "def spelled(event):\n"
+        "    return getattr(event, \"wait\")(20.0)\n",
+        5,
+        'getattr(event, "wait")',
+        id="getattr-literal",
+    ),
+    pytest.param(
+        "awaited-event-literal",
+        "import asyncio\n"
+        "\n"
+        "\n"
+        "async def spelled(event):\n"
+        "    return await event.wait(5.0)\n",
+        5,
+        "event.wait",
+        id="awaited-event-literal",
+    ),
+]
+
+
+@pytest.mark.parametrize("shape, source, line, callee",
+                         WAIT_OUTSIDE_ASYNCIO_WITH_A_LITERAL)
+def test_a_wait_shaped_call_outside_the_asyncio_vocabulary_refuses_a_literal_bound(
+        tmp_path, shape, source, line, callee):
+    """A different API's name-bound form is silent; its literal-bound form is refused."""
+    sites = _audit_synthetic(tmp_path, source, f"outside_vocabulary_{shape}.py")
+    refused = [site for site in sites if site.classification == REFUSED]
+    assert len(refused) == 1, (
+        f"the {shape} call must be refused once, audited "
+        f"{[(s.line, s.form, s.bound, s.classification) for s in sites]}")
+    site = refused[0]
+    assert site.line == line, f"the audit refused line {site.line}, not line {line}"
+    assert site.form == FORM_WAIT_OTHER_API, (
+        f"the refusal must name the form it read, got {site.form!r}")
+    # ``ast.unparse`` picks its own quote style, so compare the spelling modulo quotes.
+    assert callee.replace('"', "'") in site.callee.replace('"', "'"), (
+        f"the refusal must name the shape it read ({callee!r} in {site.callee!r})")
+    assert "1.0" in site.message, (
+        f"the refusal must say the literal reached the 1.0 threshold: {site.message}")
 
 
 # The rule of last resort, exercised: a callee the resolver cannot place, on a call

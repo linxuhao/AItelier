@@ -577,6 +577,9 @@ def test_the_checks_read_the_serving_uid_and_refuse_modes_it_cannot_read(tmp_pat
 
     tree = tmp_path / "godot"
     tree.mkdir()
+    # Pinned, not inherited from the umask: the yes/no answer below must come from
+    # the mode this check reads, not from how the invoking shell was configured.
+    tree.chmod(0o755)
     harness = tree / "godot_harness.py"
     harness.write_text("print('harness')\n", encoding="utf-8")
     harness.chmod(0o600)

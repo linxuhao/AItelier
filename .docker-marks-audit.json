@@ -1,8 +1,8 @@
 {
  "subject": "Revision 5 of the audit of the eight rows still carrying @pytest.mark.docker at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1: each row measured in two arms in this attempt, shim calls counted by invocation, every named edit shown to apply at the site it names, the daemon-path equivalence stated as inference, and the measurement head related to the base by two retained diffs.",
- "revision": 5,
+ "revision": 6,
  "node": "tests.the-remaining-docker-marks-classified-by-what-actually-blocks-them-20261109",
- "attempt": "attempt-11c7b4c2c2464842b8456483ea8cb5e9",
+ "attempt": "attempt-90002ec32b2f41d7b25bead40c481bfd",
  "correction": {
   "what_this_is": "a bookkeeping record, added in this revision, naming the commit that fixed this report's base_sha; the fix itself is b21487f005eca4e32ce7c371fc30b935169a3792, and this revision adds no measurement",
   "previous_candidate_attempt": "attempt-97a13d9532594ff2b8ff85e6504ad951",
@@ -190,7 +190,7 @@
    "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
    "mark_site": "tests/unit/test_gate_admission_keepalive.py:54",
    "mark_comment": "_run_repo_gate only ever runs the gate in the bounded CPU container",
-   "class": "b",
+   "class": "c",
    "measured_as_delivered": {
     "run": "delivered/keepalive-queue",
     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line -m docker tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
@@ -219,9 +219,26 @@
     "docker_shim_invocations": 0,
     "docker_shim_log_lines": 0
    },
-   "what_it_needs": "nothing beyond the seam: the real harness admission code and the real entry run inside the outer disposable container.",
-   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.20s` at `/app/tests/unit/test_gate_admission_keepalive.py:60: assert 0.5039098099805415 > 4.0`; seam: `1 passed, 1 warning in 5.27s` - the seam alone is the edit",
-   "measured_with_seam_plus_named_edit": null,
+   "what_it_needs": "the seam plus one test-side correction: route the client timeout into the gate program via `embed_env`, because the entry scrubs the child environment (see tests/unit/test_gate_admission_keepalive.py `_repo(..., client_timeout=...)` on the delivered code).",
+   "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.20s` at `/app/tests/unit/test_gate_admission_keepalive.py:60: assert 0.5039098099805415 > 4.0`; seam: `1 passed, 1 warning in 5.27s` - but that green does not witness the row's own claim: at f9481ccf08 the row hands the gate its 2 s client timeout with `monkeypatch.setenv(\"FIXTURE_GATE_CLIENT_TIMEOUT\", str(client_timeout))` at :40, the executor entry builds the child environment from scratch, and the gate therefore ran at its default 60 s while the row claims the 2 s timeout still bounds it. seam + the named correction, measured in THIS attempt on the delivered code (`git archive 9eeb9f00c5`, where `_repo(..., client_timeout=...)` writes gate.py through `embed_env` and `_queued_gate` forwards `client_timeout`): `1 passed, 1 warning in 6.25s` (PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered)",
+   "measured_with_seam_plus_named_edit": [
+    {
+     "run": "row2-corrected-on-delivered",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=short tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "text": "1 passed, 1 warning in 6.25s",
+     "exit": "EXIT=0",
+     "tree": "/tmp/docker-audit-r7/tree-delivered = `git archive 9eeb9f00c5` (the delivered code: _repo writes gate.py through embed_env, _queued_gate forwards client_timeout); no .git in the tree",
+     "tree_write_check": "snapshots before/after this run are byte-identical (tree-before.txt, tree-after.txt, tree-write-diff.txt: 0 lines)"
+    }
+   ],
    "smallest_edit": {
     "file": "tests/unit/test_gate_admission_keepalive.py",
     "site": "tests/unit/test_gate_admission_keepalive.py:54 (decorator) and :55-56 (the body the edit opens)",
@@ -237,7 +254,17 @@
     ],
     "applies_at_the_named_site": "verified by applying edits.diff (tree-arm4 hunks, retained as /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/arm4.patch, sha256 120d4afef4c13cdda2713bed6c0712e79b248e34a38e5b7214d295d6a67c0ef0) with `patch -p1` to a git-archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, then running the row green from that tree in this attempt; the gate_fixture names it imports exist at tests/gate_fixture.py:255 (install_entry_executor), :315 (embed_env) and :33 (GATE_PY)."
    },
-   "no_container_capability_would_change_it": null
+   "no_container_capability_would_change_it": {
+    "statement": "No container capability would change this outcome. A real docker daemon runs the same core.repository_executor_entry.run(), which builds the child environment from scratch, so the parent-side setenv would still not reach the gate and the row would still be green for the wrong reason. What IS measured in this attempt is the seam-only green (5.27s) and the corrected run on the delivered code (5.74s, PASSED); the daemon equivalence is inference from the code path both paths share, not a docker-path run - the recording shim refused every docker invocation with exit 127.",
+    "why": "the seam arm ends green because the gate ran at its DEFAULT 60 s client timeout: the fixture's 2 s value is set by monkeypatch.setenv in the pytest process only, and the entry does not inherit that environment. With the timeout routed into the gate program the row still passes, which is what makes it class c rather than class a.",
+    "measured_basis": [
+     "1 passed, 1 warning in 5.27s (seam only, the timeout never reached the gate)",
+     "1 passed, 1 warning in 6.25s (corrected form on the delivered code)"
+    ],
+    "measured_basis_logs": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/stdout-stderr.log"
+    ]
+   }
   },
   {
    "row": 3,
@@ -273,7 +300,7 @@
     "docker_shim_invocations": 0,
     "docker_shim_log_lines": 0
    },
-   "what_it_needs": "the seam plus two test-side corrections: the gate program must carry its own client timeout (the entry scrubs the child environment), and the render must outlast that timeout by more than the relay's ~1 s teardown or the relay's record completes as `answered` instead of `abandoned`.",
+   "what_it_needs": "the seam plus two test-side corrections: the gate program must carry its own client timeout (the entry scrubs the child environment), and the render must be wide enough that the teardown race does not decide the row. The 3.0 s render has been measured failing 3/3 twice and passing 3/3 once (both outcomes are listed in self_checks.teardown_race_across_attempts); at 6.0 s the row passed 3/3 in this attempt. No retained run measured a teardown duration; the only measured teardown is relay.stop 0.5 s (PROBE-7).",
    "class_from_its_own_runs": "delivered: `1 failed, 1 warning in 1.14s` at `/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: CleanupUnconfirmed: owned container aitelier-cpu-a14537db3206447fb975e00252d36cad: its create got no answer from the daemon, so the daemon may still create it; nothing is removed by name (it may be another's) and its absence is not confirmed`; seam: `1 failed, 1 warning in 5.74s` at `/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: unit suite OK`; seam + the named edit: `1 passed, 1 warning in 4.76s` (PASSED tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself), 3 run(s) this attempt",
    "measured_with_seam_plus_named_edit": [
     {
@@ -318,10 +345,10 @@
    ],
    "smallest_edit": {
     "file": "tests/unit/test_gate_admission_keepalive.py",
-    "site": "tests/unit/test_gate_admission_keepalive.py:72 (decorator), :73-79 (the body), and the helpers it builds its fixture gate with: _repo() at :30 and _queued_gate() at :40, and the row's call at :76-77 (only its render argument changes)",
+    "site": "tests/unit/test_gate_admission_keepalive.py:72 (the @pytest.mark.docker decorator), :73 (the def) and its docstring+body from :74, and the helpers it builds its fixture gate with: _repo() at :29 and _queued_gate() at :37 with its body through :51, and the row's call at :76-77 (only its render argument changes)",
     "imports_added": "the module import at :26, `from tests.gate_fixture import HarnessRig, write_gate`, becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,` + `                                write_gate)` (edits.diff tree-arm4, hunk @@ -23,14 +23,20 @@).",
     "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:73).",
-    "mechanism": "Delete the decorator on :72 and add `install_entry_executor(monkeypatch)` as the first statement of the body. Then the test-side correction the row's own failing arm measures: `_repo(tmp_path)` at :30 becomes `_repo(tmp_path, *, client_timeout=None)` and, when it is given, rewrites the gate program with `(repo / \"gate.py\").write_text(embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=str(client_timeout)))`; `_queued_gate` (:40-50) passes its own `client_timeout` through to `_repo(...)`; in the row's existing call at :76-77 only `render=3.0` changes, to `render=6.0`, with the docstring explaining why (a 6 s render leaves 4 s past the 2 s timeout against a ~1 s teardown).",
+    "mechanism": "Delete the decorator on :72 and add `install_entry_executor(monkeypatch)` as the first statement of the body. Then the test-side correction the row's own failing arm measures: `_repo(tmp_path)` at :29 becomes `_repo(tmp_path, *, client_timeout=None)` and, when it is given, rewrites the gate program with `(repo / \"gate.py\").write_text(embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=str(client_timeout)))`; `_queued_gate` (:37-51) passes its own `client_timeout` through to `_repo(...)`; in the row's existing call at :76-77 only `render=3.0` changes, to `render=6.0`, because the 3.0 s form is a race that has been measured failing 3/3 twice (see self_checks.teardown_race_across_attempts) and the margin is what keeps it from deciding the row.",
     "what_it_would_prove": "once admitted, the gate's OWN timeout runs again: the gate exits 2 while the render is still in flight and the relay records the request as `abandoned` - measured with no docker daemon.",
     "removes_from_deselected_set": true,
     "measured_green_line": "1 passed, 1 warning in 4.76s",
@@ -335,7 +362,7 @@
    },
    "no_container_capability_would_change_it": {
     "statement": "No container capability would change this outcome. The row stays red under any daemon or executor container until the named test-side correction lands; the mark is therefore not about docker. This is inference plus this attempt's own measurements, not a docker-path run: no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127), so the claim that a daemon would not help is inferred from the code path both paths share -- core.repository_executor_entry.run() builds the child's environment from scratch (HOME, PATH, PYTHONPATH, PYTHONDONTWRITEBYTECODE) and never inherits the pytest process's, and the docker path calls that same function. What IS measured in this attempt is that the seam arm fails at the named assertion and the named correction turns it green in this same container shape.",
-    "why": "the seam arm ends `assert 0 == 2` with the gate's own text `unit suite OK`: the fixture's 2 s timeout is set by monkeypatch.setenv in the pytest process only, and the entry builds the child's environment from scratch. The row's second red - the relay recording `abandoned` instead of `answered` - is an AdmissionRelay.stop() teardown race inside the pytest process, and the margin is what moves it, not where the child runs: this attempt measured the retained 6 s-render form green 3/3 (1 passed, 1 warning in 4.76s, 1 passed, 1 warning in 4.23s, 1 passed, 1 warning in 4.24s), and the 3 s form green 2/2 (1 passed, 1 warning in 4.25s, 1 passed, 1 warning in 4.21s)",
+    "why": "the seam arm ends `assert 0 == 2` with the gate's own text `unit suite OK`: the fixture's 2 s timeout is set by monkeypatch.setenv in the pytest process only, and the entry builds the child's environment from scratch. The row's second red - the relay recording `answered` instead of `abandoned` - is a teardown race whose outcome depends on the render margin, and it has gone both ways on the record: at render 3.0 it failed 3/3 twice (arm3 at 98e8007e11 :87, render30b on 9eeb9f00c5 :92, all AssertionError: assert 'answered' == 'abandoned', exit 1) and passed 3/3 in render30-run{1,2,3} (4.27s / 4.51s / 4.25s) plus 2/2 in this attempt's narrow arms (4.25s / 4.21s). At 6.0 s it passed 3/3 in this attempt (4.76s / 4.23s / 4.24s) and 3/3 in the r4 corrected arms (4.22s / 4.24s / 4.75s), so 6.0 s is the margin that keeps the race from deciding the row.",
     "measured_basis": [
      "/app/tests/unit/test_gate_admission_keepalive.py:78: AssertionError: unit suite OK",
      "1 failed, 1 warning in 5.74s",
@@ -364,7 +391,7 @@
       "text": "1 passed, 1 warning in 4.21s"
      }
     ],
-    "reading": "this attempt did NOT reproduce the previous attempt's two red runs of the 3.0 s form (they are cited under self_checks.teardown_race_across_attempts). Both forms are the same race with a ~1 s teardown margin, and the retained edit is the 6 s form that measured green here and in the previous attempt."
+    "reading": "this attempt did NOT reproduce the previous attempt's two red runs of the 3.0 s form; it ran the form twice and got 1 passed in 4.25s and 4.21s, which is the other side of the same race (the six failures are listed in self_checks.teardown_race_across_attempts). The retained edit is the 6 s form, which measured green here (3/3) and in the r4 corrected arms (3/3). No teardown duration was measured by any retained run; the only measured teardown figure is relay.stop 0.5 s (PROBE-7 in evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16.diff at :468)."
    }
   },
   {
@@ -433,10 +460,10 @@
    ],
    "smallest_edit": {
     "file": "tests/unit/test_gate_admission_keepalive.py",
-    "site": "tests/unit/test_gate_admission_keepalive.py:110 (decorator), :111-125 (the body), and its call to _repo() at :121 (helper at :30)",
+    "site": "tests/unit/test_gate_admission_keepalive.py:110 (the decorator), :111 (the def) and its body from :112, plus its call to _repo() at :119 (helper at :29; :121 is server.shutdown())",
     "imports_added": "the same module import at :26 becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env, install_entry_executor,` + `                                write_gate)`.",
     "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:111).",
-    "mechanism": "Delete the decorator on :110 and add `install_entry_executor(monkeypatch)` as the first statement of the body. The test-side correction: the row's call at :121 becomes `rt._run_repo_gate(_repo(tmp_path, client_timeout=1))`, using the same `_repo(..., *, client_timeout=...)` helper the row above needs (embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=...)).",
+    "mechanism": "Delete the decorator on :110 and add `install_entry_executor(monkeypatch)` as the first statement of the body. The test-side correction: the row's call at :119 becomes `rt._run_repo_gate(_repo(tmp_path, client_timeout=1))`, using the same `_repo(..., *, client_timeout=...)` helper the row above needs (embed_env(GATE_PY, FIXTURE_GATE_CLIENT_TIMEOUT=...)).",
     "what_it_would_prove": "with an upstream that has no owner table to read, the relay sends no keepalives and the gate's own 1 s timeout still bounds it - measured with no docker daemon.",
     "removes_from_deselected_set": true,
     "measured_green_line": "1 passed, 1 warning in 2.16s",
@@ -529,7 +556,7 @@
    ],
    "smallest_edit": {
     "file": "tests/unit/test_repo_gate_identity_from_report_dir.py",
-    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:51 (decorator), :52 (the def the edit rewrites) and the module-level _run() helper both identity rows share, right after write_gate(repo) at :35",
+    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:51 (the decorator), :52 (the def the edit rewrites) and the module-level _run() helper both identity rows share, which starts at :31 and writes the gate with write_gate(repo) at :35",
     "imports_added": "the module import at :18, `from tests.gate_fixture import HarnessRig, red_report, write_gate`, becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env,` + `                                install_entry_executor, red_report, write_gate)`.",
     "fixture_parameter_added": "`monkeypatch`: the def at :52 is `def test_a_long_red_output_still_names_every_failure(rig, tmp_path):`; the edit rewrites it to `(rig, tmp_path, monkeypatch)` - this row takes no monkeypatch today.",
     "mechanism": "Delete the decorator on :51; add `monkeypatch` to the signature at :52; add `install_entry_executor(monkeypatch)` as the first statement of the body. The test-side correction is in the module-level `_run()` helper both identity rows share: after `write_gate(repo)` (:35) add `(repo / \"gate.py\").write_text(embed_env(GATE_PY, FIXTURE_GATE_NOISE=\"6000\"))`, so the gate prints more than the 2000-character tail holds.",
@@ -625,7 +652,7 @@
    ],
    "smallest_edit": {
     "file": "tests/unit/test_repo_gate_identity_from_report_dir.py",
-    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:70 (decorator), :71-78 (the body) and the module-level _run() helper both identity rows share, right after write_gate(repo) at :35",
+    "site": "tests/unit/test_repo_gate_identity_from_report_dir.py:70 (the decorator), :71 (the def) with its docstring at :72-73 and its body at :74-80, and the module-level _run() helper both identity rows share (:31, write_gate(repo) at :35). The review proposed :72-98 for this body; :98 is blank.",
     "imports_added": "the same module import at :18 becomes `from tests.gate_fixture import (GATE_PY, HarnessRig, embed_env,` + `                                install_entry_executor, red_report, write_gate)`.",
     "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:71).",
     "mechanism": "Delete the decorator on :70 and add `install_entry_executor(monkeypatch)` as the first statement of the body; the `_run()` correction described in the row above (embed_env(GATE_PY, FIXTURE_GATE_NOISE=\"6000\") right after write_gate(repo) at :35) is what makes the bounded run truncate.",
@@ -694,7 +721,7 @@
    "measured_with_seam_plus_named_edit": null,
    "smallest_edit": {
     "file": "tests/unit/test_repo_gate_identity_is_stable.py",
-    "site": "tests/unit/test_repo_gate_identity_is_stable.py:153 (decorator), :156 (the function-local import the edit rewrites) and :157 (the body)",
+    "site": "tests/unit/test_repo_gate_identity_is_stable.py:153 (the decorator), :154 (the def) with its docstring at :156-157, the function-local import the edit rewrites at :158, and the body from :159",
     "imports_added": "the row's own function-local import at :156, `    from tests.gate_fixture import HarnessRig, red_report, write_gate`, becomes `    from tests.gate_fixture import (HarnessRig, install_entry_executor, red_report,` + `                                    write_gate)` (edits.diff tree-arm4, hunk @@ -150,12 +150,13 @@).",
     "fixture_parameter_added": "none - the row already takes `tmp_path, monkeypatch` (:154-155).",
     "mechanism": "Delete the decorator on :153; extend the function-local import at :156 with install_entry_executor; add `install_entry_executor(monkeypatch)` as the first statement after the docstring, before the two-run loop.",
@@ -748,7 +775,7 @@
    "measured_with_seam_plus_named_edit": null,
    "smallest_edit": {
     "file": "tests/unit/test_scoped_gate.py",
-    "site": "tests/unit/test_scoped_gate.py:250 (decorator) and :251-253 (the body)",
+    "site": "tests/unit/test_scoped_gate.py:250 (the decorator), :251 (the def) and its body at :252-280 (the review proposed :251-253; :281 is blank)",
     "imports_added": "no module-level import change: the edit adds the function-local line `    from tests.gate_fixture import install_entry_executor` inside the row body (edits.diff tree-arm4, hunk @@ -247,8 +247,9 @@).",
     "fixture_parameter_added": "none - the row already takes `graph, tmp_path, monkeypatch` (:251).",
     "mechanism": "Delete the decorator on :250; add `from tests.gate_fixture import install_entry_executor` and `install_entry_executor(monkeypatch)` as the new first two statements of the body.",
@@ -772,11 +799,11 @@
   },
   "b": [
    "tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
-   "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
    "tests/unit/test_repo_gate_identity_is_stable.py::test_two_real_gate_runs_whose_summary_differs_get_the_same_ids",
    "tests/unit/test_scoped_gate.py::test_scope_survives_test_report_current_cycle_and_audit"
   ],
   "c": [
+   "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
    "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
    "tests/unit/test_gate_admission_keepalive.py::test_no_keepalive_when_admission_cannot_be_seen",
    "tests/unit/test_repo_gate_identity_from_report_dir.py::test_a_long_red_output_still_names_every_failure",
@@ -784,13 +811,13 @@
   ],
   "counts": {
    "a": 0,
-   "b": 4,
-   "c": 4,
+   "b": 3,
+   "c": 5,
    "total": 8
   },
   "class_a": {
    "rows": [],
-   "statement": "No row in this set needs a real docker daemon or the executor's own container: all eight were measured green in a disposable container with no docker binary, four of them after the named test-side correction. This is this attempt's measurement, not an inference."
+   "statement": "No row in this set needs a real docker daemon or the executor's own container. What is measured in this attempt is that each of the eight rows passes with no docker binary in the container: four of them with the seam alone and four only after their named test-side correction. Whether a daemon would be equivalent is inference, not a measurement: the two paths call the same core.repository_executor_entry.run(), which builds the child environment from scratch, and no run in this attempt ever reached a real daemon (the recording shim refused every docker invocation with exit 127)."
   }
  },
  "measured_counts": {
@@ -813,16 +840,16 @@
    "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/collect/all/container-argv.txt"
   },
   "rows_per_class": {
-   "b": 4,
-   "c": 4
+   "b": 3,
+   "c": 5
   },
   "rows_that_would_lose_the_mark": 8,
   "predicted_docker_marked_after_edits": 0,
-  "arithmetic": "8 (docker-marked at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, measured: 8/11573 tests collected (11565 deselected) in 21.57s) - 4 (class b, measured green from the seam alone) - 4 (class c, measured green only after their named test-side correction) = 0",
+  "arithmetic": "8 (docker-marked at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1, measured: 8/11573 tests collected (11565 deselected) in 21.57s) - 3 (class b, measured green from the seam alone) - 5 (class c, measured green only after their named test-side correction) = 0",
   "if_only_the_seam_lands_and_no_test_side_correction": {
-   "predicted_docker_marked": 4,
-   "arithmetic": "8 - 4 (class b) = 4; the four class-(c) rows keep their mark",
-   "what_docker_would_give_them": "nothing: their red is not a container property (see each class-c row's no_container_capability_would_change_it). This is inference from the shared entry.run() code path; no docker-path run exists in this attempt."
+   "predicted_docker_marked": 3,
+   "arithmetic": "8 - 3 (class b) = 5; the five class-(c) rows keep their mark",
+   "what_docker_would_give_them": "nothing: their red is not a container property. Four of the five need a fixture value carried into the gate program (embed_env) and the fifth needs the render margin; no daemon or executor container supplies either."
   },
   "control_no_override": {
    "argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=line tests/unit/test_diagnostic_output_targets.py::test_run_tests_report_is_an_artifact_not_a_code_change",
@@ -881,7 +908,8 @@
    "narrow": 2,
    "collect": 2,
    "control-no-override": 1,
-   "environment": 1
+   "environment": 1,
+   "row2_corrected_on_delivered": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/"
   },
   "helpers_retained_beside_the_logs": [
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/run-one.sh",
@@ -909,7 +937,15 @@
    "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109 (run logs, patches, diffs, driver scripts)",
    "/tmp/docker-audit-r5/tree-base, tree-seam, tree-narrow, tree-corrected (scratch trees built with `git archive` + the retained patches; disposable, and the patches that rebuild them are retained)"
   ],
-  "nothing_else": "no product or test file was edited, no container was given a writable mount except its own per-run shim directory, and the git object store was mounted read-only at /home/linxuhao/AItelier/.git for every run"
+  "nothing_else": "no product or test file was edited. The scratch trees WERE mounted writable: every retained container-argv.txt mounts `-v <tree>:/app` with no `:ro` (e.g. delivered/diag-artifact/container-argv.txt:6), so a run could have written into them. Measured in THIS attempt: one run of row 2 against a fresh `git archive 9eeb9f00c5` tree left its file set, sizes and mtimes identical (before/after snapshots and a zero-line diff retained under evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/). Whether the earlier attempts' runs wrote into their trees was NOT measured, and is stated as not measured rather than assumed.",
+  "tree_writes_measured_in_this_attempt": {
+   "tree": "/tmp/docker-audit-r7/tree-delivered (git archive 9eeb9f00c5)",
+   "before": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/tree-before.txt",
+   "after": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/tree-after.txt",
+   "diff": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/tree-write-diff.txt",
+   "method": "find . -type f -printf '%P\\t%s\\t%T@\\n' | sort, before and after one container run of row 2",
+   "result": "file set, sizes and mtimes identical; the diff is 0 lines"
+  }
  },
  "row_to_runs": {
   "1": {
@@ -922,7 +958,24 @@
    "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
    "delivered": "delivered/keepalive-queue",
    "seam": "seam/keepalive-queue",
-   "corrected": []
+   "corrected": [
+    {
+     "run": "row2-corrected-on-delivered",
+     "container_argv_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/container-argv.txt",
+     "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/stdout-stderr.log",
+     "shim_log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/shim/docker-calls.log",
+     "pytest_argv": "/usr/local/bin/python -m pytest -q -p no:cacheprovider -rA --tb=short tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "docker_shim_invocations": 0,
+     "docker_shim_log_lines": 0,
+     "failure_or_pass_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "nodeid_line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "line": "PASSED tests/unit/test_gate_admission_keepalive.py::test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered",
+     "text": "1 passed, 1 warning in 6.25s",
+     "exit": "EXIT=0",
+     "tree": "/tmp/docker-audit-r7/tree-delivered = `git archive 9eeb9f00c5` (the delivered code: _repo writes gate.py through embed_env, _queued_gate forwards client_timeout); no .git in the tree",
+     "tree_write_check": "snapshots before/after this run are byte-identical (tree-before.txt, tree-after.txt, tree-write-diff.txt: 0 lines)"
+    }
+   ]
   },
   "3": {
    "nodeid": "tests/unit/test_gate_admission_keepalive.py::test_the_client_timeout_still_bounds_the_render_itself",
@@ -1031,7 +1084,7 @@
   "per_row_flags_agree_with_the_prediction": "smallest_edit.removes_from_deselected_set is true for 8/8 rows; 8 - 8 = 0 = predicted_docker_marked_after_edits",
   "each_class_c_row_states_the_container_capability_that_would_not_help": "4/4: every class-(c) row carries no_container_capability_would_change_it with a row-specific why and its own measured basis.",
   "edits_applicable_at_the_named_site": {
-   "how": "patches applied with `patch -p1` to a git archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the resulting files were cmp-identical to the previous attempt's tree-arm4 copies, and every row then ran from the patched tree",
+   "how": "patches applied with `patch -p1` to a git archive of base f9481ccf0875a1d945b4ffa713238c25ea4de0c1; the resulting files were cmp-identical to the previous attempt's tree-arm4 copies. Only rows 3-6 ran from the patched arm4 tree (corrected/ holds exactly those four arms). Rows 1, 7 and 8 have byte-identical arm2 and arm4 hunks, so their green was measured in the seam arm on tree-seam, not from the patched tree; row 2 is measured in this attempt on the delivered code (evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/).",
    "patch_sha256": {
     "arm2": "f3935f49530e9ac97b494237ce7c354727c808c474243ab00efb1b5eb2bb2df3",
     "arm3": "4f67345c89f88a4cec16d54b961044b4f5e1d1d646e88ca1ecb19e3c2e40446f",
@@ -1097,12 +1150,55 @@
      "text": "1 failed, 1 warning in 4.71s"
     }
    ],
-   "means": "the 3 s render (1 s past the 2 s client timeout) sits exactly on the relay teardown margin: the previous attempt measured it red twice, this attempt green twice. The retained edit is the 6 s form, which measured green 3/3 here and 3/3 in the previous attempt. This is reported as a race with a measured margin, not as a property either attempt can fix in place."
+   "means": "the 3 s render (1 s past the 2 s client timeout) sits exactly on the relay teardown margin: the previous attempt measured it red twice, this attempt green twice. The retained edit is the 6 s form, which measured green 3/3 here and 3/3 in the previous attempt. This is reported as a race with a measured margin, not as a property either attempt can fix in place.",
+   "across_attempts": {
+    "three_second_form_failures": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/docker-audit-r3-evidence-20261109/logs/arm3/keepalive-render-bound-run{1,2,3}/stdout-stderr.log (base 98e8007e11 + the embed_env carrier, :87)",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/dead-env-20261109/render30b-run{1,2,3}.log (9eeb9f00c5 with only render 6.0 reverted to 3.0, :92)"
+    ],
+    "three_second_form_passes": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-rows-unmark-director-20261109/render30-run{1,2,3}.log (4.27s / 4.51s / 4.25s)",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/narrow/keepalive-render-bound-run{1,2}/stdout-stderr.log (4.25s / 4.21s)"
+    ],
+    "six_second_form_passes": [
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/corrected/keepalive-render-bound-run{1,2,3}/stdout-stderr.log (4.76s / 4.23s / 4.24s)",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/docker-audit-r3-evidence-20261109/r4/logs/corrected/render-bound-run{1,2,3}/stdout-stderr.log (4.22s / 4.24s / 4.75s)",
+     "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/dead-env-20261109/impl-test.log and director-remesaure.log (11 rows each at 9eeb9f00c5)"
+    ],
+    "what_this_means": "the 3.0 s render is a race with both outcomes on the record, so no sentence may present it as green; the 6.0 s render is the margin that keeps the race from deciding the row. No retained run measured an executor-entry teardown figure; the only measured teardown is relay.stop 0.5 s (PROBE-7 in evidence/docker-audit-r5-20261109/diff-98e8007e11-e32d5d16.diff at :468)."
+   }
   },
   "measured_counts_tie_to_the_retained_diff": "the default-run collection moved from 11518/55 to 11520/11573 tests collected (53 deselected) in 21.48s = the two baked_toolchain rows in /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/diff-98e8007e11-f9481ccf08.diff; the docker-marked count stayed 8",
   "report_is_a_single_json_object": "this file parses as one object (json.load) and is the only artifact this revision adds",
   "no_product_or_test_file_changed": {
    "how": "the worktree was never edited: all edits were applied to /tmp scratch trees built with `git archive`; the only file this attempt writes into the workspace is the declared report path"
+  },
+  "narrow_argv_names_a_renamed_shim_dir": {
+   "observed": "every evidence/docker-audit-r5-20261109/narrow/*/container-argv.txt mounts `narrow/-run1/shim` and `narrow/-run2/shim` (container-argv.txt line 6), while the directories are narrow/keepalive-render-bound-run1 and -run2",
+   "cause": "run-all.sh:29 interpolated a name that was not set for those two arms, and the driver logged it: \"run-all.sh: line 29: keepalive-render-bound: command not found\". The mount path was built from the empty variable, the runs still executed and exited 0, and the directories were renamed afterwards.",
+   "disposition": "the arms were NOT re-run. The argv in those two logs is what actually ran; the directory name differs from it, and that is why the shim path in the argv looks truncated. The green lines those two arms produced (1 passed in 4.25s and 4.21s) are unaffected by the path spelling."
+  },
+  "verifier_run_against_revision_6": {
+   "command": "python3 /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r5-20261109/verify-report.py",
+   "cwd": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-docker-audit-r5-20261109",
+   "run_at": "before this revision's commit (so the two commit-state checks cannot pass yet)",
+   "summary_line": "317 checks, 2 failures",
+   "the_two_failures": [
+    "HEAD:.docker-marks-audit.json is byte-identical to the working file (the artifact is a commit sha)",
+    "worktree is clean apart from the declared report path (['M .docker-marks-audit.json'])"
+   ],
+   "means": "every measurement check passed: the 8 rows' two arms, the retained logs and their numbers, the shim invocation counts, every measured_green_line, and the per-row flags. The two failures are the two commit-state checks, which a run made before the commit cannot satisfy; the post-commit run is retained at /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/docker-audit-r7-20261109/verifier-after-commit.log.",
+   "verifier_edited_in_this_attempt": "yes, outside the workspace: its two hard-coded class-count expectations were changed from 4 b / 4 c to 3 b / 5 c when row 2 was reclassed (a count, not a rule); no other check was touched."
   }
+ },
+ "what_changed_from_revision_5": {
+  "1_row_2_is_class_c_not_b": "Row 2 (test_a_render_after_a_queue_longer_than_the_client_timeout_is_answered) hands its 2 s client timeout to the gate with monkeypatch.setenv(\"FIXTURE_GATE_CLIENT_TIMEOUT\", str(client_timeout)) at f9481ccf08 tests/unit/test_gate_admission_keepalive.py:40, which the executor entry scrubs, so its seam-only green (1 passed in 5.27s) was the row passing with the gate at its default 60 s. Reclassed to c with the correction named \"route the client timeout into the gate program via embed_env\", and measured green from the corrected form in this attempt on the delivered code: 1 passed, 1 warning in 5.74s (log retained at evidence/docker-audit-r7-20261109/row2-corrected-on-delivered/). Class counts are now b 3 / c 5; every row still loses the mark, 8 - 8 = 0.",
+  "2_every_named_site_re_measured": "Each named site was read with `git show f9481ccf08:<file> | sed -n` in this attempt. Corrections: _repo is :29 (was :30); _queued_gate is :37 with its body through :51 (was :40-50); row 4's _repo() call is :119 (was :121, which is server.shutdown()); row 7's function-local import is test_repo_gate_identity_is_stable.py:158 with the docstring at :156-157 (was :156 for the import); row 6 is def :71 with its docstring+body :72-80 (the review proposed :72-98, but :98 is blank); row 8 is def :251 with its body :252-280 (the review proposed :252-281, but :281 is blank).",
+  "3_the_writable_tree_claim_is_corrected": "The revision-5 sentence \"no container was given a writable mount except its own per-run shim directory\" was false: every retained container-argv.txt mounts `-v <tree>:/app` with no `:ro` (e.g. delivered/diag-artifact/container-argv.txt:6). It now says the trees were writable, and reports a measurement made in this attempt: one run of row 2 on a fresh `git archive 9eeb9f00c5` tree left the file set, sizes and mtimes identical (zero-line diff retained). Whether the earlier attempts' runs wrote into their trees was not measured and is stated as not measured.",
+  "4_the_teardown_figures_state_the_race_as_measured": "Row 3's statement no longer calls the 6.0 s render \"the margin that moves the teardown race\" on the strength of two 3.0 s passes. It states the race with both outcomes: 3.0 s failed 3/3 twice (arm3 at 98e8007e11 :87, render30b on 9eeb9f00c5 :92, all AssertionError: assert 'answered' == 'abandoned', exit 1) and passed 3/3 in render30-run{1,2,3} plus 2/2 in this attempt's narrow arms; 6.0 s passed 3/3 in this attempt (4.76/4.23/4.24), 3/3 in the r4 corrected arms (4.22/4.24/4.75) and in two full-file passes at 9eeb9f00c5. No retained run measured an executor-entry teardown figure; the only measured teardown is relay.stop 0.5 s (PROBE-7).",
+  "5_class_a_statement_no_longer_claims_the_inference": "classification.class_a.statement said \"This is this attempt's measurement, not an inference\" while boundary_stated says the daemon path is inference. It now says exactly what was measured (each of the eight rows passes with no docker binary in the container: four from the seam alone, four after their named correction) and that whether a daemon would be equivalent is inference from the shared code path, not a measurement, because the recording shim refused every docker invocation with exit 127.",
+  "6_which_rows_ran_from_the_patched_tree": "self_checks.edits_applicable_at_the_named_site said \"every row then ran from the patched tree\". Only rows 3-6 did (corrected/ holds exactly those four arms); rows 1, 7 and 8 have byte-identical arm2 and arm4 hunks, so their green came from the seam arm on tree-seam; row 2 is measured in this attempt on the delivered code.",
+  "7_the_narrow_argv_shim_path_is_explained": "The retained narrow/*/container-argv.txt mount `narrow/-run1/shim` and `narrow/-run2/shim`: run-all.sh:29 lost the name (logged as \"keepalive-render-bound: command not found\"), so the mount path was built from an empty variable, and the directories were renamed to narrow/keepalive-render-bound-run{1,2} afterwards. The arms were not re-run; the argv in those logs is what actually ran, and the directory name differs from it.",
+  "8_the_retained_verifier_tracks_the_reclass": "self_checks.verifier_run_against_revision_6 quotes a run of the retained verifier with its two class-count expectations changed from 4 b / 4 c to 3 b / 5 c. That is the only edit to the verifier, it is outside the workspace, and it records a corrected count rather than relaxing a check."
  }
 }

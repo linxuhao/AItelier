@@ -889,13 +889,13 @@
         "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
         "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
         "file": "tests/unit/test_repo_gate_admission.py",
-        "site": "tests/unit/test_repo_gate_admission.py:189 (mark) and the test body at tests/unit/test_repo_gate_admission.py:191"
+        "site": "tests/unit/test_repo_gate_admission.py:189 (the mark), :190 (the def) and :194 (the body's first statement; :191-193 is the test's docstring, not its body)"
       },
       "removes_from_deselected_set": true,
       "removes_by": {
         "file": "tests/unit/test_repo_gate_admission.py",
         "site": "tests/unit/test_repo_gate_admission.py:189",
-        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+        "mechanism": "drop that mark line and install the in-repo seam at the test body, which also adds monkeypatch to that test's signature (seam-tree.diff) - the signature change is part of the edit, so this is not 'no other change'"
       },
       "runs": [
         "B1-baked-group-as-delivered",
@@ -1021,13 +1021,13 @@
         "would_prove": "that the row needs no missing binary at all: it passes on the shipped image once the transport is the in-repo seam (S5 13 passed; G4 14 passed)",
         "note": "every line number here is the base file's; in a tree where the marks above a row are deleted the same insertion lands a line or two higher (the retained tree diff shows it)",
         "file": "tests/unit/test_repo_gate_red_beats_absence.py",
-        "site": "tests/unit/test_repo_gate_red_beats_absence.py:159 (mark) and the test body at tests/unit/test_repo_gate_red_beats_absence.py:161"
+        "site": "tests/unit/test_repo_gate_red_beats_absence.py:159 (the mark), :160 (the def) and :162 (the body's first statement; :161 is the test's docstring, not its body)"
       },
       "removes_from_deselected_set": true,
       "removes_by": {
         "file": "tests/unit/test_repo_gate_red_beats_absence.py",
         "site": "tests/unit/test_repo_gate_red_beats_absence.py:159",
-        "mechanism": "drop that mark line and install the in-repo seam at the test body; no other change"
+        "mechanism": "drop that mark line and install the in-repo seam at the test body, which also adds monkeypatch to that test's signature (seam-tree.diff) - the signature change is part of the edit, so this is not 'no other change'"
       },
       "runs": [
         "B1-baked-group-as-delivered",
@@ -1077,7 +1077,7 @@
       "mark_site": "tests/unit/test_repo_gate_red_beats_absence.py:220",
       "group": "repo_gate",
       "as_delivered": "FAILED",
-      "as_delivered_error": "assert False (pytest:timed out absent from the report); the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
+      "as_delivered_error": "E assert False at tests/unit/test_repo_gate_red_beats_absence.py:235, on `assert any(f.startswith(\"pytest:timed out\") for f in report[\"failures\"])` - the test's own predicate found no such entry in report[\"failures\"] (the retained log B1 shows the assertion line and `E   assert False`, not a report field that is absent); the whole gate was unmeasured: IsolationUnavailable: Docker CPU execution facility is unavailable; local execution refused (core/repository_executor.py:865; no docker CLI and no AITELIER_HOST_LAUNCHER_SOCKET in the container, measured D1)",
       "missing_object": "the docker CLI / a host-launcher socket inside the disposable container: the row reaches its repository command through core.repository_executor.execute, and the container has neither transport",
       "class": "runs_in_the_shipped_image_after_repo_edits",
       "measured": "as delivered FAILED (B1, B1b-gate); PASSED with the mark dropped and the seam installed (G4)",
@@ -1369,9 +1369,9 @@
     "the_two_groups_kept_apart": "baked_toolchain and docker are separate marks with separate addopts terms. At this base the baked group is the only non-empty opt-in group: 34 rows, all enumerated below; the docker group selects nothing.",
     "why_the_8_rows_an_earlier_audit_counted_are_not_here": {
       "measured_then": "8 docker-marked rows of 11573 at base f9481ccf0875a1d945b4ffa713238c25ea4de0c1",
-      "source_of_that_number": ".docker-marks-audit.json (revision 5, base_sha f9481ccf08)",
+      "source_of_that_number": ".docker-marks-audit.json (revision 7, base_sha f9481ccf08)",
       "were_they_still_marked_at_the_base_this_task_names": "no: the 8 lost their marks in 58f3e23506 'tests: free the 8 docker-marked rows with the real executor entry seam', an ancestor of this base (git merge-base --is-ancestor)",
-      "at_d72627bf83_measured_here": "0 as well: git grep 'pytest.mark.docker' at d72627bf83 finds only prose mentions in three files, and pytest.ini at that commit already states that the group selects no rows",
+      "at_d72627bf83_measured_here": "0 as well, and the literal grep finds five paths there rather than three files of prose: a literal git grep 'pytest.mark.docker' at d72627bf83 returns .docker-marks-audit.json (its subject line and a site line), evidence/gate-not-run-r3-remeasure-20261108/raw-C-keepalive-docker-marked.log (three real @pytest.mark.docker decorator lines), and the prose of three test files (tests/unit/test_deployment_readonly_search.py:7, tests/unit/test_gate_admission_shared_operation_id.py:34, tests/unit/test_godot_only_deployment_scope.py:29); pytest.ini at that commit already states that the group selects no rows",
       "at_this_base_measured_here": "0 (C2-collect-docker-rows: 'no tests collected (11574 deselected)', exit 5)"
     }
   },
@@ -1440,7 +1440,7 @@
       }
     ],
     "what_the_needles_found": {
-      "fixture-ownership.sqlite": "0 hits in the three stores above; the director's report store returns 351 files whose only kind is an archived COPY of tests/integration/test_javascript_lint_validation_context.py inside a report tree -- not one of them is a .sqlite file and not one is a prepared root. So the root the 13 integration rows expect is NOT on this host, and the root used here is a SUBSTITUTE",
+      "fixture-ownership.sqlite": "0 hits for this needle in the three stores above; the needle set is the one listed in needles above, which names files and digests (fixture-ownership.sqlite, the run-instance needles, node-v24.22.0, eslint-10.12.0 and the two sha256s) and never names the prepared root's path - LINT_REAL_ROOT itself was not a needle, so this is a search for the store FILE and for the run instances, not a path search that could have found a prepared root somewhere else on this host; what the hits are is stated next. The director's report store returns 351 files whose only kind is an archived COPY of tests/integration/test_javascript_lint_validation_context.py inside a report tree -- not one of them is a .sqlite file and not one is a prepared root. So the root the 13 integration rows expect is NOT on this host, and the root used here is a SUBSTITUTE",
       "node-v24.22.0 / eslint-10.12.0": "0 hits in the three stores above (no tarball is archived there); the director's report store does hold them (see director_store_search): the retained Dockerfile that bakes /opt/aitelier-node from node-v24.22.0-linux-x64.tar.xz with its official sha256, and the retained official eslint 10.12.0 package tree",
       "dsh-synthetic-evaluated-headers": "hits only in pytest logs and State records that mention the name (artifacts; state-report-evidence), never the file itself",
       "f98cfd1b9d54ea050d6c80d35d609b260eb80d333306c6ccc605934973b677a1": "12 blobs in the content-addressed store mention the digest; none of them IS the file",
@@ -1452,7 +1452,7 @@
       "why_it_is_a_substitute": "its fixture-ownership.sqlite carries the 5-column run_isolation table the rows INSERT into (the shape tests/unit/test_javascript_lint_owned_boundary.py:23-25 shows), built by this attempt; the owning harness's own prepared root -- which the module docstring says nothing in this repository creates -- was looked for by name and by content and is not on this host",
       "what_it_is_functionally": "equivalent for these rows: I4 passes all 13 with it, so the substitution is measured rather than assumed"
     },
-    "binary_blobs_are_not_text_searched": "rg declines to decode binary files; the content-addressed store holds git bundles (e.g. state-report-evidence/a2/a2e8e9e7... begins '# v2 git bundle'), whose packfile is compressed and cannot be read by any text search. This cannot hide the needles that matter here: the digest-addressed lookup for f98cfd1b is exact and MISSING (the CAS slot state-report-evidence/f9/f98cfd1b... does not exist), and no baked row reads a /reports path at all (none of the four row files mentions /reports).",
+    "binary_blobs_are_not_text_searched": "rg declines to decode binary files; the content-addressed store holds git bundles (e.g. state-report-evidence/a2/a2e8e9e7... begins '# v2 git bundle'), whose packfile is compressed and cannot be read by any text search. This cannot hide the needles that matter here: the digest-addressed lookup for f98cfd1b is exact and MISSING (the CAS slot state-report-evidence/f9/f98cfd1b... does not exist), and no baked row reads a /reports path at all (none of the five row files mentions /reports).",
     "director_store_search": {
       "why": "r3 searched this store too; it is not one of the three the criterion names, so it is recorded separately and no row's recoverability depends on it",
       "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/D3-director-store-provenance-search.log",
@@ -1499,7 +1499,7 @@
       "argv": "bash /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/cas_lookup.sh"
     },
     "reports_path_search": {
-      "finding": "no row among the 34 consumes a path under /reports: grep -rn '/reports' over the four row files and tests/gate_fixture.py returns nothing; the 10 test files elsewhere in tests/ that do mention /reports are not in this group",
+      "finding": "no row among the 34 consumes a path under /reports: grep -rn '/reports' over the five row files and tests/gate_fixture.py returns nothing; the 10 test files elsewhere in tests/ that do mention /reports are not in this group",
       "the_one_place_the_bytes_are_gone": "/reports/dsh-synthetic-evaluated-headers.json (the row that r3's reports_search section discussed) has no CAS slot under its recorded sha256 and no copy in any store; that row was already fixed at this base and is not among the 34"
     }
   },
@@ -1622,7 +1622,7 @@
       "id": "I6-vacuity-refusal-reasons",
       "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I6-vacuity-refusal-reasons.log",
       "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/aitelier-opt/aitelier-node:/opt/aitelier-node:ro -v /tmp/aitelier-opt/aitelier-eslint:/opt/aitelier-eslint:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/vacuity_probe_r4.py:/tmp/baked-r4/vacuity_probe_r4.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot aitelier:latest /usr/local/bin/python /tmp/baked-r4/vacuity_probe_r4.py",
-      "result": "5 CASE lines, one per reproduced case",
+      "result": "6 CASE lines, one per reproduced case",
       "cases": [
         {
           "case": "missing-context",
@@ -1648,6 +1648,12 @@
           "case": "cjs-import",
           "passed": "False",
           "reason": "JavaScript lint unavailable: JavaScript lint requires the owned host launcher; JavaScript syntax unmeasured: select owned 'eslint' in the lint manifest and enable its reviewed "
+        },
+        {
+          "case": "empty-match",
+          "passed": "False",
+          "no_lint_measurement": true,
+          "reason": "{\"passed\": false, \"errors\": [{\"tool\": \"lint\", \"error\": \"lint matched no files; no lint measurement was made\"}], \"warnings\": []}"
         }
       ],
       "purpose": "which refusal each passing integration case hit with no launcher"
@@ -1656,7 +1662,7 @@
       "id": "I5-vacuity-refusal-reasons-with-a-SEATED-launcher",
       "log": "/home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/I5-vacuity-refusal-reasons-with-a-SEATED-launcher.log",
       "argv": "docker run --rm --network none --cpus 2 --memory 2g -u 1000:1000 --init -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/work/wt-baked-audit-r4-20261109:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -v /tmp/baked-r4/lintroot:/tmp/baked-r4/lintroot -v /tmp/baked-r4/launcher.sock:/tmp/baked-r4/launcher.sock -v /home/linxuhao/.AItelier/dsh-drivers/dsh-c61eed4a13ba4aaaae96/evidence/baked-audit-r4-20261109/vacuity_probe_r4.py:/tmp/baked-r4/vacuity_probe_r4.py:ro -w /app -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e LINT_REAL_ROOT=/tmp/baked-r4/lintroot -e AITELIER_HOST_LAUNCHER_SOCKET=/tmp/baked-r4/launcher.sock aitelier:latest /usr/local/bin/python /tmp/baked-r4/vacuity_probe_r4.py",
-      "result": "5 CASE lines, one per reproduced case",
+      "result": "6 CASE lines, one per reproduced case",
       "cases": [
         {
           "case": "missing-context",
@@ -1682,6 +1688,12 @@
           "case": "cjs-import",
           "passed": "False",
           "reason": "{\"all_passed\": false, \"results\": [{\"file\": \"/tmp/baked-r4/lintroot/projects/fed2b22ebd8c42c681cc3bd28c2ef63a/input.cjs\", \"passed\": false, \"error_message\": \"ESLint exited 1: /tmp/input.cjs\\n  1:1  error  Parsing error: 'import' and 'export' may appear only with"
+        },
+        {
+          "case": "empty-match",
+          "passed": "False",
+          "no_lint_measurement": true,
+          "reason": "{\"passed\": false, \"errors\": [{\"tool\": \"lint\", \"error\": \"lint matched no files; no lint measurement was made\"}], \"warnings\": []}"
         }
       ],
       "purpose": "the same probe with a launcher seated"
@@ -1813,6 +1825,7 @@
     "2. The owned host launcher and the image carrying the pinned bytes are both present on this host (D1). r3 recorded them under 'not_recovered'. The launcher is alive but seated to the operator's home and state_db, so it cannot bind a disposable fixture run; a launcher seated to the fixture root runs all 13 integration rows (I4). Nothing among the 34 consumes bytes that no longer exist here.",
     "3. The 7 lint_boundary rows are the only rows that need the pytest image itself to carry the pinned toolchain; the shipped image carries node v24.22.2 and distro eslint v6.4.0 instead, and not at the paths the entry checks (D1).",
     "4. Without a launcher, three of the six passing integration rows pass for the wrong reason (the launcher refusal). That vacuity is a property of the environment, not of the rows: with a launcher seated the same three produce their named guards (I5).",
-    "5. Every number above is read from a file named beside it; every run record's argv is the argv line of its own retained log, so no record can describe a run that did not produce it."
+    "5. Every number above is read from a file named beside it; every run record's argv is the argv line of its own retained log, so no record can describe a run that did not produce it.",
+    "6. The r4 report at REPORT.md:30 reads 'The r3 review named R4, R5, R7, R12, R13 as records whose argv and result disagreed' - five run records, not an eight-row list. No review document of the r3 audit exists in this driver's evidence: baked-audit-r3-review-20261109 holds only scratch/hits-*.txt (8 files), and the neighbouring baked-audit-r3-20261109 holds 22 .log files, so that attribution is withdrawn here. The eight rows are not identified by that review: this file identifies them by .docker-marks-audit.json (revision 7, base_sha f9481ccf08), and every one of them is accounted for in why_the_8_rows_an_earlier_audit_counted_are_not_here. The C2 collect at this base selects no docker rows and identifies none of them."
   ]
 }

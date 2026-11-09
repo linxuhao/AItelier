@@ -118,12 +118,12 @@ def test_state_only_bearer_wrapper_resolves_registered_driver(world):
         assert actual.get('/probe',headers={'X-AItelier-Driver-Token':token}).json()=={'actor':'driver:caller','driver_id':'caller'}
         assert actual.get('/probe',headers={'X-AItelier-Driver-Token':'synthetic-unknown'}).status_code==401
 
-@pytest.mark.baked_toolchain  # reads a node-evaluated cordis.patch.yml from /reports; needs /opt/aitelier-node + that mount, neither of which the shipped image or a disposable test container has
 def test_actual_node_evaluated_dsh_patch_headers_resolve_table_and_refuse_suspension(tmp_path,monkeypatch):
     from api import authz
     from api.mcp_router import build_mcp
     from core import drivers
-    headers=json.loads(Path('/reports/dsh-synthetic-evaluated-headers.json').read_text())
+    # The node-evaluated header set is checked in as a fixture; no node/npm and no /reports mount needed.
+    headers=json.loads((Path(__file__).resolve().parents[1]/'fixtures'/'dsh-evaluated-driver-headers.json').read_text())['cases']
     reg=DriverRegistry(StateDatabase(str(tmp_path/'dsh.sqlite')),'synthetic-dsh-pepper-'*3)
     reg.seed('synthetic-dsh-owner-token')
     monkeypatch.setattr(drivers,'new_token',lambda:'synthetic-dsh-driver-token')

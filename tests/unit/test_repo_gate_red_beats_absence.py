@@ -11,6 +11,16 @@ Two shapes did exactly that on the r2 candidate (review gnr2, 2026-09-25):
 
 Every test below serves the REAL harness admission code
 (`tests/gate_fixture.py:HarnessRig`) and runs the REAL `run_tests`.
+
+The fixture gate here reads two settings of its own. `RED_GATE_MODE` is carried
+INTO the gate program, with the mode the row is written to measure
+(`embed_env`, see `_red_then_ask_repo`); a setting on this pytest process would
+never arrive, because `core/repository_executor_entry.py:run` builds the gate
+child's environment from scratch and Popens with it. The three `write_gate` rows
+run at that gate's own client timeout -- `tests/gate_fixture.py:37`'s default
+`"60"` s -- and always have; a parent-side `FIXTURE_GATE_CLIENT_TIMEOUT`
+reached nothing but this process.
+tests/unit/test_fixture_gate_settings_have_a_carrier.py guards both.
 """
 
 from __future__ import annotations
@@ -23,7 +33,7 @@ import pytest
 from aitelier import gate_admission
 from aitelier.tools.run_tests import impl as rt
 from core import gate_deferral
-from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, write_gate
+from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, embed_env, write_gate
 
 
 # A gate with the game gate's report layout that can be told to measure a red
@@ -86,15 +96,21 @@ def busy(tmp_path, monkeypatch):
     rig.close()
 
 
-def _red_then_ask_repo(tmp_path, monkeypatch, mode):
+def _red_then_ask_repo(tmp_path, mode):
+    """The gate program above, carrying the mode it is written to measure.
+
+    `mode` is read by the gate program itself (`os.environ["RED_GATE_MODE"]`),
+    and the executor entry builds the gate child's environment from scratch, so
+    the value reaches it only when the program carries it (`embed_env`). A
+    `monkeypatch.setenv` in the pytest process never did.
+    """
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
-    (repo / "gate.py").write_text(RED_THEN_ASK_GATE)
+    (repo / "gate.py").write_text(embed_env(RED_THEN_ASK_GATE, RED_GATE_MODE=mode))
     script = repo / "run_tests.sh"
     script.write_text(RUN_TESTS_SH)
     script.chmod(0o755)
-    monkeypatch.setenv("RED_GATE_MODE", mode)
     return repo
 
 
@@ -115,7 +131,7 @@ def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
             "passed": False, "summary": "1 error",
             "errors": [{"file": "res://a.gd", "line": 3,
                         "msg": "Parse Error: probe"}]})
-    repo = _red_then_ask_repo(tmp_path, monkeypatch, mode)
+    repo = _red_then_ask_repo(tmp_path, mode)
     result, report = _run(repo, tmp_path / "out")
     gate = report["repo_gate"]
 
@@ -141,10 +157,9 @@ def test_pole_3_a_retained_red_then_a_refusal_is_a_measured_red(
 
 
 @pytest.mark.baked_toolchain  # needs the pinned node/npm the image does not bake
-def test_the_same_refusal_with_no_retained_red_is_still_not_run(
-        busy, tmp_path, monkeypatch):
+def test_the_same_refusal_with_no_retained_red_is_still_not_run(busy, tmp_path):
     """The other pole of the same gate: nothing measured before the refusal."""
-    repo = _red_then_ask_repo(tmp_path, monkeypatch, "clean")
+    repo = _red_then_ask_repo(tmp_path, "clean")
     result, report = _run(repo, tmp_path / "out")
     gate = report["repo_gate"]
     assert gate["returncode"] == 2
@@ -184,7 +199,6 @@ def test_pole_4_a_pytest_red_beside_a_refused_gate_is_not_an_absence(
     (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
     (repo / "tests" / "test_bad.py").write_text("def test_bad():\n    assert 1 == 2\n")
     write_gate(repo)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
     result, report = _run(repo, tmp_path / "out")
     gate = report["repo_gate"]
 
@@ -215,7 +229,6 @@ def test_a_pytest_killed_at_its_wall_beside_a_refused_gate_is_an_absence(
     (repo / "tests" / "test_slow.py").write_text(
         "import time\n\ndef test_slow():\n    time.sleep(60)\n")
     write_gate(repo)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
     monkeypatch.setattr(rt, "PYTEST_WALL_SECONDS", 3)
     result, report = _run(repo, tmp_path / "out")
     assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
@@ -234,7 +247,6 @@ def test_a_green_pytest_beside_a_refused_gate_is_an_absence(
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
     write_gate(repo)
-    monkeypatch.setenv("FIXTURE_GATE_CLIENT_TIMEOUT", "30")
     result, report = _run(repo, tmp_path / "out")
     assert report["repo_gate"]["measured"] == rt.REPO_GATE_UNMEASURED
     assert report["repo_gate_absent"] is True

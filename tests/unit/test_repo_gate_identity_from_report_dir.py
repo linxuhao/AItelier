@@ -24,7 +24,11 @@ def rig(tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     rig.script_report = red_report()
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("FIXTURE_GATE_NOISE", "6000")
+    # FIXTURE_GATE_NOISE is not set here: the executor entry builds the gate
+    # child's environment from scratch, so a parent-side setting would reach
+    # nothing and the gate would print its own default noise (0). `_run` carries
+    # it inside the gate program (`embed_env`) instead;
+    # tests/unit/test_fixture_gate_settings_have_a_carrier.py guards that.
     yield rig
     rig.close()
 
@@ -37,6 +41,11 @@ def _run(tmp_path, name):
     # The executor entry scrubs the child environment, so the noise the run
     # needs to pass the bounded tail must be carried by the gate program
     # (`embed_env`), not by the pytest process's environment.
+    #
+    # The gate program also reads FIXTURE_GATE_CLIENT_TIMEOUT
+    # (tests/gate_fixture.py:37). This row leaves it out on purpose: the harness
+    # answers at once, so what it varies is the length of the output, and the
+    # gate's own default ("60") is the value these rows have always run with.
     (repo / "gate.py").write_text(embed_env(GATE_PY, FIXTURE_GATE_NOISE="6000"))
     state = tmp_path / f"state-{name}"
     baseline_dir = Path(rt._baseline_dir(str(state), repo.resolve()))

@@ -1658,9 +1658,11 @@ def _repo_gate_declares_unmeasured(gate: dict) -> bool:
 # The smallest wait ONE request may record and still be called contention when
 # the queue named no owner. The floor is judged per request: the largest single
 # recorded wait of the run, never the sum over its requests. `render_owner_wait_sec`
-# starts counting when a request begins TAKING ownership, so an uncontended
-# acquisition still records one owner-table round trip: measured 0.0115s per
-# request through the real harness (`tests/gate_fixture`,
+# starts its clock at the first FAILED admission poll, the first time something
+# else is in the way, so an uncontended acquisition records exactly 0.0: its own
+# owner-table transaction is never charged to it (that attempt is reported as
+# `admission_attempt_sec` only when it was refused). Measured 0.0 per request
+# through the real harness (`tests/gate_fixture`,
 # `docker/godot/godot_harness.py:acquire_render_owner_waiting`). A busy run of
 # many clean requests sums past one second without any request waiting at all,
 # so judging the sum cried wolf on the runs this block exists to certify. The

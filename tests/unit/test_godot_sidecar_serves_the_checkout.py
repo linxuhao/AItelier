@@ -46,6 +46,24 @@ file's own location, never a copy of the file) and REFUSES — never skips:
     executed harness a mixture of this checkout and bytes no repository holds — the
     mount declaration is then true about the directory and false about the files the
     gate is measured against.
+    A third shape is the destination exactly /srv: `- /tmp/shadow:/srv:ro` beside
+    the directory mount names that one destination twice. It was accepted here
+    until 2026-11-09 even though this sentence already claimed it was refused, so
+    it is refused explicitly now — at most one volume may claim /srv, and it must
+    be this checkout's docker/godot directory. The runtime refuses that shape
+    itself at container-create time (`docker: Error response from daemon: Duplicate
+    mount point: /srv`, rc 125), so nothing can be served from it; this check does
+    not lean on the runtime to say what the file must not declare, and it does not
+    claim more than it does either.
+
+Destination comparison happens on NORMALISED paths, and a `//srv` destination is
+accepted deliberately. Docker folds duplicate slashes, `.` and `..` before it
+mounts anything, so `//srv`, `/srv/` and `/srv/../srv` name the same mount point
+`/srv`; a check that demanded the literal spelling would refuse a declaration the
+runtime treats as identical while saying nothing about which bytes get served.
+`_normalised_target` folds exactly those forms before any comparison, so every
+spelling is judged by the path it names — that is the property under test, not the
+characters in the file.
 
 Declaring the mount is also not the same as the serving user being able to READ it.
 `user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"` runs the sidecar as uid/gid
@@ -61,6 +79,20 @@ otherwise. The uid/gid are resolved the way compose resolves them: `${VAR:-defau
 from the process environment, else the declared default, and a `user:` that does not
 spell out both numbers is refused rather than assumed. Not measured, and not claimed:
 a bind mount's access-control layers beyond POSIX mode bits (SELinux labels, ACLs).
+
+The resolver reads only THIS PROCESS's environment, and that is a real boundary
+rather than a detail. `docker compose` resolves the same interpolation from its own
+environment PLUS a `.env` file beside the compose file (and `--env-file`), so a
+`user:` value supplied only through `.env` is invisible here: with the
+`${VAR:-default}` spelling the variable looks unset, the declared default is used,
+and the file modes are then measured against a uid that is not the one the sidecar
+will run as — green here, unreadable at `up`. This module does not read `.env` and
+will not guess at it, since a guess would be the same assumption in a new place. A
+human must therefore run this test with the same `AITELIER_UID`/`AITELIER_GID`
+exported that `docker compose up` will see, or keep the `.env` values equal to the
+`:-` defaults the `user:` line declares; otherwise this measurement describes some
+other user. (`${VAR}` with no default and the value only in `.env` is refused, not
+guessed: `_expand` cannot resolve it.)
 
 The baked image copy is deliberately still allowed to exist: it is the fallback for
 a container started without this compose file (a bare `docker run`). What this test
@@ -210,10 +242,10 @@ def _is_srv_target(mount: Mount) -> bool:
 def _shadowed_srv_path(mount: Mount) -> str | None:
     """The path this mount puts UNDER /srv, or None when it is not under it.
 
-    `/srv` itself is the directory mount the tests above own: a mount at exactly
-    /srv is judged by `_missing_mount_message` / `_writable_mount_messages`, not
-    here. Anything deeper — /srv/godot_harness.py, /srv/clock_sensitivity.py —
-    lands inside that directory and replaces one entry of it.
+    Only paths BELOW /srv are answered here — `/srv/godot_harness.py`, not `/srv`.
+    A mount at exactly /srv replaces the whole destination instead of one entry of
+    it and is judged in `_srv_shadow_messages` by its own message, beside the
+    directory mount the checks above own.
     """
     if mount.target is None:
         return None
@@ -258,29 +290,62 @@ def _writable_mount_messages(service: dict) -> list[str]:
 # ── Nothing else may live under /srv ────────────────────────────────────────
 
 def _srv_shadow_messages(service: dict) -> list[str]:
-    """One refusal per volume whose destination is inside /srv, below /srv itself.
+    """One refusal per volume that puts anything at or under /srv, but the mount itself.
 
-    A per-file mount (`…/godot_harness.py:/srv/godot_harness.py`, or the same
-    read-only) does not remove the directory mount and is invisible to the checks
-    above: they ask whether the intended mount EXISTS, and it does. But docker
+    Two shapes reach here, and both leave the intended directory mount present and
+    read-only, which is why neither is visible to `_missing_mount_message` or
+    `_writable_mount_messages`.
+
+    A destination BELOW /srv is a per-file mount
+    (`…/godot_harness.py:/srv/godot_harness.py`, or the same read-only). Docker
     applies the more specific destination last, so that one file is served from
     outside this checkout while its siblings still come from it — the sidecar then
     runs a harness this repository does not contain, and the gate measures the
     bytes nobody reviewed.
+
+    A destination EXACTLY /srv is a second claim on the whole directory
+    (`/tmp/shadow:/srv:ro` beside `./docker/godot:/srv:ro`). At most one volume may
+    claim /srv and it must be this checkout's docker/godot directory; anything else
+    there replaces the destination rather than one entry of it. The runtime refuses
+    this shape by itself (`Duplicate mount point: /srv`, rc 125), so the refusal
+    here is not what stops a shadow from being served — it is what keeps this
+    module's own sentence, and its test names, true of the file.
     """
-    return [
-        f"service `{SERVICE}` in docker-compose.yml also mounts "
-        f"{mount.describe()}: {_shadowed_srv_path(mount)} is inside {TARGET}, so it "
-        f"shadows an entry of the checkout's {CHECKOUT_SOURCE} directory that the "
-        f"sidecar must serve. Docker resolves the more specific destination last, so "
-        f"that path alone would come from {mount.source or '<anonymous>'} while its "
-        f"{TARGET} siblings still come from this checkout — the container would run "
-        f"a mixture of the repository and bytes no repository holds, and the gate "
-        f"would be measured against code a recreate can silently change. Mount only "
-        f"./{CHECKOUT_SOURCE}:{TARGET}:ro, and nothing else at or under {TARGET}"
-        for mount in _mounts(service)
-        if _shadowed_srv_path(mount) is not None
-    ]
+    messages: list[str] = []
+    srv_claimed = False                      # the one volume allowed to be at /srv
+    for mount in _mounts(service):
+        shadowed = _shadowed_srv_path(mount)
+        if shadowed is not None:
+            messages.append(
+                f"service `{SERVICE}` in docker-compose.yml also mounts "
+                f"{mount.describe()}: {shadowed} is inside {TARGET}, so it "
+                f"shadows an entry of the checkout's {CHECKOUT_SOURCE} directory that "
+                f"the sidecar must serve. Docker resolves the more specific "
+                f"destination last, so that path alone would come from "
+                f"{mount.source or '<anonymous>'} while its {TARGET} siblings still "
+                f"come from this checkout — the container would run a mixture of the "
+                f"repository and bytes no repository holds, and the gate would be "
+                f"measured against code a recreate can silently change. Mount only "
+                f"./{CHECKOUT_SOURCE}:{TARGET}:ro, and nothing else at or under "
+                f"{TARGET}")
+            continue
+        if not _is_srv_target(mount):
+            continue
+        if _is_checkout_godot(mount.source) and not srv_claimed:
+            srv_claimed = True
+            continue
+        messages.append(
+            f"service `{SERVICE}` in docker-compose.yml also mounts "
+            f"{mount.describe()}: its destination is exactly {TARGET}, and at most "
+            f"one volume may claim {TARGET} — this checkout's {CHECKOUT_SOURCE} "
+            f"directory. A second volume there does not replace one entry inside "
+            f"{TARGET}, it takes the whole destination, and Docker refuses the shape "
+            f"at container-create time (`Duplicate mount point: {TARGET}`, rc 125) "
+            f"and starts nothing — so no silent shadow is served this way, but this "
+            f"file must not declare one either and this check must not lean on the "
+            f"runtime to notice. Mount only "
+            f"./{CHECKOUT_SOURCE}:{TARGET}:ro, once")
+    return messages
 
 
 # ── The serving uid must be able to READ what it mounts ─────────────────────
@@ -503,8 +568,10 @@ def test_the_checks_refuse_a_shadow_at_or_under_srv():
 
     This is the shape that passed on 2026-11-09: the directory mount below is
     present and read-only, and one file inside /srv is served from somewhere else.
-    Each refusal must name the service and the shadowed path, so a mutation of the
-    real compose file says which path was taken over."""
+    The same file also covers the destination that is exactly /srv, which passed
+    the same way. Each refusal must name the service and the shadowed path (or
+    destination), so a mutation of the real compose file says which path was taken
+    over."""
     intended = f"./{CHECKOUT_SOURCE}:{TARGET}:ro"
 
     # The intended declaration, mounts elsewhere, and the same directory named
@@ -519,8 +586,8 @@ def test_the_checks_refuse_a_shadow_at_or_under_srv():
                       "target": TARGET, "read_only": True},)):
         assert _srv_shadow_messages(_service_with(*volumes)) == [], volumes
 
-    # A destination at or under /srv, other than /srv itself, is a shadow — read
-    # only or writable, short or long form, and however the path is spelled.
+    # A destination BELOW /srv is a shadow — read only or writable, short or long
+    # form, and however the path is spelled.
     for volumes, shadowed in (
             ((intended, "/tmp/shadow/godot_harness.py:/srv/godot_harness.py"),
              "/srv/godot_harness.py"),
@@ -545,6 +612,29 @@ def test_the_checks_refuse_a_shadow_at_or_under_srv():
         problems = _srv_shadow_messages(service)
         assert len(problems) == 1, (volumes, problems)
         assert SERVICE in problems[0] and shadowed in problems[0], problems[0]
+
+    # A destination EXACTLY /srv is the third shape: the directory mount is still
+    # present and read-only, and a second volume claims that same destination, so
+    # the whole directory would come from somewhere else. It was accepted here on
+    # 2026-11-09 while this module's docstring already said it was refused. Docker
+    # refuses it itself (Duplicate mount point: /srv, rc 125) and starts nothing,
+    # so the refusal below keeps the file honest rather than preventing a served
+    # shadow; the message must still name the service and the destination.
+    for volumes in ((intended, "/tmp/shadow:/srv:ro"),
+                    (intended, "/tmp/shadow:/srv"),
+                    (intended, "/tmp/shadow:/srv//"),
+                    (intended, "/tmp/shadow/x.py:/srv/../srv:ro"),
+                    ("/tmp/shadow:/srv:ro", intended),
+                    (intended, {"type": "bind", "source": "/tmp/shadow",
+                                "target": TARGET, "read_only": True}),
+                    # A second copy of the intended mount is still a second volume
+                    # at /srv; the runtime refuses the duplicate either way.
+                    (intended, intended)):
+        service = _service_with(*volumes)
+        assert _missing_mount_message(service) is None, volumes
+        problems = _srv_shadow_messages(service)
+        assert len(problems) == 1, (volumes, problems)
+        assert SERVICE in problems[0] and TARGET in problems[0], problems[0]
 
 
 def test_the_checks_read_the_serving_uid_and_refuse_modes_it_cannot_read(tmp_path):

@@ -9,6 +9,30 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 
+// The liveness predicate is what keeps a departed child from pinning dormancy: it
+// drops ids it rejects, and the count in the reason is the number of ids that survive.
+// runtime.mjs is imported dynamically so these stay independent of the real-DSH
+// scenarios below, which run the whole runtime.
+test('a departed child is dropped by the liveness predicate, not counted', async () => {
+  const { dormancyRefusal } = await import('./runtime.mjs');
+  const refusal = dormancyRefusal({ reason: 'x', liveChildren: 2, childSessions: ['ghost', 'live'], isLive: id => id === 'live' });
+  assert.equal(refusal.refused, 'live_children');
+  assert.equal(refusal.reason, '1 native child(ren) still running');
+  assert.deepEqual(refusal.live_children, ['live']);
+  assert.equal(dormancyRefusal({ reason: 'x', liveChildren: 1, childSessions: ['ghost'], isLive: () => false }), null);
+});
+
+test('pruning a live-child set leaves only the ids the registry still holds', async () => {
+  const { pruneDepartedChildren } = await import('./runtime.mjs');
+  const live = new Set(['ghost', 'live']);
+  assert.deepEqual(pruneDepartedChildren(live, { isLocal: () => true, isLive: id => id === 'live' }), ['ghost']);
+  assert.deepEqual([...live], ['live']);
+  // A non-local activation owns no local Agent here, so nothing proves it gone.
+  const remote = new Set(['remote']);
+  assert.deepEqual(pruneDepartedChildren(remote, { isLocal: () => false, isLive: () => false }), []);
+  assert.deepEqual([...remote], ['remote']);
+});
+
 // Root script: refused while a claim is live, then dormant with a padded context,
 // then a State event wakes it. Compaction requests answer with a checkpoint.
 const PROVIDER = String.raw`

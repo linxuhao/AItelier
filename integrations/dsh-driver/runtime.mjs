@@ -396,12 +396,18 @@ export function watchRefusal({ pid, note, alive, session, mySession, watched = f
  *  `liveChildren` is the count the reason states; `childSessions` names them, so the
  *  refusal is actionable: a director can find the child and tell a live worker from
  *  an id whose lifecycle end edge was missed (iss-dc85aa2c80f2454d). A caller
- *  that knows only the count still refuses, it just cannot name the sessions. */
-export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], claims = [], plans = [], background = [] }) {
+ *  that knows only the count still refuses, it just cannot name the sessions.
+ *  `isLive` rejects an id that is no longer a child at all; with sessions supplied
+ *  the count is the number of ids that survive it, so a departed id neither
+ *  refuses nor inflates the number. */
+export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], claims = [], plans = [], background = [], isLive = () => true }) {
   if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
-  if (liveChildren) {
-    const named = [...childSessions].sort();
-    return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running`,
+  const given = childSessions ? [...childSessions] : [];
+  const named = given.filter(isLive).sort();
+  // Only a caller that cannot name its children falls back to its own count.
+  const count = given.length ? named.length : liveChildren;
+  if (count) {
+    return { refused: 'live_children', reason: `${count} native child(ren) still running`,
       ...(named.length ? { live_children: named } : {}) };
   }
   if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
@@ -411,6 +417,16 @@ export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], 
     ...(plans.some(p => p.ready_to_finish) ? { ready_to_finish: plans.filter(p => p.ready_to_finish).map(p => p.attempt_id) } : {}) };
   if (background.length) return { refused: 'background_processes', reason: 'jobs you started are still running; watch_process them or wait', pids: background };
   return null;
+}
+
+/** Drop from `live` every activation the agent registry can prove departed: its start
+ *  event reported `local: true`, so it owns a local Agent here, and `isLive` now says
+ *  no. A non-local activation owns no local Agent, so nothing in this process can prove
+ *  it gone and it stays. Returns the pruned ids. */
+export function pruneDepartedChildren(live, { isLocal = () => true, isLive = () => true } = {}) {
+  const departed = [...live].filter(id => isLocal(id) && !isLive(id));
+  for (const id of departed) live.delete(id);
+  return departed;
 }
 
 /** Below this measured context (tokens) entering dormancy does not compact: a cold re-read is cheap. */
@@ -895,6 +911,21 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
   const todo = new TodoCli({ python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, stateDir: env.AITELIER_DSH_STATE_DIR });
   const liveChildren = new Set();
+  // Which live children own a local Agent here (their start event said `local: true`).
+  // Only those can be checked against the agent registry; a non-local activation owns
+  // nothing this process can look up, so its absence there proves nothing.
+  const localChildren = new Set();
+  // A child whose `subagent/end` never arrived - the process that owed it died - would
+  // hold dormancy off for the rest of this runtime's life. The registry answers "the
+  // agent, or undefined when no live agent has that id", so an id it no longer holds is
+  // departed and leaves the set; a registry that is not there proves nothing, so the
+  // id stays, as before.
+  const pruneChildren = () => {
+    const departed = pruneDepartedChildren(liveChildren, { isLocal: id => localChildren.has(id),
+      isLive: id => typeof ctx.agents?.get !== 'function' || ctx.agents.get(id) !== undefined });
+    if (departed.length) ctx.logger.info(`dropped departed child sessions ${departed.join(', ')}: no live agent holds them`);
+    return departed;
+  };
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
   const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
   // Worker-facing plan tools are host-scoped like project_work: the caller is
@@ -1147,6 +1178,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+        // Prune first: a departed child must not refuse dormancy at all.
+        pruneChildren();
         const early = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren });
         if (early) return early;
         let claims, work;
@@ -1159,6 +1192,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         } catch (error) {
           return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
         }
+        // The reads above take time: re-prune before reading the plans and refusing.
+        pruneChildren();
         const plans = unfinishedWithoutChild(work.plans, liveChildren, work.settled);
         const background = backgroundProcesses(env.AITELIER_DSH_SESSION).filter(pid => !watches.has(pid));
         const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren, claims, plans, background });
@@ -1288,9 +1323,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   };
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.
-  ctx.on('subagent/start', info => { subagents.add(info.runId); liveChildren.add(info.id); void report(currentPhase()); });
+  ctx.on('subagent/start', info => {
+    subagents.add(info.runId); liveChildren.add(info.id);
+    if (info.local) localChildren.add(info.id);
+    void report(currentPhase());
+  });
   ctx.on('subagent/end', info => {
-    subagents.delete(info.runId); liveChildren.delete(info.id); void report(currentPhase());
+    subagents.delete(info.runId); liveChildren.delete(info.id); localChildren.delete(info.id); void report(currentPhase());
     void handback(info.id).catch(error => ctx.logger.warn(String(error)));
   });
   // After a child's successful compaction, its next step gets one line of its

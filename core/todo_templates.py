@@ -467,8 +467,21 @@ def _judged_before(plan: TodoPlan, item_id: str) -> list[str]:
     return [i.id for i in plan.items if i.id in keep]
 
 
-#: Predicates that RUN a program. What such a step does to the tree is not in the plan, so whether it
-#: can touch a declared delta is decided by its ARGV and by nothing else.
+#: Predicates that RUN a program the PLAN names. What such a step does to the tree is not in the plan,
+#: so whether it can touch a declared delta is decided by its ARGV and by nothing else.
+#:
+#: The list is a literal, and it is MEASURED rather than trusted. `PredicateLibrary` has no marker to
+#: declare the fact in, so the fact is pinned from outside, by
+#: `tests/unit/test_todo_templates_command_predicates.py`: that test walks the REAL registration table,
+#: drives every registered implementation with type-directed sentinel arguments through the real spawn
+#: primitives, and fails - naming the predicate - when one spawns a program built from binding words
+#: and is not listed here, when a listed name spawns nothing, or when its words arrive in an argument
+#: `_argv_of` does not read. Without that pin a new program-running predicate joins the library
+#: silently: its argv names nothing to `_programs_naming`, so the audit REFUSES (`invalid_plan`) a plan
+#: the program itself makes satisfiable, with every other test green (iss-f7d7793371a34bec) - and for
+#: a delta git excludes the opposite: a program that could expose it stops keeping the refusal. So a
+#: name belongs here only together with the measurement showing its words arriving in `argv`, the name
+#: `core.todo_runtime._STR_LISTS` fixes for a program's argv.
 COMMAND_PREDICATES = ("command_exit",)
 
 #: Files whose CONTENT decides whether git excludes a path. An item that declares a change to one of
@@ -524,7 +537,13 @@ def _runs_a_command(item: Any) -> bool:
 
 
 def _argv_of(item: Any) -> list[str]:
-    """Every argv word the item's program bindings carry, in binding order."""
+    """Every argv word the item's program bindings carry, in binding order.
+
+    `argv` is the argument name `core.todo_runtime._STR_LISTS` fixes for a program's argv, and the one
+    `tests/unit/test_todo_templates_command_predicates.py` measures every registered program-running
+    predicate against: a predicate whose words arrived in some other argument would name nothing here,
+    and the audit would then withhold no refusal for the very item that can revert the delta.
+    """
     words: list[str] = []
     for binding in item.predicates:
         if binding.predicate not in COMMAND_PREDICATES:

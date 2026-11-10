@@ -28,7 +28,7 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +103,15 @@ SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 # nobody did, so the row stays a durable blocker until a late quiescent report
 # by the original reporter (or an admin) settles it.
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled", "abandoned"})
+# The ONE liveness measurement a registered external owner row can carry: its
+# owning attempt's lease expired, the claim/lease grace passed, and nothing was
+# recorded on that attempt inside the window (see
+# ``_measure_external_owner_liveness``). It is a measurement, not a status: the
+# registry's own ``status`` keeps saying what the registry says, so a measured
+# owner stays in the inventory and in the blockers - the gate is NOT quiescent -
+# and only the classification changes, disclosing it through the same
+# acknowledged-unknown path every other unsettled metadata owner uses.
+EXTERNAL_OWNER_LIVENESS = frozenset({"owner_lost"})
 EXTERNAL_OWNER_KINDS = frozenset({"docker", "process"})
 GODOT_OWNER_STATUSES = frozenset({"active", "owner_lost", "reconciled", "released"})
 # Names that read as a measurement. A bare `eval` is deliberately absent: every
@@ -273,6 +282,22 @@ def _nonempty_string(value: Any) -> bool:
     return type(value) is str and bool(value.strip())
 
 
+def _stamp(value: Any) -> datetime | None:
+    """An AWARE timestamp, or None: absent/naive/unparseable measures nothing.
+
+    The claim ledger, the attempt ledger and this module do not write one
+    timestamp format (seconds vs microseconds), so liveness compares parsed
+    datetimes rather than the strings themselves.
+    """
+    if type(value) is not str or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def _legacy_journal_genesis(event: Any) -> bool:
     return (type(event) is dict
             and set(event) == {"event_id", "status", "usable"}
@@ -284,7 +309,12 @@ def _normalized_owner_blockers(*, runs: list[dict], sidecar_owners: list[dict],
                                external_owners: list[dict],
                                registered_external_owners: list[dict],
                                godot_render_owners: list[dict]) -> dict[str, list[dict]]:
-    """Project measured owner inventories through the producer's blocker rules."""
+    """Project measured owner inventories through the producer's blocker rules.
+
+    Every measured row here stays a blocker, including a registered external
+    owner whose attempt is measurably gone: disclosure (``_classify_blockers``)
+    decides who may be acknowledged, never what was measured.
+    """
     return {
         "active_runs": [row for row in runs
                         if row.get("status") in BLOCKING_STATUSES
@@ -1517,6 +1547,68 @@ def _godot_rows(path: Path | None) -> tuple[list[dict], list[str]]:
         return [], [f"Godot owner ledger measurement failed: {type(exc).__name__}: {exc}"]
 
 
+def _measure_external_owner_liveness(rows: list[dict]) -> None:
+    """Mark the registered owners whose owning attempt is measurably gone.
+
+    A row in ``state_external_owners`` is authoritative because an ACTIVE owner
+    is presumed to be running something. Nothing measured that presumption: a
+    row whose owning process died days ago vetoed every cross-project deployment
+    forever (attempt-4091fbb3c550458eb82f10794e6e0fb7, admitted 2026-10-13, no
+    settlement, no heartbeat since), and only that foreign project's owner could
+    clear it. ``audit_operation_owners`` gives runs a lost/unknown/alive
+    classification and render owners an ``owner_lost`` state; this is the same
+    measurement for this class.
+
+    The window is the claim/lease code's own (``core.state_claims``): a lease
+    expires, GRACE_SECONDS goes by, and a claim past that grace authorizes
+    nothing. Applied to the owning ATTEMPT - the lease holder - because that is
+    where the heartbeat lands, plus its second half, that nothing further was
+    recorded on the attempt inside the window. Both must hold, so a single
+    heartbeat or a single observation recorded after the lease lapsed keeps the
+    owner authoritative exactly as today.
+
+    Attaching the measurement is ALL this does: the row keeps its registry
+    ``status``, stays in its inventory and stays a blocker, so the gate is not
+    quiescent and the operator still sees the owner. ``_classify_blockers`` is
+    what turns ``liveness: owner_lost`` into a disclosed unknown the existing
+    ``acknowledge_unknown`` decision can cover, instead of an authoritative
+    owner that only a scoped ``coordinated_owners`` cover could ever name.
+
+    The raw lease columns are popped from EVERY row: the shape of a row changes
+    only when it is measurably lost, so the CPU-only metadata classification -
+    which refuses any column it does not know - keeps seeing exactly the columns
+    it saw before.
+    """
+    from core.state_claims import GRACE_SECONDS, lease_state
+
+    for row in rows:
+        expiry = row.pop("lease_expires_at", None)
+        heartbeat = row.pop("last_heartbeat_at", None)
+        attempt_updated = row.pop("attempt_updated_at", None)
+        if row.get("status") != "active":
+            # Only an ACTIVE row claims a live owner. ``paused``/``unknown``
+            # rows are already disclosed as unsettled metadata and abandoned
+            # ones carry their own attestation; none of them is made quieter.
+            continue
+        expiry_at = _stamp(expiry)
+        recorded = [moment for moment in (_stamp(heartbeat), _stamp(attempt_updated))
+                    if moment is not None]
+        if expiry_at is None or not recorded:
+            # legacy_unleased: no lease was ever recorded, so there is no window
+            # to measure against and the row keeps vetoing exactly as today.
+            continue
+        if lease_state(expiry) != "reclaimable":
+            continue
+        window_end = expiry_at + timedelta(seconds=GRACE_SECONDS)
+        last_seen = max(recorded)
+        if last_seen > window_end:
+            continue
+        row["liveness"] = "owner_lost"
+        row["last_seen_at"] = last_seen.isoformat()
+        row["lease_expires_at"] = expiry_at.isoformat()
+        row["liveness_grace_seconds"] = GRACE_SECONDS
+
+
 def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     if db is None:
         return [], [], [], []
@@ -1536,13 +1628,25 @@ def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
                         errors.append(f"{table} measurement failed: {exc}")
             try:
                 attempt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(state_attempts)")}
+                # The lease columns arrived with the P3 migration, exactly like
+                # `abandon_kind`, so the read names each one only when it exists.
+                # A database without them has no window to measure: those rows
+                # keep vetoing as they do today, and an unavailable measurement
+                # is not a failed one.
+                lease_column = ("a.lease_expires_at" if "lease_expires_at" in attempt_columns
+                                else "NULL")
+                heartbeat_column = ("a.last_heartbeat_at" if "last_heartbeat_at" in attempt_columns
+                                    else "NULL")
+                updated_column = ("a.updated_at" if "updated_at" in attempt_columns else "NULL")
                 if "abandon_kind" in attempt_columns:
                     owner_column = ("a.owner_driver_id" if "owner_driver_id" in attempt_columns
                                     else "NULL")
                     registry_sql = (
                         "SELECT o.attempt_id,o.project_id,o.node_key,o.harness,o.external_id,o.status,"
                         "o.admitted_at,o.updated_at,o.settled_at,a.abandon_kind,"
-                        f"{owner_column} AS owner_driver_id FROM state_external_owners o "
+                        f"{owner_column} AS owner_driver_id,{lease_column} AS lease_expires_at,"
+                        f"{heartbeat_column} AS last_heartbeat_at,"
+                        f"{updated_column} AS attempt_updated_at FROM state_external_owners o "
                         "LEFT JOIN state_attempts a ON a.attempt_id=o.attempt_id "
                         "WHERE o.status != 'settled' AND NOT (o.status='abandoned' AND a.abandon_kind='confirmed_stopped') "
                         "ORDER BY o.project_id,o.node_key,o.attempt_id")
@@ -1596,6 +1700,14 @@ def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
                             "external owner registry is missing while external attempts are active")
     except Exception as exc:  # noqa: BLE001 -- unknown DB state blocks deployment
         errors.append(f"AItelier DB measurement failed: {type(exc).__name__}: {exc}")
+    # Measured here, with the rows, so the runtime facts this process publishes
+    # carry the measurement too: the consuming host must not need the DB to read
+    # who is gone. A row that cannot be measured keeps its veto and the failure
+    # is an error, never a silent clearance.
+    try:
+        _measure_external_owner_liveness(external_registry)
+    except Exception as exc:  # noqa: BLE001 -- an unmeasured owner is not a quiet one
+        errors.append(f"external owner liveness measurement failed: {type(exc).__name__}: {exc}")
     return leases, admissions, external_registry, errors
 
 
@@ -1950,6 +2062,16 @@ def _validate_owner_inventories(observation: dict) -> str | None:
             return f"{prefix} needs a non-empty attempt_id"
         if row.get("status") not in EXTERNAL_OWNER_STATUSES:
             return f"{prefix} has unknown status {row.get('status')!r}"
+        if "liveness" in row:
+            # The measurement is published WITH its evidence or not at all: a
+            # conclusion nobody can re-read against the clocks is not one.
+            if row["liveness"] not in EXTERNAL_OWNER_LIVENESS:
+                return f"{prefix} has unknown liveness {row['liveness']!r}"
+            if not _nonempty_string(row.get("last_seen_at")) \
+                    or not _nonempty_string(row.get("lease_expires_at")):
+                return f"{prefix} liveness needs last_seen_at and lease_expires_at"
+            if not _nonnegative_int(row.get("liveness_grace_seconds")):
+                return f"{prefix} liveness_grace_seconds must be a nonnegative integer"
 
     for index, row in enumerate(inventories["godot_render_owners"]):
         prefix = f"godot_render_owners row {index}"
@@ -2097,6 +2219,34 @@ def _settled_external_owner(row: dict, observed_at: str) -> bool:
         return False
 
 
+def _external_owner_measurably_lost(row: Any, observed_at: Any) -> bool:
+    """Whether this row carries the measurement that its owner is gone.
+
+    ``_measure_external_owner_liveness`` is the producer. This re-reads its
+    evidence against the OBSERVATION's own clock instead of trusting the
+    conclusion: the window the row exceeded (its attempt's lease + the
+    claim/lease grace) had already passed when this observation was taken, and
+    the last thing recorded on the attempt fell inside that window. A row whose
+    fields say otherwise is not a measurement, so it stays an authoritative
+    owner - the failure direction is a veto, never a clearance.
+    """
+    if not isinstance(row, dict) or row.get("liveness") != "owner_lost":
+        return False
+    if row.get("status") != "active" or not _nonempty_string(row.get("attempt_id")):
+        return False
+    if not _nonempty_string(row.get("last_seen_at")) \
+            or not _nonempty_string(row.get("lease_expires_at")) \
+            or not _nonnegative_int(row.get("liveness_grace_seconds")):
+        return False
+    lease_expires, last_seen, observed = (_stamp(row.get("lease_expires_at")),
+                                          _stamp(row.get("last_seen_at")),
+                                          _stamp(observed_at))
+    if lease_expires is None or last_seen is None or observed is None:
+        return False
+    window_ends = lease_expires + timedelta(seconds=row["liveness_grace_seconds"])
+    return window_ends <= observed and last_seen <= window_ends
+
+
 # The State registry describes assignments, not CPU sessions. A CPU-only caller
 # may disclose these exact metadata columns as unknown/nonconsumers; it never
 # infers an owner ACK or quiescence from a frozen Doc/research assignment.
@@ -2118,6 +2268,10 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
     Scopes come from trusted effect-bound callers, never process names. Retained
     ready demand on persistent storage and settled recovery are passive metadata;
     physical operations, unsettled demand and measurement errors remain vetoes.
+    A registered external owner measured as ``owner_lost`` is disclosed
+    uncertainty on EVERY decision (passive scope or not), the same way a paused
+    or unknown row is disclosed under a scope: it keeps its row, keeps the gate
+    closed, and is covered only by an explicit ``acknowledge_unknown``.
     """
     passive_scope = backend_only or godot_only or semantic_only or cpu_only
     blockers = observation.get("blockers")
@@ -2134,9 +2288,22 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
                 row.get("desired") == row.get("outcome") == "ready"
                 and row.get("revision") == row.get("done_revision")
                 and row.get("error") == "")]
-        elif passive_scope and name == "registered_external_owners" and isinstance(rows, list):
+        elif name == "registered_external_owners" and isinstance(rows, list):
+            # The one classification that does NOT need a passive scope: a row
+            # whose owning attempt is measurably gone is disclosed uncertainty
+            # on any decision, exactly like a `paused`/`unknown` row is under a
+            # scope. It is measured, published and acknowledged - never
+            # removed and never quiet: the row stays in `blockers`, so the gate
+            # is not quiescent and no decision covers it without
+            # `acknowledge_unknown`.
             known_rows = []
             for row in rows:
+                if _external_owner_measurably_lost(row, observation.get("observed_at")):
+                    unknown_owners.append(row)
+                    continue
+                if not passive_scope:
+                    known_rows.append(row)
+                    continue
                 if cpu_only:
                     if CPU_METADATA_OWNER_FIELDS.issuperset(row):
                         # Preserve raw status and disclose uncertainty; actual host

@@ -29,6 +29,11 @@ import { LiveChildren, Continuation, NOTHING_LEFT, continuationWaitKey, dormancy
 // LiveChildren + agent registry per section, and each section's FIRST read after
 // `depart()` is the reader that section witnesses - remove that reader's own
 // reconciliation and its section, and only its section, goes red.
+//
+// So there are five readers and one section each: the dormancy refusal (the count and
+// the names), the continuation wait key, the plan binding (`sessionSet()`), the phase
+// report, and the membership answer `has()` - the reader `todo_begin` asks before it
+// treats a plan bound to another session as attended.
 function registry(ids = []) {
   const held = new Set(ids);
   return { forget: id => held.delete(id), agents: { get: id => held.has(id) ? { session: { id } } : undefined } };
@@ -160,6 +165,22 @@ test('the phase report names live child sessions only, never a runId', () => {
     'the phase report names session ids, never runIds');
   assert.deepEqual(Object.keys(report).sort(), ['error', 'phase', 'subagents'],
     'the report body carries no extra key: Activity forbids extras, so a second identity needs its own contract');
+});
+
+// (5) The membership answer: `has(id)` is a reader too. `todo_begin` asks it
+// `children.has(bound)` to decide whether a plan bound to another session is attended,
+// so a `has()` that reads the raw map answers yes for a child the registry has already
+// proved gone - and the plan looks attended by a session that no longer exists.
+test('the membership answer reports a departed child absent and a live one present', () => {
+  const { children, depart } = twoChildren();
+  // The half that must not weaken: while the registry holds both, both are members.
+  assert.equal(children.has('worker-1'), true);
+  assert.equal(children.has('worker-0'), true);
+
+  // This set's first read after the departure is the membership answer itself.
+  depart();
+  assert.equal(children.has('worker-1'), false, 'a departed child must not answer as a live session');
+  assert.equal(children.has('worker-0'), true, 'a live child must still answer as live');
 });
 
 // The set's own invariants, which no single reader owns: reconciling is idempotent,

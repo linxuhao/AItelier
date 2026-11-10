@@ -209,6 +209,7 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
     failures = prior.get("failure_history", []) if prior else []
     root = None
     abandoned = None
+    rerooted = None
     if prior and prior["status"] not in {"idle", "excluded"}:
         try:
             root = project_root(Path(prior["root"]), projects, worktrees)
@@ -230,6 +231,21 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
             if prior["root"] != str(root) and prior.get("first_failure"):
                 if prior["first_failure"] not in failures:
                     failures = [*failures, prior["first_failure"]]
+        # Path() normalises the recorded root string, so an owned root spelled
+        # non-canonically (a trailing slash, say) does not equal the spelling this
+        # pass writes, while validate_project_owner requires first_failure and
+        # settlement.failure to name the written root. The prior row keeps its own
+        # spelling in failure_history, whose rows are identified by their own root,
+        # and the evidence written below is re-rooted at the written spelling; it
+        # is the same dependency, recorded once per spelling, not a second failure.
+        if abandoned is None and prior["root"] != str(root):
+            source = prior.get("first_failure")
+            if source is None and prior["status"] == "error" and prior["error"]:
+                source = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+            if source is not None:
+                if source not in failures:
+                    failures = [*failures, source]
+                rerooted = {**source, "root": str(root)}
         if abandoned is not None:
             settlement = None
         elif immutable_project(root):
@@ -244,7 +260,10 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
                 raise ValueError("semantic daemon operations are active or unknown")
             if not immutable_project(project_root(root, projects, worktrees)):
                 raise ValueError("immutable project exclusion changed during measurement")
-            settlement = {"reason": "immutable-root-without-index", "failure": prior,
+            # owner.error must equal settlement.failure.error, so this is the prior
+            # row itself under the written root, not its first_failure.
+            established = {**prior, "root": str(root)} if prior["root"] != str(root) else prior
+            settlement = {"reason": "immutable-root-without-index", "failure": established,
                           "daemon": status, "proof": {"uid": os.geteuid(),
                           "root_mode": root.stat().st_mode & 0o777,
                           "cache_absent": True, "effective_write_access": False}}
@@ -285,6 +304,8 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
                 first = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
             if first is not None:
                 value["first_failure"] = first
+        elif rerooted is not None:
+            value["first_failure"] = rerooted
         if status == "error" and "first_failure" not in value:
             value["first_failure"] = {k: value[k] for k in ("root", "status", "error", "updated_at")}
         if status == "excluded":

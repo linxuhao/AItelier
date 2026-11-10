@@ -392,10 +392,18 @@ export function watchRefusal({ pid, note, alive, session, mySession, watched = f
 
 /** Why idle_dormant must refuse, or null. Dormancy must never strand work: a live
  *  native child, a live State claim of this driver, or an unfinished todo plan
- *  without a live child each refuse. claims/plans are omitted for the early check. */
-export function dormancyRefusal({ reason, liveChildren = 0, claims = [], plans = [], background = [] }) {
+ *  without a live child each refuse. claims/plans are omitted for the early check.
+ *  `liveChildren` is the count the reason states; `childSessions` names them, so the
+ *  refusal is actionable: a director can find the child and tell a live worker from
+ *  an id whose lifecycle end edge was missed (iss-dc85aa2c80f2454d). A caller
+ *  that knows only the count still refuses, it just cannot name the sessions. */
+export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], claims = [], plans = [], background = [] }) {
   if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
-  if (liveChildren) return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running` };
+  if (liveChildren) {
+    const named = [...childSessions].sort();
+    return { refused: 'live_children', reason: `${liveChildren} native child(ren) still running`,
+      ...(named.length ? { live_children: named } : {}) };
+  }
   if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
   if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id),
     // Which of them have nothing left to run: the director's next step there is
@@ -1139,7 +1147,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-        const early = dormancyRefusal({ reason, liveChildren: liveChildren.size });
+        const early = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren });
         if (early) return early;
         let claims, work;
         try {
@@ -1153,7 +1161,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         }
         const plans = unfinishedWithoutChild(work.plans, liveChildren, work.settled);
         const background = backgroundProcesses(env.AITELIER_DSH_SESSION).filter(pid => !watches.has(pid));
-        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, claims, plans, background });
+        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren, claims, plans, background });
         if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
         const dormant = idleReview.enterDormancy(reason);

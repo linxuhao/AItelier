@@ -16,6 +16,8 @@ their todo tools; State reporting stays with you. The old container's workspace-
 and project_work instructions in retained history are obsolete on the host.
 Run AItelier pytest only in disposable containers (network none, 2 CPU/2 GiB,
 one worker, at most four concurrent), never on the host or in production.
+Every step re-sends your whole context, so issue independent tool calls
+(reads, greps, status checks) together in one step rather than one per step.
 
 Your runtime injects the current node names/statuses, project note index and your
 private note index only on the first request and once
@@ -32,7 +34,9 @@ log, including shadowed precompact messages, and returns event seq/line citation
 Use regex=true for regular expressions and after_seq for the next result page.
 
 Use state_read(action, arguments) for State queries; the current project_id is
-supplied when omitted. Use the AItelier MCP tools for writes and pipelines.
+supplied when omitted. Use the AItelier MCP tools for writes and pipelines;
+state_graph_write fills director_identity, and project_id while you belong to
+exactly one project, when omitted.
 Their full definitions are deferred: use search_tools(query) to find the relevant
 names and parameter schemas, then call_tool(name, arguments) to execute them.
 Known names can be called directly through call_tool, without a search gate.

@@ -65,3 +65,30 @@ def test_first_failure_survives_recovery_then_next_owner(tmp_path):
     assert advanced["failure_history"] == [original]
     assert "first_failure" not in advanced  # historical error does not own this root
     assert dq._semantic_worker_errors(control) == []
+
+
+def test_owner_switch_keeps_noncanonical_nested_failure_under_its_own_root(tmp_path):
+    # An idle owner whose root is spelled with a trailing slash carries its own
+    # first_failure. When the owner moves to another checkout, that nested row is
+    # retained in failure_history under the spelling it was recorded with, and is
+    # not promoted to the new owner's top-level first_failure (it names another root).
+    projects, runs, control = (tmp_path / n for n in ("projects", "runs", "control"))
+    control.mkdir()
+    repo(projects / "a")
+    second = repo(projects / "b")
+    old = str(second) + "/"
+    nested = {"root": old, "status": "error", "updated_at": 0.5,
+              "error": "earlier failure recorded under the trailing-slash spelling"}
+    prior = {"root": old, "status": "idle", "error": "", "updated_at": 1.0,
+             "first_failure": nested}
+    marker = control / "project-owner.json"
+    marker.write_text(json.dumps(prior))
+    index_project_once(control, projects, runs, execute=provider)
+    current = json.loads(marker.read_text())
+    from core import semantic_index_control as module
+    module.validate_project_owner(current)
+    assert current["status"] == "idle" and current["root"] == str(projects / "a")
+    assert "first_failure" not in current
+    assert current["failure_history"] == [nested]
+    assert current["failure_history"][0]["root"] == old
+    assert dq._semantic_worker_errors(control) == []

@@ -76,7 +76,9 @@ def test_partial_default_inventory_refuses_owned_clearance(tmp_path, monkeypatch
     assert observed["quiescent"] is False
     assert dq._validate_observation(observed) is None
     journal = tmp_path / "owned-journal.json"
-    with pytest.raises(dq.DeploymentBlocked, match="not quiescent"):
+    # No owner was measured (the inventory tool is missing), so the refusal names
+    # the instrument; "not quiescent" is reserved for measured owners.
+    with pytest.raises(dq.DeploymentBlocked, match="quiescence observation is unavailable"):
         dq.authorize("restart", observed, journal=journal)
     data = json.loads(journal.read_text())
     assert data["latest"]["status"] == "aborted"
@@ -114,7 +116,8 @@ def test_real_nonzero_inventory_retains_other_and_refuses_clearance(tmp_path, mo
     assert len(observed["errors"]) == 1
     assert "owned nonzero failure" in observed["errors"][0]
     assert observed["quiescent"] is False
-    with pytest.raises(dq.DeploymentBlocked, match="not quiescent"):
+    # Same instrument failure: the inventory tool failed, nothing was measured.
+    with pytest.raises(dq.DeploymentBlocked, match="quiescence observation is unavailable"):
         dq.authorize("restart", observed, journal=tmp_path / "owned-journal.json")
 
 

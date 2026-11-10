@@ -157,8 +157,10 @@ def test_remote_authority_refuses_before_client_or_compose(operated_backend, mon
 
 
 def test_untrusted_http_response_refuses_before_real_compose(operated_backend, monkeypatch):
+    # A refused credential is named, not left as a bare HTTP status: the gate's
+    # refusal quote this text, so the operator is told to fix the credential.
     monkeypatch.setenv('OWNED_HTTP_STATUS', '403')
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(RuntimeError, match='active off-tunnel driver credential is required'):
         server._live_runtime_observation('http://127.0.0.1:4444')
     assert not operated_backend[1].exists()
 

@@ -346,8 +346,17 @@ def _live_runtime_observation(base_url: str, *, compose_root: str | Path | None 
     url = urlsplit(base_url)
     if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise ValueError("Host deployment observation requires the local backend URL")
+    observation_path = "/api/admin/deployment-runtime-observation"
     with httpx.Client(base_url=base_url, timeout=15, headers=_auth_headers()) as client:
-        response = client.post("/api/admin/deployment-runtime-observation")
+        response = client.post(observation_path)
+        if response.status_code in (401, 403):
+            # A refused credential is an instrument failure, and it must say so:
+            # the gate's later refusal names the cause it was handed, and the
+            # operator has to be told to fix its credential, not its projects.
+            raise RuntimeError(
+                f"Live runtime observation POST {observation_path} was refused with HTTP "
+                f"{response.status_code}: an active off-tunnel driver credential is "
+                "required; the admin role is not required")
         response.raise_for_status()
         facts = dq._validated_runtime_facts(response.json())
     container = _compose("ps", "-q", _COMPOSE_SERVICE,

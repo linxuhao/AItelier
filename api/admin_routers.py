@@ -41,6 +41,15 @@ def delete_logged_user(
 def deployment_runtime_observation(request: Request):
     """Original runtime facts for any ACTIVE off-tunnel driver, admin or not.
 
+    Each fact comes from the surface that owns it: ``runtime_identity`` (pid,
+    pid namespace, mount namespace, boot id) is the serving process's own
+    /proc entries, ``runs`` and their operation audit are the initialized live
+    SkillFlow instance, ``checkout_leases``, ``write_admissions`` and
+    ``registered_external_owners`` are the host DBManager's rows, and
+    ``observed_at`` is that process's clock. A caller elsewhere cannot assemble
+    the same facts from these surfaces, and ``digest`` is only an unkeyed check
+    of the bytes returned here.
+
     The payload is RAW owner rows — commands and free text included — which is
     why the MCP transport projection (`api/mcp_router.py`) redacts them; its
     audience is off-tunnel LAN drivers, not only admins. This owner audit can

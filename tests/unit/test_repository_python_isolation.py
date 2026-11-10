@@ -196,6 +196,101 @@ def test_actual_entry_timeout_reaps_the_owned_group_when_the_direct_child_dies(t
         f"child, so only the group kill can reach it: {result!r}")
 
 
+def _grandchild_state(pid):
+    """`pid`'s /proc state right now, or 'gone' once the kernel has no trace of it.
+
+    Read from /proc/<pid>/stat rather than `os.kill(pid, 0)` because a ZOMBIE
+    answers signal 0: the contract here is that the detached grandchild was
+    KILLED AND COLLECTED, not merely that it stopped running. The comm field is
+    wrapped in parentheses and may itself contain them, so the state is the
+    first field after the LAST ')'. Anything unreadable is reported by name
+    instead of raising, so a failed contract is a legible line rather than an
+    exception from inside the assertion.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return "gone"
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__})"
+    fields = raw.rpartition(")")[2].split()
+    return fields[0] if fields else "unparsable"
+
+
+_REAPED_STATES = frozenset({"gone", "Z", "X"})   # no /proc entry, zombie, dead
+
+
+def test_actual_entry_normal_exit_reaps_a_detached_grandchild(tmp_path):
+    # This witness exists for the exit path that fires NO timeout. Both
+    # witnesses above build their shape by timing out, so they are answered by
+    # the TIMEOUT branch's own `os.killpg`: with only the finally-branch call
+    # replaced by `pass` they stay green, i.e. they cannot see that site at all
+    # (iss-4de060cff56140e9). Here the direct child exits 0 while leaving a
+    # `sleep 20 &` grandchild in the same process group (it inherits the new
+    # session/group that `start_new_session=True` gave the shell, and `sleep`
+    # never calls setsid), so:
+    #   * `communicate()` returns because the DIRECT CHILD exited -- which is
+    #     why the grandchild MUST redirect its stdout/stderr (`>/dev/null
+    #     2>&1`); without that it holds both pipes open, communicate has no
+    #     EOF, the budget expires and this becomes the timeout shape again;
+    #   * `proc.kill()` cannot help: communicate has already reaped the direct
+    #     child, so its pid is gone and only the group can be addressed;
+    #   * no other code runs between the return and the `finally:` block.
+    # So the surviving-or-not grandchild is an observation about exactly one
+    # statement: the finally branch's `os.killpg(proc.pid, signal.SIGKILL)`
+    # around core/repository_executor_entry.py:612.
+    #
+    # Measured on the delivered tree with ONLY that call site replaced by
+    # `pass` (a writable copy inside the pytest container): after `run()`
+    # returned rc 0 / timed_out False the grandchild's /proc state was `S` at
+    # +0.0, +0.3 and +1.5 s. The 1 s bounded wait below is therefore long
+    # enough to report the survivor's state and short enough not to mistake a
+    # reap-in-progress for a contract breach.
+    import time
+    root = shlex.quote(str(tmp_path))
+    # `$!` is the fork'd grandchild, live from the instant of the fork; the
+    # shell writes both pids BEFORE it exits, so `run()` returning implies the
+    # two witness files carry complete values (nothing here races a 0.2 s
+    # budget). The direct child's pid is published too, so "the pid polled
+    # below is a grandchild, not the direct child" is an assertion and not a
+    # comment.
+    script = (f"sleep 20 >/dev/null 2>&1 & echo $! > {root}/grandchild.pid; "
+              f"echo $$ > {root}/shell.pid; echo partial; exit 0")
+    result = entry.run({"repo":str(tmp_path),"timeout":30,"args":["/bin/sh","-c",script]})
+    # The NORMAL exit path: rc 0, no timeout. If this ever becomes a timeout,
+    # the assertions below would be about the timeout branch and the witness
+    # would be blind in exactly the way it was written to fix.
+    assert result["returncode"] == 0, result
+    assert result["timed_out"] is False, result
+    assert "partial" in result["stdout"], result
+    pid_file, shell_file = tmp_path / "grandchild.pid", tmp_path / "shell.pid"
+    assert pid_file.exists() and shell_file.exists(), (
+        f"the child never published both pids: files={sorted(p.name for p in tmp_path.iterdir())}: "
+        f"{result!r}")
+    grandchild, direct_pid = int(pid_file.read_text().strip()), int(shell_file.read_text().strip())
+    assert grandchild != direct_pid, (
+        f"the polled pid must be the GRANDCHILD's: grandchild={grandchild} "
+        f"direct child={direct_pid}")
+    deadline = time.monotonic() + 1.0
+    state = _grandchild_state(grandchild)
+    while state not in _REAPED_STATES and time.monotonic() < deadline:
+        time.sleep(0.02)
+        state = _grandchild_state(grandchild)
+    if state not in _REAPED_STATES:
+        # Never leave a survivor holding this tmp_path for the rest of the
+        # suite when the entry did not kill the group it owns.
+        try:
+            os.kill(grandchild,signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert state in _REAPED_STATES, (
+        f"the detached grandchild {grandchild} (process group {direct_pid}) "
+        f"survived a NORMAL exit: run() returned rc 0 / timed_out False and "
+        f"/proc/{grandchild}/stat still reports state {state!r} after the 1 s "
+        f"bound; the direct child is already reaped by communicate(), so only "
+        f"the finally-branch group kill can reach it: {result!r}")
+
+
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])
 def test_adapter_timeout_cancel_cleanup_is_id_scoped(monkeypatch, tmp_path, failure):
     calls=[]

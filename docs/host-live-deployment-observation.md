@@ -6,13 +6,18 @@ OS/Docker/sidecar measurement. The endpoint is an explicit owner audit: it may
 record observed-lost ownership through the existing live SDK, but does not retire
 owners, construct a runtime, register graphs, authorize deployment or start work.
 
-The endpoint requires the existing off-tunnel CLI admin token. Cloudflare
-requests, including a writer identity or replayed admin token, cannot obtain this
-raw inventory. The existing MCP observer remains a writer-authorized redacted
-observation with an original digest; that projection is never used here.
+The endpoint requires an off-tunnel credential that is either the existing CLI
+admin token or a per-driver token that still resolves to an active driver
+(suspended and unknown tokens refuse). The admin role is not required: this raw
+read is what a non-admin platform director needs to take a clearance decision at
+all. Cloudflare requests, including a writer identity or replayed admin token,
+cannot obtain this raw inventory. The payload carries raw owner rows, including
+command lines and free text of processes owned by other projects; that is why the
+MCP observer remains a writer-authorized, redacted observation with an original
+digest, and that projection is never used here.
 
-The host CLI uses the existing admin header, a loopback HTTP backend URL and the
-normal compose service/container identity. Original runtime facts carry their
+The host CLI uses the existing CLI auth header, a loopback HTTP backend URL and
+the normal compose service/container identity. Original runtime facts carry their
 canonical digest, time, boot ID and live process namespace identity. The host
 checks the boot ID, snapshot age (30 seconds), schema and Docker backend PID/mount
 namespaces before composing them with its own OS and shared-sidecar observations.
@@ -22,9 +27,14 @@ There is no competing runtime, raw operation-table scan, new daemon, credential,
 or automatic owner release. Existing cutover fence, blocker classification,
 override rules and journal finalization are unchanged.
 
-A stopped/uninitialized/unreachable backend cannot provide live runtime facts:
-its normal guard refuses explicitly rather than constructing a substitute and
-calling it quiet. This change is SOURCE only until independently reviewed and
+A stopped/uninitialized/unreachable backend, or a credential the endpoint refuses,
+cannot provide live runtime facts: its normal guard refuses explicitly rather than
+constructing a substitute and calling it quiet. That refusal names the instrument -
+the endpoint path, the HTTP status, and that an active off-tunnel driver credential
+is required - and never claims the host is not quiescent; `measurement_failure`
+remains an authoritative blocker either way. A measured owner keeps the ordinary
+"not quiescent" refusal, and an audited override that would bypass an authoritative
+active owner is refused naming that owner. This change is SOURCE only until independently reviewed and
 installed; it does not perform a restart or alter production configuration.
 
 A pre-bound `AITELIER_DEPLOY_OVERRIDE_FILE` still needs the exact fresh digest

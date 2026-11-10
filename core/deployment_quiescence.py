@@ -2191,6 +2191,54 @@ def _classify_blockers(observation: dict, *, backend_only: bool = False,
     return authoritative, unknown_owners
 
 
+def _instrument_failure_cause(observation: dict) -> str | None:
+    """Why the observation could not be TAKEN, or None when something was measured.
+
+    An unmeasured host and a busy host are different answers, and a refusal that
+    calls both "not quiescent" sends the operator to audit projects when the
+    instrument (a refused credential, an unreachable runtime) is what failed.
+    ``measurement_failure`` and ``errors`` carry that cause; a measured owner is
+    the ordinary non-quiescence answer and keeps its wording.
+    """
+    if not isinstance(observation, dict):
+        return None
+    blockers = observation.get("blockers")
+    blockers = blockers if isinstance(blockers, dict) else {}
+    failures = blockers.get("measurement_failure")
+    reasons = [row["reason"] for row in (failures if isinstance(failures, list) else [])
+               if isinstance(row, dict) and _nonempty_string(row.get("reason"))]
+    errors = observation.get("errors")
+    errors = [error for error in (errors if isinstance(errors, list) else [])
+              if _nonempty_string(error)]
+    if not reasons and not errors:
+        return None
+    if any(rows for name, rows in blockers.items() if name != "measurement_failure"):
+        return None                     # measured owners are the ordinary refusal
+    return "; ".join(dict.fromkeys(reasons + errors))[:500]
+
+
+def _authoritative_owner_names(authoritative: dict) -> str:
+    """Name each authoritative owner by the identity its rows answer to.
+
+    ``BLOCKER_IDENTITY_FIELDS`` is the identity set the validator already
+    requires, so a refusal can say WHICH owner still vetoes instead of only
+    which inventory holds it — "external_active" alone cannot tell the operator's
+    own foreign owner from anybody else's.
+    """
+    names = []
+    for kind in sorted(authoritative):
+        rows = authoritative[kind]
+        for row in (rows if isinstance(rows, list) else [rows]):
+            named = None
+            if isinstance(row, dict):
+                for field in BLOCKER_IDENTITY_FIELDS.get(kind, ()):
+                    if _nonempty_string(row.get(field)):
+                        named = f"{kind}({field}={row[field][:120]})"
+                        break
+            names.append(named or kind)
+    return ", ".join(dict.fromkeys(names))
+
+
 def _coordinated_cover_refusal(coordinated: Any, authoritative: dict, *,
                                scoped: bool,
                                nameable: dict[str, str] = COORDINATED_OWNER_IDENTITY) -> str | None:
@@ -2345,7 +2393,7 @@ def _valid_override(action: str, observation: dict, override: dict | None, *,
     elif (requested_scope or requested_godot or requested_semantic or requested_cpu
           or override.get("acknowledge_unknown") is True) and authoritative:
         return False, ("unknown-ownership override cannot bypass authoritative active owners: "
-                       + ", ".join(sorted(authoritative)))
+                       + _authoritative_owner_names(authoritative))
     if (unknown_owners or observation.get("errors")) \
             and override.get("acknowledge_unknown") is not True:
         return False, "override must acknowledge unknown measurement errors"
@@ -2502,6 +2550,15 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                    "resumable_runs": _resumable_runs(observation_value),
                                    "errors": observation_value.get("errors")})
         _persist_journal(path, state)
+    cause = _instrument_failure_cause(observation_value)
+    if cause is not None:
+        # The host was never measured: measurement_failure is still an
+        # authoritative veto (unchanged - an unmeasured host is never quiescent),
+        # but the refusal must name the instrument, not the projects.
+        raise DeploymentBlocked(
+            f"refusing {action}: the quiescence observation is unavailable; "
+            f"measurement_failure remains an authoritative blocker ({cause}); "
+            f"evidence {event['event_id']} is aborted/unusable ({reason})")
     raise DeploymentBlocked(
         f"refusing {action}: cross-project deployment is not quiescent; "
         f"evidence {event['event_id']} is aborted/unusable ({reason})")

@@ -39,17 +39,31 @@ def delete_logged_user(
 
 @router.post("/deployment-runtime-observation", dependencies=[Depends(require_writer)])
 def deployment_runtime_observation(request: Request):
-    """Original runtime facts for the existing off-tunnel host CLI authority.
+    """Original runtime facts for any ACTIVE off-tunnel driver, admin or not.
 
-    This owner audit can record observed-lost accounting. It never starts a
-    runtime, clears ownership, or grants deployment authorization.
+    Each fact comes from the surface that owns it: ``runtime_identity`` (pid,
+    pid namespace, mount namespace, boot id) is the serving process's own
+    /proc entries, ``runs`` and their operation audit are the initialized live
+    SkillFlow instance, ``checkout_leases``, ``write_admissions`` and
+    ``registered_external_owners`` are the host DBManager's rows, and
+    ``observed_at`` is that process's clock. A caller elsewhere cannot assemble
+    the same facts from these surfaces, and ``digest`` is only an unkeyed check
+    of the bytes returned here.
+
+    The payload is RAW owner rows — commands and free text included — which is
+    why the MCP transport projection (`api/mcp_router.py`) redacts them; its
+    audience is off-tunnel LAN drivers, not only admins. This owner audit can
+    record observed-lost accounting. It never starts a runtime, clears
+    ownership, or grants deployment authorization.
     """
     import sys
     from api import authz
-    # Off-tunnel admin authority: the env admin token (driver identity off) or an
-    # active is_admin LAN driver such as owner-cli (on). See api/authz.py.
-    if not authz.local_admin_authority(request):
-        raise HTTPException(403, "Original runtime observation requires the local CLI admin authority")
+    # Any active off-tunnel driver credential: the env admin token (driver
+    # identity off) or a LAN driver such as owner-cli (on) — the admin role is
+    # NOT required, because this read changes nothing. See api/authz.py.
+    if not authz.local_driver_authority(request):
+        raise HTTPException(403, "Original runtime observation requires an active "
+                                 "off-tunnel driver credential; the admin role is not required")
     dependencies = sys.modules.get("api.dependencies")
     sf = getattr(dependencies, "_skillflow_instance", None)
     db = getattr(dependencies, "db_instance", None)

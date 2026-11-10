@@ -190,6 +190,29 @@ def local_admin_authority(request) -> bool:
     return bool(row and row["is_admin"])
 
 
+def local_driver_authority(request) -> bool:
+    """An OFF-tunnel ACTIVE driver credential — the `is_admin` role is NOT required.
+
+    This is the authority for a READ-ONLY measurement, not for a mutation, so it
+    is deliberately wider than `local_admin_authority`: the observation route
+    neither starts a runtime, clears ownership nor grants a deployment
+    clearance, a LAN driver token is minted only by the admin-gated driver
+    routes (`api/driver_routers.py` registers/rotates under `require_admin`),
+    and `lookup_token` already refuses a suspended/retired driver. An admin sees
+    exactly the payload it saw before, so nothing an admin could do depends on
+    this being admin-only. Requiring admin here made every ordinary driver
+    unable to measure its own deployment, and reported that refusal as
+    non-quiescence.
+    Never a Cloudflare caller: a leaked token is not replayable through the edge.
+    """
+    if is_via_cloudflare(request):
+        return False
+    token = presented_token(request)
+    if not token:
+        return False
+    return _token_authorizes(request, token)
+
+
 def require_admin(request: Request) -> None:
     """FastAPI dependency: break-glass/admin operations (driver registry writes).
 

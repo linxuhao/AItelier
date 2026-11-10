@@ -300,7 +300,7 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
             result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
             assert result.json()['served_by'] == endpoints[2]
             assert 'x-opencode-session' not in called[-1][1].get('extra_headers', {})
-            # The plan recovers: once the probe interval passes, the session
+            # The plan recovers: once idle for the probe interval, the session
             # leaves the paid fallback instead of sticking to it for its life.
             fail_go = False
             assert client.post('/api/dsh-drivers/alpha/completion', json=payload).json()['served_by'] == endpoints[2]
@@ -371,8 +371,17 @@ async def test_a_failed_over_session_returns_only_when_the_prompt_cache_is_cold(
             state['fail_go'] = True
             assert post('epoch-2 summary') == endpoints[1]
             state['fail_go'] = False
+            ai._ENDPOINT_COOLDOWN[endpoints[0]] = state['now'] + 300  # head parked (quota)
+            assert post('epoch-3 summary') == endpoints[1]  # compaction while the head is parked: stay
+            ai._ENDPOINT_COOLDOWN.clear()                   # the park has lapsed
+            state['now'] += 60                              # next compaction, 60 s after the failover:
+            assert post('epoch-4 summary') == endpoints[0]  # no 600 s wait once the cache is cold
+            state['fail_go'] = True
+            assert post('epoch-4 summary') == endpoints[1]
+            state['fail_go'] = False
+            ai._ENDPOINT_COOLDOWN.clear()
             state['now'] += ai._RETURN_PROBE_EVERY_S        # idle for the probe interval: cold too
-            assert post('epoch-2 summary') == endpoints[0]
+            assert post('epoch-4 summary') == endpoints[0]
         await runtime.stop('alpha')
     finally:
         await runtime.close()

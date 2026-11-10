@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import authz
 from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
-from core.ai_router import _RETURN_PROBE_EVERY_S
+from core import ai_router
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers
 from core.state_commands import ProjectPrivate, execute
@@ -307,12 +307,14 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         # the next call re-sends the whole context uncached (~130k tokens for
         # a director, measured). So an earlier endpoint is retaken only when
         # the cache is cold anyway - the conversation prefix changed (a
-        # compaction) or the session sat idle for the probe interval. A
-        # failover on an error still moves at once.
+        # compaction, which also skips the post-failover interval; only a
+        # parked endpoint is still refused) or the session sat idle for the
+        # probe interval. A failover on an error still moves at once.
         prefix = hashlib.sha256(json.dumps(body.messages[:2], sort_keys=True, default=str)
                                 .encode()).hexdigest()
-        if (prefix != getattr(gateway, "_dsh_prefix", None)
-                or time.time() - getattr(gateway, "_dsh_last_call", 0.0) >= _RETURN_PROBE_EVERY_S):
+        if prefix != getattr(gateway, "_dsh_prefix", None):
+            gateway.return_to_earlier(cold=True)
+        elif time.time() - getattr(gateway, "_dsh_last_call", 0.0) >= ai_router._RETURN_PROBE_EVERY_S:
             gateway.return_to_earlier()
         gateway._dsh_prefix = prefix
         turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)

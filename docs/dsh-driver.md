@@ -477,10 +477,14 @@ live_children: [<child session id>, ...]}` with the ids sorted. They are the set
 the runtime maintains from `subagent/start` and `subagent/end`, so a refusal can
 be traced to one child rather than read as an anonymous number; a caller that
 knows only a count still gets the same payload without the `live_children` key,
-so nothing that cannot name ids changes shape. One honest limit: an id whose
-`subagent/end` never arrived stays in that set until the runtime process starts
-again, and the refusal will keep naming it - the name is what makes that visible
-(`iss-dc85aa2c80f2454d`), it does not clear it.
+so nothing that cannot name ids changes shape. The set is not trusted blindly: before
+refusing, the runtime asks its own agent registry (`ctx.agents.get`, `undefined` when
+no live agent has that id) and drops every id it no longer answers for, so a child
+whose `subagent/end` never arrived stops holding dormancy off once its Agent is gone.
+Only an activation that owns a local Agent here can be pruned that way; a non-local
+activation, or a runtime whose registry is unavailable, keeps being named until the
+process starts again - the name is what makes such a lost end edge visible
+(`iss-dc85aa2c80f2454d`).
 
 Compaction. The root's `aitelier-driver-state` snapshot (bootstrap and after each
 successful compaction) adds `todo: [{attempt_id, node_key, next, remaining_count,

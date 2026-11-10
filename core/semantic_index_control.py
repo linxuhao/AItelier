@@ -62,6 +62,23 @@ def project_root(root: Path, projects: Path, worktrees: Path) -> Path:
     return root
 
 
+def _abandoned_project_root(root: Path, projects: Path, worktrees: Path) -> bool:
+    """Owned project path whose checkout is gone, so no operation can run there.
+
+    Measured 2026-11-10: the live project-owner marker held status="error" for
+    ~/.AItelier/projects/wuxia-tmp-docs, a directory that still existed but no
+    longer held a .git checkout. project_root() raised before any marker write,
+    so the resident worker re-raised on every tick and the marker stayed an
+    authoritative measurement error no override could cover, vetoing every
+    deployment. Absence is disposable; a redirected or unowned path stays
+    unknown, because that is evidence of tampering rather than of a vanished
+    checkout.
+    """
+    return (root.is_absolute() and root.parent == projects and not root.is_symlink()
+            and root.resolve() == root and projects.resolve() == projects
+            and not root.is_relative_to(worktrees) and not (root / ".git").exists())
+
+
 def immutable_project(root: Path) -> bool:
     """Positive exclusion only: no index, no write bits, and worker cannot write.
 
@@ -186,9 +203,23 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
     history = prior.get("excluded_owners", []) if prior else []
     failures = prior.get("failure_history", []) if prior else []
     root = None
+    abandoned = None
     if prior and prior["status"] not in {"idle", "excluded"}:
-        root = project_root(Path(prior["root"]), projects, worktrees)
-        if immutable_project(root):
+        try:
+            root = project_root(Path(prior["root"]), projects, worktrees)
+        except ValueError:
+            # An ownership check that only raises keeps such a marker at its
+            # prior status forever, so it is settled below instead of re-raised.
+            if not _abandoned_project_root(Path(prior["root"]), projects, worktrees):
+                raise
+            abandoned = root = Path(prior["root"])
+            if prior["status"] == "error" and prior["error"]:
+                retained = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+                if retained not in failures:
+                    failures = [*failures, retained]
+        if abandoned is not None:
+            settlement = None
+        elif immutable_project(root):
             if prior["status"] != "error" or not prior["error"]:
                 raise ValueError("immutable project operation is still unknown")
             # A client timeout may leave actual daemon work. Do not replace its
@@ -257,6 +288,13 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
         finally:
             os.close(fd)
 
+    if abandoned is not None:
+        # Terminal, not a successful index: no project operation is in flight for
+        # a checkout that no longer exists, and the retained failure stays the
+        # evidence. The observer settles on idle/excluded only, so this is the
+        # recorded disposal rather than another unanswerable error.
+        record("idle")
+        return
     if settlement is not None:
         record("excluded", prior["error"])
         return

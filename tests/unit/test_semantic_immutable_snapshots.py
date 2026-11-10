@@ -185,6 +185,48 @@ def test_symlink_error_owner_is_not_excluded(setup):
     assert dq._semantic_worker_errors(control)
 
 
+def test_vanished_checkout_marker_is_disposed_terminally(setup):
+    # Measured 2026-11-10: the live marker held status="error" for a project
+    # directory that kept only its .zvec-grep cache after the checkout was
+    # removed. The ownership check raised before any marker write, so the worker
+    # re-raised every tick and deployment clearance vetoed every deployment.
+    from core import semantic_index_control as module
+    projects, runs, control, _ = setup
+    gone = projects / "a-vanished"
+    gone.mkdir()
+    (gone / ".zvec-grep").mkdir()
+    error = "checkout ownership was unavailable when the operation failed"
+    older = {"root": str(projects / "a-older"), "status": "error",
+             "error": "older retained failure", "updated_at": 0.5}
+    first = {"root": str(gone), "status": "error", "error": error, "updated_at": 0.25}
+    excluded = {"root": str(projects / "a-frozen"), "status": "excluded",
+                "error": "", "updated_at": 0.75}
+    prior = {"root": str(gone), "status": "error", "error": error, "updated_at": 1.0,
+             "failure_history": [older], "first_failure": first,
+             "excluded_owners": [excluded]}
+    marker = control / "project-owner.json"
+    marker.write_text(json.dumps(prior))
+    # The ownership check is untouched: this root is still not owned, and on the
+    # base implementation that ValueError escaped before any marker write.
+    with pytest.raises(ValueError, match="not an owned project root"):
+        module.project_root(gone, projects, runs)
+    module._index_project_once(control, projects, runs, execute=no_commands)
+    settled = json.loads(marker.read_text())
+    module.validate_project_owner(settled)
+    assert settled["status"] == "idle" and settled["error"] == ""
+    assert settled["root"] == str(gone)
+    assert dq._semantic_worker_errors(control) == []
+    # The failure is retained verbatim, not rewritten into a fake success.
+    assert settled["first_failure"] == first
+    assert settled["first_failure"]["error"] == error
+    assert settled["failure_history"][0] == older
+    assert {"root": str(gone), "status": "error", "error": error,
+            "updated_at": 1.0} in settled["failure_history"]
+    assert error in [row["error"] for row in settled["failure_history"]]
+    assert settled["excluded_owners"] == [excluded]
+    assert [p.name for p in gone.iterdir()] == [".zvec-grep"]
+
+
 @pytest.mark.parametrize("patch", [{"status": "excluded"}, {"status": "excluded", "settlement": {}},
                                     {"status": "idle", "updated_at": float("nan")}])
 def test_forged_or_corrupt_terminal_marker_blocks_guard(setup, patch):

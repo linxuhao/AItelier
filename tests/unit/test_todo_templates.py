@@ -9,12 +9,13 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 
 import pytest
 
 from core.todo_runtime import builtin_library
-from core.todo_templates import check_declared_paths, load_template
+from core.todo_templates import _names_path, check_declared_paths, load_template
 # The CLI harness and fixtures are shared with the free-plan tests.
 from tests.unit.test_todo_plan_cli import (  # noqa: F401
     Cli, T0, begin_done, base, cli, commit_all, deliver_results, git, item, plan, repo)
@@ -850,11 +851,53 @@ items:
       - predicate: files_changed
         args: {paths: ["app.py"]}
   - id: judge
-    title: "judge other.py before anything has changed"
+    title: "judge other.py against a scope of its own"
     predicates:
       - predicate: changes_within
         args: {scope: ["other.py"]}
 """
+
+SCOPE_BEFORE_DELTA = """\
+name: t
+version: 1
+description: the narrower-scope item FIRST, so it is measured while the tree is still clean
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+"""
+
+
+def follow_next(cli: Cli, repo: Path, work) -> tuple[list, dict]:
+    """Drive a frozen plan the way a compliant child does: read `status`, act on `status.next`.
+
+    Nothing here knows the plan's item ids in advance, so the order the assertions see is the order
+    `TodoRuntime.next_item` actually presents - which is the order the audit must reason about.
+    """
+    presented, outcomes = [], {}
+    for _ in range(8):
+        nxt = cli.ok("status", "--attempt", "att-1")["next"]
+        presented.append(nxt)
+        if nxt is None:
+            return presented, outcomes
+        cli.ok("begin", "--attempt", "att-1", "--item", nxt)
+        work(nxt)
+        out = cli.ok("done", "--attempt", "att-1", "--item", nxt)
+        outcomes[nxt] = out["outcome"]
+        if out["outcome"] != "pass":
+            return presented, outcomes
+    raise AssertionError(f"plan did not finish; presented {presented}")
 
 
 def test_a_delta_outside_the_plan_scope_is_refused_by_the_deliver_item_that_needs_it(cli, repo, base, custom):
@@ -905,33 +948,492 @@ def test_a_scope_an_item_needs_that_excludes_the_earlier_delta_is_refused(cli, r
     assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
 
 
-def test_a_later_item_that_does_not_need_the_delta_is_not_judged_against_it_and_the_plan_runs(
+def test_a_later_item_that_does_not_need_the_delta_is_judged_against_it_because_it_is_presented_after(
         cli, repo, base, custom):
-    """The rule follows `needs`, not declaration order - and the plan it spares really does pass.
+    """`judge` does not need `change`, but the runtime still presents `change` FIRST - so `judge` fails.
 
-    `judge` binds a scope that excludes `app.py` but does not need `change`, so it may be judged
-    first, when nothing has changed since the base yet ("0 changed path(s), all inside scope").
-    Driving the shipped predicates on a real tree - `changes_within` for judge, `files_changed` for
-    change, `git_delivered` and `changes_within` for deliver - EVERY item of the frozen plan passes,
-    so pairing a later item's scope with an earlier delta it does not depend on would be a false
-    refusal. Every verdict asserted below is a shipped predicate's, run by the CLI against the real
-    tree: the audit's share is only to let the plan freeze.
+    This test used to pin the opposite (`..._does_not_need_the_delta_is_not_judged_against_it_and_the_plan_runs`)
+    and was green only because it began `judge` first, by hand. A compliant child does not choose:
+    `TodoRuntime.next_item` hands out the first item, IN PLAN ORDER, whose needs have passed, so the
+    child is shown `change` and then - with `app.py` changed and committed - `judge` measures over the
+    whole base..HEAD delta and fails with "1 changed path(s) outside scope ['other.py']: app.py"
+    (retained probe: work/evidence/plan-order-20261109/probe2-follows-next.txt). A plan the freeze
+    audit ACCEPTS has to be satisfiable in the order the runtime PRESENTS, so the audit refuses this
+    one at freeze and names the item and the path its scope excludes.
     """
     write_template(custom, "t", SCOPE_IN_AN_INDEPENDENT_ITEM)
     code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"]})
-    assert code == 0 and out["items"] == ["change", "judge", "deliver"], out
-    judge = begin_done(cli, "judge")
-    assert judge["outcome"] == "pass", judge
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "app.py" and out["scope"] == ["other.py"] and out["predicate"] == "files_changed", out
+    assert "'app.py'" in out["reason"] and "['other.py']" in out["reason"], out["reason"]
+    assert "changes_within" in out["reason"] and "presented" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_the_same_two_items_freeze_and_run_when_the_narrower_scope_is_presented_first(
+        cli, repo, base, custom):
+    """The reordering the refusal names: `judge` first, so it is measured while the tree is clean.
+
+    The audit refuses the ORDER, not the pair. Declared first, the narrower-scope item is presented
+    first, `changes_within` finds "0 changed path(s), all inside scope", and the plan is
+    deliverable - which is why the rule must never fire on a delta declared LATER than the scope that
+    judges it. Driven by following `status.next`, the path a compliant child takes, so the order
+    asserted below is the runtime's rather than the test's: judge, change, deliver.
+    """
+    write_template(custom, "t", SCOPE_BEFORE_DELTA)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py"]})
+    assert code == 0 and out["items"] == ["judge", "change", "deliver"], out
+
+    def work(item_id: str) -> None:
+        if item_id == "change":
+            (repo / "app.py").write_text("x = 2\n")
+            commit_all(repo)      # deliver requires a clean tree, and the work belongs in a commit
+
+    presented, outcomes = follow_next(cli, repo, work)
+    assert presented == ["judge", "change", "deliver", None], presented
+    assert outcomes == {"judge": "pass", "change": "pass", "deliver": "pass"}, outcomes
+    judge = cli.ok("status", "--attempt", "att-1")["items"][0]
+    assert judge["id"] == "judge" and judge["state"] == "pass", judge
     assert "0 changed path(s)" in judge["results"][0]["detail"], judge["results"]
-    cli.ok("begin", "--attempt", "att-1", "--item", "change")
-    (repo / "app.py").write_text("x = 2\n")
-    change = cli.ok("done", "--attempt", "att-1", "--item", "change")
-    assert change["outcome"] == "pass" and "all 1 file(s) changed as intended" in change["results"][0]["detail"], change
-    commit_all(repo)
-    got = deliver_results(cli)
-    assert got["_outcome"] == "pass", got
-    assert (got["git_delivered"]["outcome"], got["changes_within"]["outcome"]) == ("pass", "pass"), got
-    assert "all inside scope" in got["changes_within"]["detail"], got["changes_within"]
+
+
+SCOPE_AFTER_A_COMMAND = """\
+name: t
+version: 1
+description: an EARLIER item declares a delta, an INTERVENING command reverts it, a LATER item binds a scope that excludes it
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: undo
+    title: "revert app.py and commit other.py"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args:
+          argv: ["/bin/sh", "-c", "git checkout HEAD~1 -- app.py && echo o = 2 > other.py && git -c user.name=t -c user.email=t@example.invalid commit -q -am undo"]
+          expect: 0
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+NEEDS_AFTER_A_COMMAND = """\
+name: t
+version: 1
+description: an EARLIER item declares a delta, an INTERVENING command reverts it, and a LATER item that NEEDS it binds a scope that excludes it
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: undo
+    title: "revert app.py and commit other.py"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args:
+          argv: ["/bin/sh", "-c", "git checkout HEAD~1 -- app.py && echo o = 2 > other.py && git -c user.name=t -c user.email=t@example.invalid commit -q -am undo"]
+          expect: 0
+  - id: judge
+    title: "judge other.py, needing the delta that is no longer there"
+    needs: [change]
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+IGNORED_DELTA = """\
+name: t
+version: 1
+description: an EARLIER item declares a path a pattern excludes, which changes_within therefore never reports
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change secret.txt"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["secret.txt"]}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+
+def change_app_py(repo: Path):
+    """The work a compliant child does at `change`: write app.py and commit it.
+
+    Committed because `git checkout HEAD~1 -- app.py` (the intervening command) restores it from the
+    commit before, and because `deliver` requires a clean tree.
+    """
+    def work(item_id: str) -> None:
+        if item_id == "change":
+            (repo / "app.py").write_text("x = 2\n")
+            commit_all(repo)
+    return work
+
+
+def test_a_command_between_the_delta_and_a_later_scope_leaves_the_plan_runnable(cli, repo, base, custom):
+    """The over-refusal a non-author reviewer found: the intervening command REVERTS the delta.
+
+    `judge` does not need `change`, but it is presented after it, so the audit refused this plan on
+    the premise that `app.py` is in the tree when `judge` is measured. `undo` puts it back (and
+    commits, so `git diff base..HEAD` no longer lists it either), and the plan then runs to a clean
+    delivery - measured here by following `status.next`, the path a compliant child takes. Refused
+    on the tree before this test's subject (retained: work/evidence/plan-narrow-verify-20261109),
+    which is why `create` must answer 0 here.
+    """
+    write_template(custom, "t", SCOPE_AFTER_A_COMMAND)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 0, out
+    assert out["items"] == ["change", "undo", "judge", "deliver"], out
+
+    presented, outcomes = follow_next(cli, repo, change_app_py(repo))
+    assert presented == ["change", "undo", "judge", "deliver", None], presented
+    assert outcomes == {"change": "pass", "undo": "pass", "judge": "pass", "deliver": "pass"}, outcomes
+    judge = [i for i in cli.ok("status", "--attempt", "att-1")["items"] if i["id"] == "judge"][0]
+    assert "1 changed path(s), all inside scope" in judge["results"][0]["detail"], judge["results"]
+
+
+def test_a_command_between_the_delta_and_the_item_that_needs_it_leaves_the_plan_runnable(
+        cli, repo, base, custom):
+    """The same escape one pass over: `judge` NEEDS `change`, and the command in between still undoes it.
+
+    `begin` refuses an item whose needs have not passed, so `change` has passed by the time `judge`
+    runs - but passed is not present: `undo` reverted and committed the revert, so `changes_within`
+    finds one changed path (other.py) and the plan delivers. The dependency pass is narrowed by the
+    same rule as the presentation pass, because the fact it rests on - the delta is in the tree when
+    the scope is measured - is defeated by a program in exactly the same way.
+    """
+    write_template(custom, "t", NEEDS_AFTER_A_COMMAND)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 0, out
+    assert out["items"] == ["change", "undo", "judge", "deliver"], out
+
+    presented, outcomes = follow_next(cli, repo, change_app_py(repo))
+    assert presented == ["change", "undo", "judge", "deliver", None], presented
+    assert outcomes == {"change": "pass", "undo": "pass", "judge": "pass", "deliver": "pass"}, outcomes
+
+
+def test_a_delta_git_cannot_see_is_not_one_the_later_scope_can_fail_on(cli, repo, custom):
+    """The second escape: `changes_within` reads three git commands, and none of them lists an ignored path.
+
+    `secret.txt` is excluded by a committed pattern, so it is in neither `git diff base..HEAD` nor
+    `git diff HEAD` nor `git ls-files --others --exclude-standard`: the declared delta cannot fail
+    `judge`'s scope however it changed, and the plan runs. `files_changed` does see it - it compares
+    digests against the state at the start of the step, not git - so the item that declares it still
+    has real work to do, which is why the delta is created here rather than assumed.
+    """
+    (repo / ".gitignore").write_text("secret.txt\n")
+    start = commit_all(repo, "ignore the secret")
+    write_template(custom, "t", IGNORED_DELTA)
+    code, out = create_from(cli, repo, start, "t", {"scope": ["secret.txt", "other.py"]})
+    assert code == 0, out
+    assert out["items"] == ["change", "judge", "deliver"], out
+
+    def work(item_id: str) -> None:
+        if item_id == "change":
+            (repo / "secret.txt").write_text("s = 1\n")
+            (repo / "other.py").write_text("o = 2\n")
+            commit_all(repo)          # stages other.py; secret.txt is ignored, so it stays untracked
+
+    presented, outcomes = follow_next(cli, repo, work)
+    assert presented == ["change", "judge", "deliver", None], presented
+    assert outcomes == {"change": "pass", "judge": "pass", "deliver": "pass"}, outcomes
+    judge = [i for i in cli.ok("status", "--attempt", "att-1")["items"] if i["id"] == "judge"][0]
+    assert "1 changed path(s), all inside scope" in judge["results"][0]["detail"], judge["results"]
+
+
+def test_a_path_git_tracks_is_refused_even_when_a_pattern_names_it(cli, repo, custom):
+    """The same pattern, a path that was force-added: git answers "not excluded", and the refusal stands.
+
+    `git check-ignore` is the audit's own question (`_invisible_to_changes_within`), and for a tracked
+    path it answers 1 even though the pattern matches - exclude rules do not apply to tracked files,
+    so the path IS in `git diff base..HEAD` and the plan is unsatisfiable exactly as before. Asserted
+    on the exit code rather than on the audit, so the two sides are measured independently.
+    """
+    (repo / ".gitignore").write_text("secret.txt\n")
+    (repo / "secret.txt").write_text("s = 0\n")
+    git(repo, "add", "-f", "secret.txt")
+    start = commit_all(repo, "track the secret anyway")
+    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--", "secret.txt"])
+    assert ignored.returncode == 1, "a tracked path is not excluded: this is the case the audit keeps refusing"
+
+    write_template(custom, "t", IGNORED_DELTA)
+    code, out = create_from(cli, repo, start, "t", {"scope": ["secret.txt", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "secret.txt" and out["scope"] == ["other.py"], out
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+
+NOOP_INSIDE_THE_WINDOW = """\
+name: t
+version: 1
+description: the unsatisfiable pair, with a program between the two items that NAMES nothing
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: noop
+    title: "run a program that touches nothing"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args: {argv: ["/bin/sh", "-c", "true"], expect: 0}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+SELF_COMMAND = """\
+name: t
+version: 1
+description: ONE item declares app.py, runs a program that names nothing, and binds a scope without app.py
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py, then run a program that touches nothing"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+      - predicate: command_exit
+        args: {argv: ["/bin/sh", "-c", "true"], expect: 0}
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+FORCE_ADD_THE_IGNORED_DELTA = """\
+name: t
+version: 1
+description: an ignored delta, a program in the plan that NAMES it and force-adds it, then a scope without it
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "write the ignored secret"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["secret.txt"]}
+  - id: track
+    title: "force-add the ignored file"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args: {argv: ["/bin/sh", "-c", "git add -f secret.txt"], expect: 0}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+PLAN_CREATES_ITS_OWN_IGNORE_RULE = """\
+name: t
+version: 1
+description: the plan itself writes the exclude rule that hides its own delta
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "ignore and create secret.txt"
+    predicates:
+      - predicate: files_changed
+        args: {paths: [".gitignore", "secret.txt"]}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py", ".gitignore"]}
+"""
+
+NAMED_WITHOUT_A_REVERT = """\
+name: t
+version: 1
+description: a program whose argv NAMES the declared delta and reverts nothing
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: noop
+    title: "a program that only mentions app.py"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args: {argv: ["/bin/sh", "-c", "true app.py"], expect: 0}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+
+def declined_notes(out: dict) -> list[str]:
+    return [note for note in (out.get("paths") or {}).get("notes") or () if "NOT refused" in note]
+
+
+def test_a_program_that_does_not_name_the_path_is_not_an_opt_out(cli, repo, base, custom):
+    """A program in the window only makes the pair unjudgeable when its argv NAMES the declared path.
+
+    Measured 2026-11-10 by a non-author reviewer and reproduced on the tree before this test: with the
+    skip firing on ANY program in the window, `/bin/sh -c true` between `change` and `judge` froze this
+    dead plan (rc 0), and `judge` then failed with `1 changed path(s) outside scope ['other.py']: app.py`
+    - a plan that cannot finish, accepted. A freeze cannot read a program, but it CAN read its argv,
+    and a program that does not name the path is not evidence that the delta goes away.
+    """
+    write_template(custom, "t", NOOP_INSIDE_THE_WINDOW)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "app.py" and out["scope"] == ["other.py"], out
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
+def test_a_program_inside_the_declaring_item_does_not_disable_its_own_scope(cli, repo, base, custom):
+    """The same escape one item's turn: the item's OWN unrelated program must not disable its own pair.
+
+    The declaring item runs the program in the same step that declares the delta, so its turn is
+    inside the window at both ends; the refusal must survive exactly as it does for the pair above.
+    """
+    write_template(custom, "t", SELF_COMMAND)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "change" and out["path"] == "app.py", out
+    assert out["scope"] == ["other.py"], out
+
+
+def test_a_program_that_names_an_excluded_delta_keeps_the_refusal(cli, repo, custom):
+    """`git check-ignore` answers at FREEZE time; a program in the plan can make that answer false.
+
+    The delta is on a path the pattern excludes, so `changes_within` cannot see it - which is why the
+    ignore skip exists. But `track` NAMES that path and force-adds it, and a tracked path is in all
+    three of `changes_within`'s sets, so the same plan measurably fails at `judge` (2026-11-10). The
+    audit therefore keeps the refusal, and says which program made the exclusion answer unstable.
+    """
+    (repo / ".gitignore").write_text("secret.txt\n")
+    start = commit_all(repo, "ignore the secret")
+    excluded = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--", "secret.txt"])
+    assert excluded.returncode == 0, "the premise of the skip: git excludes the untracked path"
+
+    write_template(custom, "t", FORCE_ADD_THE_IGNORED_DELTA)
+    code, out = create_from(cli, repo, start, "t", {"scope": ["secret.txt", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "secret.txt" and out["scope"] == ["other.py"], out
+    assert "['track']" in out["reason"] and "git add -f" in out["reason"], out["reason"]
+
+
+def test_a_plan_that_creates_its_own_ignore_rule_freezes_and_announces(cli, repo, base, custom):
+    """The other direction of the same premise: visibility can be decided by the plan's own work.
+
+    At freeze `secret.txt` is not excluded (the rule does not exist yet), so the audit cannot see that
+    `change` is about to hide it; refusing would refuse a plan that measurably runs to a clean
+    delivery (2026-11-10). It freezes instead and ANNOUNCES the doubt - the price is that the same
+    shape could write a rule that does NOT exclude the delta, and it would then fail at `todo_done`.
+    """
+    write_template(custom, "t", PLAN_CREATES_ITS_OWN_IGNORE_RULE)
+    code, out = create_from(cli, repo, base, "t", {"scope": [".gitignore", "secret.txt", "other.py"]})
+    assert code == 0, out
+    assert out["items"] == ["change", "judge", "deliver"], out
+    notes = declined_notes(out)
+    assert len(notes) == 1, out["paths"]
+    assert "['change']" in notes[0], notes[0]
+    assert "git exclude rules (.gitignore / .git/info/exclude)" in notes[0], notes[0]
+
+    def work(item_id: str) -> None:
+        if item_id == "change":
+            (repo / ".gitignore").write_text("secret.txt\n")
+            (repo / "secret.txt").write_text("s = 1\n")
+            commit_all(repo)          # stages .gitignore; secret.txt is ignored, so it stays untracked
+
+    presented, outcomes = follow_next(cli, repo, work)
+    assert presented == ["change", "judge", "deliver", None], presented
+    assert outcomes == {"change": "pass", "judge": "pass", "deliver": "pass"}, outcomes
+
+
+def test_a_named_path_without_a_revert_is_the_disclosed_escape(cli, repo, base, custom):
+    """The residual this narrowing keeps: a program that NAMES the path and reverts nothing.
+
+    `true app.py` names `app.py`, so the audit cannot tell it from `git restore app.py` and declines -
+    the plan freezes and dies at `judge`, exactly as the previous version died with no program at all.
+    It is pinned here as a MEASURED boundary, not hidden: the announcement says which program stopped
+    the refusal, and the run's own failure names the path and the scope.
+    """
+    write_template(custom, "t", NAMED_WITHOUT_A_REVERT)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 0, out
+    notes = declined_notes(out)
+    assert len(notes) == 1 and "['noop']" in notes[0], out["paths"]
+
+    def work(item_id: str) -> None:
+        if item_id == "change":
+            (repo / "app.py").write_text("x = 2\n")
+            commit_all(repo)
+
+    presented, outcomes = follow_next(cli, repo, work)
+    assert presented == ["change", "noop", "judge"], presented
+    assert outcomes == {"change": "pass", "noop": "pass", "judge": "fail"}, outcomes
+    judge = [i for i in cli.ok("status", "--attempt", "att-1")["items"] if i["id"] == "judge"][0]
+    assert "1 changed path(s) outside scope ['other.py']: app.py" in judge["results"][0]["detail"], judge["results"]
+
+
+def test_the_naming_test_compares_path_components_not_substrings():
+    """`_names_path` is the rule the whole window skip rests on: a path SUFFIX, compared by components.
+
+    By component, so a program that merely mentions a longer or a decorated name does not count:
+    `myapp.py` and `app.py.bak` are different paths from `app.py`, and a bare `.` names nothing.
+    """
+    assert _names_path(["git", "restore", "app.py"], "app.py") is True
+    assert _names_path(["git", "checkout", "--", "./app.py"], "app.py") is True
+    assert _names_path(["/bin/sh", "-c", "true app.py"], "app.py") is True
+    assert _names_path(["git", "restore", "sub/secret.txt"], "sub/secret.txt") is True
+    assert _names_path(["git", "restore", "secret.txt"], "sub/secret.txt") is False
+    assert _names_path(["cat", "myapp.py"], "app.py") is False
+    assert _names_path(["mv", "app.py.bak", "app.py"], "app.py") is True
+    assert _names_path(["git", "checkout", "--", "."], "app.py") is False
+    assert _names_path([], "app.py") is False
 
 
 # The shipped `investigate` template is the shape the plan-level half exists for: its `investigate`

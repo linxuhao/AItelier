@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,63 @@ def test_actual_entry_timeout_captures_partial_and_reaps_owned_child(tmp_path):
     assert "partial" in result["stdout"]
     with pytest.raises(ProcessLookupError):
         os.kill(_witness_pid(witnesses[0]),0)
+
+
+def test_actual_entry_timeout_reaps_the_owned_group_when_the_direct_child_dies(tmp_path):
+    # The witness above ends its child with `exec`, so the DIRECT CHILD is the
+    # owned process-group leader and `proc.kill()` alone reaps it: replacing
+    # both `os.killpg(proc.pid, SIGKILL)` call sites in
+    # core/repository_executor_entry.py with `pass` left it green
+    # (iss-f3f078df588a402f) -- it could not see a removed group kill. Here the
+    # direct child PUBLISHES, forks, and then kills itself with the SAME signal
+    # a group kill delivers (`kill -9 $$`), while the grandchild (`sleep 20 &`
+    # -- it inherits the shell's new session/group from start_new_session, and
+    # `sleep` never calls setsid, so its process group is the dead direct
+    # child's pid) stays alive holding BOTH output pipes open. `communicate`
+    # wants EOF on the pipes, so the 0.2 s budget expires on the SURVIVING
+    # writer, never on a slow child, and the returncode is -9 in both arms:
+    # the three contracts above are unchanged (timed_out true, returncode
+    # nonzero, "partial" already in the pipe) and the only thing left to
+    # observe is whether the survivor died. `proc.kill()` can only address the
+    # direct child's pid, which is a zombie by then, so a live survivor means
+    # the GROUP was never killed.
+    #
+    # Both pids travel as witness FILE NAMES, one open(2) each, for the reason
+    # recorded on `_witness_pid`: a name cannot be half-written, so an existing
+    # witness always carries a complete pid. The second witness carries the
+    # direct child's own pid, which makes "the pid polled below is a
+    # grandchild, not the direct child" an assertion instead of a comment.
+    root = shlex.quote(str(tmp_path))
+    script = (f"echo partial; sleep 20 & : > {root}/child.pid.$!; "
+              f": > {root}/shell.pid.$$; kill -9 $$")
+    result = entry.run({"repo":str(tmp_path),"timeout":0.2,"args":["/bin/sh","-c",script]})
+    assert result["timed_out"] and result["returncode"] != 0, result
+    survivors = sorted(tmp_path.glob("child.pid.*"))
+    direct = sorted(tmp_path.glob("shell.pid.*"))
+    # Child-side witness, same contract as above: both pids were published
+    # inside the budget, after `echo partial` reached the pipe.
+    assert len(survivors) == 1 and len(direct) == 1, (
+        "child never published both pids inside the 0.2 s budget (start-up "
+        f"outran the budget under load): survivors={[w.name for w in survivors]}: "
+        f"direct={[w.name for w in direct]}: {result!r}")
+    assert "partial" in result["stdout"], result
+    survivor, direct_pid = _witness_pid(survivors[0]), _witness_pid(direct[0])
+    assert survivor != direct_pid, (
+        f"the polled pid must be the GRANDCHILD's: survivor={survivor} "
+        f"direct child={direct_pid}")
+    try:
+        os.kill(survivor,0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    if alive:
+        # Never leave a survivor holding this tmp_path for the rest of the
+        # suite when the entry did not kill the group it owns.
+        os.kill(survivor,signal.SIGKILL)
+    assert alive is False, (
+        f"the surviving grandchild {survivor} (process group {direct_pid}) "
+        f"outlived the timeout: proc.kill() addresses the already-dead direct "
+        f"child, so only the group kill can reach it: {result!r}")
 
 
 @pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["docker"],1), KeyboardInterrupt()])

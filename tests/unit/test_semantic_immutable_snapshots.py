@@ -295,6 +295,74 @@ def test_immutable_owned_root_with_noncanonical_spelling_stays_valid(setup):
     assert json.loads(marker.read_text()) == settled
 
 
+def root_rows(node, path=()):
+    """Every dict that carries a root, anywhere in the marker, with its path."""
+    if type(node) is dict:
+        if "root" in node:
+            yield path, node
+        for key, value in node.items():
+            yield from root_rows(value, (*path, key))
+    elif type(node) is list:
+        for index, value in enumerate(node):
+            yield from root_rows(value, (*path, index))
+
+
+@pytest.mark.parametrize("outcome", ["immutable", "writable"])
+def test_noncanonical_owned_root_names_one_spelling_in_every_root_row(setup, outcome):
+    # Nested-row defect: prior carries its own first_failure under the trailing-slash
+    # spelling. Every root-carrying row the worker writes (top level, first_failure,
+    # settlement.failure and its nested first_failure) must name the spelling this
+    # pass records. Only failure_history keeps the old spelling, and its rows must
+    # still be present, identified by their own root. A later validator that walks
+    # nested rows would otherwise reject a marker this worker writes today.
+    from core import semantic_index_control as module
+    projects, runs, control, root = setup
+    old = str(root) + "/"
+    nested = {"root": old, "status": "error", "updated_at": 0.5,
+              "error": "first observed permission failure; raw evidence retained"}
+    prior = {"root": old, "status": "error", "updated_at": 1.0,
+             "error": "the last attempt found the root read-only", "first_failure": nested}
+    own = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+    marker = control / "project-owner.json"
+    marker.write_text(json.dumps(prior))
+    module.validate_project_owner(prior)
+    if outcome == "immutable":
+        root.chmod(0o555)
+        first = worker(projects, runs, control)
+        expected_status = "excluded"
+    else:
+        first = worker(projects, runs, control)
+        expected_status = "idle"
+    assert first.returncode == 0, first.stderr
+    def assert_written_shape(owner):
+        module.validate_project_owner(owner)
+        assert owner["status"] == expected_status and owner["root"] == str(root)
+        paths = []
+        for path, row in root_rows(owner):
+            paths.append(path)
+            if "failure_history" in path:  # the only rows allowed to keep the old spelling
+                continue
+            assert row["root"] == str(root), (
+                f"{path or ('top level',)} keeps {row['root']!r}, not {str(root)!r}")
+        assert ("first_failure",) in paths
+        if outcome == "immutable":
+            assert ("settlement", "failure") in paths
+            assert ("settlement", "failure", "first_failure") in paths
+            assert owner["settlement"]["failure"]["first_failure"] == {**nested, "root": str(root)}
+        history = owner["failure_history"]
+        assert own in history and nested in history
+        assert {row["root"] for row in history} == {old}
+        assert owner["first_failure"] == {**nested, "root": str(root)}
+
+    owner = json.loads(marker.read_text())
+    assert_written_shape(owner)
+    second = worker(projects, runs, control)
+    assert second.returncode == 0, second.stderr
+    # Excluded is terminal; a writable second pass finds the checkout indexed and
+    # returns without writing. Either way the marker is unchanged.
+    assert json.loads(marker.read_text()) == owner
+
+
 def test_writable_owned_root_with_noncanonical_spelling_keeps_first_failure(setup):
     # Same spelling defect on the writable branch: the pass wrote "idle" but
     # dropped the prior failure row because record() found prior["root"] !=

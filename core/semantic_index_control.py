@@ -186,6 +186,19 @@ def _failure_error(directory: Path, exc: BaseException) -> str:
     return prefix + (cause or "no client output")[:max(0, 500-len(prefix)-len(locator))] + locator
 
 
+def _reroot_row(row: dict, root: str) -> dict:
+    """Copy a retained row under the spelling this pass writes.
+
+    Only root fields are rewritten (the row and any nested first_failure); every
+    other field is kept as recorded. failure_history rows never pass through here:
+    they keep the spelling they were recorded with, identified by their own root.
+    """
+    copy = {**row, "root": root}
+    if type(row.get("first_failure")) is dict:
+        copy["first_failure"] = _reroot_row(row["first_failure"], root)
+    return copy
+
+
 def index_project_once(directory: Path, projects: Path, worktrees: Path, **kwargs):
     """One-shot serial owner, with the same fences as the resident worker."""
     with service_lock(directory, "worker.lock"), deployment_admission(directory):
@@ -240,12 +253,19 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
         # is the same dependency, recorded once per spelling, not a second failure.
         if abandoned is None and prior["root"] != str(root):
             source = prior.get("first_failure")
-            if source is None and prior["status"] == "error" and prior["error"]:
-                source = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+            # The prior row keeps its own spelling as a failure_history row even when
+            # it already carries a first_failure; without that, the nested rows were
+            # the only evidence left and the prior row's own root was lost.
+            own = None
+            if prior["status"] == "error" and prior["error"]:
+                own = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
+            if source is None:
+                source = own
+            for row in (source, own):
+                if row is not None and row not in failures:
+                    failures = [*failures, row]
             if source is not None:
-                if source not in failures:
-                    failures = [*failures, source]
-                rerooted = {**source, "root": str(root)}
+                rerooted = _reroot_row(source, str(root))
         if abandoned is not None:
             settlement = None
         elif immutable_project(root):
@@ -261,8 +281,9 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
             if not immutable_project(project_root(root, projects, worktrees)):
                 raise ValueError("immutable project exclusion changed during measurement")
             # owner.error must equal settlement.failure.error, so this is the prior
-            # row itself under the written root, not its first_failure.
-            established = {**prior, "root": str(root)} if prior["root"] != str(root) else prior
+            # row itself under the written root, not its first_failure. Its nested
+            # first_failure is re-rooted too, so no root-carrying row keeps the old spelling.
+            established = _reroot_row(prior, str(root)) if prior["root"] != str(root) else prior
             settlement = {"reason": "immutable-root-without-index", "failure": established,
                           "daemon": status, "proof": {"uid": os.geteuid(),
                           "root_mode": root.stat().st_mode & 0o777,

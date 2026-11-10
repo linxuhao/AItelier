@@ -1398,6 +1398,156 @@ def test_missing_external_owner_row_fails_closed_against_active_attempt(tmp_path
                for row in observed["blockers"]["registered_external_owners"])
 
 
+def test_a_measurably_dead_external_owner_is_disclosed_not_authoritative(tmp_path, monkeypatch):
+    """A registered external owner is measured, never presumed still running.
+
+    ``attempt-4091fbb3c550458eb82f10794e6e0fb7`` (project
+    ``agent-depth-benchmark``) was admitted 2026-10-13T15:25:08Z, never settled,
+    never heartbeat again, and its process is long gone - yet it vetoed every
+    cross-project deployment forever, and only that other project's owner could
+    clear it, because an ``active`` row counted as an authoritative owner with
+    nothing measuring the owner. Runs get a lost/unknown/alive audit and render
+    owners get ``owner_lost``; this class got nothing.
+
+    The claim/lease window already answers this question (lease expiry plus its
+    grace, and nothing recorded on the attempt inside that window), so the same
+    measurement is applied here. Both arms are one test because they are the
+    same code path read twice: the stale owner must be DISCLOSED and
+    acknowledgeable (never silently quiescent, never dropped), while a live one
+    and a paused one must keep vetoing exactly as they do today.
+    """
+    from core.db_manager import DBManager
+    from core.state_attempts import StateAttempts
+    from core.state_claims import GRACE_SECONDS
+    from core.state_external import ExternalAttempts
+    from core.state_graph import StateGraphStore
+
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    db = DBManager(str(tmp_path / "state.sqlite3"))
+    store = StateGraphStore(db, project_read_trusted=True)
+    store.create_project("portfolio", "Portfolio")
+    store.add_nodes("portfolio", [
+        {"key": node_key, "goal": f"{node_key} is measured remotely",
+         "dependencies": [],
+         "acceptance": [{"id": "result", "kind": "test", "description": "result"}]}
+        for node_key in ("dead-gate", "live-gate", "paused-gate", "heartbeat-gate")])
+    # An owning driver is what records a lease. Without one the attempt is
+    # legacy_unleased: no window exists, so there is nothing to measure and the
+    # row keeps vetoing (that path is unchanged and is not what this test is for).
+    external = ExternalAttempts(StateAttempts(store), "director", driver_id="director")
+
+    def register(node_key, external_id):
+        return external.register("portfolio", node_key, 1, "remote-harness",
+                                 external_id, "request-" + external_id)
+
+    reference = datetime.now(UTC)
+    dead = register("dead-gate", "worker-dead")
+    # Every number below is the fixture's own: the lease ran out
+    # GRACE_SECONDS + 10 minutes before the observation, and the last thing
+    # recorded on the attempt was two hours before the lease even lapsed.
+    dead_lease = reference - timedelta(seconds=GRACE_SECONDS + 600)
+    dead_seen = dead_lease - timedelta(hours=2)
+    with db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET lease_expires_at=?,last_heartbeat_at=?,"
+                     "updated_at=? WHERE attempt_id=?",
+                     (dead_lease.isoformat(), dead_seen.isoformat(),
+                      dead_seen.isoformat(), dead["attempt_id"]))
+        conn.commit()
+
+    observed = dq.measure(skillflow=_quiet_sf(), db=db, external_probe=list)
+    assert observed["quiescent"] is False            # disclosed, not silently quiet
+    assert dq._validate_observation(observed) is None
+    rows = observed["blockers"]["registered_external_owners"]
+    assert [row["attempt_id"] for row in rows] == [dead["attempt_id"]]   # not dropped
+    dead_row = rows[0]
+    # The row keeps the registry's own fact and names the MEASUREMENT that
+    # decided it: when the attempt was last seen, and the window it exceeded.
+    assert dead_row["status"] == "active"
+    assert dead_row["liveness"] == "owner_lost"
+    assert dead_row["last_seen_at"] == dead_seen.isoformat()
+    assert dead_row["lease_expires_at"] == dead_lease.isoformat()
+    assert dead_row["liveness_grace_seconds"] == GRACE_SECONDS
+
+    # The ordinary acknowledgement path covers it - the same decision the
+    # operator makes for any other disclosed unknown owner, and the audit says
+    # which measurement it covered.
+    allowed = dq.authorize(
+        "restart", observed, journal=tmp_path / "journal.json", backend_only=True,
+        override=_deployment_override(observed["digest"], backend_only=True,
+                                      acknowledge_unknown=True))
+    assert allowed["allowed"] is True
+    assert allowed["event"]["audit"]["override_scope"] == "unknown_ownership"
+    covered = allowed["event"]["audit"]["affected_ownership"]
+    assert [row["attempt_id"] for row in covered] == [dead["attempt_id"]]
+    assert covered[0]["last_seen_at"] == dead_seen.isoformat()
+
+    # ...and only WITH the acknowledgement: a measured-dead owner is unknown,
+    # not absent, so the same decision without one is still refused.
+    with pytest.raises(dq.DeploymentBlocked, match="acknowledge unknown"):
+        dq.authorize("restart", observed, journal=tmp_path / "refused.json",
+                     backend_only=True,
+                     override=_deployment_override(observed["digest"], backend_only=True))
+
+    # --- live arm: inside the window it keeps vetoing exactly as today -------
+    live = register("live-gate", "worker-live")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET lease_expires_at=?,last_heartbeat_at=?,"
+                     "updated_at=? WHERE attempt_id=?",
+                     ((reference + timedelta(hours=2)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      live["attempt_id"]))
+        conn.commit()
+    # The heartbeat half of the window needs its own witness. This attempt's
+    # lease HAS lapsed (and past the grace), so the lease half says "reclaimable";
+    # what keeps the owner authoritative is that something was recorded on the
+    # attempt INSIDE the window. Without this row the live arm only exercises the
+    # lease half - an unexpired lease the heartbeat half can never discriminate -
+    # and deleting the heartbeat half of the window leaves the whole file green.
+    heartbeat = register("heartbeat-gate", "worker-heartbeat")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET lease_expires_at=?,last_heartbeat_at=?,"
+                     "updated_at=? WHERE attempt_id=?",
+                     ((reference - timedelta(seconds=GRACE_SECONDS + 600)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      heartbeat["attempt_id"]))
+        conn.commit()
+    paused = register("paused-gate", "worker-paused")
+    with db.get_connection() as conn:
+        # A paused owner is unsettled metadata, not proof of life, and the
+        # registry says so itself: disclosed under a scope, never reclassified.
+        conn.execute("UPDATE state_external_owners SET status='paused' WHERE attempt_id=?",
+                     (paused["attempt_id"],))
+        conn.execute("UPDATE state_attempts SET status='paused' WHERE attempt_id=?",
+                     (paused["attempt_id"],))
+        conn.commit()
+
+    observed = dq.measure(skillflow=_quiet_sf(), db=db, external_probe=list)
+    assert observed["quiescent"] is False
+    rows = {row["attempt_id"]: row
+            for row in observed["blockers"]["registered_external_owners"]}
+    assert "liveness" not in rows[live["attempt_id"]]
+    # A heartbeat inside the window is life, even though the lease itself lapsed:
+    # this row is what makes a window with only its lease half red.
+    assert "liveness" not in rows[heartbeat["attempt_id"]]
+    assert "liveness" not in rows[paused["attempt_id"]]
+    authoritative, disclosed = dq._classify_blockers(observed, backend_only=True)
+    assert {row["attempt_id"] for row in authoritative["registered_external_owners"]} \
+        == {live["attempt_id"], heartbeat["attempt_id"]}
+    assert [row["attempt_id"] for row in disclosed] == [dead["attempt_id"],
+                                                       paused["attempt_id"]]
+    # With the live owner present, the very decision that covered the stale one
+    # is refused - and the refusal names the live owner, not the dead one.
+    with pytest.raises(dq.DeploymentBlocked, match="cannot bypass authoritative") as refused:
+        dq.authorize("restart", observed, journal=tmp_path / "live.json",
+                     backend_only=True,
+                     override=_deployment_override(observed["digest"], backend_only=True,
+                                                   acknowledge_unknown=True))
+    assert live["attempt_id"] in str(refused.value)
+    assert dead["attempt_id"] not in str(refused.value)
+
+
 def test_generic_external_measurement_process_fails_closed_when_unregistered():
     def runner(command):
         if command[0] == "docker":

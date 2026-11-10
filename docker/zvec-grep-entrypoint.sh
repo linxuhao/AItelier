@@ -7,6 +7,28 @@ PROJECTS="${AITELIER_PROJECTS_DIR:-/home/linxuhao/.AItelier/projects}"
 WORKTREES="${AITELIER_WORKTREES_DIR:-/home/linxuhao/.AItelier/worktrees}"
 ZVEC_HOME="${ZVEC_GREP_HOME:-/home/linxuhao/.AItelier/zvec-grep-home}"
 EMBED="${ZVEC_GREP_EMBEDDING:-local/potion-code-16m-v2}"
+# This script and the worker module are delivered by the read-only source mount,
+# so a merge reaches the running sidecar by one recreate. The image still bakes
+# both as its own fallback for an image-only run; /app is the mounted checkout.
+SOURCE_ROOT="${AITELIER_SOURCE_ROOT:-/app}"
+WORKER_PY="$SOURCE_ROOT/core/semantic_index_control.py"
+
+# Resolve the worker BEFORE any side effect: no lock, no directory created, no
+# daemon started on behalf of a module that is not there. Exit 78 (EX_CONFIG)
+# names the missing path and nothing else, so the failure is one line.
+worker_unavailable() {
+  echo "[zg-lifecycle] worker module missing: $WORKER_PY (need a readable regular file)" >&2
+  exit 78
+}
+if [ ! -f "$WORKER_PY" ] || [ ! -r "$WORKER_PY" ]; then
+  worker_unavailable
+fi
+# Report the resolved path without doing anything: one caller-side use is to
+# prove what a recreate would load before spending the recreate.
+if [ "${1:-}" = "--path-only" ]; then
+  printf '%s\n' "$WORKER_PY"
+  exit 0
+fi
 
 CONTROL="${AITELIER_HOME:-/home/linxuhao/.AItelier}/semantic-index-control"
 mkdir -p "$CONTROL" || exit 1
@@ -39,7 +61,7 @@ until zg server status --check-ready >/dev/null 2>&1; do
   sleep 1
   tries=$((tries + 1))
 done
-python3 /usr/local/lib/semantic_index_control.py --control-dir "$CONTROL" \
+python3 "$WORKER_PY" --control-dir "$CONTROL" \
   --worktrees-root "$WORKTREES" --projects-root "$PROJECTS" &
 WORKER=$!
 while kill -0 "$SERVER" 2>/dev/null && kill -0 "$WORKER" 2>/dev/null; do

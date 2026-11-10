@@ -479,8 +479,10 @@ be traced to one child rather than read as an anonymous number; a caller that
 knows only a count still gets the same payload without the `live_children` key,
 so nothing that cannot name ids changes shape. The set is not trusted blindly: before
 refusing, the runtime asks its own agent registry (`ctx.agents.get`, `undefined` when
-no live agent has that id) and drops every id it no longer answers for, so a child
-whose `subagent/end` never arrived stops holding dormancy off once its Agent is gone.
+no live agent has that id) and drops every id it no longer answers for, so the
+departed id stops refusing as a live child; an unfinished todo plan still bound to
+that session then surfaces as `unfinished_plans`, unfinished work the director must
+finish, and dormancy stays refused while that plan is unsettled.
 Only an activation that owns a local Agent here can be pruned that way; a non-local
 activation, or a runtime whose registry is unavailable, keeps being named until the
 process starts again - the name is what makes such a lost end edge visible

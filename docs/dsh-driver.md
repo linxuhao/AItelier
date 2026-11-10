@@ -470,6 +470,18 @@ The idle review payload adds `todo_unfinished` - one entry per plan of those two
 kinds that also has no live child: `{attempt_id, node_key, next, remaining,
 ready_to_finish}` - or `todo_error` when the plans cannot be read.
 
+`idle_dormant` refuses while the director still has a live native child, and that
+refusal names them instead of only counting them:
+`{refused: "live_children", reason: "<n> native child(ren) still running",
+live_children: [<child session id>, ...]}` with the ids sorted. They are the set
+the runtime maintains from `subagent/start` and `subagent/end`, so a refusal can
+be traced to one child rather than read as an anonymous number; a caller that
+knows only a count still gets the same payload without the `live_children` key,
+so nothing that cannot name ids changes shape. One honest limit: an id whose
+`subagent/end` never arrived stays in that set until the runtime process starts
+again, and the refusal will keep naming it - the name is what makes that visible
+(`iss-dc85aa2c80f2454d`), it does not clear it.
+
 Compaction. The root's `aitelier-driver-state` snapshot (bootstrap and after each
 successful compaction) adds `todo: [{attempt_id, node_key, next, remaining_count,
 ready_to_finish, child_alive}]` for the plans the director still owns, with

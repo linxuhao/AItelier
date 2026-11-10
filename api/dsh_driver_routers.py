@@ -1,5 +1,8 @@
 """Managed DSH drivers: existing State reader/writer authentication applies."""
+import hashlib
+import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -8,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import authz
 from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
+from core import ai_router
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers
 from core.state_commands import ProjectPrivate, execute
@@ -298,9 +302,23 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         gateway.thinking_effort = body.reasoning_effort
         gateway.enable_thinking = body.reasoning_effort != "off"
         # A session's gateway lives as long as the session; without this a
-        # failover onto the paid fallback would stick until a restart.
-        gateway.return_to_earlier()
+        # failover onto the paid fallback would stick until a restart. But
+        # moving to another endpoint throws away the provider's prompt cache:
+        # the next call re-sends the whole context uncached (~130k tokens for
+        # a director, measured). So an earlier endpoint is retaken only when
+        # the cache is cold anyway - the conversation prefix changed (a
+        # compaction, which also skips the post-failover interval; only a
+        # parked endpoint is still refused) or the session sat idle for the
+        # probe interval. A failover on an error still moves at once.
+        prefix = hashlib.sha256(json.dumps(body.messages[:2], sort_keys=True, default=str)
+                                .encode()).hexdigest()
+        if prefix != getattr(gateway, "_dsh_prefix", None):
+            gateway.return_to_earlier(cold=True)
+        elif time.time() - getattr(gateway, "_dsh_last_call", 0.0) >= ai_router._RETURN_PROBE_EVERY_S:
+            gateway.return_to_earlier()
+        gateway._dsh_prefix = prefix
         turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)
+        gateway._dsh_last_call = time.time()
         # Persisted here, where the endpoint was chosen, and with the concrete
         # model that answered (`active_model` is the same value returned as
         # `served_by`): the child's own session file only keeps the route alias.

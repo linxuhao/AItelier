@@ -1274,7 +1274,7 @@ class AIGateway:
               f"({type(exc).__name__}{held})", flush=True)
         return True
 
-    def return_to_earlier(self) -> bool:
+    def return_to_earlier(self, cold: bool = False) -> bool:
         """Move a failed-over gateway back to an earlier candidate. True if moved.
 
         For gateways that outlive one step (a DSH session binds once and keeps
@@ -1283,10 +1283,12 @@ class AIGateway:
         candidate still fails, the normal failover walks forward again, which
         is why the failover history is cleared here. Never after a context
         failover: the earlier windows cannot hold this conversation.
+        ``cold=True`` (the caller's prompt cache is cold anyway, e.g. right
+        after a compaction) skips the interval - only parking still holds.
         """
         import time as _t
         if (self._candidate_ix == 0 or self._return_after is None
-                or self._context_failed_over or _t.time() < self._return_after):
+                or self._context_failed_over or (not cold and _t.time() < self._return_after)):
             return False
         self._return_after = _t.time() + _RETURN_PROBE_EVERY_S
         i = self._next_usable(0)

@@ -204,6 +204,13 @@ services:
     # makes a missing local image fail closed instead of pulling another one.
     image: sha256:4efa1423eb59b0544d8d45828bf93e61189cbbadbe4fdb3ba32d3a2f19837874
     pull_policy: never
+    # What runs is split, and the split is the point: the npm/zg layers come
+    # from the accepted pinned image, while the entrypoint and the worker module
+    # come from the read-only `.:/app:ro` mount. So ONE merge plus ONE `up -d`
+    # recreate changes the code the resident worker loads — no rebuild, no image
+    # or digest churn (the baked copies stay what an image-only run, started
+    # without the mount under the Dockerfile's own CMD, executes).
+    command: ["/bin/sh", "/app/docker/zvec-grep-entrypoint.sh"]
     container_name: aitelier-zg
     environment:
       AITELIER_HOME: "${HOME}/.AItelier"

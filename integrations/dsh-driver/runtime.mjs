@@ -429,6 +429,92 @@ export function pruneDepartedChildren(live, { isLocal = () => true, isLive = () 
   return departed;
 }
 
+/** The runtime's live native children: ONE set, and the ONE place that set is
+ *  reconciled against the agent registry.
+ *
+ *  `sessions` is the identity every reader holds - a native child's session id, the
+ *  same id `ctx.agents.get` answers for. `runs` keeps the runId -> session pairing
+ *  `subagent/start` hands over, so the phase report can name an identity the registry
+ *  answers for instead of a runId nothing can look up (iss-de1b4e7f644f4f0e). `local`
+ *  names the ids whose start event said `local: true`: only those own a local Agent in
+ *  this process, so only those can be proven gone. A non-local activation owns nothing
+ *  here to look up, so its absence proves nothing and it stays.
+ *
+ *  `isLive` is the liveness oracle and the only one. The runtime passes
+ *  `ctx.agents.get(id) !== undefined` - the call shape the idle_dormant path always
+ *  used, with a missing registry proving nothing - and a test passes a registry that
+ *  answers absent. `reconcile()` drops every entry that oracle proves departed from
+ *  all three structures, is idempotent, and NEVER adds an entry back.
+ *
+ *  Reading reconciles: every accessor below runs `reconcile()` first, so no reader can
+ *  see a departed child and a reader added later cannot forget the check
+ *  (iss-5f2c09b74cb040ee). A child that ended without its `subagent/end` edge - a host
+ *  restart, a killed worker - therefore stops refusing dormancy, stops keying the
+ *  continuation wait, stops making a plan look bound to a live session and stops
+ *  appearing in the phase report. A child the registry still answers for is untouched. */
+export class LiveChildren {
+  constructor({ isLive = () => true } = {}) {
+    this.isLive = isLive;
+    this.sessions = new Set();
+    this.runs = new Map();
+    this.local = new Set();
+  }
+  /** A child started: pair its runId with its session id, and remember whether it
+   *  owns a local Agent here (both come from the one `subagent/start` payload).
+   *  Pinned DSH publishes this edge only after a local child's agent is registered
+   *  (dsh-subagent observeActivation -> observer.start after its handle exists), so
+   *  the read that follows this call already finds it in the registry. */
+  start({ id, runId, local = false } = {}) {
+    this.sessions.add(id);
+    if (runId !== undefined) this.runs.set(runId, id);
+    if (local) this.local.add(id);
+    return this;
+  }
+  /** The normal end edge - the only way out the set used to have. */
+  end({ id, runId } = {}) {
+    this.sessions.delete(id);
+    if (runId !== undefined) this.runs.delete(runId);
+    this.local.delete(id);
+    return this;
+  }
+  /** Drop what the oracle proves departed; returns the dropped session ids. */
+  reconcile() {
+    const departed = pruneDepartedChildren(this.sessions, { isLocal: id => this.local.has(id), isLive: this.isLive });
+    for (const id of departed) this.local.delete(id);
+    // The runId pairing goes with the session: a runId whose child is gone is the
+    // same leak in a second identity.
+    for (const [runId, id] of this.runs) if (!this.sessions.has(id)) this.runs.delete(runId);
+    return departed;
+  }
+  /** Reconciled count: the number dormancy's reason states. */
+  size() { this.reconcile(); return this.sessions.size; }
+  /** Reconciled membership: is this session id still a live child, and so still the
+   *  session a plan stays bound to? */
+  has(id) { this.reconcile(); return this.sessions.has(id); }
+  /** Reconciled ids, sorted: what a reader may NAME (the phase report, the
+   *  continuation key, the dormancy reason). */
+  ids() { this.reconcile(); return [...this.sessions].sort(); }
+  /** Reconciled ids as the Set the plan views take. */
+  sessionSet() { return new Set(this.ids()); }
+}
+
+/** The phase report body: what this driver is doing. `subagents` names the live
+ *  native child SESSIONS - the identity the agent registry can answer for - never
+ *  runIds (iss-de1b4e7f644f4f0e). Its consumer counts the array (`running_subagents`
+ *  in core/dsh_driver.py), and a runId cannot be looked up anywhere. */
+export function phaseReport({ phase, children, error = '', event }) {
+  return { phase, subagents: children.ids(), error, ...(event ? { event } : {}) };
+}
+
+/** What will wake the director: its live children and watched jobs, as one key.
+ *  Reading `children` reconciles it, so a child that ended without its end edge
+ *  leaves the key instead of holding a NOTHING_LEFT answer for a session that is
+ *  gone (iss-5f2c09b74cb040ee). Synchronous by design: the oracle is a synchronous
+ *  registry lookup, and `Continuation.turnEnded()` is synchronous. */
+export function continuationWaitKey({ children, watched = [] }) {
+  return [...children.ids(), ...watched.map(pid => 'pid:' + pid)].join(',');
+}
+
 /** Below this measured context (tokens) entering dormancy does not compact: a cold re-read is cheap. */
 export const DORMANT_COMPACT_MIN_TOKENS = 32000;
 
@@ -910,19 +996,15 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   if (hostExecution) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
     text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
   const todo = new TodoCli({ python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, stateDir: env.AITELIER_DSH_STATE_DIR });
-  const liveChildren = new Set();
-  // Which live children own a local Agent here (their start event said `local: true`).
-  // Only those can be checked against the agent registry; a non-local activation owns
-  // nothing this process can look up, so its absence there proves nothing.
-  const localChildren = new Set();
-  // A child whose `subagent/end` never arrived - the process that owed it died - would
-  // hold dormancy off for the rest of this runtime's life. The registry answers "the
-  // agent, or undefined when no live agent has that id", so an id it no longer holds is
-  // departed and leaves the set; a registry that is not there proves nothing, so the
-  // id stays, as before.
+  // The live native children, and what it takes for the runtime to believe one is
+  // gone: the agent registry answers with the agent, or undefined when no live agent
+  // has that id. A missing registry proves nothing, so an id it cannot be asked about
+  // stays. Every reader goes through this object, which reconciles on read - see
+  // LiveChildren. `pruneChildren` keeps the ops log line for the ids a read dropped.
+  const children = new LiveChildren({ isLive: id =>
+    typeof ctx.agents?.get !== 'function' || ctx.agents.get(id) !== undefined });
   const pruneChildren = () => {
-    const departed = pruneDepartedChildren(liveChildren, { isLocal: id => localChildren.has(id),
-      isLive: id => typeof ctx.agents?.get !== 'function' || ctx.agents.get(id) !== undefined });
+    const departed = children.reconcile();
     if (departed.length) ctx.logger.info(`dropped departed child sessions ${departed.join(', ')}: no live agent holds them`);
     return departed;
   };
@@ -946,7 +1028,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       const result = await todo.call(args.attempt_id, begin, exec.signal);
       if (result.refused !== 'bound_to_other_session') return result;
       const bound = result.bound_session;
-      if (!bound || bound === env.AITELIER_DSH_SESSION || liveChildren.has(bound)) return result;
+      // A plan stays bound only to a session that is still a live child: `has` reads
+      // the reconciled set, so a child that ended without its end edge no longer makes
+      // a stranded plan look attended.
+      if (!bound || bound === env.AITELIER_DSH_SESSION || children.has(bound)) return result;
       return todo.call(args.attempt_id, [...begin, '--rebind'], exec.signal);
     },
   }));
@@ -973,10 +1058,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   };
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request,
-    todoPlans: async () => { const { plans, settled } = await planWork(); return todoSummary(plans, liveChildren, settled); } });
+    todoPlans: async () => { const { plans, settled } = await planWork();
+      return todoSummary(plans, children.sessionSet(), settled); } });
   await runtime.init();
   const schema = await request('/api/state/schema');
-  const subagents = new Set();
   const watchIntervalMs = Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) > 0 ? Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) : 15000;
   const floorEnv = Number(env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS);
   const compactFloor = env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS !== undefined && Number.isFinite(floorEnv) && floorEnv >= 0
@@ -985,9 +1070,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   let agent, agentCtx, idleReview, waiting = false, disposed = false;
   // watch_process: pid -> { note, since }. One poller while any watch exists.
   const watches = new Map();
-  // What the director is waiting on that will wake it: its live children and watched jobs.
-  const continuation = new Continuation({ waitKey: () => [...[...liveChildren].sort(),
-    ...[...watches.keys()].sort((a, b) => a - b).map(pid => 'pid:' + pid)].join(',') });
+  // What the director is waiting on that will wake it: its live children and watched
+  // jobs. `continuationWaitKey` reconciles the children, so a departed one leaves the
+  // key - a synchronous read of a synchronous oracle, no await needed or available here.
+  const continuation = new Continuation({ waitKey: () => continuationWaitKey({ children,
+    watched: [...watches.keys()].sort((a, b) => a - b) }) });
   let watchTimer;
   const pollWatches = () => {
     for (const [pid, watch] of watches) {
@@ -1002,7 +1089,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   let activity = Promise.resolve();
   const currentPhase = () => waiting ? completionError ? 'failed' : 'waiting' : 'running';
   const report = (phase, error = completionError || subscriptionError, event) => {
-    const body = { phase, subagents: [...subagents], error, ...(event ? { event } : {}) };
+    // One report per /activity request; `phaseReport` names the live child SESSIONS,
+    // reconciled against the registry, never the runIds the registry cannot answer for.
+    const body = phaseReport({ phase, children, error, event });
     activity = activity.catch(() => {}).then(() => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`,
       body));
     activity.catch(error => ctx.logger.warn(String(error)));
@@ -1151,7 +1240,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         catch (error) { return { refused: 'unverifiable', reason: 'could not read the plan: ' + String(error.message ?? error).slice(0, 500), brief: null }; }
         if (status.refused) return status;
         const refusal = rebindRefusal({ attempt_id: args.attempt_id, item_id: args.item_id, session_id: args.session_id,
-          bound_session: status.child_session, live: [...liveChildren], root_session: root });
+          // Reconciled: a child that ended without its end edge is provably dead, so
+          // its stranded plan may be taken over.
+          bound_session: status.child_session, live: children.ids(), root_session: root });
         if (refusal) return { ...refusal, brief: status.brief ?? null };
         // The CLI holds the plan lock and writes the file; --rebind is the one path
         // that may move child_session, and it records the session it replaced.
@@ -1178,9 +1269,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-        // Prune first: a departed child must not refuse dormancy at all.
+        // Reconcile first: a departed child must not refuse dormancy at all (and the
+        // readers below reconcile on their own, so an early return cannot skip it).
         pruneChildren();
-        const early = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren });
+        const live = children.ids();
+        const early = dormancyRefusal({ reason, liveChildren: live.length, childSessions: live });
         if (early) return early;
         let claims, work;
         try {
@@ -1192,11 +1285,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         } catch (error) {
           return { refused: 'unverifiable', reason: 'could not prove nothing is in flight: ' + String(error.message ?? error).slice(0, 500) };
         }
-        // The reads above take time: re-prune before reading the plans and refusing.
+        // The reads above take time: re-reconcile before reading the plans and refusing.
         pruneChildren();
-        const plans = unfinishedWithoutChild(work.plans, liveChildren, work.settled);
+        const liveAfter = children.ids();
+        const plans = unfinishedWithoutChild(work.plans, new Set(liveAfter), work.settled);
         const background = backgroundProcesses(env.AITELIER_DSH_SESSION).filter(pid => !watches.has(pid));
-        const refusal = dormancyRefusal({ reason, liveChildren: liveChildren.size, childSessions: liveChildren, claims, plans, background });
+        const refusal = dormancyRefusal({ reason, liveChildren: liveAfter.length, childSessions: liveAfter,
+          claims, plans, background });
         if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
         const dormant = idleReview.enterDormancy(reason);
@@ -1261,7 +1356,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       let todoView;
       try {
         const { plans, settled } = await planWork();
-        todoView = { todo_unfinished: unfinishedWithoutChild(plans, liveChildren, settled) };
+        todoView = { todo_unfinished: unfinishedWithoutChild(plans, children.sessionSet(), settled) };
       }
       catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier director review due:\n' + JSON.stringify({
@@ -1324,12 +1419,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   // Observe nested native children too: all activity belongs to this private
   // per-DAG process, so no cross-project worker can enter these counts.
   ctx.on('subagent/start', info => {
-    subagents.add(info.runId); liveChildren.add(info.id);
-    if (info.local) localChildren.add(info.id);
+    children.start(info);
     void report(currentPhase());
   });
   ctx.on('subagent/end', info => {
-    subagents.delete(info.runId); liveChildren.delete(info.id); localChildren.delete(info.id); void report(currentPhase());
+    children.end(info); void report(currentPhase());
     void handback(info.id).catch(error => ctx.logger.warn(String(error)));
   });
   // After a child's successful compaction, its next step gets one line of its

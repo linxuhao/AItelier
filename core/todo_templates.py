@@ -771,10 +771,13 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
            delta: `git checkout HEAD~1 -- . && echo o = 2 > other.py && git commit -qam undo`, against
            `files_changed ['app.py']` and `changes_within ['other.py']`, is a deliberate false refusal,
            and its price is that a freeze cannot read a program. Measured 2026-11-10: the freeze returns
-           rc 2 (`invalid_plan`), while the identical argv replayed by hand in a clean repository leaves
-           `changes_within`'s changed set at `['other.py']` (no tracked change; `other.py` is untracked, so
-           `git status --porcelain` still lists it) and HEAD != base, so the judging item would pass on
-           that tree. Relaxing this shape is a conscious change to the test that pins it.
+           rc 2 (`invalid_plan`), while the identical argv replayed by hand - starting from a clean
+           tree - leaves `changes_within`'s changed set at `['other.py']` and HEAD != base, so the judging
+           item's `changes_within` would pass on that tree. That replayed tree is NOT clean: the undo
+           commits only tracked files, so `git status --porcelain` prints `?? other.py` and the
+           `git_delivered` predicate would refuse it. The false refusal is thus real for the judging
+           item, and nothing here claims a delivery verdict. Relaxing this shape is a conscious change
+           to the test that pins it.
       What the narrowings cost is measured on the shipped templates: `code_change` refuses `paths`
       outside `scope` in the item that binds BOTH halves (`implement`), and no program or
       exclude-rule write names a declared path in that window, so that refusal is untouched;

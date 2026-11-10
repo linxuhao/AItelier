@@ -5,6 +5,7 @@ Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
 """
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Literal
 
 from pydantic import (BaseModel, ConfigDict, Field, ValidationError, field_serializer, field_validator,
@@ -1397,6 +1398,51 @@ def _director_schema(service):
     return getattr(getattr(service, "director_messages", None), "reply_schema", SCHEMA_ID)
 
 
+# Actions whose project_id is never filled in: project lifecycle and
+# project-level administration must name the project they act on.
+_NO_PROJECT_DEFAULT = frozenset({
+    "create_project", "open_project", "close_project", "refresh_project",
+    "retire_context_run_protection", "set_dispatch", "bind_source", "import_tasks"})
+
+
+def _sole_project(service, driver_id):
+    try:
+        with service.db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT m.project_id FROM project_drivers m JOIN drivers d ON d.driver_id = m.driver_id "
+                "WHERE m.driver_id=? AND m.status='member' AND d.status='active'", (driver_id,)).fetchall()
+    except sqlite3.Error:
+        return None
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def _driver_defaults(service, action, arguments):
+    """Fill the arguments a registered driver's credential already answers.
+
+    director_identity defaults to the driver id. A REQUIRED project_id (or a
+    notebook entry's scope, when no driver_id is named) defaults to the
+    driver's project when it is an active member of exactly one. An optional
+    project_id is left alone, because omitting it has its own meaning there.
+    Explicit values are kept and checked as before; this grants nothing.
+    """
+    driver_id = getattr(service, "driver_id", None)
+    if not driver_id or _anonymous(service):
+        return arguments
+    model = REQUESTS[action]
+    fields = model.model_fields
+    out = dict(arguments)
+    if "director_identity" in fields and out.get("director_identity") is None:
+        out["director_identity"] = driver_id
+    field = fields.get("project_id")
+    wanted = field is not None and action not in _NO_PROJECT_DEFAULT and (
+        field.is_required() or (issubclass(model, NotebookScopeRequest) and not out.get("driver_id")))
+    if wanted and out.get("project_id") is None:
+        sole = _sole_project(service, driver_id)
+        if sole is not None:
+            out["project_id"] = sole
+    return out
+
+
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
     if isinstance(action, str) and action in RETIRED_ACTIONS:
         raise StateGraphError(RETIRED_ACTIONS[action])
@@ -1456,6 +1502,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         state_privacy.refuse_private_read(not anonymous, action)
         _refuse_if_project_not_public(service, action, arguments)
 
+    arguments = _driver_defaults(service, action, arguments)
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:

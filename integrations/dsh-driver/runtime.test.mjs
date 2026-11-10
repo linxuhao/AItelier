@@ -390,6 +390,12 @@ test('driver guide: external Claude/Codex subagents are for review and hard item
     assert.ok(guide.includes(phrase), phrase);
   assert.ok(!guide.includes('so the reviewer is a different model family'), 'review no longer demands another model family');
 });
+test('driver guide: independent tool calls share a step, and state_graph_write fills project and identity', async () => {
+  const guide = (await readFile(new URL('./driver.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  for (const phrase of ['Every step re-sends your whole context', 'together in one step rather than one per step',
+    'state_graph_write fills director_identity, and project_id while you belong to exactly one project, when omitted'])
+    assert.ok(guide.includes(phrase), phrase);
+});
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
   t.mock.timers.enable({apis:['setTimeout']});
   const errors=[],agent={status:'idle'},goal={id:'g',phase:'active',activation:'disarmed'};

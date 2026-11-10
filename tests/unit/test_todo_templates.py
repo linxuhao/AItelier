@@ -1419,6 +1419,54 @@ def test_a_named_path_without_a_revert_is_the_disclosed_escape(cli, repo, base, 
     assert "1 changed path(s) outside scope ['other.py']: app.py" in judge["results"][0]["detail"], judge["results"]
 
 
+NAMELESS_UNDO = """\
+name: t
+version: 1
+description: an undo program that reverts the delta but names no declared path
+params:
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: change
+    title: "change app.py"
+    predicates:
+      - predicate: files_changed
+        args: {paths: ["app.py"]}
+  - id: undo
+    title: "revert everything to HEAD~1 and commit, naming no declared path"
+    needs: [change]
+    predicates:
+      - predicate: command_exit
+        args: {argv: ["/bin/sh", "-c", "git checkout HEAD~1 -- . && echo o = 2 > other.py && git commit -qam undo"], expect: 0}
+  - id: judge
+    title: "judge other.py against a scope of its own"
+    predicates:
+      - predicate: changes_within
+        args: {scope: ["other.py"]}
+"""
+
+
+def test_the_audit_refuses_a_naming_less_undo_even_though_it_can_run(cli, repo, base, custom):
+    """A program that really reverts the delta is refused when its argv names NO declared path.
+
+    `git checkout HEAD~1 -- . && echo o = 2 > other.py && git commit -qam undo` does revert app.py, and
+    replayed by hand it leaves `changes_within ['other.py']` passing. But no argv word equals `app.py`,
+    and a freeze cannot read a program, so the audit cannot tell this revert from one that leaves the
+    delta in place: it refuses, deliberately, and the price is a plan that would run. Measured
+    2026-11-10: the freeze returns rc 2 here, while the identical argv replayed in a fresh repository
+    leaves the changed set at ['other.py'] and HEAD != base. This name is the tripwire: relaxing the
+    shape (naming-less undo accepted) must be a conscious change to this test, not a silent one.
+    """
+    write_template(custom, "t", NAMELESS_UNDO)
+    code, out = create_from(cli, repo, base, "t", {"scope": ["app.py", "other.py"]})
+    assert code == 2 and out["refused"] == "invalid_plan", out
+    assert out["item"] == "judge" and out["declared_by"] == "change", out
+    assert out["path"] == "app.py" and out["scope"] == ["other.py"], out
+    assert "judge" in out["reason"] and "app.py" in out["reason"], out["reason"]
+    assert not list(cli.store.glob("*.json")), "a refused create leaves no plan behind"
+
+
 def test_the_naming_test_compares_path_components_not_substrings():
     """`_names_path` is the rule the whole window skip rests on: a path SUFFIX, compared by components.
 

@@ -767,6 +767,14 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
           git and a program in the window names it, because `git add -f` can make such a path
           visible to all three of `changes_within`'s sets and the plan does not say which program
           runs. That refusal says so rather than claiming no tree can satisfy the plan.
+           An undo program that names NO declared path is refused even when it genuinely reverts the
+           delta: `git checkout HEAD~1 -- . && echo o = 2 > other.py && git commit -qam undo`, against
+           `files_changed ['app.py']` and `changes_within ['other.py']`, is a deliberate false refusal,
+           and its price is that a freeze cannot read a program. Measured 2026-11-10: the freeze returns
+           rc 2 (`invalid_plan`), while the identical argv replayed by hand in a clean repository leaves
+           `changes_within`'s changed set at `['other.py']` (no tracked change; `other.py` is untracked, so
+           `git status --porcelain` still lists it) and HEAD != base, so the judging item would pass on
+           that tree. Relaxing this shape is a conscious change to the test that pins it.
       What the narrowings cost is measured on the shipped templates: `code_change` refuses `paths`
       outside `scope` in the item that binds BOTH halves (`implement`), and no program or
       exclude-rule write names a declared path in that window, so that refusal is untouched;

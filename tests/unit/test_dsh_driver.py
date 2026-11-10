@@ -318,6 +318,66 @@ async def test_host_completion_reuses_native_session_gateway_and_real_failover(r
         await runtime.close()
 
 
+async def test_a_failed_over_session_returns_only_when_the_prompt_cache_is_cold(runtime, tmp_path, monkeypatch):
+    """Moving endpoints mid-conversation re-sends the whole context uncached, so
+    the earlier endpoint is retaken only after a compaction (prefix changed) or
+    an idle probe interval - never while the session is busy on one prefix."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api import authz
+    from api.dsh_driver_routers import router, manager
+    import core.ai_router as ai
+    import litellm
+    import time as _time
+    providers = tmp_path / 'providers.json'
+    routes = tmp_path / 'routes.json'
+    providers.write_text(json.dumps({p: {'base_url': 'https://example.invalid/v1', 'api_key_env': 'FIXTURE'}
+                                    for p in ('opencodego', 'deepseek')}))
+    endpoints = ['opencodego/deepseek-v4.1-flash', 'deepseek/deepseek-flash']
+    routes.write_text(json.dumps({'driver': endpoints}))
+    monkeypatch.setattr(ai, '_read_secret', lambda _: 'fixture-key')
+    monkeypatch.setattr(ai, '_ENDPOINT_COOLDOWN', {})
+    gateway_class = ai.AIGateway
+    monkeypatch.setattr(ai, 'AIGateway', lambda model, **kw: gateway_class(model, config_path=str(providers), routes_path=str(routes), **kw))
+    state = {'fail_go': False, 'now': _time.time()}
+    monkeypatch.setattr(_time, 'time', lambda: state['now'])
+    def call(gateway, kwargs, **unused):
+        if gateway.provider == 'opencodego' and state['fail_go']:
+            raise litellm.AuthenticationError('fixture unavailable', llm_provider='openai', model=gateway.active_model)
+        return litellm.ModelResponse(choices=[{'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}],
+                                     usage={'prompt_tokens': 100, 'completion_tokens': 10, 'total_tokens': 110})
+    monkeypatch.setattr(gateway_class, '_call_llm', call)
+    try:
+        driver = await runtime.start('alpha', actor='fixture')
+        monkeypatch.setattr(authz, 'request_identity', lambda _: SimpleNamespace(driver_id=driver['driver_id']))
+        app = FastAPI(); app.include_router(router)
+        app.dependency_overrides[manager] = lambda: runtime
+        app.dependency_overrides[authz.require_writer] = lambda: None
+        def post(first):
+            payload = {'session_id': driver['session_id'],
+                       'messages': [{'role': 'user', 'content': first}, {'role': 'assistant', 'content': 'a'}]}
+            result = client.post('/api/dsh-drivers/alpha/completion', json=payload)
+            assert result.status_code == 200, result.text
+            return result.json()['served_by']
+        with TestClient(app) as client:
+            assert post('epoch-1') == endpoints[0]
+            state['fail_go'] = True
+            assert post('epoch-1') == endpoints[1]          # failover moves at once
+            state['fail_go'] = False
+            for _ in range(5):                             # busy on one prefix for 25 minutes
+                state['now'] += 300
+                assert post('epoch-1') == endpoints[1]
+            assert post('epoch-2 summary') == endpoints[0]  # a compaction: the cache is cold anyway
+            state['fail_go'] = True
+            assert post('epoch-2 summary') == endpoints[1]
+            state['fail_go'] = False
+            state['now'] += ai._RETURN_PROBE_EVERY_S        # idle for the probe interval: cold too
+            assert post('epoch-2 summary') == endpoints[0]
+        await runtime.stop('alpha')
+    finally:
+        await runtime.close()
+
+
 async def test_native_workers_rotate_once_per_session_and_fail_over_without_changing_director(runtime, tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

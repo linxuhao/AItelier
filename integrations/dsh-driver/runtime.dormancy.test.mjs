@@ -155,6 +155,15 @@ async function scenario(t, floor) {
     assert.deepEqual(plans.attempts, ['attempt-open']);
     const children = json(result('root-dormant-children'));
     assert.equal(children.refused, 'live_children', JSON.stringify(children));
+    // Naming, not only counting: the refusal must carry the id of the child that
+    // holds dormancy off. This scenario holds exactly one child open (DORMANCY_CHILD),
+    // and its session is the only non-root session the fixture provider is called for.
+    // Printed verbatim so the evidence file quotes the payload instead of restating it.
+    console.log('DORMANCY_CHILDREN_REFUSAL ' + JSON.stringify(children));
+    await until('the held child never ran', () => requests.some(r => r.session !== session));
+    const childSession = requests.find(r => r.session !== session).session;
+    assert.deepEqual(children.live_children, [childSession], JSON.stringify(children));
+    assert.equal(children.reason, '1 native child(ren) still running');
     assert.equal(claimQueries[0].driver_id, 'dsh-fixture');
     const entered = json(result('root-dormant'));
     assert.equal(entered.dormant, true);

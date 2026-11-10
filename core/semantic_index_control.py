@@ -70,9 +70,14 @@ def _abandoned_project_root(root: Path, projects: Path, worktrees: Path) -> bool
     longer held a .git checkout. project_root() raised before any marker write,
     so the resident worker re-raised on every tick and the marker stayed an
     authoritative measurement error no override could cover, vetoing every
-    deployment. Absence is disposable; a redirected or unowned path stays
+    deployment. Absence is disposable; a redirected or unowned ROOT stays
     unknown, because that is evidence of tampering rather than of a vanished
-    checkout.
+    checkout. The predicate judges that root path only: it rejects a relative
+    root, one whose parent is not the projects directory, a symlink or otherwise
+    resolved-away root, a redirected projects directory, a worktree path, and a
+    root that still holds a .git checkout. It does not inspect the index cache —
+    a .zvec-grep that redirects somewhere else inside a vanished directory is
+    accepted rather than rejected.
     """
     return (root.is_absolute() and root.parent == projects and not root.is_symlink()
             and root.resolve() == root and projects.resolve() == projects
@@ -217,6 +222,14 @@ def _index_project_once(directory: Path, projects: Path, worktrees: Path, *,
                 retained = {k: prior[k] for k in ("root", "status", "error", "updated_at")}
                 if retained not in failures:
                     failures = [*failures, retained]
+            # Path() normalises the prior root string, so record() will not carry
+            # first_failure under a root that no longer matches it verbatim (and
+            # validate_project_owner forbids one under a normalised root). Keep
+            # the retained evidence in failure_history, whose rows carry their
+            # own root, exactly as the renamed-root scan path below does.
+            if prior["root"] != str(root) and prior.get("first_failure"):
+                if prior["first_failure"] not in failures:
+                    failures = [*failures, prior["first_failure"]]
         if abandoned is not None:
             settlement = None
         elif immutable_project(root):

@@ -227,6 +227,42 @@ def test_vanished_checkout_marker_is_disposed_terminally(setup):
     assert [p.name for p in gone.iterdir()] == [".zvec-grep"]
 
 
+def test_vanished_checkout_with_noncanonical_root_keeps_first_failure(setup):
+    # Reviewer probe on b2848f78f5: the abandoned root is rebuilt with
+    # Path(prior["root"]), which normalises a trailing slash, so record() no
+    # longer sees prior["root"] == str(root) and dropped the retained
+    # first_failure row on the way to idle. No recorded evidence may vanish.
+    from core import semantic_index_control as module
+    projects, runs, control, _ = setup
+    gone = projects / "a-gone2"
+    gone.mkdir()
+    (gone / ".zvec-grep").mkdir()
+    error = "checkout ownership was unavailable when the operation failed"
+    first = {"root": str(gone) + "/", "status": "error", "error": error,
+             "updated_at": 0.25}
+    prior = {"root": str(gone) + "/", "status": "error",
+             "error": "the last attempt found the checkout gone", "updated_at": 1.0,
+             "first_failure": first}
+    marker = control / "project-owner.json"
+    marker.write_text(json.dumps(prior))
+    module.validate_project_owner(prior)
+    with pytest.raises(ValueError, match="not an owned project root"):
+        module.project_root(Path(prior["root"]), projects, runs)
+
+    def no_execute(*args, **kwargs):
+        raise AssertionError("a vanished checkout must not run an index command")
+
+    module._index_project_once(control, projects, runs, execute=no_execute)
+    settled = json.loads(marker.read_text())
+    module.validate_project_owner(settled)
+    assert settled["status"] == "idle" and settled["error"] == ""
+    assert settled["root"] == str(gone)
+    assert first in settled["failure_history"]
+    assert error in [row["error"] for row in settled["failure_history"]]
+    assert json.dumps(first) in marker.read_text()
+    assert [p.name for p in gone.iterdir()] == [".zvec-grep"]
+
+
 @pytest.mark.parametrize("patch", [{"status": "excluded"}, {"status": "excluded", "settlement": {}},
                                     {"status": "idle", "updated_at": float("nan")}])
 def test_forged_or_corrupt_terminal_marker_blocks_guard(setup, patch):

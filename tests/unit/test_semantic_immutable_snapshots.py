@@ -263,6 +263,86 @@ def test_vanished_checkout_with_noncanonical_root_keeps_first_failure(setup):
     assert [p.name for p in gone.iterdir()] == [".zvec-grep"]
 
 
+def test_immutable_owned_root_with_noncanonical_spelling_stays_valid(setup):
+    # Measured 2026-11-10 on 6a5d0988d730: an owned immutable checkout whose
+    # marker recorded the root with a trailing slash settled "excluded" with
+    # settlement.failure still naming the old spelling and no first_failure, so
+    # validate_project_owner refused the marker ("excluded project owner
+    # settlement is malformed") and the next worker pass exited 1 with the same
+    # error -- a marker the worker itself could never repair. The prior row keeps
+    # its own spelling in failure_history; the evidence written beside the
+    # normalised root names the written root.
+    from core import semantic_index_control as module
+    projects, runs, control, root = setup
+    prior = failed(control, str(root) + "/")
+    root.chmod(0o555)
+    first = worker(projects, runs, control)
+    assert first.returncode == 0, first.stderr
+    marker = control / "project-owner.json"
+    settled = json.loads(marker.read_text())
+    module.validate_project_owner(settled)
+    assert dq._semantic_worker_errors(control) == []
+    assert settled["status"] == "excluded" and settled["root"] == str(root)
+    assert prior["root"] == str(root) + "/"
+    assert prior in settled["failure_history"]
+    assert json.dumps(prior) in marker.read_text()
+    assert settled["first_failure"] == settled["settlement"]["failure"]
+    assert settled["first_failure"]["root"] == str(root)
+    assert settled["settlement"]["failure"]["root"] == str(root)
+    assert settled["first_failure"]["error"] == prior["error"] == settled["error"]
+    second = worker(projects, runs, control)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(marker.read_text()) == settled
+
+
+def test_writable_owned_root_with_noncanonical_spelling_keeps_first_failure(setup):
+    # Same spelling defect on the writable branch: the pass wrote "idle" but
+    # dropped the prior failure row because record() found prior["root"] !=
+    # str(root), leaving first_failure and failure_history both empty.
+    from core import semantic_index_control as module
+    projects, runs, control, root = setup
+    prior = failed(control, str(root) + "/")
+    calls = []
+
+    def provider(command, **kwargs):
+        calls.append(command)
+        if command[1] == "index":
+            (Path(command[2]) / ".zvec-grep").mkdir()
+
+    index_project_once(control, projects, runs, execute=provider)
+    owner = json.loads((control / "project-owner.json").read_text())
+    module.validate_project_owner(owner)
+    assert dq._semantic_worker_errors(control) == []
+    assert owner["status"] == "idle" and owner["root"] == str(root)
+    assert prior in owner["failure_history"]
+    assert owner["first_failure"]["root"] == str(root)
+    assert owner["first_failure"]["error"] == prior["error"]
+    assert [c[1] for c in calls] == ["index", "status"]
+
+
+def test_writable_owned_root_with_canonical_spelling_keeps_first_failure(setup):
+    # Control: the canonical spelling already took the working path, so the fix
+    # must leave it unchanged (first_failure is the prior row, no history).
+    from core import semantic_index_control as module
+    projects, runs, control, root = setup
+    prior = failed(control, root)
+    calls = []
+
+    def provider(command, **kwargs):
+        calls.append(command)
+        if command[1] == "index":
+            (Path(command[2]) / ".zvec-grep").mkdir()
+
+    index_project_once(control, projects, runs, execute=provider)
+    owner = json.loads((control / "project-owner.json").read_text())
+    module.validate_project_owner(owner)
+    assert dq._semantic_worker_errors(control) == []
+    assert owner["status"] == "idle" and owner["root"] == str(root)
+    assert owner["first_failure"] == prior
+    assert "failure_history" not in owner
+    assert [c[1] for c in calls] == ["index", "status"]
+
+
 @pytest.mark.parametrize("patch", [{"status": "excluded"}, {"status": "excluded", "settlement": {}},
                                     {"status": "idle", "updated_at": float("nan")}])
 def test_forged_or_corrupt_terminal_marker_blocks_guard(setup, patch):

@@ -1430,7 +1430,7 @@ def test_a_measurably_dead_external_owner_is_disclosed_not_authoritative(tmp_pat
         {"key": node_key, "goal": f"{node_key} is measured remotely",
          "dependencies": [],
          "acceptance": [{"id": "result", "kind": "test", "description": "result"}]}
-        for node_key in ("dead-gate", "live-gate", "paused-gate")])
+        for node_key in ("dead-gate", "live-gate", "paused-gate", "heartbeat-gate")])
     # An owning driver is what records a lease. Without one the attempt is
     # legacy_unleased: no window exists, so there is nothing to measure and the
     # row keeps vetoing (that path is unchanged and is not what this test is for).
@@ -1498,6 +1498,21 @@ def test_a_measurably_dead_external_owner_is_disclosed_not_authoritative(tmp_pat
                       (reference - timedelta(minutes=1)).isoformat(),
                       live["attempt_id"]))
         conn.commit()
+    # The heartbeat half of the window needs its own witness. This attempt's
+    # lease HAS lapsed (and past the grace), so the lease half says "reclaimable";
+    # what keeps the owner authoritative is that something was recorded on the
+    # attempt INSIDE the window. Without this row the live arm only exercises the
+    # lease half - an unexpired lease the heartbeat half can never discriminate -
+    # and deleting the heartbeat half of the window leaves the whole file green.
+    heartbeat = register("heartbeat-gate", "worker-heartbeat")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE state_attempts SET lease_expires_at=?,last_heartbeat_at=?,"
+                     "updated_at=? WHERE attempt_id=?",
+                     ((reference - timedelta(seconds=GRACE_SECONDS + 600)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      (reference - timedelta(minutes=1)).isoformat(),
+                      heartbeat["attempt_id"]))
+        conn.commit()
     paused = register("paused-gate", "worker-paused")
     with db.get_connection() as conn:
         # A paused owner is unsettled metadata, not proof of life, and the
@@ -1513,10 +1528,13 @@ def test_a_measurably_dead_external_owner_is_disclosed_not_authoritative(tmp_pat
     rows = {row["attempt_id"]: row
             for row in observed["blockers"]["registered_external_owners"]}
     assert "liveness" not in rows[live["attempt_id"]]
+    # A heartbeat inside the window is life, even though the lease itself lapsed:
+    # this row is what makes a window with only its lease half red.
+    assert "liveness" not in rows[heartbeat["attempt_id"]]
     assert "liveness" not in rows[paused["attempt_id"]]
     authoritative, disclosed = dq._classify_blockers(observed, backend_only=True)
-    assert [row["attempt_id"] for row in authoritative["registered_external_owners"]] \
-        == [live["attempt_id"]]
+    assert {row["attempt_id"] for row in authoritative["registered_external_owners"]} \
+        == {live["attempt_id"], heartbeat["attempt_id"]}
     assert [row["attempt_id"] for row in disclosed] == [dead["attempt_id"],
                                                        paused["attempt_id"]]
     # With the live owner present, the very decision that covered the stale one

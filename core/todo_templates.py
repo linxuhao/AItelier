@@ -23,12 +23,16 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   there, each refusal naming what to declare instead, and the ones that do not exist
   yet - legal, since creating a file is a change - are announced in the result the
   director reads. It ALSO judges every declared change against the `changes_within`
-  scope it is judged under - the item's own, and the scope of every item that NEEDS it,
-  which includes the appended `deliver` item (it needs every item, and binds the plan's
-  own `scope`) - with the run's own matcher (`core.todo_runtime._scope_regex`): a path no
+  scope it is judged under - the item's own, the scope of every item that NEEDS it
+  (which includes the appended `deliver` item: it needs every item, and binds the
+  plan's own `scope`), and the scope of every item the runtime PRESENTS AFTER it -
+  with the run's own matcher (`core.todo_runtime._scope_regex`): a path no
   scope glob matches is refused, because then no tree can satisfy both predicates -
   changing the file fails `changes_within`, leaving it alone fails `files_changed` -
-  and the plan would freeze an item that can never pass. The remaining containment
+  and the plan would freeze an item that can never pass. The presentation half exists
+  because `TodoRuntime.next_item` hands items out in PLAN order, so an item declared
+  later measures `changes_within` with every earlier item's change already in the tree.
+  The remaining containment
   refusal, a path outside the workspace
   (absolute, or holding a `..` component), is NOT this audit's on the production
   route: the plan's own binding validation (`TodoPlan._binding`, inside
@@ -49,7 +53,8 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import Any, Mapping
+import subprocess
+from typing import Any, Mapping, NamedTuple
 
 # `_relative` is reused, not restated: a declared path that escapes the workspace must be
 # refused by the SAME rule whichever site answers. On the production route the plan's own binding
@@ -462,6 +467,206 @@ def _judged_before(plan: TodoPlan, item_id: str) -> list[str]:
     return [i.id for i in plan.items if i.id in keep]
 
 
+#: Predicates that RUN a program. What such a step does to the tree is not in the plan, so whether it
+#: can touch a declared delta is decided by its ARGV and by nothing else.
+COMMAND_PREDICATES = ("command_exit",)
+
+#: Files whose CONTENT decides whether git excludes a path. An item that declares a change to one of
+#: them can change the answer `_invisible_to_changes_within` reads, and that content is not in the plan.
+EXCLUDE_RULE_FILES = (".gitignore", (".git", "info", "exclude"))
+
+#: What `_judge_the_pair` answers for one (declared delta, judging scope) pair the scope does not match.
+PAIR_REFUSE = "refuse"                  # provably unsatisfiable: refuse at freeze
+PAIR_SATISFIABLE = "satisfiable"        # the delta cannot make that scope fail: freeze, silently
+PAIR_DECLINED = "declined"              # the audit cannot tell: freeze, and ANNOUNCE the doubt
+
+
+class _PairVerdict(NamedTuple):
+    """One pair's answer, plus the items that made it what it is (empty when they did not matter)."""
+
+    action: str
+    programs: tuple[str, ...] = ()          # items in the window whose argv NAMES the declared path
+    exclude_writers: tuple[str, ...] = ()   # items in the window that change an exclude-rule file
+
+
+def _path_components(value: object) -> tuple[str, ...]:
+    """`value` as non-empty, separator-normalised path components: the unit `_names_path` compares."""
+    return tuple(part for part in str(value).replace("\\", "/").split("/") if part not in ("", "."))
+
+
+def _invisible_to_changes_within(workspace: Path, rel: str) -> bool:
+    """True when git itself excludes `rel` from the changed set `changes_within` measures.
+
+    `changes_within` (``core.todo_runtime.changes_within``) builds its set from `git diff
+    base..HEAD`, `git diff HEAD` and `git ls-files --others --exclude-standard`, so an ignored
+    UNTRACKED path is in none of the three and can never make that predicate fail. git answers the
+    exclusion question itself, which is the only answer worth having: tracked files are not subject
+    to exclude rules, so a force-added ignored path answers "not ignored" here and stays refused.
+    When git cannot answer (no repository, no git, a timeout) this returns False and the audit keeps
+    its refusal.
+
+    The answer is read AS THE WORKSPACE STANDS AT FREEZE TIME, and a program in the plan can change
+    it later: `git add -f` on the excluded path makes it visible to all three sets. That is why a
+    program whose argv NAMES the path turns this answer into a refusal instead of a skip
+    (`_judge_the_pair`) - measured 2026-11-10, see the BOUNDARY in `check_declared_paths`.
+    """
+    try:
+        done = subprocess.run(["git", "-C", str(workspace), "check-ignore", "-q", "--", rel],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _runs_a_command(item: Any) -> bool:
+    """Whether this item runs a program whose effect on the tree the plan does not declare."""
+    return any(binding.predicate in COMMAND_PREDICATES for binding in item.predicates)
+
+
+def _argv_of(item: Any) -> list[str]:
+    """Every argv word the item's program bindings carry, in binding order."""
+    words: list[str] = []
+    for binding in item.predicates:
+        if binding.predicate not in COMMAND_PREDICATES:
+            continue
+        raw = binding.args.get("argv")
+        for value in (raw if isinstance(raw, list) else [] if raw is None else [raw]):
+            words.append(str(value))
+    return words
+
+
+#: Characters that separate one shell word from the next INSIDE one argv element. A `command_exit`
+#: binding normally carries `["/bin/sh", "-c", "<program>"]`, so the program's own paths sit inside a
+#: single argv element; splitting it on shell metacharacters is what lets the audit read them at all.
+_SHELL_WORD_SEPARATORS = re.compile(r"[^A-Za-z0-9_./@+=:~^-]+")
+
+
+def _names_path(words: list[str], rel: str) -> bool:
+    """Whether one of these argv words NAMES `rel`, as a whole path SUFFIX compared by components.
+
+    Component-wise, not by substring: `git restore app.py` and `git checkout -- ./app.py` name
+    `app.py`; `myapp.py` and `app.py.bak` do not. One argv element may be a WHOLE program
+    (`/bin/sh -c "<program>"`), so each element is split into shell words first - that is the only
+    reason `["/bin/sh", "-c", "git restore app.py"]` names `app.py` at all. A bare `.` or `/` names no
+    declared path, so `git checkout -- .` restores everything and is NOT this audit's undo shape - a
+    boundary, not an oversight (see the BOUNDARY in `check_declared_paths`).
+    """
+    parts = _path_components(rel)
+    if not parts:
+        return False
+    for word in words:
+        for token in [str(word), *_SHELL_WORD_SEPARATORS.split(str(word))]:
+            token_parts = _path_components(token)
+            if len(token_parts) >= len(parts) and token_parts[-len(parts):] == parts:
+                return True
+    return False
+
+
+def _window_items(plan: TodoPlan, declared_by: str, judged_by: str) -> list[Any]:
+    """Items from `declared_by` through `judged_by` in PLAN order, both INCLUDED.
+
+    Both ends are included because what either end does to the tree happens before the scope
+    predicate is measured: the declaring item's work runs in the step that declares the delta, and
+    the judging item's own predicates are evaluated in its own step.
+    """
+    ids = [i.id for i in plan.items]
+    if declared_by not in ids or judged_by not in ids:
+        return []
+    start, stop = ids.index(declared_by), ids.index(judged_by)
+    if start > stop:
+        return []
+    return list(plan.items[start:stop + 1])
+
+
+def _programs_naming(plan: TodoPlan, declared_by: str, judged_by: str, rel: str) -> tuple[str, ...]:
+    """Ids of the items in that window that run a program whose argv NAMES `rel`."""
+    return tuple(item.id for item in _window_items(plan, declared_by, judged_by)
+                 if _names_path(_argv_of(item), rel))
+
+
+def _declares_exclude_rule(binding: Any) -> bool:
+    """Whether this binding requires a file that can carry git EXCLUDE RULES to change."""
+    arg = DELTA_PATHS.get(binding.predicate)
+    if arg is None or arg not in binding.args:
+        return False
+    raw = binding.args[arg]
+    for value in (raw if isinstance(raw, list) else [raw]):
+        parts = _path_components(value)
+        if not parts:
+            continue
+        if parts[-1] == EXCLUDE_RULE_FILES[0] or parts[-3:] == EXCLUDE_RULE_FILES[1]:
+            return True
+    return False
+
+
+def _exclude_rule_writers(plan: TodoPlan, declared_by: str, judged_by: str) -> tuple[str, ...]:
+    """Ids of the items in that window that declare a change to a file carrying exclude rules."""
+    return tuple(item.id for item in _window_items(plan, declared_by, judged_by)
+                 if any(_declares_exclude_rule(binding) for binding in item.predicates))
+
+
+def _judge_the_pair(plan: TodoPlan, workspace: Path, declared_by: str, judged_by: str,
+                    rel: str) -> _PairVerdict:
+    """Answer one (declared delta, judging scope) pair that no glob of the scope matches.
+
+    The refusals rest on two premises: the delta is still in the tree when the scope is measured, and
+    git can see it there. The refusal fires only when the plan can defeat neither, and each way it
+    can is a shape measured in `tests/unit/test_todo_templates.py` (2026-11-10):
+
+    * a program in the window NAMES the path (`_programs_naming`) - the undo shape a non-author
+      reviewer found refused, and its residual: the same naming with a program that reverts nothing;
+    * the path is excluded by git and no program names it - `changes_within` cannot see the delta at
+      all, so the scope cannot fail (silently satisfiable). If a program DOES name it, `git add -f`
+      can make it visible, so the refusal stands;
+    * an item in the window declares a change to a file that carries exclude rules
+      (`_exclude_rule_writers`): whether the delta is visible is then decided by content the plan does
+      not carry, so the plan freezes - the shape a plan that creates its own ignore rule takes.
+    """
+    invisible = _invisible_to_changes_within(workspace, rel)
+    naming = _programs_naming(plan, declared_by, judged_by, rel)
+    if invisible:
+        if naming:
+            return _PairVerdict(PAIR_REFUSE, programs=naming)
+        return _PairVerdict(PAIR_SATISFIABLE)
+    if naming:
+        return _PairVerdict(PAIR_DECLINED, programs=naming)
+    writers = _exclude_rule_writers(plan, declared_by, judged_by)
+    if writers:
+        return _PairVerdict(PAIR_DECLINED, exclude_writers=writers)
+    return _PairVerdict(PAIR_REFUSE)
+
+
+def _named_message(where: str, rel: str, scope_where: str, scope: Any, programs: tuple[str, ...]) -> str:
+    """The refusal for a delta on a path git EXCLUDES that a program in the window also NAMES."""
+    if not programs:
+        return ""
+    return (
+        f"{where} declares {rel!r}, which matches no glob in the {scope_where} it must also satisfy: the "
+        f"declared scope is {list(scope)}. Item(s) {list(programs)} in that window run a program whose argv "
+        f"NAMES {rel!r}, and git excludes {rel!r} from every changed set changes_within reads at freeze time: "
+        f"`git add -f` on it makes it visible to all three, which fails that scope, while a program that leaves "
+        f"it alone does not. The plan does not say which program runs, so the audit cannot promise this item "
+        f"can pass and refuses rather than freeze it. Declare {rel!r} inside the scope, or drop the program "
+        f"that names it")
+
+
+def _declined_note(where: str, rel: str, scope_where: str, scope: Any, verdict: _PairVerdict) -> str:
+    """The announcement for a pair the audit declines to judge, naming what made it undecidable."""
+    if verdict.programs:
+        because = (f"item(s) {list(verdict.programs)} in that window run a program whose argv NAMES {rel!r}, so "
+                   f"they can revert the delta and commit the revert - a program that reverts it and one that "
+                   f"leaves it look identical in the plan")
+    else:
+        because = (f"item(s) {list(verdict.exclude_writers)} in that window declare a change to a file that "
+                   f"carries git exclude rules (.gitignore / .git/info/exclude), so whether git can see {rel!r} "
+                   f"when the scope is measured depends on content the plan does not carry")
+    return (f"{where} declares {rel!r}, which matches no glob in the {scope_where} (declared scope "
+            f"{list(scope)}): NOT refused, because {because}. The audit cannot prove this pair "
+            f"unsatisfiable, so the plan freezes and the run answers at todo_done - if the delta is still "
+            f"visible there, item {scope_where.split(':')[0].replace('item ', '')} fails with the changed path "
+            f"named")
+
+
 def check_declared_paths(plan: TodoPlan) -> PathAudit:
     """Judge the plan's declared paths against the real workspace, before the plan file exists.
 
@@ -499,7 +704,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
 
     * The PAIR every declared delta is judged under: a path a predicate requires to CHANGE
       (`files_changed`, or `file_changed`) must match at least one glob of EVERY `changes_within`
-      scope that path is already in place for. There are two such scopes. The first is the
+      scope that path is already in place for. There are THREE such scopes. The first is the
       declaring item's own - the `code_change`/`docs_change` shape, where the item carries both
       predicates. The second is the scope of every item that transitively NEEDS the declaring item:
       `begin` refuses an item whose `needs` have not passed, so those items are judged only after
@@ -512,15 +717,63 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       matches. A declared path matching NONE of a scope it is judged under is therefore
       unsatisfiable both ways - change it and `changes_within` fails, leave it and `files_changed`
       fails - so it is refused at freeze time (`invalid_plan`), naming the path and that scope's
-      declared list. The relation is DEPENDENCY, never declaration order: an item that does not
-      need the declaring item may legitimately run before it and is not judged against it, so such
-      a plan still freezes. Only an item carrying BOTH halves itself is judged immediately, inside
-      its own turn, and by the same rule. The match is made by `core.todo_runtime._scope_regex` -
+      declared list. That sentence is exact for the delta the audit can still SEE, and the BOUNDARY
+      below says which deltas it cannot. The third is the scope of every item the runtime PRESENTS
+      AFTER the declaring one: `TodoRuntime.next_item` hands out the first item, in PLAN order,
+      whose needs have passed, and `needs` may only name items declared earlier, so the
+      presentation order IS the plan order
+      - an item declared later is measured with the earlier item's change already in the tree
+      whether or not it needs it. That is the scope this audit used to spare ("it does not need the
+      declaring item, so it may run first"), and the plan it spared was measurably dead: `change`
+      was presented first, and `judge` then failed with `1 changed path(s) outside scope
+      ['other.py']: app.py`. So the two cases are answered by two refusals, never one twice: an item
+      that NEEDS the declaring item gets the dependency sentence, and an item declared after it
+      WITHOUT needing it gets the presentation sentence. What stays unjudged - and must - is a
+      delta declared LATER than the scope that judges it: the scope item is presented first, while
+      the tree is still clean, so such a plan freezes and runs (a test drives it by following
+      `status.next`). Only an item carrying BOTH halves itself is judged immediately, inside its own
+      turn, and by the same rule. The match is made by `core.todo_runtime._scope_regex` -
       the function `changes_within` itself compiles its globs with at run time - imported rather
       than restated, so the freeze and the run cannot apply two different glob rules. Like the
       duplicate rule, this reads the plan and not the workspace, so it runs whether or not the
       workspace exists. This is a refusal, never an announcement: a path that does not exist yet is
       still legal when the scope can match it.
+      BOUNDARY: the presentation order holds for every item the run can present. An earlier item
+      skipped as UNMEASURABLE (an expired absence) is never presented, but an attempt with one
+      cannot finish at all (`TodoRun.finished` requires every item complete). That is NOT the whole
+      premise the three refusals above rest on: a declared delta can make a scope fail only if it is
+      still in the tree when the scope is measured AND git can see it there, and the refusal fires
+      only when the plan can defeat NEITHER. `_judge_the_pair` answers each pair with one of three
+      verdicts, and every shape below is measured (2026-11-09, 2026-11-10) and pinned by a test:
+        - `PAIR_SATISFIABLE`, silently: a path `changes_within` cannot observe - one git excludes
+          from all three of its changed sets (`_invisible_to_changes_within`) - cannot fail that
+          predicate however it changed. A path git DOES track answers "not excluded" even when a
+          pattern names it (tracked files are not subject to exclude rules), so for it the refusal
+          stands unless one of the two cases below holds;
+        - `PAIR_DECLINED`, announced with the frozen plan: item(s) in the window run a program whose
+          argv NAMES the declared path (`_programs_naming`), or declare a change to a file that
+          carries exclude rules (`_exclude_rule_writers`; `.gitignore`, `.git/info/exclude`). A
+          program that reverts the delta and commits the revert, and one that leaves it, look
+          identical in the plan; and whether an exclude rule hides the delta is decided by content
+          the plan does not carry. So the audit declines and the run answers at `todo_done` - a
+          `fail` carrying the predicate's own detail. What it trades away is written into the
+          announcement: `["/bin/sh", "-c", "true app.py"]` NAMES `app.py` and disables the refusal
+          for a plan that will then die, and a plan that writes its own `.gitignore` may write a
+          rule that does not exclude the delta. Naming a path is compared by COMPONENTS
+          (`git restore app.py` names it, `myapp.py` does not), and `git checkout -- .` names no
+          declared path, so that undo shape is still refused. This is the audit's residual escape,
+          measured rather than hidden: a freeze cannot read a program;
+        - `PAIR_REFUSE`, the three sentences above, otherwise - and also when the path is EXCLUDED by
+          git and a program in the window names it, because `git add -f` can make such a path
+          visible to all three of `changes_within`'s sets and the plan does not say which program
+          runs. That refusal says so rather than claiming no tree can satisfy the plan.
+      What the narrowings cost is measured on the shipped templates: `code_change` refuses `paths`
+      outside `scope` in the item that binds BOTH halves (`implement`), and no program or
+      exclude-rule write names a declared path in that window, so that refusal is untouched;
+      `investigate` declares its report path in an item and binds the judging scope in `deliver`,
+      with no program and no exclude-rule writer in the window, so its refusal is untouched too. A
+      template that hangs a program naming the declared path off the declaring or judging item gets
+      its verdict from the run.
 
     * The REPORT a binding names (`REPORT_ARG`; `command_exit`'s `report`, today the only one).
       It is judged by containment only, in two steps. First `_relative` - the plan's rule, and here
@@ -560,7 +813,8 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     says which checks that cost - and which ones it did not: the THREE refusals that read the plan
     rather than the workspace (a duplicate spelling in one list, a path outside the workspace
     via `todo_plan._relative`, and a declared path no glob of a `changes_within` scope it is judged
-    under matches - its own item's, or one that item needs) still run there and still refuse, so
+    under matches - its own item's, one that item needs, or one declared before it and presented
+    first) still run there and still refuse, so
     none is one of the checks a
     missing directory cost. The outside-workspace one is the backstop again: on the production route
     `TodoPlan.from_json` has already refused such a path before this audit is entered - workspace or
@@ -576,6 +830,9 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
     declared: list[str] = []
     existing: list[str] = []
     created: list[str] = []
+    # Pairs the audit declines to judge, announced with the frozen plan instead of refused: the plan's
+    # own program or its own exclude-rule write can defeat a premise, and a freeze cannot read either.
+    declined: list[str] = []
     # Every declared delta and every declared scope, kept per item and judged AFTER every item has
     # been read: a delta is constrained by the scopes it is judged under, and those are not all its
     # own item's (see the dependency pass below, which needs the whole plan in hand).
@@ -701,8 +958,15 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                 for where, rel, predicate in item_delta:
                     if any(pattern.match(rel) for pattern in patterns):
                         continue
+                    verdict = _judge_the_pair(plan, workspace, item.id, item.id, rel)
+                    if verdict.action == PAIR_SATISFIABLE:
+                        continue    # git never lists it and nothing here can make it visible
+                    if verdict.action == PAIR_DECLINED:
+                        declined.append(_declined_note(where, rel, scope_where, scope, verdict))
+                        continue
                     raise Refusal(
                         "invalid_plan",
+                        _named_message(where, rel, scope_where, scope, verdict.programs) or
                         f"{where} declares {rel!r}, which matches no glob in the {scope_where} it must also "
                         f"satisfy: the declared scope is {list(scope)}. The same item requires every declared path "
                         f"to differ from its state at the start of the step ({predicate}) AND every path changed "
@@ -713,25 +977,55 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         f"or add a scope glob that matches it",
                         item=item.id, predicate=predicate, path=rel, scope=list(scope))
     # The scope each item is judged under, against every declared delta that is ALREADY IN PLACE when
-    # it is judged. `begin` refuses an item whose `needs` have not passed, so an item's transitive
-    # `needs` is exactly the set of items that have already been judged - and whose declared changes
-    # are already in the tree - when it measures `changes_within` over the whole tree since the base.
+    # it is judged. Two things put a delta there, and each gets its own refusal so the message can say
+    # which: the item's transitive `needs` (`begin` refuses an item whose `needs` have not passed), and
+    # PLAN ORDER, which is the order the runtime presents items in.
+    #
     # The harness-appended `deliver` item needs EVERY item and binds the plan's own `scope`, so every
     # plan is judged under that scope here: a declared path it cannot match (an `investigate` report
     # path outside `scope`) is refused at freeze instead of freezing a `deliver` item that can never
-    # pass. An item that does NOT need the declaring item may legitimately run before it and is not
-    # judged against it, which is the boundary a test pins. Same matcher as the run, as above.
-    for item in plan.items:
-        for scope_where, scope in scopes.get(item.id) or ():
+    # pass.
+    #
+    # PRESENTATION ORDER is the second half, and it is not decoration: `TodoRuntime.next_item` hands
+    # out the first item, IN PLAN ORDER, whose needs have passed, and `needs` may only name items
+    # declared EARLIER (`TodoPlan._item`). Induction on the plan makes the presentation order exactly
+    # the plan order - the first item has nothing earlier to need, and every item's needs sit before
+    # it, so each is presented (and completed) in turn - which is what the retained probe shows
+    # (`change` is presented first even though `judge` does not need it). So an item declared later is
+    # measured with every earlier item's declared change already in the tree, and a scope that
+    # excludes one is unsatisfiable however the child behaves. Refusing it here needs the ORDER, not
+    # the declaration: the same two items in the other order (narrower scope first, measured while the
+    # tree is still clean) freeze and run, which is why this rule fires only on earlier declarations
+    # and never on a later one.
+    #
+    # An item that NEEDS the declaring item is answered by the dependency pass below, with its own
+    # sentence (`Item judge needs item change...`); the presentation pass skips exactly those owners
+    # so one contradiction is never reported twice. Everything else declared earlier is the
+    # presentation pass's.
+    for position, item in enumerate(plan.items):
+        item_scopes = scopes.get(item.id) or ()
+        if not item_scopes:
+            continue
+        judged = _judged_before(plan, item.id)      # itself + transitive needs, in plan order
+        # The owners the dependency pass does not answer: declared earlier, not needed.
+        presented_before = [i.id for i in plan.items[:position] if i.id not in judged]
+        for scope_where, scope in item_scopes:
             patterns = [_scope_regex(glob) for glob in scope]
-            for owner in _judged_before(plan, item.id):
+            for owner in judged:
                 if owner == item.id:
                     continue    # the item's own pair, refused inside its own turn above
                 for where, rel, predicate in deltas.get(owner) or ():
                     if any(pattern.match(rel) for pattern in patterns):
                         continue
+                    verdict = _judge_the_pair(plan, workspace, owner, item.id, rel)
+                    if verdict.action == PAIR_SATISFIABLE:
+                        continue    # invisible to changes_within: it cannot make this scope fail
+                    if verdict.action == PAIR_DECLINED:
+                        declined.append(_declined_note(where, rel, scope_where, scope, verdict))
+                        continue
                     raise Refusal(
                         "invalid_plan",
+                        _named_message(where, rel, scope_where, scope, verdict.programs) or
                         f"{where} declares {rel!r}, which matches no glob in the {scope_where} it must also "
                         f"satisfy: the declared scope is {list(scope)}. Item {item.id} needs item {owner}, so it is "
                         f"judged only after {owner} has passed - by which point {rel!r} is the change item {owner} "
@@ -742,7 +1036,36 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
                         f"written, so it is refused here rather than frozen into an attempt that can only hang. "
                         f"Declare {rel!r} inside the scope, or add a scope glob that matches it",
                         item=item.id, declared_by=owner, predicate=predicate, path=rel, scope=list(scope))
-    notes: list[str] = []
+            for owner in presented_before:
+                for where, rel, predicate in deltas.get(owner) or ():
+                    if any(pattern.match(rel) for pattern in patterns):
+                        continue
+                    verdict = _judge_the_pair(plan, workspace, owner, item.id, rel)
+                    if verdict.action == PAIR_SATISFIABLE:
+                        continue    # invisible to changes_within: it cannot make this scope fail
+                    if verdict.action == PAIR_DECLINED:
+                        # A program (or an exclude-rule write) in between can take the delta out of
+                        # view; the plan does not say it does not, so the audit cannot call this plan
+                        # unsatisfiable - it freezes and ANNOUNCES that (see the BOUNDARY).
+                        declined.append(_declined_note(where, rel, scope_where, scope, verdict))
+                        continue
+                    raise Refusal(
+                        "invalid_plan",
+                        _named_message(where, rel, scope_where, scope, verdict.programs) or
+                        f"{where} declares {rel!r}, which matches no glob in the {scope_where} it must also "
+                        f"satisfy: the declared scope is {list(scope)}. Item {item.id} does not need item {owner}, "
+                        f"but {owner} is declared EARLIER in the plan and the runtime presents a plan in that order "
+                        f"- `next_item` hands out the first item, in plan order, whose needs have passed - so "
+                        f"{owner} is completed, and {rel!r} is in the tree as the change it requires ({predicate}), "
+                        f"before {item.id} is ever presented. {item.id} then requires every path changed since the "
+                        f"base to fall inside its scope (changes_within), which no delivered tree satisfies: with "
+                        f"{rel!r} changed, changes_within fails on it; with it undone, item {owner}'s {predicate} "
+                        f"describes work that was never delivered. The plan is refused here rather than frozen into "
+                        f"one whose later item can never pass. Declare {rel!r} inside the scope, add a scope glob "
+                        f"that matches it, or declare {item.id} BEFORE {owner}, so {item.id} is measured while the "
+                        f"tree is still clean",
+                        item=item.id, declared_by=owner, predicate=predicate, path=rel, scope=list(scope))
+    notes: list[str] = list(declined)
     if not measured:
         notes.append(
             f"workspace {plan.workspace} is not a directory, so the {len(declared)} declared path(s) {list(declared)} "
@@ -750,8 +1073,9 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             f"and nothing was assumed about them (the refusals that read the PLAN still ran: a duplicate spelling of "
             f"one path in one list is still refused, and so is a path outside the workspace - neither needs a "
             f"directory to decide. So is a declared path that no glob of a changes_within scope it is judged "
-            f"under matches, whether that scope belongs to its own item or to an item that needs it (deliver "
-            f"included): that rule reads the plan too)")
+            f"under matches, whether that scope belongs to its own item, to an item that needs it (deliver "
+            f"included), or to an item declared after it - which the runtime presents after it, so it measures "
+            f"with the change already in the tree: that rule reads the plan too)")
     elif created:
         notes.append(
             f"declared path(s) {list(created)} do not exist in workspace {plan.workspace} yet: the item requires "

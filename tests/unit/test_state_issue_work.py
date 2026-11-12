@@ -102,6 +102,7 @@ def test_verifying_the_work_item_resolves_the_issue_as_fixed(svc, tmp_path):
     assert svc.store.get_node("p", key)["status"] == "VERIFIED"
     overview = execute(svc, "project_overview", {"project_id": "p"})
     assert overview["issue_work"] == [] and overview["issue_work_counts"] == {"VERIFIED": 1}
+    assert svc.store.get_graph("p")["issue_work"] == []
     assert overview["counts"] == {"OPEN": 1}
     events = [e["event_type"] for e in svc.store.events("p")]
     assert events[-2:] == ["node_verified", "issue_resolved"]

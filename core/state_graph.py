@@ -924,11 +924,13 @@ class StateGraphStore:
             return {"query": query, "total": len(results), "nodes": results[:limit]}
 
     def get_graph(self, project_id: str) -> dict:
-        """The DAG. Issue work items are not part of it and are listed apart."""
+        """The DAG. Live issue work items are not part of it and are listed apart;
+        closed ones (VERIFIED/SUPERSEDED) are read through get_node/get_issue."""
         with self.transaction() as conn:
             view = self._graph_view(conn, project_id)
         return {**view, "nodes": [n for n in view["nodes"] if not n.get("issue_id")],
-                "issue_work": [issue_work_entry(n) for n in view["nodes"] if n.get("issue_id")]}
+                "issue_work": [issue_work_entry(n) for n in view["nodes"]
+                               if n.get("issue_id") and n["status"] not in ("VERIFIED", "SUPERSEDED")]}
 
     def get_node(self, project_id: str, node_key: str) -> dict:
         key(node_key)

@@ -342,6 +342,13 @@ command printed none (`null` only when the plan does not exist).
 | `AITELIER_DSH_STATE_DIR` | `core/dsh_driver.py`: the driver's private state directory | plan store `<state dir>/todo/<attempt_id>.json` |
 | `AITELIER_TODO_TEMPLATES` | unset (tests only) | read by the CLI: overrides the template directory `todo_templates/` |
 | `AITELIER_DSH_IDLE_REVIEW_MS` | unset (tests only) | overrides the 15-minute idle review interval |
+| `AITELIER_DSH_MODEL_RETRY_SEC` | unset (host-service override) | seconds a completion call may spend retrying a connection-level failure; default 180, `0` disables the retry |
+
+A completion is retried, inside that budget, only when the request failed at
+the connection level (nothing answered) or was answered 502/503/504; the waits
+start at 500 ms and double to at most 8 s. Every other answer, and any abort,
+is returned at once. A retry is safe because the adapter buffers the whole
+response before yielding the first block, so nothing has been delivered yet.
 
 Templates. `todo_templates/<name>.yaml` declares `name`, `version`,
 `description`, `params` (each with `type` in `str`, `int`, `list[str]`,

@@ -158,16 +158,22 @@ class StateIssues:
 
     def _view(self, conn, row, *, full: bool) -> dict:
         links = self._links(conn, row["issue_id"])
-        statuses = {r["node_key"]: r["status"] for r in conn.execute(
-            "SELECT n.node_key,n.status FROM state_nodes n JOIN state_issue_nodes l "
-            "ON l.project_id=n.project_id AND l.node_key=n.node_key WHERE l.issue_id=?", (row["issue_id"],))}
+        linked = [dict(r) for r in conn.execute(
+            "SELECT n.node_key,n.status,n.issue_id FROM state_nodes n JOIN state_issue_nodes l "
+            "ON l.project_id=n.project_id AND l.node_key=n.node_key WHERE l.issue_id=?", (row["issue_id"],))]
+        statuses = {r["node_key"]: r["status"] for r in linked}
+        # The issue's own work item reaching CANDIDATE is the fix under review,
+        # not an acceptance the open report contradicts.
+        own_work = {r["node_key"] for r in linked if r["issue_id"] == row["issue_id"]}
         item = {
             "issue_id": row["issue_id"], "project_id": row["project_id"], "kind": row["kind"],
             "title": row["title"], "status": row["status"], "version": row["version"],
             "nodes": [{"node_key": k, "status": statuses.get(k)} for k in links],
             "contradicts_acceptance": sorted(
                 k for k in links if row["status"] == "open" and row["kind"] == "defect"
-                and statuses.get(k) in {"VERIFIED", "CANDIDATE"}),
+                and k not in own_work and statuses.get(k) in {"VERIFIED", "CANDIDATE"}),
+            "work_item": next((r["node_key"] for r in linked if r["issue_id"] == row["issue_id"]
+                               and r["status"] != "SUPERSEDED"), None),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
         }
         if full:
@@ -248,6 +254,66 @@ class StateIssues:
             self.store._event(conn, project_id, None, "issue_reported", {
                 "issue_id": issue_id, "kind": kind, "title": title, "node_keys": links})
             return {**self._view(conn, self._issue(conn, project_id, issue_id), full=True), "created": True}
+
+    @staticmethod
+    def _live_work_item(conn, project_id, issue_id):
+        return conn.execute("SELECT * FROM state_nodes WHERE project_id=? AND issue_id=? AND status!='SUPERSEDED'",
+                            (project_id, issue_id)).fetchone()
+
+    def start_work(self, project_id: str, issue_id: str, expected_version: int, acceptance: list[dict],
+                   director_identity: str, priority: int = 0) -> dict:
+        """Give an OPEN issue a work item so its fix can be dispatched without a DAG node.
+
+        The work item is a node outside the DAG (no dependencies, nothing may
+        depend on it, not on the frontier or in graph/overview counts) that runs
+        the ordinary path: claim_node, start_external_attempt, todo_plan,
+        report_external_attempt, record_evidence against ``acceptance``,
+        verify_node. Verifying it resolves the issue as ``fixed`` with that
+        receipt in the same transaction. The issue stays open until then; to
+        drop the fix, supersede the work item, after which a new one may start.
+        """
+        project_id = key(project_id, "project_id")
+        director_identity = text(director_identity, "director_identity", 320)
+        with self.store.transaction(write=True) as conn:
+            row = self._open_for_write(conn, project_id, issue_id, expected_version)
+            live = self._live_work_item(conn, project_id, row["issue_id"])
+            if live is not None:
+                raise StateConflict(f"issue {row['issue_id']} already has work item {live['node_key']} "
+                                    f"({live['status']}); continue it, or supersede it before starting another")
+            earlier = conn.execute("SELECT COUNT(*) FROM state_nodes WHERE project_id=? AND issue_id=?",
+                                   (project_id, row["issue_id"])).fetchone()[0]
+            node_key = f"issue.{row['issue_id']}" + (f".r{earlier + 1}" if earlier else "")
+            goal = (f"Fix issue {row['issue_id']} ({row['kind']}): {row['title']}\n\n"
+                    f"The report is issue://{project_id}/{row['issue_id']}; this work item is accepted "
+                    "against its own acceptance criteria and, once verified, resolves the issue as fixed.")
+            node_key = self.store._add_issue_work(conn, project_id, row["issue_id"], node_key, goal,
+                                                  acceptance, priority)
+            conn.execute("INSERT OR IGNORE INTO state_issue_nodes VALUES(?,?,?)",
+                         (row["issue_id"], project_id, node_key))
+            conn.execute("UPDATE state_issues SET version=version+1,updated_at=? WHERE issue_id=?",
+                         (now(), row["issue_id"]))
+            self.store._event(conn, project_id, node_key, "issue_work_started", {
+                "issue_id": row["issue_id"], "node_key": node_key, "director_identity": director_identity})
+            return {**self._view(conn, self._issue(conn, project_id, row["issue_id"]), full=True),
+                    "work_item": node_key, "revision": 1}
+
+    @staticmethod
+    def resolve_fixed_by_work_item(store, conn, node: dict, receipt: dict, actor: str) -> None:
+        """Called by verify_node inside its transaction: the verified work item's
+        receipt closes its issue as ``fixed`` (the same record shape a manual
+        ``fixed`` resolution writes). An issue that is no longer open is left alone."""
+        row = conn.execute("SELECT * FROM state_issues WHERE project_id=? AND issue_id=?",
+                           (node["project_id"], node["issue_id"])).fetchone()
+        if row is None or row["status"] != "open":
+            return
+        record = {"resolution": "fixed", "actor": actor, "director_identity": receipt["reviewer"],
+                  "reason": f"work item {node['node_key']} verified", "receipt_id": receipt["receipt_id"],
+                  "artifact_ref": receipt["artifact_ref"], "node_key": node["node_key"],
+                  "node_revision": receipt["node_revision"], "via": "issue_work_item"}
+        conn.execute("UPDATE state_issues SET status='fixed',version=version+1,resolution_json=?,updated_at=? "
+                     "WHERE issue_id=?", (canonical(record), now(), row["issue_id"]))
+        store._event(conn, node["project_id"], node["node_key"], "issue_resolved", {
+            "issue_id": row["issue_id"], **{k: v for k, v in record.items() if k != "actor"}})
 
     def _open_for_write(self, conn, project_id, issue_id, expected_version):
         self.store._project(conn, project_id)
@@ -345,6 +411,11 @@ class StateIssues:
             raise StateGraphError(f"{resolution} takes exactly: {', '.join(sorted(shape)) or 'reason only'}")
         with self.store.transaction(write=True) as conn:
             row = self._open_for_write(conn, project_id, issue_id, expected_version)
+            live = self._live_work_item(conn, project_id, row["issue_id"])
+            if live is not None:
+                raise StateConflict(f"issue {row['issue_id']} has work item {live['node_key']} ({live['status']}); "
+                                    "verifying it resolves the issue as fixed - supersede it first to resolve "
+                                    "the issue any other way")
             record = {"resolution": resolution, "reason": reason, "actor": self.actor,
                       "director_identity": director_identity}
             if node_key is not None:

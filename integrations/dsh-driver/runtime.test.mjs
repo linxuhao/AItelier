@@ -133,6 +133,16 @@ test('render carries the count map and omission statement when the payload has t
   assert.match(r.render(), /200 VERIFIED node\(s\) omitted from this snapshot; read them from live State/);
   assert.deepEqual(Object.keys(rendered).sort(), ['driver_id','node_counts','nodes','nodes_omitted','private_note','project_id','project_note']);
 }));
+test('render carries live issue work items beside the DAG nodes when the payload has them', async () => fixture(async directory => {
+  const work = [{ name: 'issue.iss-1', issue_id: 'iss-1', status: 'OPEN' }];
+  const current = { ...snapshot('OPEN'), issue_work: work };
+  const r = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
+    request: async path => path.endsWith('/me') ? { driver_id: 'driver-a' } : current });
+  await r.init();
+  const rendered = JSON.parse(r.render());
+  assert.deepEqual(rendered.issue_work, work);
+  assert.deepEqual(rendered.nodes, [{ name: 'n', status: 'OPEN' }]);
+}));
 test('wrong identity refuses bootstrap before private context is read', async () => fixture(async directory => {
   let reads = 0;
   const r = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,

@@ -168,6 +168,9 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
     verified = counts["VERIFIED"]
     return {"project_id": project_id, "driver_id": row["driver_id"], "event_seq": graph["event_seq"],
             "nodes": [{"name": n["node_key"], "status": n["status"]} for n in open_nodes],
+            # Live issue work items (closed ones are history in live State).
+            "issue_work": [{"name": w["node_key"], "issue_id": w["issue_id"], "status": w["status"]}
+                           for w in graph.get("issue_work", [])],
             "node_counts": counts,
             "nodes_omitted": {"VERIFIED": verified,
                               "statement": f"{verified} VERIFIED node(s) omitted from this snapshot; read them from live State (project_overview)."},

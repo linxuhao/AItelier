@@ -145,7 +145,13 @@
       // Keep the rows already merged - the thread's own page and any page read
       // since - and say they may be incomplete: a silently short list of open
       // questions is the failure this rail exists to prevent.
-      if (alive && asked === projectId) railIncomplete = true;
+      if (alive && asked === projectId) {
+        railIncomplete = true;
+        // One transient failure must not cost the reader an older question for
+        // the life of the pane: release the seed so the next successful poll
+        // walks again. The walk is bounded, so a retry costs one more walk.
+        railSeeded = false;
+      }
     }
   }
   // Older messages: the same keyset cursor, so each one arrives exactly once.
@@ -350,30 +356,39 @@
   </div>
   <!-- The questions rail: a SIBLING of the thread's scroll box, never inside it,
        so the thread scrolling never moves it, and with its own overflow-y.
-       It renders nothing when no question is open, so it takes no width or
-       height then. Info blocks never appear here; they stay in the thread.
-       Its rows are the WHOLE conversation (`railRows`), not this thread's page,
-       so a question 30 or more info messages have pushed off the page is still
-       listed. When the walk behind those rows stopped short, the rail says the
-       list may be missing older questions instead of looking complete. -->
-  {#if questions.length}
+       It renders nothing when no question is open AND the walk behind it read
+       the whole conversation, so it takes no width or height then. Info blocks
+       never appear here; they stay in the thread. Its rows are the WHOLE
+       conversation (`railRows`), not this thread's page, so a question 30 or
+       more info messages have pushed off the page is still listed.
+       When the walk stopped short - or failed, or the server claimed more
+       history while handing back no cursor - the rail says the list may be
+       missing older questions instead of looking complete. That warning is
+       rendered even when the shortened list holds NO question: hiding it
+       behind `questions.length` was round 2's hole, and a walk that failed
+       before finding anything is exactly when the reader needs to be told. -->
+  {#if questions.length || railIncomplete}
     <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsHeading')}>
-      <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
+      {#if questions.length}
+        <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
+      {/if}
       {#if railIncomplete}
         <p class="questions-note" data-questions-incomplete role="status">{st('driverQuestionsIncomplete')}</p>
       {/if}
-      <ul class="questions-list">
-        {#each questions as question (question.message_id + ':' + question.segment_id)}
-          <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
-            <span class="question-subject">{question.subject}</span>
-            <span class="question-text">{question.text}</span>
-            <button class="outline" type="button"
-              data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
-              aria-label="{st('driverQuestionsReply')}: {question.text}"
-              onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
-          </li>
-        {/each}
-      </ul>
+      {#if questions.length}
+        <ul class="questions-list">
+          {#each questions as question (question.message_id + ':' + question.segment_id)}
+            <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
+              <span class="question-subject">{question.subject}</span>
+              <span class="question-text">{question.text}</span>
+              <button class="outline" type="button"
+                data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
+                aria-label="{st('driverQuestionsReply')}: {question.text}"
+                onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </aside>
   {/if}
   <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>

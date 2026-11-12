@@ -3,7 +3,7 @@
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
     type DriverConversationEntry } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
-  import { openQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
+  import { railQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
   import { st } from '../lib/stateI18n.svelte';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string;
@@ -34,8 +34,8 @@
   // reads is merged into it, and behind the thread's first page the rest of the
   // conversation is read by `loadQuestions` below, bounded, on mount.
   //
-  // What is OPEN is still decided by exactly one thing, `openQuestions`, over
-  // these rows; this state is a row set, not a second rule.
+  // What is OPEN or ANSWERED is still decided by exactly one thing,
+  // `railQuestions`, over these rows; this state is a row set, not a second rule.
   let railRows = $state<DriverConversationEntry[]>([]);
   // The walk stopped before the beginning of the conversation (its page bound,
   // or a failed read), so an older question may be missing. The rail says so
@@ -51,7 +51,11 @@
   // been read yet. Seeded from the FIRST page that arrives, not from mount, so
   // a failed first read is still completed by the poll that recovers it.
   let railSeeded = false;
-  const questions = $derived(openQuestions(railRows));
+  // Every question of the conversation, answered ones included, in the rule's
+  // order: the open ones first, then the answered ones, most recent answer first.
+  const railList = $derived(railQuestions(railRows));
+  const questions = $derived(railList.filter((question) => question.answered === null));
+  const answeredQuestions = $derived(railList.filter((question) => question.answered !== null));
   let text = $state(''), sending = $state(false), sendError = $state('');
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
@@ -356,19 +360,22 @@
   </div>
   <!-- The questions rail: a SIBLING of the thread's scroll box, never inside it,
        so the thread scrolling never moves it, and with its own overflow-y.
-       It renders nothing when no question is open AND the walk behind it read
-       the whole conversation, so it takes no width or height then. Info blocks
-       never appear here; they stay in the thread. Its rows are the WHOLE
-       conversation (`railRows`), not this thread's page, so a question 30 or
-       more info messages have pushed off the page is still listed.
+       It renders nothing when the conversation has no question at all AND the
+       walk behind it read the whole conversation, so it takes no width or
+       height then. Info blocks never appear here; they stay in the thread. Its
+       rows are the WHOLE conversation (`railRows`), not this thread's page, so a
+       question 30 or more info messages have pushed off the page is still listed.
+       Two groups: the OPEN questions, each with its reply control, and the
+       ANSWERED ones (kept so the reader can look back), each marked with the
+       answer the user gave and no reply control - it is answered already.
        When the walk stopped short - or failed, or the server claimed more
        history while handing back no cursor - the rail says the list may be
        missing older questions instead of looking complete. That warning is
        rendered even when the shortened list holds NO question: hiding it
-       behind `questions.length` was round 2's hole, and a walk that failed
+       behind the question count was round 2's hole, and a walk that failed
        before finding anything is exactly when the reader needs to be told. -->
-  {#if questions.length || railIncomplete}
-    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsHeading')}>
+  {#if railList.length || railIncomplete}
+    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsRail')}>
       {#if questions.length}
         <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
       {/if}
@@ -385,6 +392,18 @@
                 data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
                 aria-label="{st('driverQuestionsReply')}: {question.text}"
                 onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if answeredQuestions.length}
+        <p class="questions-title" data-questions-answered>{st('driverQuestionsAnswered')} ({answeredQuestions.length})</p>
+        <ul class="questions-list questions-list-answered">
+          {#each answeredQuestions as question (question.message_id + ':' + question.segment_id)}
+            <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-answered-by={question.answered?.message_id}>
+              <span class="question-subject">{question.subject}</span>
+              <span class="question-text">{question.text}</span>
+              <span class="question-answered-note">{st('driverQuestionsAnswerPrefix')}</span><span class="question-answer-text">{question.answered?.text}</span>
             </li>
           {/each}
         </ul>
@@ -436,6 +455,13 @@
   .question-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .4rem;font-size:.8rem;line-height:1.35;}
   .question-subject{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
   .question-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;font-weight:600;}
+  /* An answered question: the same row, then the user's own answer under it.
+     The answer is bounded to two lines so a long reply cannot take the rail's
+     scroll height from the questions still open; the full answer is in the
+     thread. The note is muted, so it reads as a caption, not a question. */
+  .question-answered-note{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
+  .question-answer-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .question-item-answered{color:var(--pico-muted-color,#475569);}
   .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
   .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
     border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}

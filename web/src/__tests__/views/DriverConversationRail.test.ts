@@ -5,9 +5,10 @@ const api = vi.hoisted(() => ({ dshDriverConversation: vi.fn(), sendDriverConver
 vi.mock('../../lib/api', () => api);
 import DriverConversation from '../../views/DriverConversation.svelte';
 
-// The questions rail: a SIBLING of the thread's scroll box, listing only the
-// open questions, with its own reply control per question that binds the
-// composer to that one question and sends `answers` with the reply.
+// The questions rail: a SIBLING of the thread's scroll box, listing the open
+// questions (each with its own reply control, which binds the composer to that
+// one question and sends `answers` with the reply) and the answered ones in a
+// separate group, with no reply control.
 
 const driverMsg = (id: string, subject: string, created: string, extra: any = {}) =>
   ({message_id: id, thread_id: id, project_id: 'alpha', sender_kind: 'driver',
@@ -73,7 +74,7 @@ describe('the questions rail', () => {
     expect(view.container.querySelectorAll('[data-answer-message-id]')).toHaveLength(0);
   });
 
-  it('lists only open questions, each with its own reply control', async () => {
+  it('lists open questions with a reply control, and answered ones in the answered group without one', async () => {
     api.dshDriverConversation.mockResolvedValue(page([
       driverMsg('m1', 'Report', '2026-11-03T10:00:00+00:00', {segments: [
         {id: 'q1', kind: 'question', text: 'may I restart?'},
@@ -85,12 +86,16 @@ describe('the questions rail', () => {
     await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
     const rail = view.container.querySelector('[data-questions-rail]') as HTMLElement;
     expect(rail).not.toBeNull();
-    // q1 is answered, so only q2 is open; the info block is never on the rail.
-    const items = rail.querySelectorAll('[data-question-segment-id]');
-    expect([...items].map(i => i.getAttribute('data-question-segment-id'))).toEqual(['q2']);
+    // q2 is open and keeps its reply control; q1 is answered and stays on the
+    // rail in the answered group, with no reply control. The info block is never on the rail.
+    const open = rail.querySelectorAll('.questions-list:not(.questions-list-answered) [data-question-segment-id]');
+    expect([...open].map(i => i.getAttribute('data-question-segment-id'))).toEqual(['q2']);
+    const answered = rail.querySelectorAll('.questions-list-answered [data-question-segment-id]');
+    expect([...answered].map(i => i.getAttribute('data-question-segment-id'))).toEqual(['q1']);
     expect(rail.textContent).not.toContain('context');
     const button = rail.querySelector('[data-answer-message-id="m1"][data-answer-segment-id="q2"]');
     expect(button).not.toBeNull();
+    expect(rail.querySelector('[data-answer-message-id="m1"][data-answer-segment-id="q1"]')).toBeNull();
   });
 
   it('is a sibling of the thread scroll box, never inside it', async () => {
@@ -149,6 +154,89 @@ describe('the questions rail', () => {
     await waitFor(() => expect(api.sendDriverConversationMessage).toHaveBeenCalled());
     const [, , options] = api.sendDriverConversationMessage.mock.calls[0];
     expect('answers' in options).toBe(false);
+  });
+});
+
+// ── answered questions stay on the rail, marked as answered ─────────────────
+// The rail keeps every question so the reader can look back at what they
+// answered. An answered question is shown with the answer and has NO reply
+// control: the reply control exists only for an open question.
+describe('the rail keeps answered questions, marked as answered', () => {
+  it('a conversation whose only question is answered still renders the rail, with the answered group and no reply control', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      driverMsg('m1', 'Report', '2026-11-03T10:00:00+00:00', {segments: [
+        {id: 'q1', kind: 'question', text: 'may I restart?'}]}),
+      userMsg('u1', '2026-11-03T11:00:00+00:00', {body: 'yes, after the sweep',
+        answers: [{message_id: 'm1', segment_id: 'q1'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha', driverId: 'dsh-alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-questions-rail]')).not.toBeNull());
+    const rail = view.container.querySelector('[data-questions-rail]') as HTMLElement;
+
+    // The answered group is present, with its title and the one question.
+    const title = rail.querySelector('[data-questions-answered]');
+    expect(title).not.toBeNull();
+    expect(title?.textContent).toContain('Answered');
+    expect(title?.textContent).toContain('(1)');
+    const item = rail.querySelector('.questions-list-answered [data-question-segment-id="q1"]') as HTMLElement;
+    expect(item).not.toBeNull();
+    expect(item.classList.contains('question-item-answered')).toBe(true);
+    expect(item.getAttribute('data-question-message-id')).toBe('m1');
+    expect(item.getAttribute('data-question-answered-by')).toBe('u1');
+    // It names the question, and the answer the user gave.
+    expect(item.textContent).toContain('may I restart?');
+    expect(item.textContent).toContain('You answered: ');
+    expect(item.querySelector('.question-answer-text')?.textContent).toBe('yes, after the sweep');
+    // No reply control on an answered question, and no open-questions title.
+    expect(rail.querySelector('[data-answer-message-id]')).toBeNull();
+    expect(rail.querySelector('[data-answer-segment-id="q1"]')).toBeNull();
+    expect(rail.querySelectorAll('.questions-title')).toHaveLength(1);
+  });
+
+  it('an open question renders above the answered group with its reply control, and the answered one has none', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      driverMsg('m1', 'Report', '2026-11-03T10:00:00+00:00', {segments: [
+        {id: 'q1', kind: 'question', text: 'answered one?'}]}),
+      driverMsg('m2', 'Report 2', '2026-11-03T10:30:00+00:00', {segments: [
+        {id: 'q2', kind: 'question', text: 'still open?'}]}),
+      userMsg('u1', '2026-11-03T11:00:00+00:00', {body: 'yes',
+        answers: [{message_id: 'm1', segment_id: 'q1'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha', driverId: 'dsh-alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-questions-answered]')).not.toBeNull());
+    const rail = view.container.querySelector('[data-questions-rail]') as HTMLElement;
+
+    // The open title counts only the open question.
+    const openTitle = [...rail.querySelectorAll('.questions-title')].find(t => !t.hasAttribute('data-questions-answered'));
+    expect(openTitle?.textContent).toContain('(1)');
+
+    // The open question is above the answered group, and carries its reply control.
+    const openItem = rail.querySelector('[data-question-segment-id="q2"]') as HTMLElement;
+    const answeredTitle = rail.querySelector('[data-questions-answered]') as HTMLElement;
+    expect(openItem.compareDocumentPosition(answeredTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const reply = rail.querySelector('[data-answer-message-id="m2"][data-answer-segment-id="q2"]');
+    expect(reply).not.toBeNull();
+    expect(openItem.classList.contains('question-item-answered')).toBe(false);
+
+    // The answered one is in the answered group, with no reply control.
+    const answeredItem = rail.querySelector('.questions-list-answered [data-question-segment-id="q1"]') as HTMLElement;
+    expect(answeredItem).not.toBeNull();
+    expect(answeredItem.querySelector('[data-answer-message-id]')).toBeNull();
+    expect(answeredItem.getAttribute('data-question-answered-by')).toBe('u1');
+    expect(rail.querySelector('[data-answer-message-id="m1"]')).toBeNull();
+  });
+
+  it('a conversation with no question at all and a complete walk renders no rail', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      driverMsg('m1', 'Plain', '2026-11-03T10:00:00+00:00', {segments: [
+        {id: 'i1', kind: 'info', text: 'just context'}]}),
+      userMsg('u1', '2026-11-03T11:00:00+00:00', {body: 'thanks'}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha', driverId: 'dsh-alpha'});
+    await view.findByText('Plain');
+    expect(view.container.querySelector('[data-questions-rail]')).toBeNull();
+    expect(view.container.querySelector('[data-questions-answered]')).toBeNull();
+    expect(view.container.querySelectorAll('[data-answer-message-id]')).toHaveLength(0);
   });
 });
 

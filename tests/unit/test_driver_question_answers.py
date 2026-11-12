@@ -12,6 +12,8 @@ These tests pin:
   refusal (another project's message, a missing segment, an info segment, a
   repeated ref, too many refs, a malformed ref) writes NOTHING;
 * answering never modifies the answered message;
+* two separate replies may cite the same question (only a repeat INSIDE one
+  request is refused), and the question still closes exactly once;
 * a legacy row (written before ids and answers existed) reads back with no
   id and no `answers` key, and is not rewritten;
 * the conversation read carries each segment's id and each message's answers.
@@ -188,6 +190,35 @@ def test_several_questions_of_one_message_are_answered_by_separate_replies(world
     second = reply(world, request_key="r2", answers=[{"message_id": asked["message_id"], "segment_id": "q2"}])
     assert row_of(world, second["message_id"])["answers"] == [
         {"message_id": asked["message_id"], "segment_id": "q2"}]
+
+
+def test_two_separate_replies_may_cite_the_same_question_and_it_closes_once(world):
+    """Decided on purpose: a second citation of the same question is ACCEPTED.
+
+    Only the repeat INSIDE one request is refused (`invalid_answers: the same
+    question is cited twice`), because there one caller named the same block
+    twice. Two separate replies are two things the user said: "yes, restart" and
+    a later "I already restarted the second one" are both real messages, and
+    refusing the second would either lose it or push the user into writing an
+    uncited reply that claims nothing.
+
+    The question still closes ONCE, because it has no status of its own: it is
+    closed by the set of citations pointing at it, and its own row is never
+    touched - no `answered_at`, no cleared segments, no rewrite. Both replies
+    keep their own citation, so a reader shows one question and both answers.
+    """
+    asked = ask(world, segments=[{"id": "q1", "kind": "question", "text": "restart?"}])
+    before = row_of(world, asked["message_id"])
+    first = reply(world, request_key="yes", answers=[{"message_id": asked["message_id"], "segment_id": "q1"}])
+    second = reply(world, request_key="again", answers=[{"message_id": asked["message_id"], "segment_id": "q1"}])
+    cited = {"message_id": asked["message_id"], "segment_id": "q1"}
+    assert row_of(world, first["message_id"])["answers"] == [cited]
+    assert row_of(world, second["message_id"])["answers"] == [cited]
+    # Closed once: the answered message is byte-identical and carries no answer
+    # of its own - the linkage lives only on the two replies.
+    assert row_of(world, asked["message_id"]) == before
+    assert "answers" not in row_of(world, asked["message_id"])
+    assert count_rows(world["path"]) == 3
 
 
 # ── answers: every refusal writes nothing ───────────────────────────────────

@@ -1189,12 +1189,22 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         const { node_key, segments, ...rest } = args;
         // Tagged blocks: `info` or `question` only. A block of any other kind is
         // refused here, not dropped, so the driver learns its tag did not reach
-        // the user. The State command validates the same vocabulary; this check
-        // keeps the refusal local and names the offending block.
+        // the user. The State command validates the same vocabulary and the same
+        // two length bounds; checking them here too means a block that could
+        // never be stored costs a refused tool call instead of a failed request,
+        // and the refusal names the offending block.
         if (segments !== undefined) {
           if (!Array.isArray(segments) || segments.length > 20) return { refused: 'invalid_segments', reason: 'segments must be an array of at most 20 blocks' };
           const bad = segments.findIndex(s => !s || typeof s !== 'object' || !['info', 'question'].includes(s.kind) || typeof s.text !== 'string' || !s.text.length);
           if (bad !== -1) return { refused: 'invalid_segments', reason: `segments[${bad}].kind must be 'info' or 'question', with non-empty text` };
+          // The bounds are 2000 characters per block and 8000 in total, counted
+          // the way the server counts them: code points, not UTF-16 units, so an
+          // emoji costs one character here as it does there and this check can
+          // never refuse a block the State command would have accepted.
+          const size = text => Array.from(text).length;
+          const long = segments.findIndex(s => size(s.text) > 2000);
+          if (long !== -1) return { refused: 'invalid_segments', reason: `segments[${long}].text must be at most 2000 characters` };
+          if (segments.reduce((total, s) => total + size(s.text), 0) > 8000) return { refused: 'invalid_segments', reason: 'segments text must total at most 8000 characters' };
         }
         const body = { ...rest, project_id: project };
         if (node_key) body.refs = { node_key };

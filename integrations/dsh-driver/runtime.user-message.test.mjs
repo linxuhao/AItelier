@@ -204,3 +204,28 @@ test('native send_user_message refuses a segment whose kind is not info or quest
   assert.ok(result.turns.some(turn => turn.some(m => m.role === 'tool' && JSON.stringify(m).includes('invalid_segments'))),
     'the refusal did not reach the model\n' + JSON.stringify(result.turns.at(-1)).slice(0, 1500));
 });
+
+// The two length bounds are the server's (2000 characters per block, 8000 in
+// total) and the tool checks them locally too, so a block that could never be
+// stored is refused before the request instead of arriving as a failed one.
+test('native send_user_message refuses a block longer than 2000 characters, locally, and sends nothing', { timeout: 60000 }, async (t) => {
+  const result = await driveSendUserMessage(t, { request_key: 'too-long-block', subject: 'Restart', body: 'x',
+    segments: [{ kind: 'info', text: 'y'.repeat(2000) }, { kind: 'question', text: 'z'.repeat(2001) }] });
+  if (!result) return;
+  assert.equal(result.sent.length, 0, 'an over-long block reached the State command: ' + JSON.stringify(result.sent).slice(0, 500));
+  // The refusal is the tool's own result, and it names the block that is too long.
+  assert.ok(result.turns.some(turn => turn.some(m => m.role === 'tool'
+    && JSON.stringify(m).includes('invalid_segments') && JSON.stringify(m).includes('segments[1].text'))),
+  'the length refusal did not reach the model\n' + JSON.stringify(result.turns.at(-1)).slice(0, 1500));
+});
+
+test('native send_user_message refuses blocks totalling more than 8000 characters, locally, and sends nothing', { timeout: 60000 }, async (t) => {
+  // Five blocks of 1700 characters: every one is legal on its own, the total is not.
+  const segments = Array.from({ length: 5 }, (_, index) => ({ kind: 'info', text: String(index).repeat(1700) }));
+  const result = await driveSendUserMessage(t, { request_key: 'too-long-total', subject: 'Restart', body: 'x', segments });
+  if (!result) return;
+  assert.equal(result.sent.length, 0, 'an over-total message reached the State command: ' + JSON.stringify(result.sent).slice(0, 500));
+  assert.ok(result.turns.some(turn => turn.some(m => m.role === 'tool'
+    && JSON.stringify(m).includes('invalid_segments') && JSON.stringify(m).includes('8000'))),
+  'the total-length refusal did not reach the model\n' + JSON.stringify(result.turns.at(-1)).slice(0, 1500));
+});

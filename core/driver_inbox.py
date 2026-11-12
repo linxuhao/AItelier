@@ -107,8 +107,13 @@ class DriverInbox:
 
         Each block carries a stable id, so a reply can cite the exact question
         it answers. A caller-supplied id is kept; a block without one gets a
-        fresh 12-hex id. A duplicate id inside one message is refused, because a
-        citation would then name two blocks at once. Nothing is stored on refusal.
+        fresh 12-hex id, drawn from the same name space a caller may use. A
+        duplicate id inside one message is refused, because a citation would
+        then name two blocks at once - and a caller id equal to an id generated
+        for an earlier block of the same message is refused the same way
+        (`invalid_segments`), never resolved in the caller's favour. So a caller
+        id is either kept exactly as sent or the message is refused, and nothing
+        is stored on refusal.
 
         Returns `(sent, stored)`: `sent` is what the caller wrote (blocks without
         an id stay without one, so an idempotent replay compares equal) and
@@ -137,8 +142,11 @@ class DriverInbox:
             stored.append({"id": sid if sid is not None else uuid4().hex[:12], "kind": kind, "text": text})
         if total > 8000:
             raise StateGraphError("invalid_segments")
-        # Checked after ids are filled in, so a generated id can never collide
-        # with a caller id and a duplicate caller id is refused as well.
+        # Checked after ids are filled in, because that is when a duplicate can
+        # be seen at all: a duplicate caller id, or a caller id that collides
+        # with an id generated for an earlier block. Both are REFUSED as
+        # invalid_segments - there is deliberately no rule saying the caller's
+        # id wins, so nothing is ever silently renamed.
         for block in stored:
             if block["id"] in seen:
                 raise StateGraphError("invalid_segments")

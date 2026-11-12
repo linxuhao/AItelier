@@ -156,9 +156,9 @@ def test_a_git_step_that_outlives_its_budget_is_ended_says_so_and_is_not_remembe
     assert time.monotonic() - started < 120
     message = str(refusal.value)
     assert message.startswith("Git artifact normalization unavailable: TimeoutExpired")
-    # The caller is told which budget ended it, that nothing was kept, and what to do.
-    assert "5s" in message and "AITELIER_STATE_GIT_TIMEOUT_SEC" in message
-    assert "nothing was retained" in message and "resend the identical report" in message
+    # The caller is told which budget ended it, that this is no verdict, and what to do.
+    assert "after 5s" in message and "AITELIER_STATE_GIT_TIMEOUT_SEC" in message
+    assert "the candidate was not judged" in message and "retry the identical call" in message
 
     # The refusal is about that run, not the candidate: the next report is judged afresh.
     monkeypatch.setenv("SLOW_GIT_HANG", "0")

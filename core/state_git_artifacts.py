@@ -34,6 +34,8 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 
 from core import closed_git
@@ -42,6 +44,32 @@ from core.state_report_integrity import _read_regular_nofollow
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
+# Wall-clock guard for ONE Git subprocess over a candidate. It ends a Git that
+# hangs; it does not judge the candidate, so it sits far above any real run.
+# Measured 2026-11-12 (Git 2.47.3, a core to itself, a 116.8 MiB bundle carrying
+# 1.05 GB of blobs): the normalizing pack-objects needs 109 s of CPU, which at
+# the same cost per MiB is about 240 s for a bundle at MAX_BUNDLE_BYTES. The
+# former fixed 120 s refused that candidate whenever the host was 10% slower.
+GIT_TIMEOUT_SEC = 1800
+GIT_TIMEOUT_ENV = "AITELIER_STATE_GIT_TIMEOUT_SEC"
+
+
+def _git_timeout():
+    try:
+        seconds = float(os.environ.get(GIT_TIMEOUT_ENV, ""))
+    except ValueError:
+        return GIT_TIMEOUT_SEC
+    return seconds if seconds > 0 else GIT_TIMEOUT_SEC
+
+
+def _unavailable(what, exc):
+    """A Git step that could not run or outlived its budget says nothing about
+    the candidate; the refusal names the budget and what the caller does next."""
+    detail = type(exc).__name__
+    if isinstance(exc, subprocess.TimeoutExpired):
+        detail += (f" after {exc.timeout:g}s ({GIT_TIMEOUT_ENV}); the candidate was not judged, "
+                   "retry the identical call")
+    return StateConflict(f"Git artifact {what} unavailable: {detail}")
 
 
 def _env():
@@ -55,9 +83,9 @@ def _git(repo, *args):
     try:
         result = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "-C", str(repo), *args],
-            capture_output=True, text=True, timeout=120, env=_env())
+            capture_output=True, text=True, timeout=_git_timeout(), env=_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StateConflict(f"Git artifact validation unavailable: {type(exc).__name__}") from exc
+        raise _unavailable("validation", exc) from exc
     if result.returncode:
         raise StateConflict("Git artifact validation failed: " + result.stderr[-1000:].strip())
     return result.stdout.strip()
@@ -107,7 +135,7 @@ def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=F
                         raise closed_git.GitRefused("bundle destination config rewrites transport URLs")
                     closed_git.transport(destination, "fetch", "--no-tags", "--no-recurse-submodules",
                         "--no-auto-gc", "--", str(bundle), commit + ":" + ref,
-                        profile=("file", ("protocol.file.allow=always",)), timeout=120)
+                        profile=("file", ("protocol.file.allow=always",)), timeout=_git_timeout())
                     actual = closed_git.out(destination, "rev-parse", ref + "^{commit}")
                     actual_tree = closed_git.out(destination, "rev-parse", ref + "^{tree}")
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -132,9 +160,9 @@ def _normalized_bundle(repo, root, commit):
                  "--threads=1", "--window=10", "--depth=50", "--compression=6",
                  "--delta-base-offset", "-q"],
                 input=(commit + "\n").encode(), stdout=out, stderr=subprocess.PIPE,
-                timeout=120, env=_env())
+                timeout=_git_timeout(), env=_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StateConflict(f"Git artifact normalization unavailable: {type(exc).__name__}") from exc
+        raise _unavailable("normalization", exc) from exc
     if result.returncode:
         raise StateConflict("Git artifact normalization failed: "
                             + result.stderr[-1000:].decode(errors="replace").strip())
@@ -180,6 +208,10 @@ def custody_metadata(row):
     return artifact
 
 
+_IN_FLIGHT = {}  # (commit, producer bundle sha256) -> Future of the retained artifact
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
 def retain_candidate(report_bytes, commit):
     descriptor = json.loads(report_bytes).get("git_bundle")
     if (not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"}
@@ -194,6 +226,31 @@ def retain_candidate(report_bytes, commit):
     input_sha = hashlib.sha256(raw).hexdigest()
     if input_sha != descriptor["sha256"]:
         raise StateConflict(f"expected bundle {descriptor['sha256']}; actual {input_sha}")
+    # An identical report arriving while this one is being normalized waits for
+    # its result instead of starting another: a caller whose own timeout fired
+    # resends the same call, and one normalization costs minutes of CPU and
+    # several hundred MiB.
+    key = (commit, input_sha)
+    with _IN_FLIGHT_LOCK:
+        running = _IN_FLIGHT.get(key)
+        if running is None:
+            mine = _IN_FLIGHT[key] = Future()
+    if running is not None:
+        del raw
+        return running.result()
+    try:
+        artifact = _normalize_candidate(raw, input_sha, commit)
+        mine.set_result(artifact)
+        return artifact
+    except BaseException as exc:
+        mine.set_exception(exc)
+        raise
+    finally:
+        with _IN_FLIGHT_LOCK:
+            del _IN_FLIGHT[key]
+
+
+def _normalize_candidate(raw, input_sha, commit):
     with tempfile.TemporaryDirectory(prefix="state-git-candidate-") as directory:
         root = Path(directory)
         repo, _, tree = _import_bundle(root, raw, commit)

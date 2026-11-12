@@ -90,6 +90,25 @@ RUN python -c "from core.output_migration import require_output_engine; require_
 # Fail the build if a tool-calling litellm completion cannot run (2026-10-28 litellm 1.106.5 incident).
 RUN LITELLM_LOCAL_MODEL_COST_MAP=True python -c 'import litellm; r = litellm.completion(model="anthropic/claude-sonnet-5-5", messages=[{"role": "user", "content": "hi"}], tools=[{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {}}}}], mock_response="ok"); assert r.choices[0].message.content == "ok"'
 
+# COPY keeps the mode each file has in the BUILD CONTEXT, so a builder whose
+# umask is 077 bakes 0600 root:root into /app and the sha256 still matches.
+# Measured on the image built from bef46569db: 102 regular files under /app were
+# mode 600 (build-created bytecode, the two deployment config JSONs, and the SPA
+# bundle the frontend stage handed over) and 4 directories were not
+# other-traversable. The backend runs as uid 1000 and every disposable test
+# container runs with -u 1000:1000, so a non-root consumer cannot read part of
+# /app. The widen runs after EVERY step that writes into /app - pip's egg-info
+# and the bytecode these imports create land here too - so the last writer
+# decides the mode. Bytecode and the two config JSONs that .dockerignore does not
+# exclude stay OUT OF THE MATCH on purpose: a chmod afterwards would SET a mode,
+# while the contract is that the mode COPY left survives untouched.
+RUN find /app -type d -exec chmod a+rx {} + \
+ && find /app -type f \
+      ! -name '*.pyc' \
+      ! -name 'model_routes.json' \
+      ! -name 'llm_providers.json' \
+      -exec chmod a+r {} +
+
 # Identity for in-container git commits (workspace_manager commits set no inline
 # identity, and there is no global ~/.gitconfig in the image). Overridable.
 ENV GIT_AUTHOR_NAME="AItelier" \

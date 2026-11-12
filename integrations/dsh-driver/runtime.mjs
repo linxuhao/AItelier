@@ -1,6 +1,6 @@
 /** A resident State DAG driver composed over the pinned DSH base profile. */
 import { historyPage } from './history.mjs';
-import { installHostModel, rootReasoningEffort } from './model.mjs';
+import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
@@ -964,8 +964,12 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     }
     return response.json();
   });
+  // `?? ''` keeps this read on the runtime's OWN env mapping: an unset key must
+  // not fall through to the helper's process.env default (which resolves to the
+  // 180 s budget anyway).
   installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION,
-    rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT) });
+    rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT),
+    retry: { budgetMs: modelRetryBudgetMs(env.AITELIER_DSH_MODEL_RETRY_SEC ?? '') } });
   // Resolve the existing mounted secret file into DSH's private credential
   // store, never into the environment inherited by test/build subprocesses.
   const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';

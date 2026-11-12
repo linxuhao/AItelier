@@ -54,12 +54,96 @@ async function requestImageUrls(ctx, options, signal) {
 
 /** Reasoning efforts the completion bridge accepts. */
 export const REASONING_EFFORTS = ['off', 'low', 'high', 'max'];
+
+/** Retry budget for one completion call, in milliseconds, when nothing overrides it. */
+const MODEL_RETRY_DEFAULT_MS = 180000;
+const RETRY_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8000;
+/** Answered responses that mean "nothing ran here": the backend was replaced
+ *  mid-request, so the same completion can be asked for again. */
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+/** The wall-clock budget a completion call may spend retrying a connection-level
+ *  failure. `AITELIER_DSH_MODEL_RETRY_SEC` is seconds and may be fractional;
+ *  unset, non-numeric or negative falls back to the 180 s default, and `0`
+ *  disables the retry entirely (one request, exactly as before). */
+export function modelRetryBudgetMs(raw = process.env.AITELIER_DSH_MODEL_RETRY_SEC) {
+  if (raw === undefined || raw === null) return MODEL_RETRY_DEFAULT_MS;
+  const text = String(raw).trim();
+  if (text === '') return MODEL_RETRY_DEFAULT_MS;
+  const seconds = Number(text);
+  if (!Number.isFinite(seconds) || seconds < 0) return MODEL_RETRY_DEFAULT_MS;
+  return seconds * 1000;
+}
+
+/** The failure class worth retrying, or null when this error must surface at
+ *  once. A retry is only safe because the whole response is buffered before
+ *  anything is yielded: no block has been delivered, so a repeat can never
+ *  duplicate a tool call. Anything the backend actually ANSWERED with a verdict
+ *  (400/401/429/...), an abort, or an undecodable body is that verdict. */
+function retryableClass(error, signal) {
+  if (!error || signal?.aborted) return null;
+  if (error.name === 'AbortError') return null;
+  if (error instanceof SyntaxError || error.name === 'SyntaxError') return null;
+  if (typeof error.status === 'number') return RETRYABLE_STATUSES.has(error.status) ? `HTTP ${error.status}` : null;
+  if (error instanceof TypeError || error.name === 'TypeError') {
+    return `connection-level (${error.cause?.code ?? error.cause?.name ?? error.message})`;
+  }
+  return null;
+}
+
+function abortError(signal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error('This operation was aborted');
+  error.name = 'AbortError';
+  error.cause = reason;
+  return error;
+}
+
+/** Wait `ms`, or reject the moment the caller aborts - a retry must never hold
+ *  a cancelled turn open. */
+function sleepFor(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abortError(signal)); return; }
+    const aborted = () => { clearTimeout(timer); reject(abortError(signal)); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', aborted); resolve(); }, ms);
+    signal?.addEventListener('abort', aborted, { once: true });
+  });
+}
+
+/** One completion request, retried inside a single wall-clock budget. Backoff
+ *  starts at `delayMs` and doubles up to `maxDelayMs`; the pause is clipped to
+ *  whatever the budget has left, so no retry is ever started past the deadline
+ *  and the last one waits out the remaining budget rather than overrunning it. */
+async function completionWithRetry(request, path, body, signal, { budgetMs, delayMs, maxDelayMs, log }) {
+  const deadline = Date.now() + budgetMs;
+  let attempt = 0, wait = delayMs;
+  for (;;) {
+    attempt += 1;
+    try {
+      return await request(path, body, signal);
+    } catch (error) {
+      const failure = retryableClass(error, signal);
+      if (!failure) throw error;
+      const pause = Math.min(wait, maxDelayMs, deadline - Date.now());
+      if (pause <= 0) throw error;
+      log(`dsh completion attempt ${attempt} failed (${failure}); retrying in ${pause}ms with ${deadline - Date.now()}ms of the retry budget left`);
+      await sleepFor(pause, signal);
+      if (Date.now() >= deadline) throw error;
+      wait = Math.min(wait * 2, maxDelayMs);
+    }
+  }
+}
+
 /** The root director's default effort: the configured one when valid, else max. */
 export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? value : 'max';
 
 /** Root completions default to rootEffort (the director plans and judges); native
  *  children default to high. An explicit DSH reasoningEffort is passed through. */
-export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max' }) {
+export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', retry = {} }) {
+  const retryOptions = { budgetMs: retry.budgetMs ?? modelRetryBudgetMs(), delayMs: retry.delayMs ?? RETRY_DELAY_MS,
+    maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? (() => {}) };
   class HostAdapter extends LlmAdapter {
     async resolveModel(provider, model) {
       return { provider, id: model, name: model, context: { contextWindow: 1000000 }, defaultMaxTokens: 32768,
@@ -70,13 +154,16 @@ export function installHostModel(ctx, { LlmAdapter }, { request, project, sessio
     }
     async *stream(options) {
       const imageUrls = await requestImageUrls(ctx, options, options.signal);
-      const result = await request(`/api/dsh-drivers/${encodeURIComponent(project)}/completion`, {
+      // One signal for the whole call: a retry lives inside the same 30-minute
+      // bound as the attempt it replaces, not a fresh one.
+      const signal = options.signal ?? AbortSignal.timeout(1800000);
+      const result = await completionWithRetry(request, `/api/dsh-drivers/${encodeURIComponent(project)}/completion`, {
         session_id: options.sessionId ?? session,
         messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id)),
         tools: options.tools?.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
         max_tokens: options.maxTokens ?? 32768,
         reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : 'high'),
-      }, options.signal ?? AbortSignal.timeout(1800000));
+      }, signal, retryOptions);
       const blocks = [];
       if (result.reasoning_content) blocks.push({ type: 'reasoning', text: result.reasoning_content });
       if (result.text) blocks.push({ type: 'text', text: result.text });

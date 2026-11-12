@@ -346,32 +346,57 @@ describe('a poll marks read only what the reader is actually looking at', () => 
   });
 });
 
-// ── Tagged blocks, and the at-a-glance mark ─────────────────────────────────
-// The owner's requirement: see at a glance which message asks something. The
-// mark therefore lives in the message header (visible in the thread), and the
-// tagged blocks render with their kind. A `question` tag asks; it is not a
-// checkpoint and the UI must not dress it as one.
+// ── One message, one body: no in-message info/question split ────────────────
+// The owner's ruling: information and questions are separated, but NOT inside a
+// message. A message whose body is info and a question is shown once, as its
+// text, in the thread. The questions it asks live in the permanent questions
+// box, which later info messages cannot wash away. The at-a-glance `?` mark on
+// the asking message's header stays: it is a signpost, not a split.
 describe('tagged segments', () => {
-  it('marks only the message that asks something, and renders each block with its kind', async () => {
+  it('marks only the message that asks something, and renders each message body once with no tag blocks', async () => {
     api.dshDriverConversation.mockResolvedValue(page([
       entry('q1', 'driver', 'Deploy question', '2026-11-03T12:00:00+00:00',
-        {segments: [{kind: 'question', text: 'may I restart the host now?'}]}),
+        {body: 'Heads up.\nmay I restart the host now?',
+          segments: [{id: 's1', kind: 'info', text: 'Heads up.'},
+            {id: 's2', kind: 'question', text: 'may I restart the host now?'}]}),
       entry('i1', 'driver', 'Just an update', '2026-11-03T11:00:00+00:00',
-        {segments: [{kind: 'info', text: 'nothing is in flight'}]}),
+        {body: 'nothing is in flight',
+          segments: [{id: 's3', kind: 'info', text: 'nothing is in flight'}]}),
       entry('p1', 'driver', 'Plain message', '2026-11-03T10:00:00+00:00'),
     ]));
     const view = render(DriverConversation, {projectId: 'alpha'});
-    await view.findByText('Deploy question');
+    // The subject is shown in the thread AND in the questions box (the question
+    // is listed there), so wait for the thread's own message, not the bare text.
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+    await waitFor(() => expect([...view.container.querySelectorAll('[data-conversation-thread] article.message .subject')]
+      .some(n => n.textContent === 'Deploy question')).toBe(true));
 
     const marks = view.container.querySelectorAll('article.message .asks');
     expect(marks.length, 'only the asking message carries the mark').toBe(1);
 
-    // The thread renders oldest-first, so the segment order follows time, not
-    // the order the fixture listed them in.
-    const kinds = [...view.container.querySelectorAll('.segment')].map(n => n.getAttribute('data-kind'));
-    expect(kinds).toEqual(['info', 'question']);
-    expect(view.getByText('may I restart the host now?')).toBeTruthy();
-    // A plain message keeps its body and gets no tag furniture.
-    expect(view.getByText('body of Plain message')).toBeTruthy();
+    // The segmented message renders its body EXACTLY once - as its text, in a
+    // <pre> - and nothing of the split survives inside it: no segment list, no
+    // tag labels, no kinded blocks.
+    const asking = [...view.container.querySelectorAll('article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Deploy question') as HTMLElement;
+    expect(asking).toBeTruthy();
+    expect(asking.querySelectorAll('pre')).toHaveLength(1);
+    expect(asking.querySelector('pre')?.textContent).toBe('Heads up.\nmay I restart the host now?');
+    expect(asking.textContent?.split('may I restart the host now?').length - 1).toBe(1);
+    expect(asking.querySelector('.segments')).toBeNull();
+    expect(asking.querySelector('.segment')).toBeNull();
+    expect(asking.querySelector('.seg-tag')).toBeNull();
+    expect(asking.querySelector('[data-kind]')).toBeNull();
+
+    // The same holds for every other segmented message in the thread.
+    const info = [...view.container.querySelectorAll('article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Just an update') as HTMLElement;
+    expect(info.querySelectorAll('pre')).toHaveLength(1);
+    expect(info.querySelector('.segments, .segment, .seg-tag, [data-kind]')).toBeNull();
+
+    // A segment-less message still renders its body in a <pre>.
+    expect(view.getByText('body of Plain message').tagName).toBe('PRE');
+    // And nothing in the whole thread is split into tagged blocks.
+    expect(view.container.querySelector('[data-conversation-thread] .segments, [data-conversation-thread] .segment, [data-conversation-thread] .seg-tag, [data-conversation-thread] [data-kind]')).toBeNull();
   });
 });

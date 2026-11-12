@@ -56,6 +56,10 @@
   const railList = $derived(railQuestions(railRows));
   const questions = $derived(railList.filter((question) => question.answered === null));
   const answeredQuestions = $derived(railList.filter((question) => question.answered !== null));
+  // The questions box is permanent and foldable. Open by default; the user's
+  // toggle is kept here, so a new message (which re-renders the thread, not this
+  // box) never resets it for the life of the mounted pane.
+  let questionsOpen = $state(true);
   let text = $state(''), sending = $state(false), sendError = $state('');
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
@@ -342,74 +346,82 @@
           </header>
           {#if entry.reply_to_message_id}<p class="identity">{st('driverConversationReplyingTo')} #{entry.reply_to_message_id.slice(0, 8)}</p>{/if}
           <strong class="subject">{entry.subject}</strong>
-          {#if entry.segments?.length}
-            <!-- Tagged blocks: the question ones are the reason this exists - the
-                 reader can see what is being asked without reading a wall of text. -->
-            <ul class="segments">
-              {#each entry.segments as segment}
-                <li class="segment" data-kind={segment.kind}>
-                  <span class="seg-tag">{segment.kind === 'question' ? st('segmentQuestion') : st('segmentInfo')}</span>
-                  <span class="seg-text">{segment.text}</span>
-                </li>
-              {/each}
-            </ul>
-          {:else if entry.body}<pre>{entry.body}</pre>{/if}
+          <!-- The body is the whole message, rendered once. A message is not split
+               into info and question blocks: a split would scatter one message across
+               the thread, and the questions it asks live in the questions box below,
+               which later info messages cannot wash away. -->
+          {#if entry.body}<pre>{entry.body}</pre>{/if}
         </article>
       {/each}
     {/if}
   </div>
-  <!-- The questions rail: a SIBLING of the thread's scroll box, never inside it,
-       so the thread scrolling never moves it, and with its own overflow-y.
-       It renders nothing when the conversation has no question at all AND the
-       walk behind it read the whole conversation, so it takes no width or
-       height then. Info blocks never appear here; they stay in the thread. Its
-       rows are the WHOLE conversation (`railRows`), not this thread's page, so a
-       question 30 or more info messages have pushed off the page is still listed.
+  <!-- The questions box: a PERMANENT, foldable band between the thread and the
+       composer. It is a sibling of the thread's scroll box, never inside it, so
+       the thread scrolling never moves it and it never moves the thread. It is
+       always rendered - with no question it says so - because an absent box reads
+       as "no questions were ever asked" when the walk may not have finished.
+       Info blocks never appear here; the questions are the only thing it lists.
+       Its rows are the WHOLE conversation (`railRows`), not this thread's page, so
+       a question 30 or more info messages have pushed off the page is still listed.
+       `<details>` gives the fold natively; `questionsOpen` keeps the user's toggle
+       for the life of the pane. The summary always carries the open count, and an
+       incomplete walk also shows a short marker there, so the caveat survives the
+       box being collapsed. The full sentence sits in the expanded body.
        Two groups: the OPEN questions, each with its reply control, and the
        ANSWERED ones (kept so the reader can look back), each marked with the
-       answer the user gave and no reply control - it is answered already.
-       When the walk stopped short - or failed, or the server claimed more
-       history while handing back no cursor - the rail says the list may be
-       missing older questions instead of looking complete. That warning is
-       rendered even when the shortened list holds NO question: hiding it
-       behind the question count was round 2's hole, and a walk that failed
-       before finding anything is exactly when the reader needs to be told. -->
-  {#if railList.length || railIncomplete}
-    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsRail')}>
-      {#if questions.length}
-        <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
-      {/if}
+       answer the user gave and no reply control - it is answered already. -->
+  <details class="questions-box" data-questions-box aria-label={st('driverQuestionsRail')} bind:open={questionsOpen}>
+    <summary class="questions-summary">
+      <span class="questions-summary-label">{st('driverQuestionsHeading')} ({questions.length})</span>
       {#if railIncomplete}
-        <p class="questions-note" data-questions-incomplete role="status">{st('driverQuestionsIncomplete')}</p>
+        <span class="questions-note-short" data-questions-incomplete-summary>{st('driverQuestionsIncompleteShort')}</span>
       {/if}
-      {#if questions.length}
-        <ul class="questions-list">
-          {#each questions as question (question.message_id + ':' + question.segment_id)}
-            <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
-              <span class="question-subject">{question.subject}</span>
-              <span class="question-text">{question.text}</span>
-              <button class="outline" type="button"
-                data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
-                aria-label="{st('driverQuestionsReply')}: {question.text}"
-                onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      {#if answeredQuestions.length}
-        <p class="questions-title" data-questions-answered>{st('driverQuestionsAnswered')} ({answeredQuestions.length})</p>
-        <ul class="questions-list questions-list-answered">
-          {#each answeredQuestions as question (question.message_id + ':' + question.segment_id)}
-            <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-answered-by={question.answered?.message_id}>
-              <span class="question-subject">{question.subject}</span>
-              <span class="question-text">{question.text}</span>
-              <span class="question-answered-note">{st('driverQuestionsAnswerPrefix')}</span><span class="question-answer-text">{question.answered?.text}</span>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </aside>
-  {/if}
+    </summary>
+    <!-- Rendered only while open: a collapsed box is its one summary line and
+         carries no question item, so nothing below the fold is in the DOM or
+         reachable by keyboard. The fold itself is still the native <details>. -->
+    {#if questionsOpen}
+      <div class="questions-body">
+        {#if railIncomplete}
+          <p class="questions-note" data-questions-incomplete role="status">{st('driverQuestionsIncomplete')}</p>
+        {/if}
+        <!-- "No open questions." is a claim about the conversation, so it waits for
+             a page to have actually been read (before that, or after a failed first
+             load, the box must not assert an empty list it never checked), and it
+             never sits under the incomplete caveat: a list that stopped short has
+             not shown there are none. -->
+        {#if ready && !railIncomplete && railList.length === 0}
+          <p class="questions-empty" data-questions-empty>{st('driverQuestionsEmpty')}</p>
+        {/if}
+        {#if questions.length}
+          <ul class="questions-list">
+            {#each questions as question (question.message_id + ':' + question.segment_id)}
+              <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
+                <span class="question-subject">{question.subject}</span>
+                <span class="question-text">{question.text}</span>
+                <button class="outline" type="button"
+                  data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
+                  aria-label="{st('driverQuestionsReply')}: {question.text}"
+                  onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if answeredQuestions.length}
+          <p class="questions-title" data-questions-answered>{st('driverQuestionsAnswered')} ({answeredQuestions.length})</p>
+          <ul class="questions-list questions-list-answered">
+            {#each answeredQuestions as question (question.message_id + ':' + question.segment_id)}
+              <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-answered-by={question.answered?.message_id}>
+                <span class="question-subject">{question.subject}</span>
+                <span class="question-text">{question.text}</span>
+                <span class="question-answered-note">{st('driverQuestionsAnswerPrefix')}</span><span class="question-answer-text">{question.answered?.text}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+  </details>
   <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>
     {#if answering}
       <p class="identity" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}>
@@ -441,15 +453,23 @@
   .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;
     padding:.25rem 0;border-top:1px solid var(--pico-muted-border-color,#ddd);}
   .conversation-thread{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding-right:.2rem;}
-  /* The questions rail: a sibling band between the thread and the composer. It
-     scrolls on its own (overflow-y:auto, capped height), so a long list of open
-     questions never moves the thread, and the thread never moves it. It is not
-     rendered when empty, so it costs no width or height then. */
-  .questions-rail{flex:0 1 auto;min-height:0;max-height:9rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;
-    margin:.25rem 0 0;padding:.25rem 0 0;border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  /* The questions box: a permanent, foldable sibling band between the thread and
+     the composer. It takes only the height it needs, never more than a bounded
+     share: the expanded body scrolls on its own (max-height + overflow-y:auto on
+     the box's own body), so a long list of open questions never moves the thread,
+     and the thread never moves it. Collapsed, the box is its one summary line. */
+  .questions-box{flex:0 0 auto;min-height:0;margin:.25rem 0 0;padding:.25rem 0 0;
+    border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  .questions-summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:.2rem .5rem;cursor:pointer;
+    font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
+  .questions-summary-label{flex:0 0 auto;}
+  .questions-body{max-height:9rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;margin:.2rem 0 0;}
+  .questions-empty{margin:0 0 .2rem;font-size:.75rem;color:var(--pico-muted-color,#64748b);}
+  /* The incompleteness marker: a short muted caveat on the summary line (so it
+     survives the box being collapsed) and the full sentence in the body. Ordinary
+     case and muted, so it reads as a caveat rather than another question. */
+  .questions-note-short{font-size:.65rem;font-weight:400;text-transform:none;letter-spacing:0;font-style:italic;overflow-wrap:anywhere;}
   .questions-title{margin:0 0 .2rem;font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
-  /* The incompleteness marker: one line, ordinary case and muted, so it reads as
-     a caveat on the list rather than as another question. */
   .questions-note{margin:0 0 .2rem;font-size:.7rem;line-height:1.3;overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
   .questions-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
   .question-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .4rem;font-size:.8rem;line-height:1.35;}
@@ -480,12 +500,6 @@
   p{margin:.4rem 0;}
   .asks{display:inline-flex;align-items:center;justify-content:center;width:1.1rem;height:1.1rem;
     border-radius:999px;background:var(--pico-primary,#2563eb);color:#fff;font-size:.7rem;font-weight:700;}
-  .segments{list-style:none;margin:.35rem 0 0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
-  .segment{display:flex;gap:.4rem;align-items:baseline;font-size:.82rem;line-height:1.45;}
-  .seg-tag{flex:0 0 auto;font-size:.62rem;letter-spacing:.04em;text-transform:uppercase;
-    padding:.05rem .35rem;border-radius:999px;border:1px solid var(--pico-muted-border-color,#dbe3ec);color:var(--pico-muted-color,#64748b);}
-  .segment[data-kind="question"] .seg-tag{border-color:var(--pico-primary,#2563eb);color:var(--pico-primary,#2563eb);}
-  .segment[data-kind="question"] .seg-text{font-weight:600;}
   .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
   .message{margin:.45rem 0;padding:.35rem .55rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;}
   .message.mine{border-color:var(--pico-primary-border,#93c5fd);}

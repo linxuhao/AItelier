@@ -111,7 +111,10 @@ describe('the project button carries its own driver facts', () => {
     await waitFor(() => expect(api.driverStatus).toHaveBeenCalled());
     // The collapsible table that used to sit above the list is gone ...
     expect(view.container.querySelector('.driver-status')).toBeNull();
-    expect(view.container.querySelector('details')).toBeNull();
+    // A bare <details> is no longer proof of that table: the conversation pane's
+    // permanent questions box is one. What stood for the table was its own
+    // collapsible driver-status <details>, so assert that exact element instead.
+    expect(view.container.querySelector('details.driver-status')).toBeNull();
     expect(view.container.querySelector('tbody')).toBeNull();
     // ... and start/stop did not vanish with it: exactly ONE control, the one in
     // the conversation pane for the project selected there (the standalone

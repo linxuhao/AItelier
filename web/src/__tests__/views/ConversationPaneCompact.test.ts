@@ -189,7 +189,13 @@ describe('the vertical budget goes to the thread', () => {
     // conversation title, no modes band, no size row.
     const section = thread.parentElement as HTMLElement;
     expect(classes(section)).toContain('conversation');
-    expect([...section.children]).toEqual([thread, composer]);
+    // The section's bands are the thread, then the permanent questions box, then
+    // the composer. The box is a band BETWEEN the thread and the composer, never
+    // inside the thread, so it is the one band allowed here; nothing above the
+    // thread is added.
+    expect([...section.children]).toEqual([thread, section.querySelector('[data-questions-box]'), composer]);
+    expect(section.children[0]).toBe(thread);
+    expect(section.children[section.children.length - 1]).toBe(composer);
     expect(pane.querySelector('.conversation-head')).toBeNull();
 
     // The chrome that remains is small: header + body padding + composer's own

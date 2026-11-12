@@ -3,6 +3,7 @@
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
     type DriverConversationEntry } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
+  import { openQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
   import { st } from '../lib/stateI18n.svelte';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string;
@@ -21,6 +22,36 @@
   let nextCursor = $state<string | null>(null), hasMore = $state(false), endOfHistory = $state(false);
   let loading = $state(false), ready = $state(false), error = $state('');
   let replyTo = $state<DriverConversationEntry | null>(null);
+  // The question the composer is bound to, when the user chose the reply
+  // control on a rail item. One question per send: it closes exactly that one.
+  let answering = $state<OpenQuestion | null>(null);
+  // ── the rail's row source ─────────────────────────────────────────────────
+  // The rail must list every open question of the WHOLE conversation, so it
+  // never reads the thread's page: with the newest 30 rows loaded, a question
+  // followed by 30 later info messages is no longer in them, and deriving the
+  // rail from `messages` moved the "washed away by info" failure from scrolling
+  // to paging. `railRows` is therefore its own row set - every page the thread
+  // reads is merged into it, and behind the thread's first page the rest of the
+  // conversation is read by `loadQuestions` below, bounded, on mount.
+  //
+  // What is OPEN is still decided by exactly one thing, `openQuestions`, over
+  // these rows; this state is a row set, not a second rule.
+  let railRows = $state<DriverConversationEntry[]>([]);
+  // The walk stopped before the beginning of the conversation (its page bound,
+  // or a failed read), so an older question may be missing. The rail says so
+  // instead of looking complete; `readConversationRows` owns the bound.
+  //
+  // It starts optimistic, so the marker means "the walk answered and did not
+  // reach the beginning", not "a read is in flight": until that one request
+  // comes back the rail shows the rows the thread has read, which is exactly the
+  // state this pane shipped in before. The marker exists for the DURABLE bound,
+  // which a reader would otherwise have no way of knowing about.
+  let railIncomplete = $state(false);
+  // Whether the rest of the conversation behind the thread's first page has
+  // been read yet. Seeded from the FIRST page that arrives, not from mount, so
+  // a failed first read is still completed by the poll that recovers it.
+  let railSeeded = false;
+  const questions = $derived(openQuestions(railRows));
   let text = $state(''), sending = $state(false), sendError = $state('');
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
@@ -64,8 +95,10 @@
       page = await dshDriverConversation(projectId);
       if (version !== generation) return;
       messages = mergeThread(messages, page.messages);
+      railRows = mergeThread(railRows, page.messages);
       if (!paged) { nextCursor = page.next_cursor; hasMore = page.has_more; endOfHistory = page.end_of_history; }
       ready = true;
+      seedRail(page);
     } catch (e) { if (version === generation) error = String(e instanceof Error ? e.message : e); }
     // `loading` is cleared before the scroll settles: the Refresh button must not
     // stay disabled while the pane is only repositioning itself.
@@ -79,6 +112,42 @@
     }
     await keepPlace(before);
   }
+  // ── the rail reads the rest of the conversation, once ─────────────────────
+  // The first page the thread renders has already been merged into `railRows`,
+  // so what may still be missing is everything BEHIND it - the older rows that
+  // hold the questions later info has pushed out of view. When the page was the
+  // whole conversation (`end_of_history`) there is nothing behind it and the
+  // rail already has every row; otherwise its own cursor is handed to the walk,
+  // so no row is read twice.
+  //
+  // This is the only extra read the rail costs, it runs once per mounted pane,
+  // and it never touches the thread: not its cursor, not its merge, not its
+  // scroll, not the read marker. Later pages only ever add NEWER rows, which the
+  // merges below carry in.
+  function seedRail(page: {next_cursor: string | null; end_of_history: boolean}) {
+    if (railSeeded) return;
+    railSeeded = true;
+    if (page.end_of_history) return;
+    // No cursor while more history is claimed: nothing to walk, so say so
+    // rather than showing a list that looks complete.
+    if (!page.next_cursor) { railIncomplete = true; return; }
+    void loadQuestions(page.next_cursor);
+  }
+  async function loadQuestions(from: string | null) {
+    const asked = projectId;
+    try {
+      const history = await readConversationRows(
+        (cursor, limit) => dshDriverConversation(asked, cursor, limit), {from});
+      if (!alive || asked !== projectId) return;
+      railRows = mergeThread(railRows, history.rows);
+      railIncomplete = !history.complete;
+    } catch {
+      // Keep the rows already merged - the thread's own page and any page read
+      // since - and say they may be incomplete: a silently short list of open
+      // questions is the failure this rail exists to prevent.
+      if (alive && asked === projectId) railIncomplete = true;
+    }
+  }
   // Older messages: the same keyset cursor, so each one arrives exactly once.
   // The merge is belt and braces against a page that overlaps what is rendered;
   // the cursor now belongs to THIS page, which is why `paged` is set here.
@@ -90,6 +159,9 @@
       const page = await dshDriverConversation(projectId, nextCursor);
       if (version !== generation) return;
       messages = mergeThread(messages, page.messages);
+      // The rail wants every row of the conversation, so a page the reader
+      // loaded by hand is folded into it as well.
+      railRows = mergeThread(railRows, page.messages);
       nextCursor = page.next_cursor; hasMore = page.has_more; endOfHistory = page.end_of_history;
       paged = true;
       ready = true;
@@ -100,17 +172,30 @@
     const body = text.trim();
     if (!body || sending) return;
     sending = true; sendError = '';
-    const answering = replyTo;
+    const replying = replyTo;
+    // A rail reply closes exactly the question it is bound to. The cited message
+    // is never modified; the link lives on this reply's row.
+    const cited = answering ? [{message_id: answering.message_id, segment_id: answering.segment_id}] : null;
     try {
+      // `answers` is passed only when a question is bound, so an ordinary send is
+      // the same options object it always was.
       await sendDriverConversationMessage(projectId, body, {
-        replyToMessageId: answering?.message_id, targetDriverId: driverId || undefined});
-      text = ''; replyTo = null;
+        replyToMessageId: replying?.message_id, targetDriverId: driverId || undefined,
+        ...(cited ? {answers: cited} : {})});
+      text = ''; replyTo = null; answering = null;
       await loadNewest();
       await scrollToNewest();
     } catch (e) { sendError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
-  function reply(entry: DriverConversationEntry) { replyTo = entry; sendError = ''; }
+  function reply(entry: DriverConversationEntry) { replyTo = entry; answering = null; sendError = ''; }
+  // A rail item binds the composer to that one question, and the thread's reply
+  // target to the message that asked it, so the reply threads onto it too.
+  function answer(question: OpenQuestion) {
+    const asked = messages.find((m) => m.message_id === question.message_id) ?? null;
+    answering = question; replyTo = asked; sendError = '';
+  }
+  function cancelAnswer() { answering = null; replyTo = null; }
 
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
@@ -140,6 +225,10 @@
       // a thread that has moved on - and nothing may write after teardown.
       if (!alive || asked !== projectId) return;
       messages = mergeThread(messages, page.messages);
+      railRows = mergeThread(railRows, page.messages);
+      // A poll may be the first page that ever arrived (a failed mount): the
+      // rail is seeded from it, exactly as it would have been from the mount.
+      seedRail(page);
       if (!paged) { nextCursor = page.next_cursor; hasMore = page.has_more; endOfHistory = page.end_of_history; }
       // A poll that succeeds is what recovered a failed first load: the alert
       // that load left behind no longer describes the thread on screen. A failed
@@ -259,8 +348,40 @@
       {/each}
     {/if}
   </div>
+  <!-- The questions rail: a SIBLING of the thread's scroll box, never inside it,
+       so the thread scrolling never moves it, and with its own overflow-y.
+       It renders nothing when no question is open, so it takes no width or
+       height then. Info blocks never appear here; they stay in the thread.
+       Its rows are the WHOLE conversation (`railRows`), not this thread's page,
+       so a question 30 or more info messages have pushed off the page is still
+       listed. When the walk behind those rows stopped short, the rail says the
+       list may be missing older questions instead of looking complete. -->
+  {#if questions.length}
+    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsHeading')}>
+      <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
+      {#if railIncomplete}
+        <p class="questions-note" data-questions-incomplete role="status">{st('driverQuestionsIncomplete')}</p>
+      {/if}
+      <ul class="questions-list">
+        {#each questions as question (question.message_id + ':' + question.segment_id)}
+          <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
+            <span class="question-subject">{question.subject}</span>
+            <span class="question-text">{question.text}</span>
+            <button class="outline" type="button"
+              data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
+              aria-label="{st('driverQuestionsReply')}: {question.text}"
+              onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
+          </li>
+        {/each}
+      </ul>
+    </aside>
+  {/if}
   <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>
-    {#if replyTo}
+    {#if answering}
+      <p class="identity" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}>
+        {st('driverQuestionsAnswering')} · {answering.text}
+        <button class="outline" type="button" onclick={cancelAnswer}>{st('driverConversationCancelReply')}</button></p>
+    {:else if replyTo}
       <p class="identity">{st('driverConversationReplyingTo')} · {replyTo.subject}
         <button class="outline" type="button" onclick={() => (replyTo = null)}>{st('driverConversationCancelReply')}</button></p>
     {/if}
@@ -286,6 +407,20 @@
   .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;
     padding:.25rem 0;border-top:1px solid var(--pico-muted-border-color,#ddd);}
   .conversation-thread{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding-right:.2rem;}
+  /* The questions rail: a sibling band between the thread and the composer. It
+     scrolls on its own (overflow-y:auto, capped height), so a long list of open
+     questions never moves the thread, and the thread never moves it. It is not
+     rendered when empty, so it costs no width or height then. */
+  .questions-rail{flex:0 1 auto;min-height:0;max-height:9rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;
+    margin:.25rem 0 0;padding:.25rem 0 0;border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  .questions-title{margin:0 0 .2rem;font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
+  /* The incompleteness marker: one line, ordinary case and muted, so it reads as
+     a caveat on the list rather than as another question. */
+  .questions-note{margin:0 0 .2rem;font-size:.7rem;line-height:1.3;overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
+  .questions-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
+  .question-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .4rem;font-size:.8rem;line-height:1.35;}
+  .question-subject{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
+  .question-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;font-weight:600;}
   .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
   .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
     border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}

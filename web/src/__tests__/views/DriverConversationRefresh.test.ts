@@ -158,9 +158,13 @@ describe('a refresh does not disturb the reader', () => {
   });
 
   it('never renders a message twice, and keeps pages loaded further back', async () => {
-    api.dshDriverConversation
-      .mockResolvedValueOnce(page([m2], {has_more: true, next_cursor: 'cursor-1', end_of_history: false}))
-      .mockResolvedValueOnce(page([m1], {has_more: false, next_cursor: null, end_of_history: true}));
+    // Served by CURSOR and not by call order: the pane reads page 1 for the
+    // thread, then reads the rest of the conversation behind it for the rail, so
+    // which call asks for `cursor-1` no longer decides which page it gets.
+    const first = page([m2], {has_more: true, next_cursor: 'cursor-1', end_of_history: false});
+    const behind = page([m1]);
+    api.dshDriverConversation.mockImplementation(
+      async (_project: string, cursor?: string | null) => (cursor === 'cursor-1' ? behind : first));
     const view = render(DriverConversation, {projectId: 'alpha'});
     await view.findByText('Second report');
     await fireEvent.click(view.getByRole('button', {name: 'Load earlier messages'}));

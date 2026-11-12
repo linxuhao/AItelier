@@ -85,13 +85,14 @@ describe('one conversation, both directions', () => {
   });
 
   it('loads older pages with the cursor, prepending them and stating the end of history', async () => {
-    api.dshDriverConversation
-      .mockResolvedValueOnce(page([
-        entry('m2', 'driver', 'Second report', 'newest', '2026-11-03T10:00:00+00:00'),
-      ], {has_more: true, next_cursor: 'cursor-1', end_of_history: false}))
-      .mockResolvedValueOnce(page([
-        entry('m0', 'driver', 'First report', 'oldest', '2026-11-03T08:00:00+00:00'),
-      ], {has_more: false, next_cursor: null, end_of_history: true}));
+    // Served by CURSOR and not by call order: the pane reads page 1 for the
+    // thread, then reads the rest of the conversation behind it for the rail, so
+    // which call asks for `cursor-1` no longer decides which page it gets.
+    const newest = page([entry('m2', 'driver', 'Second report', 'newest', '2026-11-03T10:00:00+00:00')],
+      {has_more: true, next_cursor: 'cursor-1', end_of_history: false});
+    const older = page([entry('m0', 'driver', 'First report', 'oldest', '2026-11-03T08:00:00+00:00')]);
+    api.dshDriverConversation.mockImplementation(
+      async (_project: string, cursor?: string | null) => (cursor === 'cursor-1' ? older : newest));
     const view = render(DriverConversation, {projectId: 'alpha'});
     await view.findByText('Second report');
     expect(view.container.textContent).not.toContain('Beginning of the conversation');

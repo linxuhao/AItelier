@@ -177,6 +177,22 @@ def test_a_git_step_that_outlives_its_budget_is_ended_says_so_and_is_not_remembe
     assert log.read_text().splitlines().count(step) > 1
 
 
+def test_a_materialization_step_that_times_out_keeps_its_fixed_budget_and_plain_refusal(
+        tmp_path, slow_host, monkeypatch):
+    from core.state_git_artifacts import materialize_candidate
+    from tests.integration.test_state_git_artifact_durability import fixture
+    service, source, _, _, _, commit, *_ = fixture(tmp_path / "f")
+    monkeypatch.setenv("AITELIER_STATE_GIT_TIMEOUT_SEC", "3600")
+
+    slow_host(20.0)  # the import's fetch would need 160 s
+    with pytest.raises(StateConflict) as refusal:
+        materialize_candidate(service.store, commit, source)
+
+    # Not a candidate report: the knob is neither applied nor named, and nothing says "retry".
+    assert slow_host.budgets == [("fetch", 120)]
+    assert str(refusal.value) == "Git artifact validation unavailable: TimeoutExpired"
+
+
 @pytest.mark.parametrize("value", ["", "soon", "0", "-5", "inf", "1e300"])
 def test_a_budget_value_git_cannot_wait_for_falls_back_to_the_default(monkeypatch, value):
     from core.state_git_artifacts import GIT_TIMEOUT_SEC, _git_timeout

@@ -361,6 +361,19 @@ async function fakeCli(directory) {
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: process.env.AITELIER_TODO_TEST_CWD ?? directory };
 }
 
+// The crash arm of the CLI contract has to come from the interpreter it is
+// handed, never from `core.todo_cli` being unimportable: this image installs
+// AItelier editable (site-packages/__editable__.aitelier-*.pth -> /app), so
+// `python -m core.todo_cli` from a directory without a local `core` reaches the
+// DEPLOYED copy and answers a usage refusal (exit 2) instead of crashing. This
+// fixture's module crashes on import, from any cwd.
+async function crashCli(directory) {
+  await mkdir(join(directory, 'core'), { recursive: true });
+  await writeFile(join(directory, 'core', '__init__.py'), '');
+  await writeFile(join(directory, 'core', 'todo_cli.py'), 'raise SystemExit(3)\n');
+  return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: directory };
+}
+
 // This scenario is bounded by the progress it observes, not by the clock (see
 // progress.mjs): the wait below is a watch over the plans' own milestones - a
 // child's item passing, a handback, an idle review, the director's finish and
@@ -995,7 +1008,8 @@ test('CLI results: a refusal is returned with the brief, a missing brief is fill
     assert.ok(refused.refused); assert.match(refused.brief, /Next: implement/);
     const absent = await todo.call('attempt-missing', ['status', '--attempt', 'attempt-missing']);
     assert.ok(absent.refused); assert.equal(absent.brief, null);
-    await assert.rejects(new TodoCli({ python: cli.python, cwd: directory, stateDir: directory }).run(['status', '--attempt', 'x']), /todo_cli status/);
+    const crash = await crashCli(join(directory, 'crash'));
+    await assert.rejects(new TodoCli({ python: crash.python, cwd: crash.cwd, stateDir: directory }).run(['status', '--attempt', 'x']), /todo_cli status/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -1087,9 +1101,10 @@ test('idle review and snapshot views: unfinished plans without a live child, and
     assert.deepEqual(JSON.parse(runtime.render()).todo, listed);
     assert.equal(JSON.parse(runtime.render()).todo_error, undefined);
     // A broken todo CLI degrades the snapshot; it never fails a State refresh.
+    const brokenCli = await crashCli(join(directory, 'broken'));
     const broken = new DriverRuntime({ project: 'alpha', driver: 'driver-a', directory,
       request: async path => path.endsWith('/me') ? { driver_id: 'driver-a' } : { event_seq: 1, nodes: [], project_note: {}, private_note: {} },
-      todoPlans: () => new TodoCli({ python: cli.python, cwd: directory, stateDir: directory }).plans() });
+      todoPlans: () => new TodoCli({ python: brokenCli.python, cwd: brokenCli.cwd, stateDir: directory }).plans() });
     await broken.init();
     const degraded = JSON.parse(broken.render());
     assert.equal(degraded.todo, undefined); assert.match(degraded.todo_error, /todo_cli list/);

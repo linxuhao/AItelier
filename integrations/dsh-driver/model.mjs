@@ -63,6 +63,26 @@ const RETRY_MAX_DELAY_MS = 8000;
  *  mid-request, so the same completion can be asked for again. */
 const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
+/** The transport failures a completion is retried over — the documented set,
+ *  exactly. `ECONNREFUSED` `ECONNRESET` `EPIPE` `UND_ERR_SOCKET`
+ *
+ *  Kept as data, and the classifier reads this data, so the set cannot drift
+ *  from the sentence above it. Being an undici `TypeError` is NOT by itself a
+ *  reason to retry: a `TypeError` whose cause is a malformed body — an
+ *  undecodable payload, an invalid header, a body that cannot be serialised —
+ *  is a verdict about the request, and repeating it only asks the backend the
+ *  same unanswerable question again. Only a known transport code, or one of the
+ *  half-close shapes below, can mean "the connection died, the request may be
+ *  replayable". */
+export const RETRYABLE_TRANSPORT_CODES = Object.freeze(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']);
+
+/** The undici messages that name a reset or a half-close on an already sent
+ *  request, kept as data and documented shapes: `socket hang up` `terminated`.
+ *  Matched as the whole message or as its prefix (`terminated: other side
+ *  closed`), never as a substring, so prose about a body cannot be mistaken for
+ *  a dead connection. */
+export const RETRYABLE_TRANSPORT_SHAPES = Object.freeze(['socket hang up', 'terminated']);
+
 /** The wall-clock budget a completion call may spend retrying a connection-level
  *  failure. `AITELIER_DSH_MODEL_RETRY_SEC` is seconds and may be fractional;
  *  unset, non-numeric or negative falls back to the 180 s default, and `0`
@@ -76,28 +96,67 @@ export function modelRetryBudgetMs(raw = process.env.AITELIER_DSH_MODEL_RETRY_SE
   return seconds * 1000;
 }
 
-/** The failure class worth retrying, or null when this error must surface at
- *  once. A retry is only safe because the whole response is buffered before
- *  anything is yielded: no block has been delivered, so a repeat can never
- *  duplicate a tool call. Anything the backend actually ANSWERED with a verdict
- *  (400/401/429/...), an abort, or an undecodable body is that verdict. */
-function retryableClass(error, signal) {
-  if (!error || signal?.aborted) return null;
-  if (error.name === 'AbortError') return null;
-  if (error instanceof SyntaxError || error.name === 'SyntaxError') return null;
-  if (typeof error.status === 'number') return RETRYABLE_STATUSES.has(error.status) ? `HTTP ${error.status}` : null;
-  if (error instanceof TypeError || error.name === 'TypeError') {
-    return `connection-level (${error.cause?.code ?? error.cause?.name ?? error.message})`;
+/** The transport message that names a reset or half-close, or null. */
+function transportShape(error) {
+  for (const text of [error?.message, error?.cause?.message]) {
+    if (typeof text !== 'string') continue;
+    for (const shape of RETRYABLE_TRANSPORT_SHAPES) {
+      if (text === shape || text.startsWith(`${shape} `) || text.startsWith(`${shape}:`)) return shape;
+    }
   }
   return null;
 }
 
+/** The transport code on an error, from its undici cause or from itself. */
+function transportCode(error) {
+  if (typeof error?.cause?.code === 'string') return error.cause.code;
+  if (typeof error?.code === 'string') return error.code;
+  return null;
+}
+
+/** The failure class worth retrying, as the label the retry log carries, or
+ *  null when this error must surface at once. A retry is only safe because the
+ *  whole response is buffered before anything is yielded: no block has been
+ *  delivered, so a repeat can never duplicate a tool call. Anything the backend
+ *  actually ANSWERED with a verdict (400/401/429/...), an abort, or an
+ *  undecodable body is that verdict — including a `TypeError` whose cause is a
+ *  malformed body, which is why this looks at the transport CODE and at the
+ *  documented half-close SHAPES rather than at `instanceof TypeError`.
+ *
+ *  `after_send` states whether the request bytes can already have reached the
+ *  backend. `ECONNREFUSED` is the only retried failure where they cannot — no
+ *  socket was ever established — so a refusal is labelled `after_send=false`.
+ *  Every other retried failure happened on a connection that existed, and the
+ *  request is written before a reset can be observed, so the backend may
+ *  already have executed this completion (and billed it) while this process saw
+ *  only a dead socket. Such a failure is still retried DELIBERATELY: a turn
+ *  that died without an answer costs one repeated provider call, which is
+ *  strictly cheaper than a fatal turn. The log line says `after_send=true` so
+ *  that the possible second server-side execution is visible to an operator on
+ *  stderr, rather than discoverable only in the bill. */
+export function retryableClass(error) {
+  if (!error) return null;
+  if (error.name === 'AbortError') return null;
+  if (error instanceof SyntaxError || error.name === 'SyntaxError') return null;
+  if (typeof error.status === 'number') return RETRYABLE_STATUSES.has(error.status) ? `HTTP ${error.status}` : null;
+  const code = transportCode(error);
+  if (code && RETRYABLE_TRANSPORT_CODES.includes(code)) {
+    return `connection-level ${code} after_send=${code !== 'ECONNREFUSED'}`;
+  }
+  const shape = transportShape(error);
+  if (shape) return `connection-level ${shape} after_send=true`;
+  return null;
+}
+
+/** The caller's cancellation, always as an error named `AbortError` — the name
+ *  DSH and every caller already test for. A custom abort reason is kept as the
+ *  cause instead of replacing the shape. */
 function abortError(signal) {
   const reason = signal?.reason;
-  if (reason instanceof Error) return reason;
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
   const error = new Error('This operation was aborted');
   error.name = 'AbortError';
-  error.cause = reason;
+  if (reason !== undefined) error.cause = reason;
   return error;
 }
 
@@ -112,25 +171,76 @@ function sleepFor(ms, signal) {
   });
 }
 
-/** One completion request, retried inside a single wall-clock budget. Backoff
- *  starts at `delayMs` and doubles up to `maxDelayMs`; the pause is clipped to
- *  whatever the budget has left, so no retry is ever started past the deadline
- *  and the last one waits out the remaining budget rather than overrunning it. */
-async function completionWithRetry(request, path, body, signal, { budgetMs, delayMs, maxDelayMs, log }) {
-  const deadline = Date.now() + budgetMs;
-  let attempt = 0, wait = delayMs;
+/** Jitter bounds for one retry pause, as a fraction of the exponential base it
+ *  is drawn from. A pause is never shorter than `min` times that base (so a
+ *  retry cannot become a hot loop) and never longer than it (so the declared
+ *  ceiling, `maxDelayMs`, stays a real ceiling). Both bounds are asserted by a
+ *  witness, and the mapping is exact, not a clamp applied after the fact. */
+export const RETRY_JITTER = Object.freeze({ min: 0.5, max: 1 });
+
+/** The pause actually slept before a retry: `base` scaled by jitter inside
+ *  RETRY_JITTER. A finite sample outside [0, 1] is treated as the top of the
+ *  range so a broken random source can only ever lengthen a pause, never turn
+ *  it into a spin. */
+function jitteredPause(base, random) {
+  const span = RETRY_JITTER.max - RETRY_JITTER.min;
+  const sample = Number(random());
+  const unit = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 1;
+  return Math.round(base * (RETRY_JITTER.min + span * unit));
+}
+
+/** One line per retried attempt on stderr. This is the default because the call
+ *  site that matters (runtime.mjs `boot`) runs headless inside the driver
+ *  process: a retry nobody can see is indistinguishable from a hang, and the
+ *  retry's cost — a second provider call — is exactly what an operator needs to
+ *  be able to read off stderr. The line states the attempt number, the failure
+ *  class (`HTTP 503`, or `connection-level <code> after_send=<bool>`), the pause
+ *  actually slept in ms and the budget left. */
+export function stderrRetryLog(line) {
+  process.stderr.write(`${line}\n`);
+}
+
+/** One completion request, retried inside a single wall-clock budget.
+ *
+ *  The budget starts at the FIRST FAILURE, not at the call: a slow but
+ *  successful first attempt (20-minute completions are normal for the root
+ *  director) must leave the whole window available to recover from a transport
+ *  failure that happens later. Backoff starts at `delayMs`, doubles up to
+ *  `maxDelayMs`, and every pause is jittered inside RETRY_JITTER. A retry is
+ *  only started when the pause it needs fits inside the budget that is left, so
+ *  the last failed attempt never sleeps first — a pause that would consume the
+ *  remaining budget is skipped and the failure surfaces immediately.
+ *
+ *  `now`, `sleep`, `random` and `log` are injectable so the witnesses can pin
+ *  the deadline, the pauses, the jitter bounds and the log lines on a fake
+ *  clock instead of on wall-clock luck. */
+async function completionWithRetry(request, path, body, signal, options) {
+  const { budgetMs, delayMs, maxDelayMs, log, now = Date.now, sleep = sleepFor, random = Math.random } = options;
+  let deadline = null, attempt = 0, wait = delayMs;
   for (;;) {
     attempt += 1;
     try {
       return await request(path, body, signal);
     } catch (error) {
-      const failure = retryableClass(error, signal);
+      const failure = retryableClass(error);
+      // An abort that coincides with a connection error is the owner cancelling
+      // this turn, not a socket bug: the transport TypeError must not win that
+      // race, or the caller sees a raw undici object (or its own plain-Error
+      // reason) instead of an abort. A real verdict that arrived anyway — an
+      // HTTP status, an undecodable body — stays more informative than the
+      // cancellation, so only the non-verdicts are replaced.
+      const verdict = typeof error?.status === 'number' || error?.name === 'SyntaxError' || error instanceof SyntaxError;
+      if (signal?.aborted && !verdict) throw abortError(signal);
       if (!failure) throw error;
-      const pause = Math.min(wait, maxDelayMs, deadline - Date.now());
-      if (pause <= 0) throw error;
-      log(`dsh completion attempt ${attempt} failed (${failure}); retrying in ${pause}ms with ${deadline - Date.now()}ms of the retry budget left`);
-      await sleepFor(pause, signal);
-      if (Date.now() >= deadline) throw error;
+      // The clock starts here, at the first failure, not when the call started.
+      if (deadline === null) deadline = now() + budgetMs;
+      const remaining = deadline - now();
+      const pause = jitteredPause(Math.min(wait, maxDelayMs), random);
+      // No room for another attempt: do not sleep a pause that could not be
+      // followed by a request. The failure surfaces now.
+      if (pause <= 0 || pause >= remaining) throw error;
+      log(`dsh completion attempt ${attempt} failed (${failure}); retrying in ${pause}ms with ${remaining}ms of the retry budget left`);
+      await sleep(pause, signal);
       wait = Math.min(wait * 2, maxDelayMs);
     }
   }
@@ -143,7 +253,9 @@ export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? 
  *  children default to high. An explicit DSH reasoningEffort is passed through. */
 export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', retry = {} }) {
   const retryOptions = { budgetMs: retry.budgetMs ?? modelRetryBudgetMs(), delayMs: retry.delayMs ?? RETRY_DELAY_MS,
-    maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? (() => {}) };
+    maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? stderrRetryLog,
+    ...(retry.now ? { now: retry.now } : {}), ...(retry.sleep ? { sleep: retry.sleep } : {}),
+    ...(retry.random ? { random: retry.random } : {}) };
   class HostAdapter extends LlmAdapter {
     async resolveModel(provider, model) {
       return { provider, id: model, name: model, context: { contextWindow: 1000000 }, defaultMaxTokens: 32768,

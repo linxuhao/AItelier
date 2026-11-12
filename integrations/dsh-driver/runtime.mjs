@@ -939,6 +939,24 @@ export function retireStaleToolEnvelope(session, offered = []) {
   return stale;
 }
 
+/** One line per retried model call, on stderr. The driver's stderr is what the
+ *  supervisor captures, and a retried completion is a second provider call: a
+ *  silent retry reads as a hang and hides its own cost. */
+export function modelRetryLog(line) {
+  process.stderr.write(`AItelier DSH model retry: ${line}\n`);
+}
+
+/** The retry options this driver's model bridge runs with: the documented
+ *  budget from the environment and a logger that actually writes. Exported so
+ *  the witness exercises the object `boot` installs instead of re-deriving it —
+ *  a test that built its own logger would stay green if boot dropped this one.
+ *  `?? ''` keeps the read on the runtime's OWN env mapping: an unset key must
+ *  not fall through to the helper's process.env default (which resolves to the
+ *  180 s budget anyway). */
+export function modelRetryOptions(env = process.env) {
+  return { budgetMs: modelRetryBudgetMs(env.AITELIER_DSH_MODEL_RETRY_SEC ?? ''), log: modelRetryLog };
+}
+
 export async function boot(ctx, { env = process.env, request: suppliedRequest } = {}) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
@@ -966,12 +984,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     }
     return response.json();
   });
-  // `?? ''` keeps this read on the runtime's OWN env mapping: an unset key must
-  // not fall through to the helper's process.env default (which resolves to the
-  // 180 s budget anyway).
   installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION,
     rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT),
-    retry: { budgetMs: modelRetryBudgetMs(env.AITELIER_DSH_MODEL_RETRY_SEC ?? '') } });
+    retry: modelRetryOptions(env) });
   // Resolve the existing mounted secret file into DSH's private credential
   // store, never into the environment inherited by test/build subprocesses.
   const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';

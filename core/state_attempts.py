@@ -1141,7 +1141,12 @@ class StateAttempts:
             self.store._event(conn, project_id, node_key, "node_verified",
                               {"receipt_id": rid, "attempt_id": attempt_id, "revision": expected_revision,
                                "artifact_ref": attempt["artifact_ref"], "reviewer": reviewer})
-            return dict(conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (rid,)).fetchone())
+            receipt = dict(conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (rid,)).fetchone())
+            if node.get("issue_id"):
+                # An issue work item's acceptance IS the fix of its issue.
+                from core.state_issues import StateIssues
+                StateIssues.resolve_fixed_by_work_item(self.store, conn, node, receipt, reviewer)
+            return receipt
 
     def evidence(self, attempt_id: str) -> list[dict]:
         with self.store.transaction() as conn:

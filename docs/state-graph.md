@@ -62,6 +62,13 @@ goal invalidates dependents).
 after the report), `duplicate` (another issue, or an existing node), `fixed` (an
 existing verified acceptance receipt in this project, named with its exact
 artifact) or `rejected`.
+`start_issue_work` gives an OPEN issue a work item (`issue.<issue_id>`, column
+`state_nodes.issue_id`): a node outside the DAG with no dependencies that nothing
+may depend on, listed under `issue_work` by `get_graph` and `project_overview`
+instead of under `nodes`, and never on the `frontier`. It is claimed, attempted, evidenced
+and verified like any node; `verify_node` on it resolves the issue as `fixed`
+with that receipt in the same transaction. While it is live, `resolve_issue`
+refuses; supersede it first.
 `get_node` returns the node's `open_issues`; `project_overview` returns
 `issue_counts` and per-node `open_issue_count`. An open defect linked to a VERIFIED
 or CANDIDATE node is reported in `contradicts_acceptance`. Storage:

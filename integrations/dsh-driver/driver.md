@@ -49,6 +49,9 @@ Checkpoints remain human decisions. Never approve one on the user's behalf.
 
 Dispatch bounded work as a frozen todo plan plus a native DSH subagent. Before
 dispatch, claim the node and register the State attempt (start_external_attempt).
+To fix an issue, do not add a DAG node: start_issue_work gives it a work item
+(issue.<issue_id>, listed under issue_work) that you claim, dispatch and verify
+the same way; verify_node on it closes the issue as fixed.
 Then pick a repository template with todo_templates, bind its declared params,
 and call todo_plan(template, params, goal, attempt_id, node_key, context_hash,
 base_sha, workspace); the plan is expanded and frozen. Never improvise items:

@@ -291,6 +291,20 @@ CREATE TABLE IF NOT EXISTS state_project_access (
 """
 
 
+def _refuse_issue_work_edges(nodes: dict, deps) -> None:
+    """An issue work item is outside the DAG: nothing may be built on it."""
+    for dep in deps:
+        if (nodes.get(dep) or {}).get("issue_id"):
+            raise StateConflict(f"{dep} is the work item of issue {nodes[dep]['issue_id']}, not a DAG node; "
+                                "nothing can depend on it")
+
+
+def issue_work_entry(node: dict) -> dict:
+    """The compact listing of one issue work item beside the DAG."""
+    return {k: node.get(k) for k in ("node_key", "issue_id", "revision", "status", "priority",
+                                     "readiness", "next_action", "verified_receipt", "updated_at")}
+
+
 def initialize_graph_schema(db) -> None:
     """Create or migrate the graph and metadata tables on ``db``."""
     with db.get_connection() as conn:
@@ -308,6 +322,13 @@ def initialize_graph_schema(db) -> None:
         # Additive (design §7.2, P4): every existing project keeps review_independence=off.
         add_column_if_missing(conn, "state_project_enforcement", "review_independence", "TEXT NOT NULL "
                               "DEFAULT 'off' CHECK(review_independence IN ('off','advisory'))")
+        # Additive: an issue work item is a node that carries one issue's fix
+        # through the ordinary claim/attempt/evidence/receipt path but is not part
+        # of the DAG (no edges, not on the frontier or in graph/overview counts).
+        # Existing rows stay NULL = an ordinary DAG node.
+        add_column_if_missing(conn, "state_nodes", "issue_id", "TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS state_nodes_one_live_issue_work "
+                     "ON state_nodes(project_id,issue_id) WHERE issue_id IS NOT NULL AND status!='SUPERSEDED'")
         conn.commit()
 
 
@@ -579,6 +600,7 @@ class StateGraphStore:
             own = check_facet(spec.get("facet"))
             if any(old.get(d, {}).get("status") == "SUPERSEDED" for d in deps):
                 raise StateConflict("cannot depend on a superseded node")
+            _refuse_issue_work_edges(old, deps)
             graph[nk] = deps
             facets[nk] = own
             prepared.append((nk, goal, checks, deps, priority, own))
@@ -596,6 +618,27 @@ class StateGraphStore:
             self._event(conn, project_id, nk, "node_created", {"revision": 1, "dependencies": deps,
                                                                 "contract_hash": digest(checks), "facet": own})
         return [nk for nk, *_ in prepared]
+
+    def _add_issue_work(self, conn, project_id, issue_id, node_key, goal, checks, priority):
+        """Insert one issue work item: an OPEN node with no edges and no facet,
+        marked with the issue it fixes. The caller (StateIssues.start_work)
+        owns the issue-side checks and links."""
+        nk = key(node_key, "node key")
+        if conn.execute("SELECT 1 FROM state_nodes WHERE project_id=? AND node_key=?",
+                        (project_id, nk)).fetchone():
+            raise StateConflict(f"duplicate node key {nk!r}")
+        checks = contract(checks)
+        stamp = now()
+        conn.execute("INSERT INTO state_nodes(project_id,node_key,revision,goal,contract_json,contract_hash,status,"
+                     "priority,verified_receipt,created_at,updated_at,facet,issue_id) "
+                     "VALUES(?,?,?,?,?,?,'OPEN',?,NULL,?,?,NULL,?)",
+                     (project_id, nk, 1, text(goal, "goal"), canonical(checks), digest(checks),
+                      integer(priority, "priority", -100000, 100000), stamp, stamp, issue_id))
+        self._snapshot_revision(conn, self._node(conn, project_id, nk), [])
+        self._event(conn, project_id, nk, "node_created", {"revision": 1, "dependencies": [],
+                                                            "contract_hash": digest(checks), "facet": None,
+                                                            "issue_id": issue_id})
+        return nk
 
     @staticmethod
     def _check_facets(facets, graph):
@@ -721,6 +764,10 @@ class StateGraphStore:
             graph[node_key] = dependencies(deps)
         if any(nodes[d]["status"] == "SUPERSEDED" for d in graph[node_key] if d in nodes):
             raise StateConflict("cannot depend on a superseded node")
+        if old.get("issue_id") and graph[node_key]:
+            raise StateConflict(f"{node_key} is the work item of issue {old['issue_id']}; "
+                                "an issue work item has no dependencies")
+        _refuse_issue_work_edges(nodes, graph[node_key])
         _validate_dag(graph)
         self._check_facets({k: n.get("facet") for k, n in nodes.items()}, graph)
         new_goal = text(goal, "goal") if goal is not None else old["goal"]
@@ -750,7 +797,9 @@ class StateGraphStore:
             return self._split(conn, project_id, node_key, expected_revision, children, reason)
 
     def _split(self, conn, project_id, node_key, expected_revision, children, reason) -> dict:
-        self._node(conn, project_id, node_key)
+        if self._node(conn, project_id, node_key).get("issue_id"):
+            raise StateConflict(f"{node_key} is an issue work item; it cannot be split into DAG nodes "
+                                "(report the extra findings as issues instead)")
         new_keys = self._add(conn, project_id, children)
         _, graph = self._graph(conn, project_id)
         result = self._revise(conn, project_id, node_key, expected_revision, reason=reason,
@@ -875,19 +924,26 @@ class StateGraphStore:
             return {"query": query, "total": len(results), "nodes": results[:limit]}
 
     def get_graph(self, project_id: str) -> dict:
+        """The DAG. Live issue work items are not part of it and are listed apart;
+        closed ones (VERIFIED/SUPERSEDED) are read through get_node/get_issue."""
         with self.transaction() as conn:
-            return self._graph_view(conn, project_id)
+            view = self._graph_view(conn, project_id)
+        return {**view, "nodes": [n for n in view["nodes"] if not n.get("issue_id")],
+                "issue_work": [issue_work_entry(n) for n in view["nodes"]
+                               if n.get("issue_id") and n["status"] not in ("VERIFIED", "SUPERSEDED")]}
 
     def get_node(self, project_id: str, node_key: str) -> dict:
         key(node_key)
-        for node in self.get_graph(project_id)["nodes"]:
+        with self.transaction() as conn:
+            nodes = self._graph_view(conn, project_id)["nodes"]
+        for node in nodes:
             if node["node_key"] == node_key:
                 return node
         raise StateNotFound(f"state node {project_id}/{node_key} not found")
 
     def frontier(self, project_id: str, limit: int = 30) -> dict:
         integer(limit, "limit", 1, 200)
-        ready = [n for n in self.get_graph(project_id)["nodes"] if n["readiness"] == "ready"]
+        ready = [n for n in self.get_graph(project_id)["nodes"] if n["readiness"] == "ready"]  # DAG only
         # Frontier is a selection surface, not a dump of every acceptance
         # document. Pull get_node only for the goal the driver chooses.
         summary = []

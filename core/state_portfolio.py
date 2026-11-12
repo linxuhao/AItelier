@@ -304,7 +304,7 @@ class StatePortfolio:
                           "WHERE a.project_id=p.project_id AND a.visibility='public')")
             rows = conn.execute("SELECT p.*,COUNT(n.node_key) AS node_count,"
                                 "COALESCE(SUM(n.status='VERIFIED'),0) AS verified_count "
-                                "FROM state_projects p LEFT JOIN state_nodes n ON n.project_id=p.project_id "
+                                "FROM state_projects p LEFT JOIN state_nodes n ON n.project_id=p.project_id AND n.issue_id IS NULL "
                                 f"WHERE {where} GROUP BY p.project_id ORDER BY p.project_id", tuple(params)).fetchall()
             result = []
             for row in rows:
@@ -342,7 +342,7 @@ class StatePortfolio:
                     "WHERE i.project_id=? AND i.status='open' GROUP BY l.node_key", (project_id,))})
                 issue_counts = {r["status"]: r["n"] for r in conn.execute(
                     "SELECT status,COUNT(*) AS n FROM state_issues WHERE project_id=? GROUP BY status", (project_id,))}
-            nodes = []
+            nodes, issue_work = [], []
             for n in view["nodes"]:
                 a = latest.get(n["node_key"])
                 entry = {k: n[k] for k in ("node_key", "revision", "contract_hash", "status", "priority", "dependencies", "blocked_by", "readiness", "next_action", "hold", "node_hold")}
@@ -355,12 +355,18 @@ class StatePortfolio:
                              latest_evidence=dict(evidence.get(a["attempt_id"], {})) if a else {},
                              open_issue_count=open_issues[n["node_key"]])
                 entry["claims"] = claims.get(n["node_key"], [])
-                nodes.append(entry)
+                # Issue work items are not DAG nodes: listed apart, never counted.
+                if n.get("issue_id"):
+                    issue_work.append({**entry, "issue_id": n["issue_id"]})
+                else:
+                    nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             # P4 §7.2: receipts marked self_reviewed under review_independence=advisory.
             from core.state_review_independence import self_reviewed_count
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
+                    "issue_work": [w for w in issue_work if w["status"] not in ("VERIFIED", "SUPERSEDED")],
+                    "issue_work_counts": dict(Counter(w["status"] for w in issue_work)),
                     "self_reviewed_receipts": self_reviewed_count(conn, project_id),
                     "counts": dict(Counter(n["status"] for n in nodes)),
                     "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),

@@ -205,6 +205,12 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
             for key, status in seeded.items():
                 conn.execute("UPDATE state_nodes SET status=? WHERE project_id='alpha' AND node_key=?", (status, key))
             conn.commit()
+        # An issue being fixed: its work item is listed apart, never as a DAG node.
+        issue = execute(service, "report_issue", {"project_id": "alpha", "request_key": "r1", "kind": "defect",
+            "title": "t", "body": "b", "director_identity": driver_id}, allow_write=True)
+        work = execute(service, "start_issue_work", {"project_id": "alpha", "issue_id": issue["issue_id"],
+            "expected_version": issue["version"], "director_identity": driver_id,
+            "acceptance": [{"id": "a", "kind": "test", "description": "fixture criterion"}]}, allow_write=True)
         execute(service, "write_driver_note_entry", {"project_id": "alpha", "assertion": "Project standing rule",
             "body": "Project body stays fetchable by address", "director_identity": driver_id}, allow_write=True)
         execute(service, "write_driver_note_entry", {"driver_id": driver_id, "assertion": "Private standing rule",
@@ -225,6 +231,7 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
             assert listed == {"n": "OPEN", "o-open": "OPEN", "c-cand": "CANDIDATE", "s-stale": "STALE", "x-old": "SUPERSEDED"}
             assert "v-done" not in json.dumps(body), "no VERIFIED node name may reach the snapshot"
             assert body["node_counts"] == {"VERIFIED": 1, "OPEN": 2, "CANDIDATE": 1, "STALE": 1, "SUPERSEDED": 1}
+            assert body["issue_work"] == [{"name": work["work_item"], "issue_id": issue["issue_id"], "status": "OPEN"}]
             assert body["nodes_omitted"]["VERIFIED"] == 1
             assert "1 VERIFIED node(s) omitted" in body["nodes_omitted"]["statement"]
             assert "live State" in body["nodes_omitted"]["statement"]

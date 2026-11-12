@@ -837,7 +837,9 @@ export class DriverRuntime {
       ...(this.snapshot.nodes_omitted ? { nodes_omitted: this.snapshot.nodes_omitted } : {}),
     };
     return JSON.stringify({ project_id: this.project, driver_id: this.driver,
-      nodes: this.snapshot.nodes, ...omission, project_note: this.snapshot.project_note,
+      nodes: this.snapshot.nodes, ...omission,
+      ...(this.snapshot.issue_work?.length ? { issue_work: this.snapshot.issue_work } : {}),
+      project_note: this.snapshot.project_note,
       private_note: this.snapshot.private_note, ...(this.todo?.length ? { todo: this.todo } : {}),
       ...(this.todoError ? { todo_error: this.todoError } : {}) });
   }

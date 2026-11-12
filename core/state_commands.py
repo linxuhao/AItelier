@@ -770,6 +770,15 @@ class ResolveIssue(IssueRef):
         "moot: the exact artifact or HEAD at which the subject object was measured absent."))
 
 
+class StartIssueWork(IssueRef):
+    """Give an OPEN issue a work item, so its fix is dispatched without adding a DAG node."""
+    expected_version: int = Field(ge=1)
+    acceptance: list[NewNodeCriterion] = Field(min_length=1, max_length=64, description=(
+        "1-64 explicit checks the fix is accepted against, exactly as add_nodes takes them."))
+    director_identity: str = Field(min_length=1, max_length=320)
+    priority: int = Field(default=0, ge=-100000, le=100000)
+
+
 class Attempt(Request):
     attempt_id: str
 
@@ -1226,6 +1235,7 @@ WRITE_REQUESTS = {
     "acknowledge_director_message": TransitionDirectorMessage,
     "resolve_director_message": TransitionDirectorMessage,
     "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
+    "start_issue_work": StartIssueWork,
     "claim_node": ClaimNode, "release_claim": ReleaseClaim, "heartbeat": Heartbeat,
     "set_claim_enforcement": SetClaimEnforcement,
     "set_review_independence": SetReviewIndependence,
@@ -1398,7 +1408,7 @@ def _handlers(service) -> dict:
         "resolve_director_message": service.director_messages.resolve_director_message,
         "report_issue": service.issues.report, "list_issues": service.issues.list,
         "get_issue": service.issues.get, "link_issue": service.issues.link,
-        "resolve_issue": service.issues.resolve,
+        "resolve_issue": service.issues.resolve, "start_issue_work": service.issues.start_work,
         "claim_node": service.claims.claim_node, "release_claim": service.claims.release_claim,
         "heartbeat": service.claims.heartbeat, "list_claims": service.claims.list_claims,
         "get_claim": service.claims.get_claim,

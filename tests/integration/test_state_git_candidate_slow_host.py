@@ -46,11 +46,13 @@ def slow_host(monkeypatch):
             step = next((name for name in MEASURED if name in argv), None)
             if timeout is not None and step is not None:
                 ran.append(step)
+                install.budgets.append((step, timeout))
                 if timeout < MEASURED[step] * factor:
                     raise subprocess.TimeoutExpired(argv, timeout)
             return result
         monkeypatch.setattr(subprocess, "run", run)
         return ran
+    install.budgets = []  # (step, the timeout it was given), in call order
     return install
 
 
@@ -116,9 +118,14 @@ def test_slow_report_is_accepted_and_resending_it_starts_no_second_normalization
     assert ran.count("pack-objects") == packs
 
     # The retained bundle then materializes for an exact-base start on the same host.
+    # That runs inside the deployment admission fence and the repository's lock,
+    # so none of its Git steps may wait longer than before.
+    del slow_host.budgets[:]
     review = service.start_external_attempt("durable", "review", 1, "fixture", "review", "review",
                                             base_sha=commit)
     assert review["attempt_id"]
+    assert {"fetch", "fsck"} <= {step for step, _ in slow_host.budgets}
+    assert {budget for _, budget in slow_host.budgets} == {120}
 
 
 def test_identical_reports_in_flight_share_one_normalization(tmp_path, monkeypatch):
@@ -170,6 +177,13 @@ def test_a_git_step_that_outlives_its_budget_is_ended_says_so_and_is_not_remembe
     assert log.read_text().splitlines().count(step) > 1
 
 
+@pytest.mark.parametrize("value", ["", "soon", "0", "-5", "inf", "1e300"])
+def test_a_budget_value_git_cannot_wait_for_falls_back_to_the_default(monkeypatch, value):
+    from core.state_git_artifacts import GIT_TIMEOUT_SEC, _git_timeout
+    monkeypatch.setenv("AITELIER_STATE_GIT_TIMEOUT_SEC", value)
+    assert _git_timeout() == GIT_TIMEOUT_SEC
+
+
 def test_guide_tells_callers_how_long_a_candidate_report_may_take_and_what_a_timeout_means():
     from core.state_git_artifacts import GIT_TIMEOUT_ENV, GIT_TIMEOUT_SEC
     line = next(line for line in STATE_DRIVER_GUIDE.splitlines()
@@ -177,6 +191,6 @@ def test_guide_tells_callers_how_long_a_candidate_report_may_take_and_what_a_tim
     # The numbers callers plan around are the ones the code uses.
     assert f"{GIT_TIMEOUT_SEC // 60} minutes" in line and GIT_TIMEOUT_ENV in line
     assert "does not cancel" in line and "idempotent=true" in line
-    assert "joins the normalization in flight" in line
+    assert "joins the normalization in flight" in line and "a resend reads both again" in line
     # Within the measured cost at the size bound, with room for a busy host.
     assert GIT_TIMEOUT_SEC >= 3 * MEASURED["pack-objects"] * BOUND_MIB / MEASURED_MIB

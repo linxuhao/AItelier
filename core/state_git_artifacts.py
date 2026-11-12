@@ -44,17 +44,19 @@ from core.state_report_integrity import _read_regular_nofollow
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
-# Wall-clock guard for ONE Git subprocess over a candidate in State's own
-# temporary repository. It ends a Git that hangs; it does not judge the
-# candidate, so it sits far above any real run.
+# Wall-clock guard for ONE Git subprocess while a candidate REPORT is imported
+# and normalized. It ends a Git that hangs; it does not judge the candidate, so
+# it sits far above any real run.
 # Measured 2026-11-12 (Git 2.47.3, a core to itself, a 116.8 MiB bundle carrying
 # 1.05 GB of blobs): the normalizing pack-objects needs 109 s of CPU, which at
 # the same cost per MiB is about 240 s for a bundle at MAX_BUNDLE_BYTES. The
 # former fixed 120 s refused that candidate whenever the host was 10% slower.
-# The fetch into a project's repository (materialization) is not under this
-# guard: it holds that repository's lock, and keeps its 120 s.
+# Materialization is not under this guard and keeps 120 s per step: it runs
+# inside the deployment admission fence and, for the fetch into the project's
+# repository, that repository's lock.
 GIT_TIMEOUT_SEC = 1800
 GIT_TIMEOUT_ENV = "AITELIER_STATE_GIT_TIMEOUT_SEC"
+MATERIALIZE_GIT_TIMEOUT_SEC = 120
 
 
 def _git_timeout():
@@ -62,14 +64,16 @@ def _git_timeout():
         seconds = float(os.environ.get(GIT_TIMEOUT_ENV, ""))
     except ValueError:
         return GIT_TIMEOUT_SEC
-    return seconds if seconds > 0 else GIT_TIMEOUT_SEC
+    # subprocess cannot wait for inf or 1e300; a value like that is no budget.
+    return seconds if 0 < seconds <= 86400 else GIT_TIMEOUT_SEC
 
 
-def _unavailable(what, exc):
+def _unavailable(what, exc, budget):
     """A Git step that could not run or outlived its budget says nothing about
-    the candidate; the refusal names the budget and what the caller does next."""
+    the candidate. For a candidate report (``budget`` given) the refusal names
+    the budget and what the caller does next."""
     detail = type(exc).__name__
-    if isinstance(exc, subprocess.TimeoutExpired):
+    if budget is not None and isinstance(exc, subprocess.TimeoutExpired):
         detail += (f" after {exc.timeout:g}s ({GIT_TIMEOUT_ENV}); the candidate was not judged, "
                    "retry the identical call")
     return StateConflict(f"Git artifact {what} unavailable: {detail}")
@@ -82,51 +86,52 @@ def _env():
     return env
 
 
-def _git(repo, *args):
+def _git(repo, *args, budget=None):
+    """``budget`` is the candidate-report guard in seconds; None is every other path."""
     try:
         result = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "-C", str(repo), *args],
-            capture_output=True, text=True, timeout=_git_timeout(), env=_env())
+            capture_output=True, text=True, timeout=budget or MATERIALIZE_GIT_TIMEOUT_SEC, env=_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _unavailable("validation", exc) from exc
+        raise _unavailable("validation", exc, budget) from exc
     if result.returncode:
         raise StateConflict("Git artifact validation failed: " + result.stderr[-1000:].strip())
     return result.stdout.strip()
 
 
-def _import_bundle(root, raw, commit, expected_tree=None):
+def _import_bundle(root, raw, commit, expected_tree=None, budget=None):
     """Import bytes into a fresh bare repo; Git proves completeness and identity."""
     if not raw or len(raw) > MAX_BUNDLE_BYTES:
         raise StateConflict(f"Git bundle must contain 1..{MAX_BUNDLE_BYTES >> 20} MiB of bytes")
     bundle, repo = root / "candidate.bundle", root / "repo.git"
     bundle.write_bytes(raw)
-    _git(root, "init", "--bare", str(repo))
-    _git(repo, "bundle", "verify", str(bundle))
-    _git(repo, "fetch", "--no-tags", str(bundle), commit)
-    actual = _git(repo, "rev-parse", "FETCH_HEAD^{commit}")
-    tree = _git(repo, "rev-parse", "FETCH_HEAD^{tree}")
+    _git(root, "init", "--bare", str(repo), budget=budget)
+    _git(repo, "bundle", "verify", str(bundle), budget=budget)
+    _git(repo, "fetch", "--no-tags", str(bundle), commit, budget=budget)
+    actual = _git(repo, "rev-parse", "FETCH_HEAD^{commit}", budget=budget)
+    tree = _git(repo, "rev-parse", "FETCH_HEAD^{tree}", budget=budget)
     if actual != commit or (expected_tree is not None and tree != expected_tree):
         raise StateConflict(f"expected commit/tree {commit}/{expected_tree}; actual {actual}/{tree}")
-    _git(repo, "fsck", "--strict", "--no-reflogs", commit)
+    _git(repo, "fsck", "--strict", "--no-reflogs", commit, budget=budget)
     return repo, bundle, tree
 
 
-def _assert_exact_closure(repo, commit):
+def _assert_exact_closure(repo, commit, budget=None):
     """The imported object universe must equal the candidate's reachable objects."""
     present = set(_git(repo, "cat-file", "--batch-all-objects",
-                       "--batch-check=%(objectname)").split())
+                       "--batch-check=%(objectname)", budget=budget).split())
     reachable = {line.split()[0] for line in
-                 _git(repo, "rev-list", "--objects", commit).splitlines() if line.strip()}
+                 _git(repo, "rev-list", "--objects", commit, budget=budget).splitlines() if line.strip()}
     if present != reachable:
         raise StateConflict("normalized Git bundle does not equal the candidate object closure")
 
 
-def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=False):
+def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=False, budget=None):
     """Git proves completeness in an empty repo before destination mutation."""
     with tempfile.TemporaryDirectory(prefix="state-git-artifact-") as directory:
-        repo, bundle, tree = _import_bundle(Path(directory), raw, commit, expected_tree)
+        repo, bundle, tree = _import_bundle(Path(directory), raw, commit, expected_tree, budget)
         if exact:
-            _assert_exact_closure(repo, commit)
+            _assert_exact_closure(repo, commit, budget)
         if destination is not None:
             ref = "refs/aitelier/artifacts/" + commit
             try:
@@ -148,7 +153,7 @@ def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=F
         return tree
 
 
-def _normalized_bundle(repo, root, commit):
+def _normalized_bundle(repo, root, commit, budget):
     """Write a candidate-only v2 bundle. A hand-built header plus a pack from
     ``pack-objects --revs`` of the single commit (no reuse of the producer's
     objects or deltas, one thread, pinned window/depth) keeps unrelated packed
@@ -163,9 +168,9 @@ def _normalized_bundle(repo, root, commit):
                  "--threads=1", "--window=10", "--depth=50", "--compression=6",
                  "--delta-base-offset", "-q"],
                 input=(commit + "\n").encode(), stdout=out, stderr=subprocess.PIPE,
-                timeout=_git_timeout(), env=_env())
+                timeout=budget, env=_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _unavailable("normalization", exc) from exc
+        raise _unavailable("normalization", exc, budget) from exc
     if result.returncode:
         raise StateConflict("Git artifact normalization failed: "
                             + result.stderr[-1000:].decode(errors="replace").strip())
@@ -255,13 +260,13 @@ def retain_candidate(report_bytes, commit):
 
 def _normalize_candidate(raw, input_sha, commit):
     with tempfile.TemporaryDirectory(prefix="state-git-candidate-") as directory:
-        root = Path(directory)
-        repo, _, tree = _import_bundle(root, raw, commit)
-        normalized = _normalized_bundle(repo, root, commit)
+        root, budget = Path(directory), _git_timeout()
+        repo, _, tree = _import_bundle(root, raw, commit, budget=budget)
+        normalized = _normalized_bundle(repo, root, commit, budget)
         if len(normalized) > MAX_BUNDLE_BYTES:
             raise StateConflict(f"normalized Git bundle exceeds {MAX_BUNDLE_BYTES >> 20} MiB")
         # Independent empty-repo proof of the normalized bytes before retention.
-        if _validated_bundle(normalized, commit, tree, exact=True) != tree:
+        if _validated_bundle(normalized, commit, tree, exact=True, budget=budget) != tree:
             raise StateConflict("normalized Git bundle changed the candidate tree")
         digest = hashlib.sha256(normalized).hexdigest()
     # The State DB BLOB is the only retained copy: no second bundle file is

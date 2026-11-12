@@ -375,7 +375,7 @@
        behind the question count was round 2's hole, and a walk that failed
        before finding anything is exactly when the reader needs to be told. -->
   {#if railList.length || railIncomplete}
-    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsHeading')}>
+    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsRail')}>
       {#if questions.length}
         <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
       {/if}

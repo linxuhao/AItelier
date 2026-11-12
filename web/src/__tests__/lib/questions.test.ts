@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { openQuestions, readConversationRows, QUESTIONS_MAX_PAGES, QUESTIONS_PAGE_LIMIT } from '../../lib/questions';
+import { openQuestions, railQuestions, readConversationRows, QUESTIONS_MAX_PAGES, QUESTIONS_PAGE_LIMIT } from '../../lib/questions';
 import type { DriverConversationEntry } from '../../lib/api';
 
 // The questions rail lists the OPEN questions: every `question` block that no
@@ -98,6 +98,80 @@ describe('the open-questions rail', () => {
 
   it('a message with no segments contributes nothing', () => {
     expect(openQuestions([driverMessage('m1', 1), driverMessage('m2', 2, { segments: null })])).toEqual([]);
+  });
+});
+
+// ── the rail keeps answered questions, marked as answered ───────────────────
+// `railQuestions` lists every id-bearing question, open or answered, so the
+// rail can show what the user answered. `openQuestions` is the same rule with
+// the answered ones taken out, and must not change.
+describe('the rail keeps answered questions', () => {
+  it('still returns a cited question, naming the citing message and its body text', () => {
+    const rows = [
+      driverMessage('m1', 1, { segments: [{ id: 'q1', kind: 'question', text: 'may I restart?' }] }),
+      userReply('r1', 2, { body: 'yes, after the sweep', answers: [{ message_id: 'm1', segment_id: 'q1' }] }),
+    ];
+    expect(railQuestions(rows)).toEqual([{
+      message_id: 'm1', subject: 'Subject m1', created_at: at(1),
+      text: 'may I restart?', segment_id: 'q1',
+      answered: { message_id: 'r1', created_at: at(2), text: 'yes, after the sweep' },
+    }]);
+  });
+
+  it('keeps an info block and a question with no id out of the rail, answered or not', () => {
+    const rows = [
+      driverMessage('m1', 1, { segments: [
+        { id: 'i1', kind: 'info', text: 'context' },
+        { kind: 'question', text: 'legacy' } as never,
+      ] }),
+      userReply('r1', 2, { answers: [{ message_id: 'm1', segment_id: 'i1' }] }),
+    ];
+    expect(railQuestions(rows)).toEqual([]);
+  });
+
+  it('orders unanswered oldest first, then answered by the answering row, most recent first', () => {
+    // Two open questions (asked at minutes 1 and 2), and two answered ones
+    // (asked at 3 and 4) whose answers arrive at minutes 5 and 3.
+    const rows = [
+      driverMessage('o1', 1, { segments: [{ id: 'qo1', kind: 'question', text: 'open m1' }] }),
+      driverMessage('o2', 2, { segments: [{ id: 'qo2', kind: 'question', text: 'open m2' }] }),
+      driverMessage('a3', 3, { segments: [{ id: 'qa3', kind: 'question', text: 'answered at 3' }] }),
+      driverMessage('a4', 4, { segments: [{ id: 'qa4', kind: 'question', text: 'answered at 5' }] }),
+      userReply('r3', 3, { answers: [{ message_id: 'a3', segment_id: 'qa3' }] }),
+      userReply('r5', 5, { answers: [{ message_id: 'a4', segment_id: 'qa4' }] }),
+    ];
+    expect(railQuestions(rows).map(q => q.text)).toEqual([
+      'open m1', 'open m2', 'answered at 5', 'answered at 3',
+    ]);
+    expect(railQuestions(rows).map(q => q.answered?.message_id ?? null)).toEqual([null, null, 'r5', 'r3']);
+  });
+
+  it('names the latest citing row when several rows cite the same question', () => {
+    const rows = [
+      driverMessage('m1', 1, { segments: [{ id: 'q1', kind: 'question', text: 'asked' }] }),
+      userReply('r2', 2, { body: 'first answer', answers: [{ message_id: 'm1', segment_id: 'q1' }] }),
+      userReply('r4', 4, { body: 'second answer', answers: [{ message_id: 'm1', segment_id: 'q1' }] }),
+    ];
+    const [question] = railQuestions(rows);
+    expect(question.answered).toEqual({ message_id: 'r4', created_at: at(4), text: 'second answer' });
+  });
+
+  it('openQuestions returns exactly the open ones, in thread order, with the same fields as before', () => {
+    const rows = [
+      driverMessage('m3', 3, { segments: [{ id: 'q3', kind: 'question', text: 'third' }] }),
+      driverMessage('m1', 1, { segments: [
+        { id: 'q1', kind: 'question', text: 'first' },
+        { id: 'i1', kind: 'info', text: 'context' },
+      ] }),
+      driverMessage('m2', 2, { segments: [{ id: 'q2', kind: 'question', text: 'second' }] }),
+      userReply('r1', 4, { answers: [{ message_id: 'm2', segment_id: 'q2' }] }),
+    ];
+    expect(openQuestions(rows)).toEqual([
+      { message_id: 'm1', subject: 'Subject m1', created_at: at(1), text: 'first', segment_id: 'q1' },
+      { message_id: 'm3', subject: 'Subject m3', created_at: at(3), text: 'third', segment_id: 'q3' },
+    ]);
+    // No `answered` key leaks into the open rule's items.
+    expect(openQuestions(rows).every(q => !('answered' in q))).toBe(true);
   });
 });
 

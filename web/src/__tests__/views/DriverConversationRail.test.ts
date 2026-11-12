@@ -145,7 +145,9 @@ describe('the questions box', () => {
     const body = view.container.querySelector('[data-questions-box] .questions-body') as HTMLElement;
     const style = getComputedStyle(body);
     expect(style.overflowY).toBe('auto');
-    expect(style.maxHeight).toBeTruthy();
+    // The bound itself, by value: the rule is `.questions-body{max-height:9rem}`.
+    // A bare truthiness check passed even with the bound removed (`none`).
+    expect(style.maxHeight).toBe('9rem');
     // The box's own rules, not the thread's: the thread keeps its own scroll.
     const threadStyle = getComputedStyle(view.container.querySelector('[data-conversation-thread]') as HTMLElement);
     expect(threadStyle.overflowY).toBe('auto');

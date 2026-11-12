@@ -210,6 +210,14 @@
     answering = question; replyTo = asked; sendError = '';
   }
   function cancelAnswer() { answering = null; replyTo = null; }
+  // The text a message shows in the thread, once. A body is the whole message;
+  // a message sent with an empty body but tagged segments shows its segment texts
+  // instead, so segmented text is never lost. No per-segment tags: one message,
+  // one piece.
+  function messageText(entry: DriverConversationEntry): string {
+    if (entry.body) return entry.body;
+    return (entry.segments ?? []).map((segment) => segment.text).filter((text) => text.trim()).join('\n');
+  }
 
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
@@ -346,11 +354,12 @@
           </header>
           {#if entry.reply_to_message_id}<p class="identity">{st('driverConversationReplyingTo')} #{entry.reply_to_message_id.slice(0, 8)}</p>{/if}
           <strong class="subject">{entry.subject}</strong>
-          <!-- The body is the whole message, rendered once. A message is not split
-               into info and question blocks: a split would scatter one message across
-               the thread, and the questions it asks live in the questions box below,
-               which later info messages cannot wash away. -->
-          {#if entry.body}<pre>{entry.body}</pre>{/if}
+          <!-- The message's text, rendered once: its body, or - when the body is
+               empty - its segment texts. A message is not split into info and
+               question blocks: a split would scatter one message across the thread,
+               and the questions it asks live in the questions box below, which later
+               info messages cannot wash away. -->
+          {#if messageText(entry)}<pre>{messageText(entry)}</pre>{/if}
         </article>
       {/each}
     {/if}

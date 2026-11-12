@@ -399,4 +399,33 @@ describe('tagged segments', () => {
     // And nothing in the whole thread is split into tagged blocks.
     expect(view.container.querySelector('[data-conversation-thread] .segments, [data-conversation-thread] .segment, [data-conversation-thread] .seg-tag, [data-conversation-thread] [data-kind]')).toBeNull();
   });
+
+  it('shows a segmented message with an empty body as its segment texts, once, in ONE <pre>', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('e1', 'driver', 'Empty body', '2026-11-03T12:00:00+00:00', {body: '',
+        segments: [{id: 's1', kind: 'info', text: 'Heads up.'},
+          {id: 's2', kind: 'question', text: 'may I restart the host now?'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+
+    const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Empty body') as HTMLElement;
+    expect(message).toBeTruthy();
+    // Both texts, joined by a newline, in exactly one <pre>: the body is empty, so
+    // the segments are the message, and each text appears once.
+    const pres = message.querySelectorAll('pre');
+    expect(pres).toHaveLength(1);
+    expect(pres[0].textContent).toBe('Heads up.\nmay I restart the host now?');
+    expect(message.textContent?.split('may I restart the host now?').length - 1).toBe(1);
+    expect(message.textContent?.split('Heads up.').length - 1).toBe(1);
+    // Still no split: no segment list, no tags, no kinded blocks.
+    expect(message.querySelector('.segments, .segment, .seg-tag, [data-kind]')).toBeNull();
+
+    // The question is listed in the questions box; the info text is not.
+    const box = view.container.querySelector('[data-questions-box]') as HTMLElement;
+    await waitFor(() => expect(box.querySelector('[data-question-segment-id="s2"]')).not.toBeNull());
+    expect(box.querySelector('[data-question-segment-id="s2"] .question-text')?.textContent).toBe('may I restart the host now?');
+    expect(box.textContent).not.toContain('Heads up.');
+  });
 });

@@ -54,16 +54,16 @@ def slow_host(monkeypatch):
     return install
 
 
-def slow_git(tmp_path, monkeypatch, seconds=0, hang=False):
-    """Put a ``git`` first on PATH whose pack-objects sleeps (or never returns)."""
-    bindir, log = tmp_path / "slow-bin", tmp_path / "pack-objects.log"
+def slow_git(tmp_path, monkeypatch, seconds=0, hang=False, step="pack-objects"):
+    """Put a ``git`` first on PATH whose ``step`` sleeps (or never returns)."""
+    bindir, log = tmp_path / "slow-bin", tmp_path / "slow-git.log"
     bindir.mkdir()
     wrapper = bindir / "git"
     wrapper.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
-        '  if [ "$arg" = pack-objects ]; then\n'
-        '    echo pack-objects >> "$SLOW_GIT_LOG"\n'
+        '  if [ "$arg" = "$SLOW_GIT_STEP" ]; then\n'
+        '    echo "$arg" >> "$SLOW_GIT_LOG"\n'
         '    [ "$SLOW_GIT_HANG" = 1 ] && exec sleep 600\n'
         '    sleep "$SLOW_GIT_SECONDS"\n'
         "  fi\n"
@@ -72,6 +72,7 @@ def slow_git(tmp_path, monkeypatch, seconds=0, hang=False):
     wrapper.chmod(0o755)
     monkeypatch.setenv("REAL_GIT", shutil.which("git"))
     monkeypatch.setenv("SLOW_GIT_LOG", str(log))
+    monkeypatch.setenv("SLOW_GIT_STEP", step)
     monkeypatch.setenv("SLOW_GIT_SECONDS", str(seconds))
     monkeypatch.setenv("SLOW_GIT_HANG", "1" if hang else "0")
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
@@ -143,21 +144,22 @@ def test_identical_reports_in_flight_share_one_normalization(tmp_path, monkeypat
     assert log.read_text().splitlines() == ["pack-objects"]
 
 
+@pytest.mark.parametrize("step, what", [("pack-objects", "normalization"), ("fetch", "validation")])
 def test_a_git_step_that_outlives_its_budget_is_ended_says_so_and_is_not_remembered(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, step, what):
     repo, commits = make_repo(tmp_path)
     bundle = broad_bundle(repo, tmp_path / "broad.bundle")
-    log = slow_git(tmp_path, monkeypatch, hang=True)
-    monkeypatch.setenv("AITELIER_STATE_GIT_TIMEOUT_SEC", "5")
+    log = slow_git(tmp_path, monkeypatch, hang=True, step=step)
+    monkeypatch.setenv("AITELIER_STATE_GIT_TIMEOUT_SEC", "10")
 
     started = time.monotonic()
     with pytest.raises(StateConflict) as refusal:
         retain_candidate(report_for(bundle), commits[-1])
     assert time.monotonic() - started < 120
     message = str(refusal.value)
-    assert message.startswith("Git artifact normalization unavailable: TimeoutExpired")
+    assert message.startswith(f"Git artifact {what} unavailable: TimeoutExpired")
     # The caller is told which budget ended it, that this is no verdict, and what to do.
-    assert "after 5s" in message and "AITELIER_STATE_GIT_TIMEOUT_SEC" in message
+    assert "after 10s" in message and "AITELIER_STATE_GIT_TIMEOUT_SEC" in message
     assert "the candidate was not judged" in message and "retry the identical call" in message
 
     # The refusal is about that run, not the candidate: the next report is judged afresh.
@@ -165,7 +167,7 @@ def test_a_git_step_that_outlives_its_budget_is_ended_says_so_and_is_not_remembe
     monkeypatch.delenv("AITELIER_STATE_GIT_TIMEOUT_SEC")
     artifact = retain_candidate(report_for(bundle), commits[-1])
     assert artifact["commit_sha"] == commits[-1]
-    assert log.read_text().splitlines() == ["pack-objects", "pack-objects"]
+    assert log.read_text().splitlines().count(step) > 1
 
 
 def test_guide_tells_callers_how_long_a_candidate_report_may_take_and_what_a_timeout_means():

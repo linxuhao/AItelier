@@ -44,12 +44,15 @@ from core.state_report_integrity import _read_regular_nofollow
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
-# Wall-clock guard for ONE Git subprocess over a candidate. It ends a Git that
-# hangs; it does not judge the candidate, so it sits far above any real run.
+# Wall-clock guard for ONE Git subprocess over a candidate in State's own
+# temporary repository. It ends a Git that hangs; it does not judge the
+# candidate, so it sits far above any real run.
 # Measured 2026-11-12 (Git 2.47.3, a core to itself, a 116.8 MiB bundle carrying
 # 1.05 GB of blobs): the normalizing pack-objects needs 109 s of CPU, which at
 # the same cost per MiB is about 240 s for a bundle at MAX_BUNDLE_BYTES. The
 # former fixed 120 s refused that candidate whenever the host was 10% slower.
+# The fetch into a project's repository (materialization) is not under this
+# guard: it holds that repository's lock, and keeps its 120 s.
 GIT_TIMEOUT_SEC = 1800
 GIT_TIMEOUT_ENV = "AITELIER_STATE_GIT_TIMEOUT_SEC"
 
@@ -135,7 +138,7 @@ def _validated_bundle(raw, commit, expected_tree=None, destination=None, exact=F
                         raise closed_git.GitRefused("bundle destination config rewrites transport URLs")
                     closed_git.transport(destination, "fetch", "--no-tags", "--no-recurse-submodules",
                         "--no-auto-gc", "--", str(bundle), commit + ":" + ref,
-                        profile=("file", ("protocol.file.allow=always",)), timeout=_git_timeout())
+                        profile=("file", ("protocol.file.allow=always",)), timeout=120)
                     actual = closed_git.out(destination, "rev-parse", ref + "^{commit}")
                     actual_tree = closed_git.out(destination, "rev-parse", ref + "^{tree}")
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:

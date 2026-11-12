@@ -3,6 +3,7 @@
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
     type DriverConversationEntry } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
+  import { openQuestions, type OpenQuestion } from '../lib/questions';
   import { st } from '../lib/stateI18n.svelte';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
     projectId: string; projectTitle?: string; driverId?: string;
@@ -21,6 +22,13 @@
   let nextCursor = $state<string | null>(null), hasMore = $state(false), endOfHistory = $state(false);
   let loading = $state(false), ready = $state(false), error = $state('');
   let replyTo = $state<DriverConversationEntry | null>(null);
+  // The question the composer is bound to, when the user chose the reply
+  // control on a rail item. One question per send: it closes exactly that one.
+  let answering = $state<OpenQuestion | null>(null);
+  // The rail: every question no later message has answered, oldest first. It
+  // is derived from the same rows the thread renders, so it can never disagree
+  // with what is on screen.
+  const questions = $derived(openQuestions(messages));
   let text = $state(''), sending = $state(false), sendError = $state('');
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
@@ -100,17 +108,30 @@
     const body = text.trim();
     if (!body || sending) return;
     sending = true; sendError = '';
-    const answering = replyTo;
+    const replying = replyTo;
+    // A rail reply closes exactly the question it is bound to. The cited message
+    // is never modified; the link lives on this reply's row.
+    const cited = answering ? [{message_id: answering.message_id, segment_id: answering.segment_id}] : null;
     try {
+      // `answers` is passed only when a question is bound, so an ordinary send is
+      // the same options object it always was.
       await sendDriverConversationMessage(projectId, body, {
-        replyToMessageId: answering?.message_id, targetDriverId: driverId || undefined});
-      text = ''; replyTo = null;
+        replyToMessageId: replying?.message_id, targetDriverId: driverId || undefined,
+        ...(cited ? {answers: cited} : {})});
+      text = ''; replyTo = null; answering = null;
       await loadNewest();
       await scrollToNewest();
     } catch (e) { sendError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
-  function reply(entry: DriverConversationEntry) { replyTo = entry; sendError = ''; }
+  function reply(entry: DriverConversationEntry) { replyTo = entry; answering = null; sendError = ''; }
+  // A rail item binds the composer to that one question, and the thread's reply
+  // target to the message that asked it, so the reply threads onto it too.
+  function answer(question: OpenQuestion) {
+    const asked = messages.find((m) => m.message_id === question.message_id) ?? null;
+    answering = question; replyTo = asked; sendError = '';
+  }
+  function cancelAnswer() { answering = null; replyTo = null; }
 
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
@@ -259,8 +280,33 @@
       {/each}
     {/if}
   </div>
+  <!-- The questions rail: a SIBLING of the thread's scroll box, never inside it,
+       so the thread scrolling never moves it, and with its own overflow-y.
+       It renders nothing when no question is open, so it takes no width or
+       height then. Info blocks never appear here; they stay in the thread. -->
+  {#if questions.length}
+    <aside class="questions-rail" data-questions-rail aria-label={st('driverQuestionsHeading')}>
+      <p class="questions-title">{st('driverQuestionsHeading')} ({questions.length})</p>
+      <ul class="questions-list">
+        {#each questions as question (question.message_id + ':' + question.segment_id)}
+          <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
+            <span class="question-subject">{question.subject}</span>
+            <span class="question-text">{question.text}</span>
+            <button class="outline" type="button"
+              data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
+              aria-label="{st('driverQuestionsReply')}: {question.text}"
+              onclick={() => answer(question)}>{st('driverQuestionsReply')}</button>
+          </li>
+        {/each}
+      </ul>
+    </aside>
+  {/if}
   <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>
-    {#if replyTo}
+    {#if answering}
+      <p class="identity" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}>
+        {st('driverQuestionsAnswering')} · {answering.text}
+        <button class="outline" type="button" onclick={cancelAnswer}>{st('driverConversationCancelReply')}</button></p>
+    {:else if replyTo}
       <p class="identity">{st('driverConversationReplyingTo')} · {replyTo.subject}
         <button class="outline" type="button" onclick={() => (replyTo = null)}>{st('driverConversationCancelReply')}</button></p>
     {/if}
@@ -286,6 +332,17 @@
   .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;
     padding:.25rem 0;border-top:1px solid var(--pico-muted-border-color,#ddd);}
   .conversation-thread{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding-right:.2rem;}
+  /* The questions rail: a sibling band between the thread and the composer. It
+     scrolls on its own (overflow-y:auto, capped height), so a long list of open
+     questions never moves the thread, and the thread never moves it. It is not
+     rendered when empty, so it costs no width or height then. */
+  .questions-rail{flex:0 1 auto;min-height:0;max-height:9rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;
+    margin:.25rem 0 0;padding:.25rem 0 0;border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  .questions-title{margin:0 0 .2rem;font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
+  .questions-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
+  .question-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .4rem;font-size:.8rem;line-height:1.35;}
+  .question-subject{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
+  .question-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;font-weight:600;}
   .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
   .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
     border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}

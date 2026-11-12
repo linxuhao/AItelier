@@ -1180,12 +1180,25 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     scope.tools.register(defineTool({ name: 'send_user_message',
       description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
       parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
-        body: { type: 'string', required: true }, node_key: { type: 'string' } },
+        body: { type: 'string', required: true }, node_key: { type: 'string' },
+        segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+          kind: { type: 'string', required: true }, text: { type: 'string', required: true } } } },
+        reply_to_message_id: { type: 'string' } },
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(args, exec) {
-        const { node_key, ...rest } = args;
+        const { node_key, segments, ...rest } = args;
+        // Tagged blocks: `info` or `question` only. A block of any other kind is
+        // refused here, not dropped, so the driver learns its tag did not reach
+        // the user. The State command validates the same vocabulary; this check
+        // keeps the refusal local and names the offending block.
+        if (segments !== undefined) {
+          if (!Array.isArray(segments) || segments.length > 20) return { refused: 'invalid_segments', reason: 'segments must be an array of at most 20 blocks' };
+          const bad = segments.findIndex(s => !s || typeof s !== 'object' || !['info', 'question'].includes(s.kind) || typeof s.text !== 'string' || !s.text.length);
+          if (bad !== -1) return { refused: 'invalid_segments', reason: `segments[${bad}].kind must be 'info' or 'question', with non-empty text` };
+        }
         const body = { ...rest, project_id: project };
         if (node_key) body.refs = { node_key };
+        if (segments !== undefined) body.segments = segments.map(({ kind, text }) => ({ kind, text }));
         const result = await request('/api/state/commands/send_user_message', body, exec.signal);
         // Never hand back a message identity that does not exist.
         if (result.error) throw new Error(result.error);

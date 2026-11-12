@@ -118,6 +118,10 @@ def conversation(project_id: str, limit: int = Query(default=30, ge=1, le=200),
     as the neighbouring driver routes, and persisted rows only - nothing here
     consults the driver's presence or runtime, so an offline driver's messages
     still read.
+
+    Each entry's `segments` carry their stable `id`, which a reply cites. A
+    message carries `answers` (its cited questions) only when it cites any; a
+    row written before answers existed has no `answers` key, never an empty one.
     """
     try:
         return execute(service, "list_user_conversation",

@@ -187,3 +187,45 @@ def test_the_dashboard_write_route_is_writer_only_and_lands_in_the_thread(world,
                              json={"project_id": "alpha", "message_id": message_id})
         assert marked.status_code == 200, marked.text
         assert marked.json()["advanced"] is True
+
+
+def test_the_route_returns_segment_ids_and_the_answers_a_reply_cites(world, monkeypatch):
+    """The rail's data: a question block's id, and the reply that closes it."""
+    asked = say_driver(world, request_key="ask-q", subject="Question", body="ok?",
+                       segments=[{"id": "q-restart", "kind": "question", "text": "may I restart?"},
+                                 {"kind": "info", "text": "coordinated"}])
+    answer = say_user(world, request_key="answer-q", answers=[
+        {"message_id": asked["message_id"], "segment_id": "q-restart"}])
+
+    with client(world, monkeypatch) as reader:
+        page = reader.get("/api/dsh-drivers/alpha/conversation").json()
+        by_id = {m["message_id"]: m for m in page["messages"]}
+        driver_row = by_id[asked["message_id"]]
+        assert driver_row["segments"][0] == {"id": "q-restart", "kind": "question", "text": "may I restart?"}
+        # The info block carries a server-assigned id too: a reply can name any block.
+        assert isinstance(driver_row["segments"][1]["id"], str) and driver_row["segments"][1]["id"]
+        assert "answers" not in driver_row
+        user_row = by_id[answer["message_id"]]
+        assert user_row["answers"] == [{"message_id": asked["message_id"], "segment_id": "q-restart"}]
+
+
+def test_a_refused_citation_is_a_422_and_stores_nothing_over_http(world, monkeypatch):
+    """Through the real command route the SPA posts to: a bad citation is refused
+    with a 422 and writes nothing, so no half-answered reply reaches the thread."""
+    from api import authz as auth
+    monkeypatch.setattr(auth, "gate_enabled", lambda: True)
+    monkeypatch.setattr(auth, "WRITERS", set())
+    monkeypatch.setattr(auth, "ADMIN_TOKEN", "off-tunnel-admin-token")
+    monkeypatch.setattr(auth.cf_access, "email_from_request_headers", lambda *_: None)
+    asked = say_driver(world, request_key="ask-r", subject="Question", body="ok?",
+                       segments=[{"id": "i1", "kind": "info", "text": "context"}])
+    app = _state_app(world)
+    app.state._test_mode = True
+    body = {"request_key": "bad-cite", "project_id": "alpha", "body": "x",
+            "answers": [{"message_id": asked["message_id"], "segment_id": "i1"}]}
+    with TestClient(app) as writer:
+        refused = writer.post("/api/state/commands/send_user_conversation_message", json=body)
+        assert refused.status_code == 422, refused.text
+    page = execute(world["user"], "list_user_conversation", {"project_id": "alpha", "limit": 50})
+    assert [m["message_id"] for m in page["messages"]] == [asked["message_id"]]
+    assert all("answers" not in m for m in page["messages"])

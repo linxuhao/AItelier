@@ -327,10 +327,26 @@ class MessageSegment(BaseModel):
     The tag exists so the user can see, without opening the message, that some of
     it is a QUESTION they owe an answer to. It is presentation only: a `question`
     segment asks; it does not become a checkpoint and grants nothing.
+
+    `id` names the block so a reply can cite exactly the question it answers. A
+    caller may supply one; when it does not, the service assigns a stable one.
+    Its shape is checked by `DriverInbox._segments`, the single refusal path.
     """
 
     kind: Literal["info", "question"]
     text: str = Field(min_length=1, max_length=2000)
+    id: str | None = Field(default=None, description=(
+        "Optional stable id for this block (1-64 of A-Z a-z 0-9 . _ : -), so a reply can "
+        "cite it. Assigned by the service when omitted."))
+
+
+class MessageAnswerRef(BaseModel):
+    """One question a reply answers: the message that asked, and the block in it."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    message_id: str = Field(min_length=1, max_length=200)
+    segment_id: str = Field(min_length=1, max_length=64)
 
 
 class SendUserMessage(Project):
@@ -378,6 +394,12 @@ class SendUserConversationMessage(Project):
     target_driver_id: str | None = Field(default=None, max_length=200, description=(
         "Who to address. Defaulted from the replied-to message's sender, or to this "
         "project's member drivers when this is not a reply."))
+    answers: list[MessageAnswerRef] = Field(default_factory=list, max_length=20, description=(
+        "Optional: the question blocks this reply answers, each as {message_id, segment_id} "
+        "naming a `question` block of a driver message in this project. Each named question "
+        "is closed for the user's rail; the answered message itself is not changed. A ref to "
+        "anything else (another project, a missing block, an info block) or a repeated ref "
+        "refuses the whole reply."))
 
 
 class ListUserConversation(Project):

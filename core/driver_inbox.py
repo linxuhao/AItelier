@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import time
 from uuid import uuid4
 from core.drivers import recipient_presence_block, touch_driver
@@ -43,6 +44,8 @@ SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff
 # `channel='user'`. `audience`/`channel` are additive columns, so a row written
 # before either existed still reads back through its own half.
 CONVERSATION = "(audience='user' OR channel='user')"
+# A segment id is a short token a reply can cite: letters, digits, and . _ : -.
+_SEGMENT_ID = re.compile(r"[A-Za-z0-9._:-]+")
 
 
 def encode_conversation_cursor(created_at, message_id):
@@ -89,6 +92,9 @@ class DriverInbox:
                 # Additive (tagged segments). NULL means the message was written
                 # as one body, which is what every row before this column was.
                 add_column_if_missing(conn, "driver_inbox_messages", "segments_json", "TEXT")
+                # Additive (the questions a reply answers). NULL means the reply
+                # cites none, which is every row written before this column.
+                add_column_if_missing(conn, "driver_inbox_messages", "answers_json", "TEXT")
                 conn.commit()
 
     @staticmethod
@@ -98,27 +104,102 @@ class DriverInbox:
         Bounded on purpose: this is a glanceable summary, not a second body. The
         kind is closed to info/question so a later tag cannot appear in stored
         rows without someone deciding what it means to the reader.
+
+        Each block carries a stable id, so a reply can cite the exact question
+        it answers. A caller-supplied id is kept; a block without one gets a
+        fresh 12-hex id. A duplicate id inside one message is refused, because a
+        citation would then name two blocks at once. Nothing is stored on refusal.
+
+        Returns `(sent, stored)`: `sent` is what the caller wrote (blocks without
+        an id stay without one, so an idempotent replay compares equal) and
+        `stored` is what the row keeps, with every id filled in.
         """
         if segments is None:
-            return []
+            return [], []
         if not isinstance(segments, list) or len(segments) > 20:
             raise StateGraphError("invalid_segments")
-        normalised, total = [], 0
+        sent, stored, total, seen = [], [], 0, set()
         for item in segments:
             # The write surface may hand these over either as plain dicts or as
-            # the validated model; both are the same three fields.
+            # the validated model; both are the same fields.
             if hasattr(item, "model_dump"):
                 item = item.model_dump()
             if not isinstance(item, dict):
                 raise StateGraphError("invalid_segments")
-            kind, text = item.get("kind"), item.get("text")
+            kind, text, sid = item.get("kind"), item.get("text"), item.get("id")
             if kind not in ("info", "question") or type(text) is not str or not 1 <= len(text) <= 2000:
                 raise StateGraphError("invalid_segments")
+            if sid is not None and (type(sid) is not str or not 1 <= len(sid) <= 64
+                                    or not _SEGMENT_ID.fullmatch(sid)):
+                raise StateGraphError("invalid_segments")
             total += len(text)
-            normalised.append({"kind": kind, "text": text})
+            sent.append({"kind": kind, "text": text, **({} if sid is None else {"id": sid})})
+            stored.append({"id": sid if sid is not None else uuid4().hex[:12], "kind": kind, "text": text})
         if total > 8000:
             raise StateGraphError("invalid_segments")
+        # Checked after ids are filled in, so a generated id can never collide
+        # with a caller id and a duplicate caller id is refused as well.
+        for block in stored:
+            if block["id"] in seen:
+                raise StateGraphError("invalid_segments")
+            seen.add(block["id"])
+        return sent, stored
+
+    @staticmethod
+    def _answers(answers):
+        """Normalise the questions a reply cites, or refuse the whole reply.
+
+        Shape only here; whether each ref names a real question in this project
+        is checked against the rows by `_resolve_answers`, on the write's own
+        connection, so a refusal can never leave a half-written reply behind.
+        """
+        if answers is None:
+            return []
+        if not isinstance(answers, list) or len(answers) > 20:
+            raise StateGraphError("invalid_answers")
+        normalised = []
+        for item in answers:
+            if hasattr(item, "model_dump"):
+                item = item.model_dump()
+            if not isinstance(item, dict):
+                raise StateGraphError("invalid_answers")
+            mid, sid = item.get("message_id"), item.get("segment_id")
+            if (type(mid) is not str or not 1 <= len(mid) <= 200
+                    or type(sid) is not str or not 1 <= len(sid) <= 64):
+                raise StateGraphError("invalid_answers")
+            normalised.append({"message_id": mid, "segment_id": sid})
         return normalised
+
+    @staticmethod
+    def _resolve_answers(conn, project_id, answers):
+        """Check every cited question against the rows, and return the stored refs.
+
+        Refuses with a typed error and writes nothing if a ref names a message
+        outside this project's conversation, a segment that does not exist in
+        that message, a segment whose kind is not `question`, or the same ref
+        twice. Only a DRIVER message carries segments (the driver writes them
+        with `send_user_message`, so its row is `audience='user'`), which is why
+        the cited row must be the driver half of the conversation.
+        """
+        seen = set()
+        for ref in answers:
+            key = (ref["message_id"], ref["segment_id"])
+            if key in seen:
+                raise StateGraphError("invalid_answers: the same question is cited twice")
+            seen.add(key)
+            row = conn.execute(
+                "SELECT segments_json FROM driver_inbox_messages "
+                f"WHERE message_id=? AND project_id=? AND {CONVERSATION} AND audience='user'",
+                (ref["message_id"], project_id)).fetchone()
+            if row is None:
+                raise StateGraphError("unknown_answer_message: answers must name a driver message in this project's conversation")
+            segments = json.loads(row["segments_json"]) if row["segments_json"] else []
+            match = next((s for s in segments if s.get("id") == ref["segment_id"]), None)
+            if match is None:
+                raise StateGraphError("unknown_answer_segment: answers must name a segment that the message carries")
+            if match.get("kind") != "question":
+                raise StateGraphError("answer_not_a_question: answers may only cite a question segment")
+        return answers
 
     def _authorize(self, driver_id, *, write=False, break_glass_reason=None):
         if not self.store.project_read_trusted:
@@ -327,14 +408,18 @@ class DriverInbox:
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs")
-        segments = self._segments(segments)
-        # The reply link is appended only when it is set, so the payload of every
-        # request written before it existed still replays byte-identically.
+        # `sent` is what the caller wrote (a block may carry no id); `segments`
+        # is what gets stored, with every block id filled in. The replay
+        # comparison uses `sent`, so a generated id never makes a replay look
+        # like a different request. Segments and the reply link are appended only
+        # when they are set, so every request written before either existed
+        # replays byte-identically.
+        sent, segments = self._segments(segments)
         payload = [subject, body, project_id, refs, self.driver_id]
         if reply_to_message_id is not None:
             payload.append(reply_to_message_id)
-        if segments:
-            payload.append(segments)
+        if sent:
+            payload.append(sent)
         payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user", request_key, payload)
@@ -364,7 +449,7 @@ class DriverInbox:
                                  "sender_driver_id": self.driver_id, "created_at": created})
 
     def send_user_conversation_message(self, request_key, project_id, body, subject=None,
-                                       reply_to_message_id=None, target_driver_id=None):
+                                       reply_to_message_id=None, target_driver_id=None, answers=None):
         """Record one message from the project's USER to its driver.
 
         The mirror of `send_user_message`, and equally PRESENTATION: this writes
@@ -379,6 +464,13 @@ class DriverInbox:
         recipient (whoever wrote the message being answered) unless a target is
         named explicitly.
 
+        `answers` names the driver's question blocks this reply answers, each as
+        {message_id, segment_id}. Every ref is checked against the rows in this
+        project's conversation before anything is written: a ref to another
+        project, a missing block, a block that is not a question, or a repeated
+        ref refuses the whole reply with nothing stored. The cited messages are
+        not modified; the link lives on this reply's row.
+
         Idempotent per (actor, request_key), like every write here.
         """
         if type(request_key) is not str or not request_key or len(request_key) > 320:
@@ -389,13 +481,20 @@ class DriverInbox:
             raise StateGraphError("invalid_request")
         if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
             raise StateGraphError("user_identity_required")
-        payload = json.dumps([subject, body, project_id, reply_to_message_id, target_driver_id],
-                             sort_keys=True)
+        answers = self._answers(answers)
+        # The answers are appended only when there are some, so the payload of
+        # every request written before they existed still replays byte-identically.
+        payload = [subject, body, project_id, reply_to_message_id, target_driver_id]
+        if answers:
+            payload.append(answers)
+        payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user_conversation", request_key, payload)
             if replay is not None:
                 return replay
             self.store._project(conn, project_id)
+            if answers:
+                self._resolve_answers(conn, project_id, answers)
             parent = None
             if reply_to_message_id is not None:
                 parent = self._conversation_message(conn, project_id, reply_to_message_id)
@@ -417,10 +516,11 @@ class DriverInbox:
                 self._driver(conn, target)
             mid, created = str(uuid4()), now()
             conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
-                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel) "
-                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel,"
+                         "answers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
-                          "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user"))
+                          "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user",
+                          json.dumps(answers) if answers else None))
             deliveries = []
             for target in targets:
                 seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries "
@@ -465,7 +565,7 @@ class DriverInbox:
             self.store._project(conn, project_id)
             rows = [dict(r) for r in conn.execute(
                 "SELECT message_id,thread_id,sender_driver_id,project_id,subject,body,refs_json,"
-                "reply_to_message_id,created_at,audience,segments_json FROM driver_inbox_messages "
+                "reply_to_message_id,created_at,audience,segments_json,answers_json FROM driver_inbox_messages "
                 f"WHERE project_id=? AND {CONVERSATION} {bound} "
                 "ORDER BY created_at DESC, message_id DESC LIMIT ?", (*params, limit + 1))]
             total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
@@ -487,6 +587,9 @@ class DriverInbox:
                 "refs": json.loads(row["refs_json"]),
                 "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
                 "reply_to_message_id": row["reply_to_message_id"],
+                # Present only when the reply cites a question; a row written
+                # before answers existed has no key, never an empty list.
+                **({"answers": json.loads(row["answers_json"])} if row["answers_json"] else {}),
                 "created_at": row["created_at"]})
         next_cursor = (encode_conversation_cursor(page[-1]["created_at"], page[-1]["message_id"])
                        if more else None)

@@ -755,6 +755,15 @@ export interface DriverUserMessages {
 export function dshDriverMessages(projectId: string, limit = 50): Promise<DriverUserMessages> {
   return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/messages?limit=' + limit);
 }
+/** One tagged block. `id` is set on every block written after segment ids
+ *  existed; a block written before that has none, and a reply cannot cite it. */
+export interface DriverConversationSegment {
+  id?: string; kind: 'info' | 'question'; text: string;
+}
+/** One question a reply answers: the driver message and the block in it. */
+export interface DriverConversationAnswerRef {
+  message_id: string; segment_id: string;
+}
 export interface DriverConversationEntry {
   message_id: string; thread_id: string; project_id: string;
   sender_kind: 'driver' | 'user'; sender_driver_id: string | null;
@@ -762,7 +771,9 @@ export interface DriverConversationEntry {
   reply_to_message_id: string | null; created_at: string;
   /** Tagged blocks, when the sender wrote any. A `question` block is one the
    *  reader owes an answer to; it is presentation, never a checkpoint. */
-  segments?: {kind: 'info' | 'question'; text: string}[] | null;
+  segments?: DriverConversationSegment[] | null;
+  /** The questions this reply answers. Absent (not empty) when it answers none. */
+  answers?: DriverConversationAnswerRef[];
 }
 export interface DriverConversation {
   project_id: string; messages: DriverConversationEntry[]; has_more: boolean;
@@ -787,10 +798,14 @@ export function dshDriverConversationUnread(projectId?: string): Promise<DriverC
 /** The user's half of the conversation: one durable row plus the driver's inbox
  *  delivery. `replyToMessageId` is stored on the row; the driver may be offline. */
 export function sendDriverConversationMessage(projectId: string, body: string,
-  options: {replyToMessageId?: string | null; targetDriverId?: string | null} = {}): Promise<unknown> {
+  options: {replyToMessageId?: string | null; targetDriverId?: string | null;
+    answers?: DriverConversationAnswerRef[] | null} = {}): Promise<unknown> {
   const args: Record<string, unknown> = {request_key: crypto.randomUUID(), project_id: projectId, body};
   if (options.replyToMessageId) args.reply_to_message_id = options.replyToMessageId;
   if (options.targetDriverId) args.target_driver_id = options.targetDriverId;
+  // Sent only when there is a question to close, so an ordinary reply is the
+  // same request it always was.
+  if (options.answers?.length) args.answers = options.answers;
   return _post('/api/state/commands/send_user_conversation_message', args);
 }
 /** Advance the persisted read marker to a message the user was actually shown. */

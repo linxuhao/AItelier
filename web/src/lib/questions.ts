@@ -29,12 +29,19 @@ export interface OpenQuestion {
   segment_id: string;
 }
 
-/** Every question block no later message cites, oldest first.
+/** Every question block that carries a segment id and that no later message
+ *  cites, oldest first.
  *
- *  A citation names one (message_id, segment_id) pair, so it closes exactly
- *  that question: the other questions of the same message stay open. A reply
- *  that only sets `reply_to_message_id` cites nothing and closes nothing.
- *  Non-question segments are never listed.
+ *  The id is required, not a detail: a citation names one
+ *  (message_id, segment_id) pair, so it closes exactly that question and the
+ *  other questions of the same message stay open. A question block written
+ *  BEFORE segment ids existed therefore cannot be listed or answered here - it
+ *  has nothing to cite - and this function skips it rather than offering a
+ *  reply control that could never name it. (Such rows do not exist in this
+ *  deployment: every stored conversation row with segments was written after
+ *  ids shipped, measured 0 rows on 2026-11-12.)
+ *  A reply that only sets `reply_to_message_id` cites nothing and closes
+ *  nothing. Non-question segments are never listed.
  *
  *  Input is the conversation rows as the API returns them (newest-first or
  *  otherwise); the output order is the thread's own `(created_at, message_id)`

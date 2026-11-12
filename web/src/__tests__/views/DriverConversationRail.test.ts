@@ -221,4 +221,53 @@ describe('the rail reads the whole conversation, not the thread page', () => {
     // The questions it did read are still listed: an incomplete list is not an empty one.
     expect(view.container.querySelectorAll('[data-question-segment-id]').length).toBeGreaterThan(0);
   });
+
+  it('warns that older questions may be missing even when the short list holds no question at all', async () => {
+    // Round 2's hole: the warning lived inside `{#if questions.length}`, so a
+    // walk that failed before finding ANY question drew nothing - the reader saw
+    // no rail, no warning, and an older question stayed invisible and unsignalled.
+    const infos = Array.from({length: 40}, (_, i) => driverMsg('i' + i, 'Info ' + i, at(i + 1),
+      {segments: [{id: 'i' + i, kind: 'info', text: 'nothing to report ' + i}]}));
+    const newestFirst = [...infos].reverse();
+    api.dshDriverConversation.mockImplementation(async (_project: string, cursor?: string | null, limit = 30) => {
+      const start = cursor ? newestFirst.findIndex(row => row.message_id === cursor) + 1 : 0;
+      if (start > 0) throw new Error('the walk died on the second page');
+      const slice = newestFirst.slice(start, start + limit);
+      const more = start + slice.length < newestFirst.length;
+      return {...page(slice), has_more: more, next_cursor: more ? slice[slice.length - 1].message_id : null,
+        end_of_history: !more};
+    });
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-questions-incomplete]')).not.toBeNull());
+    const note = view.container.querySelector('[data-questions-incomplete]') as HTMLElement;
+    expect(note.textContent).toContain('Older questions may be missing');
+    // No question was read, so the rail is warning only - and it still says so.
+    expect(view.container.querySelectorAll('[data-question-segment-id]')).toHaveLength(0);
+    expect(view.container.querySelectorAll('[data-answer-message-id]')).toHaveLength(0);
+  });
+
+  it('walks again after a failed walk, so one transient error does not hide the question for the life of the pane', async () => {
+    const {asked, newestFirst} = washedAwayConversation();
+    let walkFailures = 1;
+    api.dshDriverConversation.mockImplementation(async (_project: string, cursor?: string | null, limit = 30) => {
+      const start = cursor ? newestFirst.findIndex(row => row.message_id === cursor) + 1 : 0;
+      if (start > 0 && walkFailures > 0) { walkFailures -= 1; throw new Error('transient'); }
+      const slice = newestFirst.slice(start, start + limit);
+      const more = start + slice.length < newestFirst.length;
+      return {...page(slice), has_more: more, next_cursor: more ? slice[slice.length - 1].message_id : null,
+        end_of_history: !more};
+    });
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    // The first walk died before reaching the oldest row, so the question the
+    // conversation starts with is missing and the rail says the list is short.
+    await waitFor(() => expect(view.container.querySelector('[data-questions-incomplete]')).not.toBeNull());
+    expect(view.container.querySelectorAll('[data-question-segment-id]')).toHaveLength(0);
+    // A poll that succeeds is the retry: the seed was released by the failure.
+    document.dispatchEvent(new Event('visibilitychange'));
+    await waitFor(() => expect(view.container.querySelectorAll('[data-question-segment-id]')).toHaveLength(1));
+    expect((view.container.querySelector('[data-question-segment-id]') as HTMLElement)
+      .getAttribute('data-question-message-id')).toBe(asked.message_id);
+    // And the warning is withdrawn, because this walk reached the end.
+    expect(view.container.querySelector('[data-questions-incomplete]')).toBeNull();
+  });
 });

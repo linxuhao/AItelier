@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { openaiMessages, installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 
 test('host bridge preserves tools, tool results, reasoning, session identity and usage', async () => {
@@ -274,4 +275,29 @@ test('a 300 ms budget stops the attempts within a second of wall clock', async (
     assert.ok(elapsed < 1000, `gave up after ${elapsed}ms`);
     assert.ok(server.hits.count >= 1);
   } finally { await server.close(); }
+});
+
+test('the documented retry budget is the code default, read out of docs/dsh-driver.md', () => {
+  // A number typed into this file twice proves nothing: an edit that changed
+  // only the doc would stay green. The row is the document's own claim, so it
+  // is read from there and compared with the helper's built-in default.
+  const doc = readFileSync(new URL('../../docs/dsh-driver.md', import.meta.url), 'utf8');
+  const rows = doc.split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('|') && line.endsWith('|'))
+    .map(line => line.slice(1, -1).split('|').map(cell => cell.trim()))
+    .filter(cells => cells.length >= 3 && cells[0].replace(/`/g, '') === 'AITELIER_DSH_MODEL_RETRY_SEC');
+  assert.equal(rows.length, 1, 'exactly one documented row names the retry budget');
+  const documented = /default\s+(\d+(?:\.\d+)?)/.exec(rows[0][2]);
+  assert.ok(documented, `the row states a default: ${rows[0][2]}`);
+  const saved = process.env.AITELIER_DSH_MODEL_RETRY_SEC;
+  try {
+    delete process.env.AITELIER_DSH_MODEL_RETRY_SEC;
+    assert.equal(modelRetryBudgetMs(undefined), Number(documented[1]) * 1000,
+      'the code default is the documented one');
+    assert.equal(modelRetryBudgetMs('0'), 0, 'the same row says 0 disables the retry');
+  } finally {
+    if (saved === undefined) delete process.env.AITELIER_DSH_MODEL_RETRY_SEC;
+    else process.env.AITELIER_DSH_MODEL_RETRY_SEC = saved;
+  }
 });

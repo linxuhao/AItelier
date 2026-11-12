@@ -526,9 +526,6 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "JSON schema for structured state output validation",
     ("core/state_attempt_schema.py", "OWNERS_TABLE"):
         "table-name templated SQL DDL for the external attempt owners table",
-    ("core/state_changes.py", "current"):
-        "SQL predicate fragment spliced into an attempt query, never rendered "
-        "as prose",
     ("core/state_design.py", "SCHEMA"):
         "SQL DDL schema for the design tables",
     ("core/state_driver_index.py", "ENTRY_SCHEMA"):
@@ -552,8 +549,6 @@ PROSE_CONSTANT_EXEMPTIONS = {
     # Executable plumbing, never rendered into a prompt.
     ("core/repository_executor.py", "PREP_SCRIPT"):
         "shell script run out of process to prepare the bare snapshot repo",
-    ("core/tool_guards.py", "probe"):
-        "function-local out-of-process importability probe script",
 }
 
 
@@ -867,13 +862,40 @@ def _core_module_paths(root=REPO_ROOT):
     return sorted((root / "core").glob("*.py"))
 
 
+_FUNCTION_BODIES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _declaration_scope(tree):
+    """Every node of `tree` outside a function (or lambda) body.
+
+    A constant is a name DECLARED at module or class scope: `SYSTEM_PROMPT`
+    bound in the module body and `ROLE_PROMPT` bound in a class body are both
+    readable as a module attribute. A name bound inside a function body is that
+    call's local variable — `goal = (f"Fix issue ...")` in an issue-work-item
+    builder is built per call and handed to the store, never declared — so a
+    scanner that walks the whole module AST reports function-local prose as a
+    constant no module exports.
+    """
+    stack = list(ast.iter_child_nodes(tree))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _FUNCTION_BODIES):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _prose_constants(root=REPO_ROOT):
-    """{(module path, constant name): text} for every prose-sized constant."""
+    """{(module path, constant name): text} for every prose-sized constant.
+
+    Scanned in `_declaration_scope`, so only names bound in a module body or a
+    class body count.
+    """
     found = {}
     for py in _core_module_paths(root):
         rel = f"core/{py.name}"
         tree = ast.parse(py.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        for node in _declaration_scope(tree):
             if not isinstance(node, (ast.Assign, ast.AnnAssign)):
                 continue
             targets = (node.targets if isinstance(node, ast.Assign)
@@ -915,6 +937,42 @@ def _unaccounted_prose_constants(root=REPO_ROOT):
     return missing
 
 
+def test_a_constant_is_a_name_bound_outside_a_function_body(tmp_path):
+    """A function-local f-string is not a constant; a module or class one is.
+
+    Both directions, on one synthetic module: `SYSTEM_PROMPT` at module scope
+    and `Reviewer.ROLE_PROMPT` in a class body are declared constants and are
+    still reported (and still unaccounted, naming the module), while the
+    function-local f-string `goal` is a per-call variable and is not. A
+    scanner that walked the whole module AST reported all three, which made
+    `core/state_issues.py`'s work-item `goal` red as if a new module had
+    declared a prompt of its own.
+    """
+    long_line = ("The reviewer reads the diff carefully and reports every "
+                 "defect it finds, citing a file and a line for each one.\n")
+    source = (
+        'SYSTEM_PROMPT = """You are the reviewer.\n' + long_line * 2
+        + '"""\n\n\n'
+        'class Reviewer:\n'
+        '    ROLE_PROMPT = """You are the reviewer.\n' + long_line * 2
+        + '"""\n\n\n'
+        'def build_goal(issue_id):\n'
+        '    goal = f"""Fix issue {issue_id}.\n' + long_line * 2
+        + '"""\n    return goal\n')
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "zz_scope_probe.py").write_text(source,
+                                                         encoding="utf-8")
+    rel = "core/zz_scope_probe.py"
+    found = _prose_constants(tmp_path)
+    assert (rel, "SYSTEM_PROMPT") in found, sorted(found)
+    assert (rel, "ROLE_PROMPT") in found, sorted(found)
+    assert (rel, "goal") not in found, sorted(found)
+    missing = _unaccounted_prose_constants(tmp_path)
+    assert f"{rel}:SYSTEM_PROMPT" in missing, missing
+    assert f"{rel}:ROLE_PROMPT" in missing, missing
+    assert not [item for item in missing if item.endswith(":goal")], missing
+
+
 def test_every_prose_constant_in_core_is_accounted_for():
     """Code prose constants are covered, or named in ONE exemption table.
 
@@ -924,6 +982,10 @@ def test_every_prose_constant_in_core_is_accounted_for():
     as (module path, name) with a reason it never reaches an agent prompt. A
     constant in a module the table has never heard of — including one written
     as an f-string — goes red here and names its module.
+
+    "Constant" means a name bound in a module body or a class body; a name
+    bound inside a function body is that call's local variable (see
+    test_a_constant_is_a_name_bound_outside_a_function_body).
     """
     missing = _unaccounted_prose_constants()
     assert not missing, (

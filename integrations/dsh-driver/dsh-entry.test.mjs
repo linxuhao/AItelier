@@ -217,7 +217,11 @@ test('implicit wrong-version candidates alone are refused with their details', a
   const root = await makePinRoot(PINNED);
   const wrong = await makeInstall(root, '0.2.0');
   const emptyHome = await mkdtemp(join(tmpdir(), 'dsh-entry-home-'));
-  const resolution = await resolveDshEntry({ env: { AITELIER_DSH_HOME: emptyHome }, home: emptyHome, root });
+  // The premise is `alone`: a system root that holds the pinned version (the
+  // image's /opt/aitelier-dsh, or a host install) is MEASURED, and then the
+  // fixture's 0.2.0 is no longer the only candidate - so the system roots are
+  // switched off here exactly as the sibling test below already does.
+  const resolution = await resolveDshEntry({ env: { AITELIER_DSH_HOME: emptyHome }, home: emptyHome, root, systemRoots: false });
   assert.equal(resolution.status, 'refused');
   assert.equal(resolution.entry, null);
   assert.match(resolution.reason, /0\.2\.0/);

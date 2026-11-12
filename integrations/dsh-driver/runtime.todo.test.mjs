@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1015,7 +1016,13 @@ test('CLI results: a refusal is returned with the brief, a missing brief is fill
 
 test('CLI bounds: done/finish get the plan budget plus a minute; a timeout or abort stops the process group (SIGTERM, then SIGKILL)', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-todo-bound-'));
-  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  // kill(pid, 0) alone reads an unreaped zombie as alive: a SIGKILLed grandchild whose
+  // parent has exited stays `Z` until someone reaps it, and that is not a survivor.
+  const alive = pid => {
+    try { process.kill(pid, 0); } catch { return false; }
+    try { if (/\)\s+Z\s/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false; } catch { /* no /proc: kill(0) alone */ }
+    return true;
+  };
   let sleeper;
   try {
     const cli = await fakeCli(join(directory, 'cli'));

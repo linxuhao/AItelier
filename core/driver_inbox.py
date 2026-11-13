@@ -6,6 +6,7 @@ import json
 import re
 import time
 from uuid import uuid4
+from core.driver_questions import CONVERSATION, conversation_rows, open_question_count
 from core.drivers import recipient_presence_block, touch_driver
 from core.state_graph import StateGraphError, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
@@ -42,8 +43,9 @@ SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff
 # A driver -> user message is recognised by `audience='user'`; a user -> driver
 # message is a driver-addressed row (it is delivered to a driver's inbox) marked
 # `channel='user'`. `audience`/`channel` are additive columns, so a row written
-# before either existed still reads back through its own half.
-CONVERSATION = "(audience='user' OR channel='user')"
+# before either existed still reads back through its own half. `CONVERSATION`
+# itself is declared beside the open-question rule (core/driver_questions.py),
+# which scopes its rows the same way, and is imported above so the two agree.
 # A segment id is a short token a reply can cite: letters, digits, and . _ : -.
 _SEGMENT_ID = re.compile(r"[A-Za-z0-9._:-]+")
 
@@ -676,18 +678,29 @@ class DriverInbox:
 
     @writer_only_read('user_conversation_unread')
     def user_conversation_unread(self, project_id=None):
-        """Unread driver messages per project, from persisted rows only.
+        """Unread driver messages and open questions per project, from rows only.
 
         This is the badge the dashboard shows before the conversation is
         opened, so it must answer without reading any message body and without
         the sending driver being online.
+
+        `projects`/`total` count the messages the DRIVER sent this project's
+        user that are newer than the persisted read marker - a message-level
+        badge the user clears by reading. `questions`/`questions_total` count
+        something else on purpose: the `question` segments no reply has answered
+        yet, from `core/driver_questions.py`, which is the same rule the
+        conversation's questions box reads. Reading the thread does not close a
+        question, so the two badges move independently. A project with no open
+        question is absent from `questions` (and contributes 0 to its total),
+        because that is the map's own meaning: only projects with a count.
 
         With no project named, a DRIVER sees only the projects it is a member
         of. Counting every row in the database would let a driver credential
         enumerate other projects' names and unread counts - a private project
         would leak through a badge that never shows its contents. A user/owner
         handle has no driver identity and keeps the whole-project view, which it
-        can already read.
+        can already read. The question counts obey the same visibility: they are
+        taken over the projects this caller may already see.
         """
         with self.store.transaction() as conn:
             if project_id is not None:
@@ -707,7 +720,11 @@ class DriverInbox:
                     "WHERE audience='user' AND project_id IS NOT NULL GROUP BY project_id")}
                 for pid in list(projects):
                     projects[pid] = self._unread(conn, pid)
-        return {"projects": projects, "total": sum(projects.values())}
+            questions = {pid: open_question_count(conversation_rows(conn, pid))
+                         for pid in projects}
+        questions = {pid: n for pid, n in questions.items() if n}
+        return {"projects": projects, "total": sum(projects.values()),
+                "questions": questions, "questions_total": sum(questions.values())}
 
     @writer_only_read('list_user_messages')
     def list_user_messages(self, project_id, limit=50):

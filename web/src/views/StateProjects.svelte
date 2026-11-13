@@ -17,9 +17,11 @@
   const visible = $derived(showArchived ? rows : rows.filter(p => !isArchived(p)));
   const archivedHidden = $derived(rows.length - visible.length);
   const filtered = $derived(visible.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
-  // Per-DAG driver state and unread badge, read from State and then ordered by
-  // the SAME running-first rule the driver table uses.
+  // Per-DAG driver state and the two persisted badges: unread driver messages,
+  // and the open questions no reply has answered yet. Read from State and then
+  // ordered by the SAME running-first rule the driver table uses.
   let drivers = $state<DriverStatusResponse | null>(null), unread = $state<Record<string, number>>({});
+  let questions = $state<Record<string, number>>({});
   // Which DAG the conversation pane is about. The list sets it; the pane shows it.
   let paneSelection = $state('');
   let driverTimer: ReturnType<typeof setInterval> | undefined, driverMounted = false;
@@ -29,7 +31,7 @@
     try {
       const [table, badge] = await Promise.all([driverStatus(), dshDriverConversationUnread()]);
       if (!driverMounted) return;
-      drivers = table; unread = badge.projects ?? {};
+      drivers = table; unread = badge.projects ?? {}; questions = badge.questions ?? {};
     } catch { /* badges are additive: a failed poll never hides the DAG list */ }
   }
   $effect(() => { if ($authStore.permissionResolved && $authStore.canWrite && driverMounted) void loadDriverState(); });
@@ -46,7 +48,7 @@
       .finally(() => { if (version === generation) loading = false; });
     return () => { generation++; };
   });
-  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) { drivers = null; unread = {}; } });
+  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) { drivers = null; unread = {}; questions = {}; } });
   onMount(() => {
     driverMounted = true;
     void loadDriverState();
@@ -98,6 +100,11 @@
                 <span class="fact"><strong data-fact="pipelines">{activity?.running_pipelines ?? 0}</strong> {st('driverPipelines')}</span>
               </span>
               {#if unread[project.project_id]}<span class="unread" title={st('driverConversationUnread')}>{unread[project.project_id]}</span>{/if}
+              <!-- Its own pill, not folded into the unread count: unread is
+                   about messages and clearing it answers nothing, while this
+                   counts questions still owed an answer. Rendered only when a
+                   project HAS one, so a zero never reads as a badge. -->
+              {#if questions[project.project_id]}<span class="questions" data-pending-questions={questions[project.project_id]} title={st('driverQuestionsBadge')}>{questions[project.project_id]}</span>{/if}
             </p>
           {/if}
           <div class="counts"><span><strong>{project.node_count}</strong> {st('total')}</span><span><strong>{project.verified_count}</strong> {st('verified')}</span></div>
@@ -163,6 +170,9 @@
   .driver-state[data-phase="idle"]::before { background:#2563eb; }
   .driver-state[data-phase="failed"]::before { background:#b91c1c; }
   .unread { display:inline-block; padding:0 .35rem; border-radius:999px; background:var(--pico-primary,#2563eb); color:#fff; font-size:.6rem; line-height:1.5; }
+  /* Amber, not the primary blue: a question is something the USER owes the
+     driver, so it must not read as another message waiting to be read. */
+  .questions { display:inline-block; padding:0 .35rem; border-radius:999px; background:#b45309; color:#fff; font-size:.6rem; line-height:1.5; }
   .counts { display:flex; gap:1.2rem; font-size:.8rem; } .counts strong { font-size:1.4rem; }
   .source { font-size:.7rem; opacity:.75; overflow-wrap:anywhere; margin:.8rem 0; }
   .held,.hold-reason { color:#ae751e; } .hold-reason { font-size:.75rem; }

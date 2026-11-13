@@ -279,13 +279,15 @@ def test_an_empty_conversation_states_the_end_of_history(world):
 # -------------------------------------------------------------- read marker
 def test_the_unread_badge_counts_persisted_rows_and_survives_a_fresh_instance(world):
     """Fails on main: `user_conversation_unread` does not exist there."""
-    assert execute(world["user"], "user_conversation_unread", {}) == {"projects": {}, "total": 0}
+    assert execute(world["user"], "user_conversation_unread", {}) == {
+        "projects": {}, "total": 0, "questions": {}, "questions_total": 0}
     first = say_driver(world, request_key="n1", subject="One", body="one")
     second = say_driver(world, request_key="n2", subject="Two", body="two")
     declare(world["db"], "ada", "offline", reason="gone", actor="driver:ada")
 
     badge = execute(world["user"], "user_conversation_unread", {})
-    assert badge == {"projects": {"alpha": 2}, "total": 2}
+    assert badge == {"projects": {"alpha": 2}, "total": 2,
+                    "questions": {}, "questions_total": 0}
     assert conversation(world)["unread_count"] == 2
     # The user's own message does not count as unread: only what the DRIVER sent.
     say_user(world, request_key="mine")
@@ -298,7 +300,8 @@ def test_the_unread_badge_counts_persisted_rows_and_survives_a_fresh_instance(wo
     assert marked["advanced"] is True and marked["unread_count"] == 0
     fresh = StateService(StateDatabase(world["path"]), actor="owner:again@example.test",
                          project_read_trusted=True)
-    assert execute(fresh, "user_conversation_unread", {}) == {"projects": {"alpha": 0}, "total": 0}
+    assert execute(fresh, "user_conversation_unread", {}) == {
+        "projects": {"alpha": 0}, "total": 0, "questions": {}, "questions_total": 0}
     assert execute(fresh, "list_user_conversation",
                    {"project_id": "alpha"})["read_upto_message_id"] == second["message_id"]
 
@@ -314,7 +317,8 @@ print(json.dumps(execute(service, "user_conversation_unread", {})))
     proc = subprocess.run([sys.executable, "-c", script, world["path"]],
                           cwd=REPO, capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert json.loads(proc.stdout.strip().splitlines()[-1]) == {"projects": {"alpha": 0}, "total": 0}
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == {
+        "projects": {"alpha": 0}, "total": 0, "questions": {}, "questions_total": 0}
     assert first["message_id"] != second["message_id"]
 
 
@@ -354,7 +358,8 @@ def test_a_message_arriving_while_the_page_is_open_is_not_silently_read(world):
     # lands afterwards is unread on the next poll, not swallowed by "now".
     late = say_driver(world, request_key="late", subject="Arrived after the page loaded")
     badge = execute(world["user"], "user_conversation_unread", {})
-    assert badge == {"projects": {"alpha": 1}, "total": 1}
+    assert badge == {"projects": {"alpha": 1}, "total": 1,
+                     "questions": {}, "questions_total": 0}
     page = conversation(world)
     assert page["messages"][0]["message_id"] == late["message_id"] and page["unread_count"] == 1
 
@@ -366,14 +371,17 @@ def test_unread_is_per_project_and_does_not_leak(world):
             {"request_key": "b1", "project_id": "beta", "subject": "beta one", "body": "b"},
             allow_write=True)
     assert execute(world["user"], "user_conversation_unread", {}) == {
-        "projects": {"alpha": 2, "beta": 1}, "total": 3}
+        "projects": {"alpha": 2, "beta": 1}, "total": 3,
+        "questions": {}, "questions_total": 0}
     assert execute(world["user"], "user_conversation_unread",
-                   {"project_id": "alpha"}) == {"projects": {"alpha": 2}, "total": 2}
+                   {"project_id": "alpha"}) == {
+        "projects": {"alpha": 2}, "total": 2, "questions": {}, "questions_total": 0}
     execute(world["user"], "mark_user_conversation_read",
             {"project_id": "alpha", "message_id": conversation(world)["messages"][0]["message_id"]},
             allow_write=True)
     assert execute(world["user"], "user_conversation_unread", {}) == {
-        "projects": {"alpha": 0, "beta": 1}, "total": 1}
+        "projects": {"alpha": 0, "beta": 1}, "total": 1,
+        "questions": {}, "questions_total": 0}
     # Reading one project's thread never shows the other project's messages.
     assert [m["subject"] for m in conversation(world)["messages"]] == ["alpha two", "alpha one"]
 

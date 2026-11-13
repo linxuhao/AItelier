@@ -127,9 +127,11 @@ def test_the_unread_badge_clears_on_read_and_stays_cleared(world, monkeypatch):
     second = say_driver(world, request_key="n2", subject="Two")
     with client(world, monkeypatch) as reader:
         assert reader.get("/api/dsh-drivers/unread").json() == {
-            "projects": {"alpha": 2}, "total": 2}
+            "projects": {"alpha": 2}, "total": 2,
+            "questions": {}, "questions_total": 0}
         assert reader.get("/api/dsh-drivers/unread?project_id=alpha").json() == {
-            "projects": {"alpha": 2}, "total": 2}
+            "projects": {"alpha": 2}, "total": 2,
+            "questions": {}, "questions_total": 0}
         # Reading the conversation is a read: it does NOT move the marker.
         assert reader.get("/api/dsh-drivers/alpha/conversation").json()["unread_count"] == 2
 
@@ -139,7 +141,8 @@ def test_the_unread_badge_clears_on_read_and_stays_cleared(world, monkeypatch):
     # A DIFFERENT client (fresh app, fresh connection) sees the cleared badge.
     with client(world, monkeypatch) as later:
         assert later.get("/api/dsh-drivers/unread").json() == {
-            "projects": {"alpha": 0}, "total": 0}
+            "projects": {"alpha": 0}, "total": 0,
+            "questions": {}, "questions_total": 0}
         assert later.get("/api/dsh-drivers/alpha/conversation").json()["read_upto_message_id"] == \
             second["message_id"]
     assert first["message_id"] != second["message_id"]

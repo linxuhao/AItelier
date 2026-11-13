@@ -789,9 +789,19 @@ export function dshDriverConversation(projectId: string, cursor?: string | null,
   if (cursor) query.set('cursor', cursor);
   return _get('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation?' + query.toString());
 }
-export interface DriverConversationUnread { projects: Record<string, number>; total: number }
-/** The persisted unread badge per project: driver messages newer than the
- *  stored read marker. Needs no driver online. */
+export interface DriverConversationUnread {
+  /** Unread driver messages per project, newer than the persisted read marker. */
+  projects: Record<string, number>; total: number;
+  /** Open questions per project: `question` segments no reply's `answers` cites.
+   *  This is the questions box's own rule (`openQuestions` in questions.ts), so
+   *  the badge and the box cannot disagree. A project with none is ABSENT. */
+  questions: Record<string, number>;
+  /** The sum of `questions`: 0 when no project has an open question. */
+  questions_total: number;
+}
+/** The persisted badges per project: driver messages newer than the stored read
+ *  marker, plus the count of open questions. Needs no driver online and reads no
+ *  message body. */
 export function dshDriverConversationUnread(projectId?: string): Promise<DriverConversationUnread> {
   return _get('/api/dsh-drivers/unread' + (projectId ? '?project_id=' + encodeURIComponent(projectId) : ''));
 }

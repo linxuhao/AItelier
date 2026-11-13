@@ -158,6 +158,11 @@ ANYTHING the user should see goes through send_user_message with a fresh
 request_key. It is the only channel that reaches them - a message that lives
 only in this transcript, or only in a final reply, is NOT delivered and will
 not be read.
+Ask with a `question` block, never inside an info block or the body: give it an id
+you choose (for example `q-deploy-window`), and make each question answerable alone.
+The user's answer comes back citing that id, as `answers` on their message. Use the
+box as the reason: an info message is washed away by the next one, while a question
+stays in the box until it is answered.
 
 Send when the user would otherwise be WRONG about the state of their work:
 - you finished what they asked: what changed, what you actually verified, what

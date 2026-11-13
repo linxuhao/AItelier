@@ -356,9 +356,10 @@ class SendUserMessage(Project):
     subject: str = Field(min_length=1, max_length=200)
     body: str = Field(max_length=8000)
     segments: list[MessageSegment] = Field(default_factory=list, max_length=20, description=(
-        "Optional tagged blocks, so the user can tell at a glance which messages "
-        "carry a question. One message may hold several info and several question "
-        "blocks. Presentation only: a question asks; it answers no checkpoint."))
+        "Optional tagged blocks, kind info or question. One message may hold several "
+        "info and several question blocks. A question block's id is what a reply cites: "
+        "the user's answer returns as answers [{message_id, segment_id}]. Presentation "
+        "only: a question asks; it answers no checkpoint."))
     refs: MessageRefs = Field(default_factory=MessageRefs, description=(
         "Optional: node_key (requires project_id), attempt_id, issue_id, claim_id, "
         "subagent_id, each a nonempty string naming an existing record. Context only: "

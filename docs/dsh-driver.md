@@ -52,9 +52,18 @@ lines and excerpts. Literal search is the default; `regex`, `ignore_case`,
 `after_seq` and `limit` support focused follow-up searches. There is no second
 chat-history store or search index.
 
-`send_user_message(request_key, subject, body, node_key?)` stores one durable
-message from the driver to the project's user instead of leaving the reply inside
-the session log. It is idempotent per (driver, request_key): the same payload
+`send_user_message(request_key, project_id, subject, body, segments?, refs?,
+reply_to_message_id?)` stores one durable message from the driver to the project's
+user instead of leaving the reply inside the session log. `segments` is an optional
+list of tagged blocks, each `{kind: "info"|"question", text, id?}`; a `question`
+block asks the user something, and its `id` (1 to 64 letters, digits, `.`, `_`, `:`
+or `-`, assigned by the service when omitted) is the citation key. The user's
+answer comes back as their message carrying `answers: [{message_id, segment_id}]`,
+naming the question it answers. `refs` takes the optional `node_key`, `attempt_id`,
+`issue_id`, `claim_id` and `subagent_id` context keys, and `reply_to_message_id`
+links one of the user's messages. The dashboard keeps open questions in a permanent,
+foldable box between the thread and the composer, so an info message cannot wash
+them away. It is idempotent per (driver, request_key): the same payload
 returns the same message id, and a different payload under the same key is
 refused. The dashboard lists those messages newest first under **Driver status**
 (`GET /api/dsh-drivers/<project>/messages`, reader permission), with the sending

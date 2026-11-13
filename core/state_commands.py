@@ -412,6 +412,12 @@ class ListUserConversation(Project):
         "Omit for the newest page; `next_cursor: null` is the end of history."))
 
 
+class ListUserQuestions(Project):
+    status: Literal["open", "answered", "all"] = Field(default="open", description=(
+        "Which question blocks: `open` (no reply cites it), `answered`, or `all`."))
+    limit: int = Field(default=50, ge=1, le=200)
+
+
 class MarkUserConversationRead(Project):
     """Move the user's persisted read marker to a message they were shown."""
 
@@ -1095,7 +1101,7 @@ READ_REQUESTS = {
     "list_driver_notebooks": Request,
     "list_driver_messages": ListDriverMessages, "wait_for_driver_inbox": WaitForDriverInbox,
     "list_user_messages": ListUserMessages, "list_user_conversation": ListUserConversation,
-    "user_conversation_unread": UserConversationUnread,
+    "user_conversation_unread": UserConversationUnread, "list_user_questions": ListUserQuestions,
     "design_catalog": Project, "get_design_revision": DesignRevision,
     "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
@@ -1189,7 +1195,7 @@ WRITER_ONLY_READS = frozenset({
     "list_user_messages",
     # The same conversation, both directions: the user's own thread. Private
     # for exactly the same reason as the feed above.
-    "list_user_conversation", "user_conversation_unread",
+    "list_user_conversation", "user_conversation_unread", "list_user_questions",
     # P3: subagent registry (workspaces) and handoff packages. Both private.
     "list_subagents", "list_handoffs", "get_handoff",
 })
@@ -1512,6 +1518,7 @@ def _handlers(service) -> dict:
         "list_user_messages": service.driver_inbox.list_user_messages,
         "list_user_conversation": service.driver_inbox.list_user_conversation,
         "user_conversation_unread": service.driver_inbox.user_conversation_unread,
+        "list_user_questions": service.driver_inbox.list_user_questions,
         "wait_for_driver_inbox": service.driver_inbox.wait_for_driver_inbox,
         "acknowledge_driver_message": service.driver_inbox.acknowledge_driver_message,
         "resolve_driver_message": service.driver_inbox.resolve_driver_message,

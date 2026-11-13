@@ -24,13 +24,13 @@ import json
 # conversation read must agree on which rows are one thread; core/driver_inbox
 # imports it rather than spelling it a second time.
 CONVERSATION = "(audience='user' OR channel='user')"
-_ROWS = ("SELECT message_id,created_at,segments_json,answers_json "
+_ROWS = ("SELECT message_id,created_at,body,segments_json,answers_json "
          "FROM driver_inbox_messages WHERE project_id=? AND " + CONVERSATION)
 
 
 def _decoded(row):
     """One stored row in the shape the rule reads: decoded lists, never JSON."""
-    return {"message_id": row["message_id"], "created_at": row["created_at"],
+    return {"message_id": row["message_id"], "created_at": row["created_at"], "body": row["body"],
             "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
             "answers": json.loads(row["answers_json"]) if row["answers_json"] else []}
 
@@ -40,11 +40,23 @@ def conversation_rows(conn, project_id):
     return [_decoded(row) for row in conn.execute(_ROWS, (project_id,))]
 
 
-def open_questions(rows):
-    """The questions no row's `answers` cites, in thread order (oldest first)."""
-    cited = {(ref.get("message_id"), ref.get("segment_id"))
-             for row in rows for ref in (row.get("answers") or [])
-             if isinstance(ref, dict)}
+def all_questions(rows):
+    """Every listable question with the replies that cite it, in thread order.
+
+    Each entry is `{message_id, created_at, segment_id, text, status, answers}`:
+    `status` is `answered` when at least one row's `answers` cites the exact
+    `(message_id, segment_id)` pair and `open` otherwise, and `answers` lists the
+    citing rows `{message_id, created_at, body}` in thread order (two replies may
+    cite the same question). `open_questions` is this list's open part, so the
+    badge, the questions box and `list_user_questions` read one rule.
+    """
+    citing = {}
+    for row in rows:
+        for ref in row.get("answers") or []:
+            if isinstance(ref, dict):
+                citing.setdefault((ref.get("message_id"), ref.get("segment_id")), []).append(
+                    {"message_id": row.get("message_id"), "created_at": row.get("created_at"),
+                     "body": row.get("body")})
     found = []
     for row in rows:
         for segment in row.get("segments") or []:
@@ -53,13 +65,20 @@ def open_questions(rows):
             segment_id = segment.get("id")
             if not isinstance(segment_id, str) or not segment_id:
                 continue
-            if (row.get("message_id"), segment_id) in cited:
-                continue
+            answers = sorted(citing.get((row.get("message_id"), segment_id), []),
+                             key=lambda a: (a["created_at"] or "", a["message_id"] or ""))
             found.append({"message_id": row.get("message_id"),
                           "created_at": row.get("created_at"),
-                          "segment_id": segment_id, "text": segment.get("text")})
+                          "segment_id": segment_id, "text": segment.get("text"),
+                          "status": "answered" if answers else "open", "answers": answers})
     found.sort(key=lambda question: (question["created_at"] or "", question["message_id"] or ""))
     return found
+
+
+def open_questions(rows):
+    """The questions no row's `answers` cites, in thread order (oldest first)."""
+    return [{key: question[key] for key in ("message_id", "created_at", "segment_id", "text")}
+            for question in all_questions(rows) if question["status"] == "open"]
 
 
 def open_question_count(rows):

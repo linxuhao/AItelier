@@ -6,7 +6,7 @@ import json
 import re
 import time
 from uuid import uuid4
-from core.driver_questions import CONVERSATION, conversation_rows, open_question_count
+from core.driver_questions import CONVERSATION, all_questions, conversation_rows, open_question_count
 from core.drivers import recipient_presence_block, touch_driver
 from core.state_graph import StateGraphError, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
@@ -638,6 +638,28 @@ class DriverInbox:
                 "unread_count": unread,
                 "read_upto_message_id": marker["read_message_id"] if marker else None,
                 "read_upto_created_at": marker["read_created_at"] if marker else None}
+
+    @writer_only_read('list_user_questions')
+    def list_user_questions(self, project_id, status="open", limit=50):
+        """The question blocks of ONE conversation, each with the replies citing it.
+
+        The same rule as the unread badge's question count and the dashboard's
+        questions box (`core/driver_questions.py`), read over the whole thread in
+        one call, so neither the driver nor the dashboard has to page the
+        conversation to learn what is still open. Newest question first;
+        `status` picks `open`, `answered` or `all`; `counts` always covers both.
+        Rows only: the driver's presence is never consulted.
+        """
+        if status not in ("open", "answered", "all") or type(limit) is not int or not 1 <= limit <= 200:
+            raise StateGraphError("invalid_request")
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            found = all_questions(conversation_rows(conn, project_id))
+        counts = {"open": sum(q["status"] == "open" for q in found),
+                  "answered": sum(q["status"] == "answered" for q in found)}
+        picked = [q for q in reversed(found) if status == "all" or q["status"] == status]
+        return {"project_id": project_id, "status": status, "questions": picked[:limit],
+                "matched_total": len(picked), "has_more": len(picked) > limit, "counts": counts}
 
     @staticmethod
     def _read_marker(conn, project_id):

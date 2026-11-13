@@ -1331,6 +1331,27 @@ def _without_host_paths(project):
     return {**project, "source": {k: (None if k in _HOST_PATH_KEYS else v) for k, v in source.items()}}
 
 
+# An attempt's pinned launch descriptor (`context.host_contract`) names the host
+# repository it launches from in `source_repo`: an absolute path on THIS host. The
+# attempt-bearing reads embed attempts at unknown depth (`get_node` and
+# `list_attempts` nest them), so the anonymous answer is walked, not hand-picked.
+_ATTEMPT_READS = frozenset({"get_attempt", "attempt_detail", "list_attempts", "get_node"})
+
+
+def _without_host_contract_paths(value):
+    """Copy of a JSON-like answer where every `host_contract.source_repo` is None;
+    every other key and value is kept as it is."""
+    if isinstance(value, dict):
+        out = {k: _without_host_contract_paths(v) for k, v in value.items()}
+        contract = out.get("host_contract")
+        if isinstance(contract, dict):
+            out["host_contract"] = {**contract, "source_repo": None}
+        return out
+    if isinstance(value, list):
+        return [_without_host_contract_paths(v) for v in value]
+    return value
+
+
 def _filter_catalog(service, action, result):
     """Drop every project an anonymous caller has not been allowed to see from a
     cross-project read, so the aggregate carries no id, title or count for it,
@@ -1613,6 +1634,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         # The overview's `source` block is the same binding the catalog blanks:
         # the anonymous answer keeps its shape and blanks the two host paths.
         result = _without_host_paths(result)
+    if anonymous and action in _ATTEMPT_READS:
+        # An attempt's pinned launch descriptor names its host source repository.
+        # Blank it wherever the attempt is embedded; a trusted caller keeps it.
+        result = _without_host_contract_paths(result)
     return result
 
 

@@ -90,6 +90,15 @@ SERVED_BY_SEEN_LIMIT = 8
 #
 # The pause between attempts is short on purpose - it exists so the retry is not
 # a spin, not as a second budget.
+#
+# Because the patience is this long, WHOEVER WRITES MUST NOT WAIT FOR IT ON THE
+# EVENT LOOP. `update` is synchronous sqlite by design; the coroutines below
+# therefore call it as `await asyncio.to_thread(self.update, ...)`. Called
+# directly, one held lock froze the whole driver runtime for the full budget
+# (~15.4 s) - every request, every monitor, every other project's lifecycle in
+# the same process. Off the loop the lock costs ONE thread, and `update`'s
+# contract is unchanged: same single statement, same retries, and the original
+# error still re-raised after the bound.
 STAMP_LOCK_ATTEMPTS = 3
 STAMP_LOCK_PAUSE = 0.2
 
@@ -388,7 +397,8 @@ class DshDrivers:
             if self.external_host:
                 row = self._provision(project_id, provider, model, actor)
                 if not row["enabled"]:
-                    self.update(project_id, enabled=1, phase="starting", last_error="", subagents_json="[]")
+                    await asyncio.to_thread(self.update, project_id, enabled=1, phase="starting",
+                                            last_error="", subagents_json="[]")
                 return self.public(self.get(project_id))
             proc = self.processes.get(project_id)
             if proc is not None and proc.returncode is None:
@@ -397,7 +407,8 @@ class DshDrivers:
             directory = self.root / row["driver_id"]
             try:
                 env = self._environment(row)
-                self.update(project_id, enabled=1, phase="starting", last_error="", subagents_json="[]")
+                await asyncio.to_thread(self.update, project_id, enabled=1, phase="starting",
+                                        last_error="", subagents_json="[]")
                 log_fd = os.open(directory / "runtime.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 with os.fdopen(log_fd, "ab") as log:
                     proc = await asyncio.create_subprocess_exec(*self.command, "--profile", "driver",
@@ -407,7 +418,8 @@ class DshDrivers:
                 self.monitors.add(task)
                 task.add_done_callback(self.monitors.discard)
             except (OSError, ValueError) as exc:
-                self.update(project_id, enabled=0, phase="failed", last_error=str(exc))
+                await asyncio.to_thread(self.update, project_id, enabled=0, phase="failed",
+                                        last_error=str(exc))
                 raise ValueError(str(exc)) from exc
             return self.public(self.get(project_id))
 
@@ -423,8 +435,8 @@ class DshDrivers:
             # retrieved" while the project kept a phase nobody updated. A deleted
             # project has no phase to set, so there is nothing to do.
             if row is not None and row["enabled"] and not self.closing:
-                self.update(project_id, phase="failed", subagents_json="[]",
-                            last_error=f"DSH exited with code {code}; see runtime.log")
+                await asyncio.to_thread(self.update, project_id, phase="failed", subagents_json="[]",
+                                        last_error=f"DSH exited with code {code}; see runtime.log")
 
     async def stop(self, project_id, *, preserve_enabled=False):
         async with self.lock:
@@ -432,7 +444,7 @@ class DshDrivers:
             if row is None:
                 raise ValueError("this project has no managed DSH driver")
             if self.external_host:
-                self.update(project_id, enabled=0, phase="stopping")
+                await asyncio.to_thread(self.update, project_id, enabled=0, phase="stopping")
                 # The host acknowledges shutdown by removing its process marker.
                 marker = self.root / row["driver_id"] / "host-process.json"
                 for _ in range(100):
@@ -442,9 +454,10 @@ class DshDrivers:
                 else:
                     raise ValueError("host driver shutdown is still pending; inspect the host service")
                 self.gateways.pop(project_id, None)
-                self.update(project_id, phase="stopped", subagents_json="[]")
+                await asyncio.to_thread(self.update, project_id, phase="stopped", subagents_json="[]")
                 return self.public(self.get(project_id))
-            self.update(project_id, enabled=int(preserve_enabled), phase="stopping")
+            await asyncio.to_thread(self.update, project_id, enabled=int(preserve_enabled),
+                                    phase="stopping")
             proc = self.processes.get(project_id)
             if proc is not None and proc.returncode is None:
                 # The process has a private session/group. Never signal other drivers.
@@ -458,7 +471,7 @@ class DshDrivers:
                     await proc.wait()
             self.processes.pop(project_id, None)
             self.gateways.pop(project_id, None)
-            self.update(project_id, phase="stopped", subagents_json="[]")
+            await asyncio.to_thread(self.update, project_id, phase="stopped", subagents_json="[]")
             from core.driver_presence import declare
             if self.registry:
                 declare(self.db, row["driver_id"], "offline", "Driver stopped", None,

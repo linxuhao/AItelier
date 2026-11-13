@@ -1609,6 +1609,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise
     if anonymous and action in _CATALOG_READS:
         result = _filter_catalog(service, action, result)
+    if anonymous and action == "project_overview" and isinstance(result, dict):
+        # The overview's `source` block is the same binding the catalog blanks:
+        # the anonymous answer keeps its shape and blanks the two host paths.
+        result = _without_host_paths(result)
     return result
 
 

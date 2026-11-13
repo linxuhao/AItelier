@@ -73,6 +73,37 @@ CREATE TABLE IF NOT EXISTS dsh_driver_session_models (
 # promises) even after the cap; `served_by` still names the latest one.
 SERVED_BY_SEEN_LIMIT = 8
 
+# How long the driver's own stamp write waits for a busy database, counted in
+# ATTEMPTS rather than in one longer wait. Each attempt opens a fresh connection
+# and so spends that connection's full busy timeout again (5 s on
+# `sqlite3.connect`'s default, which the host database here uses), which makes
+# the patience ~15.4 s across the three; a single attempt loses the stamp to any
+# write lock held longer than the timeout.
+#
+# THREE, not two, and measured rather than argued: releasing a write lock in WAL
+# mode is not instantaneous for the connection that wins next. Against a 7.0 s
+# lock the stamp returned in 7.05 s and 7.07 s on two runs and 9.68 s on a third,
+# because the holder's own commit landed 1.3-2.6 s after it stopped holding (one
+# probe: lock acquired at 0.00 s, holder's sleep over at 7.00 s, commit visible
+# at 8.29 s). Two attempts budget 10.2 s, i.e. 0.5 s of margin in the worst
+# measured case - a coin flip; three budget 15.4 s and keep ~5.7 s.
+#
+# The pause between attempts is short on purpose - it exists so the retry is not
+# a spin, not as a second budget.
+STAMP_LOCK_ATTEMPTS = 3
+STAMP_LOCK_PAUSE = 0.2
+
+
+def _is_lock_error(error):
+    """True only for the two messages SQLite uses to mean "somebody else is writing".
+
+    Anything else that arrives as `OperationalError` (a missing column, a
+    malformed statement) must not be retried: it would not become true on a
+    second look, and retrying it would only hide the real error.
+    """
+    return isinstance(error, sqlite3.OperationalError) and any(
+        text in str(error) for text in ("database is locked", "database table is locked"))
+
 
 # Local MCP endpoints the driver is given by default on this host. Ports match
 # the services that already run here: agentmcp (asr/ocr/pdf/web + media + video)
@@ -166,14 +197,37 @@ class DshDrivers:
         return dict(row) if row else None
 
     def update(self, project_id, **fields):
+        """Stamp one driver row, tolerating a lock that outlives a single wait.
+
+        A single attempt waits only its own connection's busy timeout, so a write
+        lock held a moment longer lost the activity tick with an error. The
+        patience is bounded from the OUTSIDE - `STAMP_LOCK_ATTEMPTS` fresh
+        connections, each still waiting the full timeout - and not by shortening
+        the timeout, which would break the short locks that already worked.
+        Exhausted attempts re-raise the ORIGINAL lock error unchanged: a
+        database that stays busy is still a failure the caller must see, never a
+        silent success and never a load on the writer that outlasts the bound.
+        """
         allowed = {"enabled", "phase", "subagents_json", "last_error"}
         if not fields.keys() <= allowed:
             raise ValueError("unsupported driver update")
         fields["updated_at"] = now()
-        with self.db.get_connection() as conn:
-            conn.execute("UPDATE dsh_drivers SET " + ",".join(k + "=?" for k in fields) +
-                         " WHERE project_id=?", (*fields.values(), project_id))
-            conn.commit()
+        statement = ("UPDATE dsh_drivers SET " + ",".join(k + "=?" for k in fields) +
+                     " WHERE project_id=?")
+        params = (*fields.values(), project_id)
+        for attempt in range(1, STAMP_LOCK_ATTEMPTS + 1):
+            try:
+                # A FRESH connection per attempt: the busy timeout is spent by
+                # the connection that waited it out, so retrying on the failed
+                # one would retry with no patience left.
+                with self.db.get_connection() as conn:
+                    conn.execute(statement, params)
+                    conn.commit()
+                return
+            except sqlite3.OperationalError as error:
+                if not _is_lock_error(error) or attempt == STAMP_LOCK_ATTEMPTS:
+                    raise
+            time.sleep(STAMP_LOCK_PAUSE)
 
     def _discard_provision(self, project_id, driver_id, directory, actor):
         """Undo a provisioning attempt that lost the insert race.

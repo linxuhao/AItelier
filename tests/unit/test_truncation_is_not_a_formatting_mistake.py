@@ -23,6 +23,7 @@ mistake and keeps the old instruction.
 import ast
 import json
 import re
+import string
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -520,6 +521,21 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL for the per-project DSH driver table",
     ("core/state_attempts.py", "SCHEMA"):
         "SQL DDL schema for the attempt tables",
+    # Visible only since the collector learned `.format()` on a literal and `+`
+    # concatenation (issue iss-6bb926aa392748d2): `CLAIMS_TABLE` and
+    # `HISTORY_TABLE` are a literal plus the `_STATUS_CHECK` name, and `SCHEMA`
+    # is `CLAIMS_TABLE.format(...) + DDL + HISTORY_TABLE.format(...) + DDL`.
+    # All three are DDL — `conn.executescript(SCHEMA)` at line 181 executes
+    # them, no agent ever reads one as prose. The placeholders in the collected
+    # text mark exactly the splices the scanner cannot see into; the readable
+    # text around them is DDL too, so nothing here reaches a prompt.
+    ("core/state_claims.py", "SCHEMA"):
+        "SQL DDL for the driver claim tables, executed not read as prose",
+    ("core/state_claims.py", "CLAIMS_TABLE"):
+        "SQL DDL for the claims table, spliced into SCHEMA and executed",
+    ("core/state_claims.py", "HISTORY_TABLE"):
+        "SQL DDL for the claim history table, spliced into SCHEMA and "
+        "executed",
     ("core/state_attempt_schema.py", "ATTEMPT_TABLE"):
         "SQL DDL for the attempts table",
     ("core/state_attempt_schema.py", "EXTRA_SCHEMA"):
@@ -837,12 +853,60 @@ def test_the_corpus_is_derived_from_the_filesystem_not_a_list():
     assert "STRICT_PATCH_GUIDANCE_ZH" not in corpus
 
 
-def _string_constant_text(value):
-    """The literal text of a string constant, plain or f-string alike.
+# What an operand the scanner cannot read becomes inside a joined text: the
+# DDL a `.format()` on an already-declared constant splices in, or the half of
+# a `+` chain that is a name. A placeholder keeps the readable text readable
+# (and keeps its newlines and length), so the joined constant is still
+# collected under the name it is bound to instead of vanishing whole.
+_OPAQUE_OPERAND = "{}"
 
-    `ast.JoinedStr` is an f-string; reading its literal chunks the same way
-    as an `ast.Constant`'s value keeps f-string prose inside the corpus
-    instead of letting it slip past as "not a constant".
+
+def _format_fields_as_placeholders(text):
+    """`text` with every `str.format` replacement field replaced by `{}`.
+
+    Nothing is evaluated: a multi-line literal carrying a `{name}` field, with
+    `.format(name=x)` applied to it, is prose with a hole in it, so the hole is
+    substituted and the prose is kept. `{{`/`}}` escapes are unescaped by
+    `string.Formatter`, which is exactly the literal a reader sees. A malformed
+    template (a lone `{`) falls back to a regex rather than raising, because a
+    scanner must never turn a core module's syntax into a collection error.
+    """
+    try:
+        parts = []
+        for literal, field_name, _spec, _conv in string.Formatter().parse(text):
+            parts.append(literal)
+            if field_name is not None:
+                parts.append(_OPAQUE_OPERAND)
+        return "".join(parts)
+    except (ValueError, IndexError):  # malformed template, not our problem
+        return re.sub(r"\{[^{}]*\}", _OPAQUE_OPERAND, text)
+
+
+def _string_constant_text(value):
+    """The literal text of a string constant, whatever shape builds it.
+
+    Covered shapes, each recursing into the one it is built from:
+
+      `ast.Constant`      a plain string literal;
+      `ast.JoinedStr`     an f-string, read chunk by chunk with each
+                          interpolation as `{}` — prose in an f-string stays
+                          inside the corpus instead of slipping past as "not a
+                          constant";
+      `ast.Call`          a literal with `.format(...)` applied to it, and any
+                          longer `.format()` chain: the literal text with every
+                          replacement field as `{}`;
+      `ast.BinOp(+)`      literal-plus-literal, including chains that mix an
+                          f-string in, or that splice a name the scanner cannot
+                          read — that operand becomes `{}` and the readable
+                          text is still collected.
+
+    Deliberately NOT covered, and named so a reader does not assume otherwise:
+    a string built by `%`-formatting (`template % value`), by repetition
+    (literal `*` n), by `str.join`, or by a helper function that returns it.
+    Those shapes yield None (or, inside a `+` chain, a bare `{}`), so a module
+    whose prose is assembled that way is collected nowhere and cannot be
+    accounted for here — the same class of blindness this function closes for
+    `.format()` and `+` is still open for these.
     """
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value.value
@@ -852,8 +916,22 @@ def _string_constant_text(value):
             if isinstance(part, ast.Constant) and isinstance(part.value, str):
                 chunks.append(part.value)
             else:
-                chunks.append("{}")
+                chunks.append(_OPAQUE_OPERAND)
         return "".join(chunks)
+    if isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Attribute) and func.attr == "format":
+            inner = _string_constant_text(func.value)
+            if inner is not None:
+                return _format_fields_as_placeholders(inner)
+        return None
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        left = _string_constant_text(value.left)
+        right = _string_constant_text(value.right)
+        if left is None and right is None:
+            return None
+        return ((left if left is not None else _OPAQUE_OPERAND)
+                + (right if right is not None else _OPAQUE_OPERAND))
     return None
 
 
@@ -1007,11 +1085,19 @@ def _prose_constants(root=REPO_ROOT):
     class body count — plus the rebind a function makes to a name it declared
     `global`, which is a module binding by definition.
 
-    Five shapes bind a module-readable string and all five are collected: a
+    Seven shapes bind a module-readable string and all seven are collected: a
     bare name, an attribute or subscript target, a value nested in a literal
-    container, an augmented assignment, and a walrus at declaration scope. A
-    name bound inside a plain function body is still that call's local
-    variable, not a constant.
+    container, an augmented assignment, a walrus at declaration scope, a value
+    built by `.format()` on a literal, and a value built by `+` concatenation
+    of literals/f-strings. The last two were invisible to a scanner that read
+    only `Constant`/`JoinedStr`, which is how `core/state_claims.py:SCHEMA`
+    (`DDL.format(name=...) + \"\"\"...\"\"\"`) reached 40 collected constants
+    across core/ without being one of them. A name bound inside a plain
+    function body is still that call's local variable, not a constant, and a
+    string assembled some OTHER way — `%`-formatting, `*` repetition,
+    `str.join`, or a helper function's return — is still collected nowhere;
+    `_string_constant_text` names those uncovered shapes at the point a reader
+    would otherwise assume coverage.
     """
     found = {}
     for py in _core_module_paths(root):
@@ -1147,6 +1233,81 @@ def test_prose_is_collected_under_every_shape_a_module_binds_it(tmp_path):
         "LITERAL_PROMPTS[review]", "Reviewer.PROMPT",
         "SUBSCRIPT_PROMPTS[review]", "AUGMENTED_PROMPT", "GLOBAL_PROMPT",
         "WALRUS_PROMPT")}
+    assert expected <= set(missing), missing
+
+
+def test_prose_is_collected_when_it_is_formatted_or_concatenated(tmp_path):
+    """A `.format()`ed literal and a `+` chain are constants, by name.
+
+    `_string_constant_text` answered None for `ast.Call` and `ast.BinOp`, so a
+    module could bind multi-line prose as a literal with `.format()` applied or
+    as literal-plus-literal and be collected NOWHERE: invisible to the corpus
+    check AND to the exemption table that is meant to be the only other way
+    past it. Live instance, measured at 20c028fd: core/state_claims.py:SCHEMA
+    (`CLAIMS_TABLE.format(name=...) + \"\"\"...\"\"\" + HISTORY_TABLE.format(...)`)
+    is multi-line SQL DDL and the scanner collected 0 constants from that
+    module — 40 across core/, tree green.
+
+    One synthetic module holds both shapes, so the guard is measured by a
+    module this test writes rather than by whatever core/ happens to contain.
+    Each shape is asserted on its own line, so deleting the scan for one
+    reddens this test naming that shape:
+
+      FORMAT_PROMPT   literal with `.format(count=3)` applied — the field must
+                      arrive as a placeholder, not as `{count}` and not as 3;
+      CONCAT_PROMPT   `\"\"\"a\"\"\" + \"\"\"b\"\"\"` — the joined text is what is
+                      collected, so prose on the SECOND side is in it;
+      SPLICED_DDL     the live module's own shape: a `+` chain whose left
+                      operand is `.format()` on an already-declared constant,
+                      which the scanner cannot read at collection time. The
+                      readable literals around the splice must still be
+                      collected, with `{}` where the opaque operand sits.
+
+    The negative arm is the third block's point in reverse: nothing here turns
+    a short or single-line join into a constant, so the existing length and
+    newline filters still decide what counts as prose.
+    """
+    long_line = ("The reviewer reads the diff carefully and reports every "
+                 "defect it finds, citing a file and a line for each one.\n")
+    source = (
+        'FORMAT_PROMPT = """You are the reviewer.\n'
+        '__LONG____LONG__Report {count} defects, each with a file and a '
+        'line.""" .format(count=3)\n\n'
+        'CONCAT_PROMPT = """You are the reviewer.\n'
+        '__LONG__""" + """Report every defect you find.\n'
+        '__LONG__"""\n\n'
+        'DELETED_CLAUSE = """CREATE TABLE IF NOT EXISTS {name} (\n'
+        '    seq INTEGER PRIMARY KEY AUTOINCREMENT,\n'
+        '    body TEXT NOT NULL, created_at TEXT NOT NULL\n'
+        ')"""\n'
+        'SPLICED_DDL = DELETED_CLAUSE.format(name="probe") + """\n'
+        'CREATE INDEX IF NOT EXISTS probe_live ON probe(body, created_at);\n'
+        'CREATE TRIGGER IF NOT EXISTS probe_no_delete BEFORE DELETE ON probe\n'
+        "BEGIN SELECT RAISE(ABORT,'rows are never deleted'); END;\n"
+        '"""\n'
+        'SHORT_JOIN = "a" + "b"\n'
+    ).replace("__LONG__", long_line)
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "zz_format_concat_probe.py").write_text(
+        source, encoding="utf-8")
+    rel = "core/zz_format_concat_probe.py"
+    found = _prose_constants(tmp_path)
+    assert (rel, "FORMAT_PROMPT") in found, sorted(found)
+    assert (rel, "CONCAT_PROMPT") in found, sorted(found)
+    assert (rel, "SPLICED_DDL") in found, sorted(found)
+    assert "Report {} defects" in found[(rel, "FORMAT_PROMPT")], \
+        found[(rel, "FORMAT_PROMPT")]
+    assert "{count}" not in found[(rel, "FORMAT_PROMPT")], \
+        found[(rel, "FORMAT_PROMPT")]
+    assert "Report every defect you find." in found[(rel, "CONCAT_PROMPT")], \
+        found[(rel, "CONCAT_PROMPT")]
+    assert "CREATE INDEX" in found[(rel, "SPLICED_DDL")], \
+        found[(rel, "SPLICED_DDL")]
+    assert (rel, "SHORT_JOIN") not in found, sorted(found)
+    missing = _unaccounted_prose_constants(tmp_path)
+    expected = {f"{rel}:{name}"
+                for name in ("FORMAT_PROMPT", "CONCAT_PROMPT",
+                             "SPLICED_DDL")}
     assert expected <= set(missing), missing
 
 

@@ -885,29 +885,143 @@ def _declaration_scope(tree):
         stack.extend(ast.iter_child_nodes(node))
 
 
+def _target_name(target):
+    """A readable name for an assignment target, or None if it binds nothing.
+
+    `SYSTEM_PROMPT` is a bare name; `Reviewer.PROMPT` and `PROMPTS["review"]`
+    bind the same kind of module-readable constant, so they are named the way
+    a reader would write them instead of being dropped for not being an
+    `ast.Name` — which is what let a prompt in a NEW core module go unseen.
+    """
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        base = _target_name(target.value)
+        return f"{base}.{target.attr}" if base else f".{target.attr}"
+    if isinstance(target, ast.Subscript):
+        base = _target_name(target.value)
+        key = _literal_key(target.slice)
+        return f"{base}[{key}]" if base else f"[{key}]"
+    return None
+
+
+def _literal_key(node):
+    """The text of a dict key / subscript, quoted-form-free: `[review]`."""
+    if node is None:
+        return "**"
+    if isinstance(node, ast.Constant):
+        return str(node.value)
+    try:
+        return ast.unparse(node)
+    except Exception:  # pragma: no cover - unparse of a parsed node is total
+        return "?"
+
+
+def _container_prose(value, path=""):
+    """(suffix, text) for every string nested in a literal container.
+
+    `PROMPTS = {"review": \"\"\"long prose\"\"\"}` declares prose under a key
+    and its value is an `ast.Dict`, not a string, so an Assign-only scanner
+    read the whole declaration as "not a constant" and moved on. Each nested
+    string is reported under `[key]` / `[index]` so the entry names the prose
+    that must be accounted for rather than the container that holds it.
+    """
+    found = []
+    if isinstance(value, ast.Dict):
+        for key, item in zip(value.keys, value.values):
+            found += _container_prose(item, f"{path}[{_literal_key(key)}]")
+    elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        for index, item in enumerate(value.elts):
+            found += _container_prose(item, f"{path}[{index}]")
+    else:
+        text = _string_constant_text(value)
+        if text is not None:
+            found.append((path, text))
+    return found
+
+
+def _string_bindings(node):
+    """(name, text) for every string constant one binding node assigns.
+
+    Covers the assignment statements (`Assign`, `AnnAssign`, `AugAssign`) and
+    the walrus, for all three target shapes, digging into a literal container
+    when the value is not itself a string.
+    """
+    if isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    elif isinstance(node, ast.Assign):
+        targets = node.targets
+    else:
+        targets = [node.target]
+    text = _string_constant_text(node.value)
+    for target in targets:
+        name = _target_name(target)
+        if name is None:
+            continue
+        if text is not None:
+            yield name, text
+            continue
+        for suffix, inner in _container_prose(node.value):
+            yield name + suffix, inner
+
+
+def _prose_bindings(tree):
+    """(name, text) for every string a module or class body binds."""
+    for node in _declaration_scope(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                             ast.NamedExpr)):
+            yield from _string_bindings(node)
+
+
+def _global_rebind_bindings(tree):
+    """(name, text) for each rebind a function makes to its `global` name.
+
+    `_declaration_scope` skips function bodies, which is right for a local
+    variable and wrong for this one: `global PROMPT` makes the assignment
+    below it a module-level binding, so this is the one shape whose
+    declaration site IS inside a function body. A name the function did not
+    declare `global` is still that call's local variable.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        declared = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Global):
+                declared.update(sub.names)
+        if not declared:
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, (ast.Assign, ast.AnnAssign,
+                                    ast.AugAssign)):
+                continue
+            for name, text in _string_bindings(sub):
+                if name in declared:
+                    yield name, text
+
+
 def _prose_constants(root=REPO_ROOT):
     """{(module path, constant name): text} for every prose-sized constant.
 
     Scanned in `_declaration_scope`, so only names bound in a module body or a
-    class body count.
+    class body count — plus the rebind a function makes to a name it declared
+    `global`, which is a module binding by definition.
+
+    Five shapes bind a module-readable string and all five are collected: a
+    bare name, an attribute or subscript target, a value nested in a literal
+    container, an augmented assignment, and a walrus at declaration scope. A
+    name bound inside a plain function body is still that call's local
+    variable, not a constant.
     """
     found = {}
     for py in _core_module_paths(root):
         rel = f"core/{py.name}"
         tree = ast.parse(py.read_text(encoding="utf-8"))
-        for node in _declaration_scope(tree):
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = (node.targets if isinstance(node, ast.Assign)
-                       else [node.target])
-            names = [t.id for t in targets if isinstance(t, ast.Name)]
-            text = _string_constant_text(node.value)
-            if not names or text is None:
-                continue
+        bindings = [*_prose_bindings(tree), *_global_rebind_bindings(tree)]
+        for const_name, text in bindings:
             if "\n" not in text or len(text) < 120:
                 continue
-            for const_name in names:
-                found[(rel, const_name)] = text
+            found[(rel, const_name)] = text
     return found
 
 
@@ -971,6 +1085,69 @@ def test_a_constant_is_a_name_bound_outside_a_function_body(tmp_path):
     assert f"{rel}:SYSTEM_PROMPT" in missing, missing
     assert f"{rel}:ROLE_PROMPT" in missing, missing
     assert not [item for item in missing if item.endswith(":goal")], missing
+
+
+def test_prose_is_collected_under_every_shape_a_module_binds_it(tmp_path):
+    """Each way a core module can declare prose is collected, by name.
+
+    One synthetic module writes all five shapes the Assign-plus-`ast.Name`
+    scanner used to drop: a value inside a dict literal
+    (`LITERAL_PROMPTS[review]`), an attribute target (`Reviewer.PROMPT`), a
+    subscript target (`SUBSCRIPT_PROMPTS[review]`), an augmented assignment
+    (`AUGMENTED_PROMPT`) and a declaration-scope walrus (`WALRUS_PROMPT`),
+    plus the one legitimate rebind from inside a function (`GLOBAL_PROMPT`,
+    declared `global`). Every base that is rebound starts short on purpose:
+    only the widened scan can find its prose, so that assertion reddens on
+    that scan alone.
+
+    Every shape is asserted on its own line, so deleting any ONE scan from
+    `_prose_constants` reddens this test naming that shape instead of
+    leaving the other four green. The negative arm is unchanged: a string
+    bound inside a plain function body — `goal` (an f-string) or `local` —
+    declares nothing global and is still not a constant.
+    """
+    long_line = ("The reviewer reads the diff carefully and reports every "
+                 "defect it finds, citing a file and a line for each one.\n")
+    prose = '"""You are the reviewer.\n' + long_line * 2 + '"""'
+    source = (
+        'LITERAL_PROMPTS = {"review": ' + prose + '}\n\n'
+        'SUBSCRIPT_PROMPTS = {"review": "You are the reviewer."}\n'
+        'SUBSCRIPT_PROMPTS["review"] = ' + prose + '\n\n'
+        'class Reviewer:\n'
+        '    ROLE_PROMPT = "You are the reviewer."\n\n\n'
+        'Reviewer.PROMPT = ' + prose + '\n\n'
+        'AUGMENTED_PROMPT = "You are the reviewer. "\n'
+        'AUGMENTED_PROMPT += ' + prose + '\n\n'
+        'GLOBAL_PROMPT = "You are the reviewer."\n'
+        'WALRUS_PROMPT = ""\n\n\n'
+        'def install_prompt():\n'
+        '    global GLOBAL_PROMPT\n'
+        '    GLOBAL_PROMPT = ' + prose + '\n\n\n'
+        'if (WALRUS_PROMPT := ' + prose + '):\n'
+        '    pass\n\n\n'
+        'def build_goal(issue_id):\n'
+        '    goal = f"""Fix issue {issue_id}.\n' + long_line * 2 + '"""\n'
+        '    local = """You are the reviewer.\n' + long_line * 2 + '"""\n'
+        '    return goal, local\n')
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "zz_shapes_probe.py").write_text(source,
+                                                         encoding="utf-8")
+    rel = "core/zz_shapes_probe.py"
+    found = _prose_constants(tmp_path)
+    assert (rel, "LITERAL_PROMPTS[review]") in found, sorted(found)
+    assert (rel, "Reviewer.PROMPT") in found, sorted(found)
+    assert (rel, "SUBSCRIPT_PROMPTS[review]") in found, sorted(found)
+    assert (rel, "AUGMENTED_PROMPT") in found, sorted(found)
+    assert (rel, "GLOBAL_PROMPT") in found, sorted(found)
+    assert (rel, "WALRUS_PROMPT") in found, sorted(found)
+    assert (rel, "goal") not in found, sorted(found)
+    assert (rel, "local") not in found, sorted(found)
+    missing = _unaccounted_prose_constants(tmp_path)
+    expected = {f"{rel}:{name}" for name in (
+        "LITERAL_PROMPTS[review]", "Reviewer.PROMPT",
+        "SUBSCRIPT_PROMPTS[review]", "AUGMENTED_PROMPT", "GLOBAL_PROMPT",
+        "WALRUS_PROMPT")}
+    assert expected <= set(missing), missing
 
 
 def test_every_prose_constant_in_core_is_accounted_for():

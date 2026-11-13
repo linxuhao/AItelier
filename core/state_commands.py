@@ -1317,15 +1317,30 @@ def _refuse_if_project_not_public(service, action, args) -> None:
         return
 
 
+# A source binding's repo_path and common_dir name a directory on THIS host. The
+# anonymous catalog keeps the source block's shape but blanks those two values:
+# the repository tree they name is refused to an anonymous caller, so the path
+# string must not be more visible than the tree it points at.
+_HOST_PATH_KEYS = frozenset({"repo_path", "common_dir"})
+
+
+def _without_host_paths(project):
+    source = project.get("source")
+    if not isinstance(source, dict):
+        return project
+    return {**project, "source": {k: (None if k in _HOST_PATH_KEYS else v) for k, v in source.items()}}
+
+
 def _filter_catalog(service, action, result):
     """Drop every project an anonymous caller has not been allowed to see from a
-    cross-project read, so the aggregate carries no id, title or count for it."""
+    cross-project read, so the aggregate carries no id, title or count for it,
+    and blank the host paths of the projects it does keep."""
     public = service.store.public_project_ids()
     if action == "list_projects" and isinstance(result, list):
         return [p for p in result if p.get("project_id") in public]
     if action == "project_catalog" and isinstance(result, dict) \
             and isinstance(result.get("projects"), list):
-        kept = [p for p in result["projects"] if p.get("project_id") in public]
+        kept = [_without_host_paths(p) for p in result["projects"] if p.get("project_id") in public]
         out = {**result, "projects": kept}
         # The SQL page already carries the right cursor (the last id of the page
         # iff more rows follow, else None). Rewrite it ONLY when this filter

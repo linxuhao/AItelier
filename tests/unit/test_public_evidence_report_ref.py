@@ -302,6 +302,107 @@ def test_receipt_evidence_shape_has_no_report_ref():
         "evidence_id", "criterion_id", "kind", "verdict", "artifact_ref", "report_sha256"}
 
 
+# The second channel: a `file://` report reference. `report_external_attempt`
+# accepts a `file://` URL and a NON-terminal observation keeps it verbatim (the
+# terminal and quiescent writes are normalised to the store path, so the raw
+# `file://` value is only reachable through a non-terminal observation). The
+# evidence and provenance arms below seed the raw row directly, the same shape
+# that observation writes, so the projection is tested on the value it must fix.
+FILE_HOME = "file:///home/somebody/.AItelier/director/reports/r.json"
+FILE_STORE_SHA = "9f" + "c" * 62
+FILE_STORE = "file:///home/somebody/.AItelier/state-report-evidence/9f/" + FILE_STORE_SHA
+FILE_TAIL_BASENAME = "r.json"
+
+
+def _raw_file_row(service, aid, ref):
+    """Write one evidence row whose report_ref is the given raw reference."""
+    with service.store.transaction(write=True) as conn:
+        conn.execute(
+            "INSERT INTO state_evidence(evidence_id,attempt_id,criterion_id,kind,verdict,artifact_ref,"
+            "report_ref,report_sha256,reviewer,detail,payload_hash,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("raw-" + ref[-8:], aid, "behaviour", "behaviour", "pass", ARTIFACT, ref,
+             "0" * 64, "verifier", "", "0" * 64, "2026-01-01T00:00:00Z"))
+
+
+def _raw_file_observation(service, aid, ref):
+    """Write one non-terminal observation whose report_ref is the given raw reference."""
+    with service.store.transaction(write=True) as conn:
+        conn.execute(
+            "INSERT INTO state_external_observations(attempt_id,observation_id,version,status,"
+            "resulting_status,quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,"
+            "detail,payload_hash,context_hash,created_at,late_after_abandon,fence) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (aid, "raw-observation", 99, "running", "running", 0, None, None, ref, "1" * 64,
+             "reporter", "", "2" * 64, "3" * 64, "2026-01-01T00:00:00Z", 0, None))
+
+
+def _raw_file_service(tmp_path):
+    service, aid = _seeded(tmp_path)
+    _raw_file_row(service, aid, FILE_HOME)
+    _raw_file_row(service, aid, FILE_STORE)
+    _raw_file_observation(service, aid, FILE_HOME)
+    return service, aid
+
+
+FILE_READS = ["evidence", "attempt_detail"]
+
+
+@pytest.mark.parametrize("action", FILE_READS)
+def test_anonymous_file_url_report_ref_is_projected(tmp_path, action):
+    service, aid = _raw_file_service(tmp_path)
+    answer = _answer(service, False, action, aid)
+
+    # No "/home", no "file:" anywhere in the anonymous answer.
+    texts = list(_strings(answer))
+    assert not any("/home" in s for s in texts), f"anonymous {action} names /home: {texts}"
+    assert not any("file:" in s for s in texts), f"anonymous {action} keeps a file: URL"
+
+    # The exact relative tail, for the store form and for the non-store form.
+    refs = [row["report_ref"] for row in _rows_with_report_ref(answer)]
+    assert f"9f/{FILE_STORE_SHA}" in refs, f"anonymous {action} lost the store-relative tail: {refs}"
+    assert FILE_TAIL_BASENAME in refs, f"anonymous {action} lost the basename tail: {refs}"
+
+
+@pytest.mark.parametrize("action", FILE_READS)
+def test_trusted_file_url_report_ref_is_unchanged(tmp_path, action):
+    service, aid = _raw_file_service(tmp_path)
+    answer = _answer(service, True, action, aid)
+    refs = [row["report_ref"] for row in _rows_with_report_ref(answer)]
+    # The control: the recorded file:// values come back exactly as stored.
+    assert FILE_HOME in refs and FILE_STORE in refs, f"trusted {action} changed a file:// ref: {refs}"
+
+
+def test_anonymous_file_url_provenance_is_projected_on_the_read_path():
+    # The dependency channel, exercised on the projection the read applies. The
+    # receipt a dependent node reads is the node's VERIFIED receipt, and
+    # state_acceptances is append-only, so an end-to-end `get_node` cannot be given a
+    # file:// provenance without a fabricated receipt. This arm therefore applies the
+    # same `execute` rewrite (`_without_host_report_refs`) to an acceptance answer
+    # shaped exactly as `get_node` returns it, and asserts the anonymous and trusted
+    # results. The store-path end-to-end arm is `test_get_node_acceptance_provenance_*`.
+    from core.state_commands import _without_host_report_refs
+    answer = {"dependency_receipts": {"goal": {"acceptance": {
+        "receipt_id": "receipt-x",
+        "provenance_json": json.dumps({"report_ref": FILE_HOME, "execution_kind": "external"},
+                                      sort_keys=True, separators=(",", ":"))}}}}
+    anonymous = _without_host_report_refs(answer)
+    texts = list(_strings(anonymous))
+    assert not any("/home" in s or "file:" in s for s in texts), "anonymous provenance names a file:// host path"
+    anon_refs = list(_provenance_report_refs(anonymous))
+    assert anon_refs == [FILE_TAIL_BASENAME], f"anonymous provenance lost the relative tail: {anon_refs}"
+    # The trusted answer is not passed through the projection, so it is unchanged.
+    assert list(_provenance_report_refs(answer)) == [FILE_HOME], "trusted provenance changed the file:// ref"
+
+
+def test_file_url_outside_the_store_loses_its_prefix_to_the_basename():
+    # A file:// URL that is neither store-relative nor an absolute store path keeps
+    # only its basename: the host prefix must not survive any shape.
+    from core.state_commands import _host_report_relative
+    assert _host_report_relative("file:///home/somebody/.AItelier/director/reports/r.json") == "r.json"
+    assert _host_report_relative("file://localhost/home/somebody/reports/r.json") == "r.json"
+
+
 def test_host_path_matcher_has_a_positive_control():
     # The scan must be able to find the leak it guards against.
     assert HOST_PATH.search("/home/somebody/.AItelier/director/reports/r.json")

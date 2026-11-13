@@ -1386,8 +1386,31 @@ def _relative_report_ref(ref):
     return parts[-1] if parts else _REPORT_STORE_DIR
 
 
+def _local_file_path(ref):
+    """The host path a `file://` reference names, or None when it is not one.
+
+    `report_external_attempt` accepts a `file://` URL whose host is empty or
+    `localhost` (any case of the scheme) as a report reference, and a non-terminal
+    observation keeps it verbatim. Its path is a host path, so the anonymous
+    projection treats it as one: the scheme and host are stripped and the path is
+    returned percent-decoded, so the store-relative rewrite sees the real parts."""
+    from urllib.parse import unquote, urlparse
+    parsed = urlparse(ref)
+    if parsed.scheme.lower() != "file" or parsed.netloc.lower() not in {"", "localhost"}:
+        return None
+    return unquote(parsed.path)
+
+
 def _is_host_path(ref) -> bool:
-    return isinstance(ref, str) and (ref.startswith("/") or ref.startswith("\\") or ":" in ref[:3])
+    return isinstance(ref, str) and (ref.startswith("/") or ref.startswith("\\")
+                                     or ":" in ref[:3] or _local_file_path(ref) is not None)
+
+
+def _host_report_relative(ref: str) -> str:
+    """The anonymous form of one host report reference: a `file://` URL is reduced
+    to its path first, then the same store-relative rewrite applies to both."""
+    path = _local_file_path(ref)
+    return _relative_report_ref(path if path is not None else ref)
 
 
 def _provenance_without_host_report_refs(text):
@@ -1400,7 +1423,7 @@ def _provenance_without_host_report_refs(text):
         return text
     if not isinstance(provenance, dict) or not _is_host_path(provenance.get("report_ref")):
         return text
-    provenance["report_ref"] = _relative_report_ref(provenance["report_ref"])
+    provenance["report_ref"] = _host_report_relative(provenance["report_ref"])
     return json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -1413,7 +1436,7 @@ def _without_host_report_refs(value):
         out = {}
         for k, v in value.items():
             if k == "report_ref" and _is_host_path(v):
-                out[k] = _relative_report_ref(v)
+                out[k] = _host_report_relative(v)
             elif k == "provenance_json" and isinstance(v, str):
                 out[k] = _provenance_without_host_report_refs(v)
             else:

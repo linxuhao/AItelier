@@ -646,6 +646,108 @@ def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch
     assert {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp"} <= ids
 
 
+# ── Per-driver browser instances ─────────────────────────────────────────────
+# One Playwright MCP instance holds one client session, so a shared URL does not
+# share a browser: the second driver's `initialize` evicts the first, whose next
+# call answers `-32001 Session not found` with nothing in the service log. The
+# instances already run one per driver on their own port; the mapping below is
+# the missing half - which port belongs to which driver id.
+
+PWMCP_PORTS_ENV = "AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS"
+
+
+def _mcp_entries(runtime, row):
+    runtime._environment(row)
+    return {e["id"]: e for e in next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)}
+
+
+def test_mapped_drivers_get_distinct_browser_urls(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
+    assert alpha["driver_id"] != beta["driver_id"]
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", "http://127.0.0.1:18931/mcp")
+    # Whitespace around entries and a trailing comma are both allowed.
+    monkeypatch.setenv(PWMCP_PORTS_ENV,
+                       f" {alpha['driver_id']}=18932 , {beta['driver_id']}=18933 ,")
+
+    a = _mcp_entries(runtime, alpha)
+    b = _mcp_entries(runtime, beta)
+    assert a["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:18932/mcp"
+    assert b["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:18933/mcp"
+    assert a["mcp-pwmcp"]["config"]["url"] != b["mcp-pwmcp"]["config"]["url"], (
+        "two drivers on one URL take turns evicting each other")
+    # The override changes the URL and nothing else.
+    for entries in (a, b):
+        assert entries["mcp-pwmcp"]["config"]["failOnStartupError"] is False
+        assert entries["mcp-pwmcp"]["config"]["toolCallTimeoutMs"] == 960000
+        assert entries["mcp-pwmcp"]["config"]["transport"] == "streamable-http"
+        for server, url in (("devmcp", "http://127.0.0.1:7676/mcp"),
+                            ("zvec", "http://127.0.0.1:7999/mcp"),
+                            ("agentmcp", "http://127.0.0.1:9003/mcp")):
+            assert entries["mcp-" + server]["config"]["url"] == url
+
+
+def test_a_driver_absent_from_the_mapping_keeps_the_default(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
+    shared = "http://127.0.0.1:18931/mcp"
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", shared)
+    monkeypatch.setenv(PWMCP_PORTS_ENV, f"{alpha['driver_id']}=18932")
+    assert _mcp_entries(runtime, alpha)["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:18932/mcp"
+    assert _mcp_entries(runtime, beta)["mcp-pwmcp"]["config"]["url"] == shared
+
+
+def test_without_a_mapping_every_driver_keeps_the_default(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.delenv(PWMCP_PORTS_ENV, raising=False)
+    monkeypatch.delenv("AITELIER_DSH_MCP_PWMCP", raising=False)
+    for row in (alpha, beta):
+        assert _mcp_entries(runtime, row)["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"
+    # An empty value is the same statement as an unset one: no mapping.
+    monkeypatch.setenv(PWMCP_PORTS_ENV, "")
+    for row in (alpha, beta):
+        assert _mcp_entries(runtime, row)["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"
+
+
+def test_a_blank_base_url_withdraws_the_service_even_when_the_driver_is_mapped(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", "")
+    monkeypatch.setenv(PWMCP_PORTS_ENV, f"{alpha['driver_id']}=18932,{beta['driver_id']}=18933")
+    for row in (alpha, beta):
+        entries = _mcp_entries(runtime, row)
+        assert "mcp-pwmcp" not in entries, (
+            "blank means 'do not register this service'; a mapped port must not resurrect it")
+        assert {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp"} <= set(entries)
+
+
+@pytest.mark.parametrize("entry", [
+    "grok",            # no "=" at all
+    "grok=abc",        # non-numeric port
+    "grok=1023",       # below 1024
+    "grok=65536",      # above 65535
+])
+def test_a_malformed_driver_port_mapping_is_refused(runtime, monkeypatch, entry):
+    """Refused, not silently defaulted: a fallback recreates the shared slot."""
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.setenv(PWMCP_PORTS_ENV, "claude=8933," + entry)
+    with pytest.raises(ValueError) as refused:
+        runtime._environment(row)
+    assert entry in str(refused.value), (
+        "the refusal must name the offending entry verbatim")
+
+
+def test_a_malformed_mapping_is_refused_even_when_the_service_is_withdrawn(runtime, monkeypatch):
+    """A malformed value is a config error, not a dormant one."""
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", "")
+    monkeypatch.setenv(PWMCP_PORTS_ENV, "grok=not-a-port")
+    with pytest.raises(ValueError) as refused:
+        runtime._environment(row)
+    assert "grok=not-a-port" in str(refused.value)
+
+
 def test_agentmcp_can_be_redirected_or_disabled(runtime, monkeypatch):
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     monkeypatch.setenv("AITELIER_DSH_MCP_AGENTMCP", "http://127.0.0.1:19003/mcp")

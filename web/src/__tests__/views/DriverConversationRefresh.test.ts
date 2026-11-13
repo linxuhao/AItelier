@@ -428,4 +428,59 @@ describe('tagged segments', () => {
     expect(box.querySelector('[data-question-segment-id="s2"] .question-text')?.textContent).toBe('may I restart the host now?');
     expect(box.textContent).not.toContain('Heads up.');
   });
+
+  // The three cases below pin the branches of the one function that decides what a
+  // message shows. Each of them survives the whole suite if its branch is broken,
+  // so they are written against the branch, not against the shape of the split.
+  it('shows the message BODY when it has one, never its stored segment texts as well', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('b1', 'driver', 'Body wins', '2026-11-03T12:00:00+00:00',
+        {body: 'The body is the message.',
+          segments: [{id: 's1', kind: 'info', text: 'a stale segment copy'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+
+    const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Body wins') as HTMLElement;
+    expect(message).toBeTruthy();
+    expect(message.querySelectorAll('pre')).toHaveLength(1);
+    expect(message.querySelector('pre')?.textContent).toBe('The body is the message.');
+    // Preferring the segments here would show the same message twice, under two
+    // different wordings.
+    expect(message.textContent).not.toContain('a stale segment copy');
+  });
+
+  it('drops a whitespace-only segment instead of rendering a blank line for it', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('w1', 'driver', 'Whitespace first', '2026-11-03T12:00:00+00:00',
+        {body: '',
+          segments: [{id: 'w0', kind: 'info', text: '   \n\t'},
+            {id: 'q1', kind: 'question', text: 'may I restart the host now?'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+
+    const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Whitespace first') as HTMLElement;
+    expect(message).toBeTruthy();
+    expect(message.querySelectorAll('pre')).toHaveLength(1);
+    // Exactly the readable text: no leading blank line, no padding around it.
+    expect(message.querySelector('pre')?.textContent).toBe('may I restart the host now?');
+  });
+
+  it('renders no text block at all for a message with neither a body nor segments', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('n1', 'driver', 'Nothing to say yet', '2026-11-03T12:00:00+00:00', {body: '', segments: []}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+
+    const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
+      .find(a => a.querySelector('.subject')?.textContent === 'Nothing to say yet') as HTMLElement;
+    expect(message).toBeTruthy();
+    // An empty <pre> is a visible blank block in the thread; the message has no text,
+    // so it must render no text element.
+    expect(message.querySelectorAll('pre')).toHaveLength(0);
+  });
 });

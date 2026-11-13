@@ -1338,6 +1338,16 @@ def _without_host_paths(project):
 # `list_attempts` nest them), so the anonymous answer is walked, not hand-picked.
 _ATTEMPT_READS = frozenset({"get_attempt", "attempt_detail", "list_attempts", "get_node"})
 
+# The reads whose answer can carry an evidence row (`state_evidence` or the
+# external observation it was recorded from), and so a `report_ref`:
+# - `evidence` returns the attempt's `state_evidence` rows;
+# - `attempt_detail` returns its `evidence` rows and its `external_observations`;
+# - `get_node` / `node_context` embed the node's acceptance rows, whose
+#   `provenance_json` names the external report; the walk covers both.
+# `get_receipt` returns RECEIPT_EVIDENCE columns only (no report_ref), and the
+# other attempt reads return attempt rows without evidence, so neither is listed.
+_REPORT_REF_READS = frozenset({"evidence", "attempt_detail", "get_node"})
+
 
 def _without_host_contract_paths(value):
     """Copy of a JSON-like answer where every `host_contract.source_repo` is None
@@ -1376,6 +1386,90 @@ def _without_provenance_digest(text: str) -> str:
         return text
     provenance["context_hash"] = None
     return json.dumps(provenance, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+# An evidence row's `report_ref` is the host path of the retained report.
+# `retain_report` stores the caller's recorded reference and the row keeps it, and
+# the report store lives under the host's AItelier home, so an anonymous answer
+# must not carry that absolute prefix. An anonymous caller can still tell rows
+# apart from the tail (`<sha[:2]>/<sha>`), which is the report's own identity in
+# the store. A trusted caller keeps the recorded value byte for byte, and
+# `report_sha256` is never changed: it carries no path.
+_REPORT_STORE_DIR = "state-report-evidence"
+
+
+def _relative_report_ref(ref):
+    """The report reference an anonymous caller may see: the components after the
+    report store directory (`<sha[:2]>/<sha>`) when the absolute path runs through
+    it, otherwise the basename. Never a host-absolute prefix, and never empty: a
+    reference with no usable tail keeps the store directory name as its handle."""
+    parts = [p for p in ref.replace("\\", "/").split("/") if p]
+    if _REPORT_STORE_DIR in parts:
+        index = len(parts) - 1 - parts[::-1].index(_REPORT_STORE_DIR)
+        tail = parts[index + 1:]
+        return "/".join(tail) if tail else _REPORT_STORE_DIR
+    return parts[-1] if parts else _REPORT_STORE_DIR
+
+
+def _local_file_path(ref):
+    """The host path a `file://` reference names, or None when it is not one.
+
+    `report_external_attempt` accepts a `file://` URL whose host is empty or
+    `localhost` (any case of the scheme) as a report reference, and a non-terminal
+    observation keeps it verbatim. Its path is a host path, so the anonymous
+    projection treats it as one: the scheme and host are stripped and the path is
+    returned percent-decoded, so the store-relative rewrite sees the real parts."""
+    from urllib.parse import unquote, urlparse
+    parsed = urlparse(ref)
+    if parsed.scheme.lower() != "file" or parsed.netloc.lower() not in {"", "localhost"}:
+        return None
+    return unquote(parsed.path)
+
+
+def _is_host_path(ref) -> bool:
+    return isinstance(ref, str) and (ref.startswith("/") or ref.startswith("\\")
+                                     or ":" in ref[:3] or _local_file_path(ref) is not None)
+
+
+def _host_report_relative(ref: str) -> str:
+    """The anonymous form of one host report reference: a `file://` URL is reduced
+    to its path first, then the same store-relative rewrite applies to both."""
+    path = _local_file_path(ref)
+    return _relative_report_ref(path if path is not None else ref)
+
+
+def _provenance_without_host_report_refs(text):
+    """An acceptance's `provenance_json` (a canonical JSON string) carries the
+    external report reference of its terminal observation. Rewrite only that
+    field; any other JSON content is kept, re-serialised canonically."""
+    try:
+        provenance = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if not isinstance(provenance, dict) or not _is_host_path(provenance.get("report_ref")):
+        return text
+    provenance["report_ref"] = _host_report_relative(provenance["report_ref"])
+    return json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _without_host_report_refs(value):
+    """Copy of a JSON-like answer where every `report_ref` that is an ABSOLUTE host
+    path is replaced by its relative reference, and every acceptance's
+    `provenance_json` has the same field rewritten. Every other key and value is
+    kept, the key stays present, and a relative reference is left as it is."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k == "report_ref" and _is_host_path(v):
+                out[k] = _host_report_relative(v)
+            elif k == "provenance_json" and isinstance(v, str):
+                out[k] = _provenance_without_host_report_refs(v)
+            else:
+                out[k] = _without_host_report_refs(v)
+        return out
+    if isinstance(value, list):
+        return [_without_host_report_refs(v) for v in value]
+    return value
 
 
 def _filter_catalog(service, action, result):
@@ -1667,6 +1761,11 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         # it. Both are blanked wherever the attempt is embedded; a trusted caller
         # keeps the recorded values.
         result = _without_host_contract_paths(result)
+    if anonymous and action in _REPORT_REF_READS:
+        # An evidence row's report_ref is a host path to the retained report. The
+        # anonymous answer keeps the row and its key but names the report by its
+        # store-relative reference; a trusted caller keeps the recorded value.
+        result = _without_host_report_refs(result)
     return result
 
 

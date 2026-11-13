@@ -5,6 +5,7 @@ Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Literal
 
@@ -1339,17 +1340,42 @@ _ATTEMPT_READS = frozenset({"get_attempt", "attempt_detail", "list_attempts", "g
 
 
 def _without_host_contract_paths(value):
-    """Copy of a JSON-like answer where every `host_contract.source_repo` is None;
-    every other key and value is kept as it is."""
+    """Copy of a JSON-like answer where every `host_contract.source_repo` is None
+    and every attempt digest is None; every other key and value is kept as it is.
+
+    The digest is a `context_hash` = sha256 of the attempt's PRE-redaction context.
+    An anonymous caller holds every other byte of that context, so a published
+    digest lets them confirm a guessed `source_repo` by hashing the guess. It is
+    therefore withheld wherever an attempt or observation is embedded, and the
+    receipt `provenance_json` string (which carries the same digest for an
+    external acceptance) is rewritten the same way."""
     if isinstance(value, dict):
         out = {k: _without_host_contract_paths(v) for k, v in value.items()}
         contract = out.get("host_contract")
         if isinstance(contract, dict):
             out["host_contract"] = {**contract, "source_repo": None}
+        if "context_hash" in out:
+            out["context_hash"] = None
+        if isinstance(out.get("provenance_json"), str):
+            out["provenance_json"] = _without_provenance_digest(out["provenance_json"])
         return out
     if isinstance(value, list):
         return [_without_host_contract_paths(v) for v in value]
     return value
+
+
+def _without_provenance_digest(text: str) -> str:
+    """The `provenance_json` text with its `context_hash` nulled. A string that is
+    not a JSON object, or carries no `context_hash`, comes back byte-identical:
+    nothing is dropped and nothing raises."""
+    try:
+        provenance = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if not isinstance(provenance, dict) or "context_hash" not in provenance:
+        return text
+    provenance["context_hash"] = None
+    return json.dumps(provenance, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _filter_catalog(service, action, result):
@@ -1635,8 +1661,11 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         # the anonymous answer keeps its shape and blanks the two host paths.
         result = _without_host_paths(result)
     if anonymous and action in _ATTEMPT_READS:
-        # An attempt's pinned launch descriptor names its host source repository.
-        # Blank it wherever the attempt is embedded; a trusted caller keeps it.
+        # An attempt's pinned launch descriptor names its host source repository,
+        # and the attempt's context digest (context_hash, including the one inside
+        # an acceptance's provenance_json) would let a caller confirm a guess at
+        # it. Both are blanked wherever the attempt is embedded; a trusted caller
+        # keeps the recorded values.
         result = _without_host_contract_paths(result)
     return result
 

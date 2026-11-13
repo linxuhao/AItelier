@@ -105,3 +105,18 @@ def test_an_empty_conversation_and_another_projects_questions(world):
 def test_bad_arguments_are_refused(world, args):
     with pytest.raises((StateGraphError, ValueError)):
         questions(world, **args)
+
+
+def test_the_badge_path_does_not_read_message_bodies(world, monkeypatch):
+    """The unread badge is polled unattended; it needs counts, never bodies."""
+    import core.driver_questions as dq
+    seen = []
+    real = dq._decoded
+    monkeypatch.setattr(dq, "_decoded", lambda row: seen.append(set(row.keys())) or real(row))
+    first = ask(world, "k1", q("q-a"))
+    answer(world, "r1", "a", (first, "q-a"))
+    execute(world["user"], "user_conversation_unread", {"project_id": "alpha"})
+    assert seen and all("body" not in keys for keys in seen)
+    seen.clear()
+    questions(world, status="answered")
+    assert seen and all("body" in keys for keys in seen)

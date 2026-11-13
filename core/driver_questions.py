@@ -24,20 +24,26 @@ import json
 # conversation read must agree on which rows are one thread; core/driver_inbox
 # imports it rather than spelling it a second time.
 CONVERSATION = "(audience='user' OR channel='user')"
-_ROWS = ("SELECT message_id,created_at,body,segments_json,answers_json "
-         "FROM driver_inbox_messages WHERE project_id=? AND " + CONVERSATION)
+_COLUMNS = "message_id,created_at,segments_json,answers_json"
+_ROWS = "SELECT {} FROM driver_inbox_messages WHERE project_id=? AND " + CONVERSATION
 
 
 def _decoded(row):
     """One stored row in the shape the rule reads: decoded lists, never JSON."""
-    return {"message_id": row["message_id"], "created_at": row["created_at"], "body": row["body"],
+    return {"message_id": row["message_id"], "created_at": row["created_at"],
+            "body": row["body"] if "body" in row.keys() else None,
             "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
             "answers": json.loads(row["answers_json"]) if row["answers_json"] else []}
 
 
-def conversation_rows(conn, project_id):
-    """The rows of one project's conversation, decoded for `open_questions`."""
-    return [_decoded(row) for row in conn.execute(_ROWS, (project_id,))]
+def conversation_rows(conn, project_id, with_body=False):
+    """The rows of one project's conversation, decoded for `open_questions`.
+
+    Bodies are read only when asked: the unread badge polls this for counts and
+    never needs them, while `list_user_questions` returns the answers' text.
+    """
+    columns = _COLUMNS + ",body" if with_body else _COLUMNS
+    return [_decoded(row) for row in conn.execute(_ROWS.format(columns), (project_id,))]
 
 
 def all_questions(rows):

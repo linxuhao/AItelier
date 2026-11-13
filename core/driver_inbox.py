@@ -654,7 +654,7 @@ class DriverInbox:
             raise StateGraphError("invalid_request")
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
-            found = all_questions(conversation_rows(conn, project_id))
+            found = all_questions(conversation_rows(conn, project_id, with_body=True))
         counts = {"open": sum(q["status"] == "open" for q in found),
                   "answered": sum(q["status"] == "answered" for q in found)}
         picked = [q for q in reversed(found) if status == "all" or q["status"] == status]

@@ -75,7 +75,7 @@ describe('driver records and realtime conversation', () => {
     await vi.advanceTimersByTimeAsync(10000);
     expect([...view.container.querySelectorAll('tbody tr')].map(r => r.firstChild?.textContent)).toEqual(['Alpha', 'Beta']);
   });
-  it('reads older records, sends to the exact driver and only reports inbox delivery', async () => {
+  it('reads older records, sends to the exact driver and leaves the completion sentence out', async () => {
     const view = render(DriverStatus, {projects});
     await view.findByText('Total: 4 · Online: 2');
     await fireEvent.click(view.getByRole('button', {name: 'Run history'}));
@@ -87,8 +87,12 @@ describe('driver records and realtime conversation', () => {
     await fireEvent.input(view.getByRole('textbox', {name: 'Message driver'}), {target: {value: 'Please summarize progress'}});
     await fireEvent.click(view.getByRole('button', {name: 'Send'}));
     await waitFor(() => expect(api.messageDshDriver).toHaveBeenCalledWith('alpha', 'dsh-alpha', 'Please summarize progress'));
-    await view.findByText('Sent to driver inbox');
-    expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    // The completion sentence ("Sent to driver inbox") was removed on purpose -
+    // the conversation tab is where a send is confirmed - so this tab must not
+    // reprint it. The empty box is what shows the send went through, and the
+    // assertion below keeps the removal from being undone by accident.
+    await waitFor(() => expect((view.getByRole('textbox', {name: 'Message driver'}) as HTMLTextAreaElement).value).toBe(''));
+    expect(view.queryByText('Sent to driver inbox')).toBeNull();
   });
   it('appends live records once, catches up after reconnect and closes the stream', async () => {
     const streams: any[] = [];

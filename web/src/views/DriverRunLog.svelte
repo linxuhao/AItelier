@@ -20,7 +20,7 @@
   let live = $state(false), stream: EventSource | undefined;
   let latest = $state(true);
   let pendingLive: DriverHistoryEntry[] = [];
-  let message = $state(''), sending = $state(false), messageSent = $state(false), messageError = $state('');
+  let message = $state(''), sending = $state(false), messageError = $state('');
   let mounted = false;
   function mergeEntries(entries: DriverHistoryEntry[], updates: DriverHistoryEntry[]) {
     return [...new Map([...entries, ...updates].map(e => [e.seq, e])).values()].sort((a, b) => a.seq - b.seq).slice(-100);
@@ -65,7 +65,7 @@
   async function load(older = false) {
     const before = older ? history?.next_before_seq ?? undefined : undefined;
     const version = ++historyGeneration;
-    if (!older) { message = ''; messageSent = false; messageError = ''; }
+    if (!older) { message = ''; messageError = ''; }
     historyLoading = true; historyError = ''; latest = !older;
     if (!older) { history = null; pendingLive = []; connectLive(); }
     else { stream?.close(); stream = undefined; live = false; }
@@ -81,11 +81,10 @@
   }
   async function sendMessage() {
     if (!message.trim() || sending) return;
-    const text = message; sending = true; messageSent = false; messageError = '';
+    const text = message; sending = true; messageError = '';
     try {
       await messageDshDriver(projectId, driverId, text);
       if (message === text) message = '';
-      messageSent = true;
     } catch (e) { messageError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
@@ -105,10 +104,17 @@
     {#if latest && driverEnabled}<span class:live>{live ? st('driverLive') : st('driverReconnecting')}</span>{/if}
     <button class="outline" type="button" disabled={historyLoading} onclick={() => void load()}>{st('driverHistoryRefresh')}</button>
     {#if onclose}<button class="outline" type="button" onclick={close}>{st('driverHistoryClose')}</button>{/if}</header>
-  <form onsubmit={(event) => {event.preventDefault(); void sendMessage();}}>
-    <label>{st('driverMessage')}<textarea bind:value={message} maxlength="8000" rows="2" disabled={sending}></textarea></label>
+  <!-- One row, the same shape the conversation composer has: the box takes the
+       width, Send keeps its own, and the accessible name lives on the textarea
+       instead of in a visible label. The completion sentence is gone with it:
+       those two were the strings the owner asked to remove, and a run log does
+       not need to repeat what the conversation tab already shows. The failure
+       line stays - a send that failed silently is worse than one that worked
+       silently. -->
+  <form class="compose" data-run-log-compose onsubmit={(event) => {event.preventDefault(); void sendMessage();}}>
+    <textarea bind:value={message} maxlength="8000" rows="1" disabled={sending}
+      aria-label={st('driverMessage')}></textarea>
     <button type="submit" disabled={sending || !message.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
-    {#if messageSent}<span role="status">{st('driverMessageSent')}</span>{/if}
     {#if messageError}<p role="alert">{messageError}</p>{/if}
   </form>
   {#if historyError}<p role="alert">{historyError}</p>{/if}
@@ -127,7 +133,14 @@
   .history header{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;}
   button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}
   p{margin:.4rem 0;}
-  .live{color:#15803d;}form{margin:.7rem 0;}label{display:block;font-size:.8rem;}textarea{font-size:.8rem;margin:.3rem 0;}
+  .live{color:#15803d;}
+  /* One row: the box takes the width, Send keeps its own, and a narrow pane wraps
+     the button under the box instead of pushing it out. Pico's global form rule is
+     `button[type=submit],select,textarea{width:100%}`; the two selectors below
+     out-specify it, exactly as the conversation composer does. */
+  form.compose{display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:.35rem;margin:.7rem 0;}
+  .compose textarea{flex:1 1 6rem;width:auto;min-width:0;margin:0;resize:vertical;font-size:.8rem;line-height:1.35;padding:.25rem .4rem;}
+  .compose button[type="submit"]{flex:0 0 auto;width:auto;margin:0;}
   .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
   .record{margin:.45rem 0;}.record summary{cursor:pointer;}
   pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto;font-size:.75rem;padding:.5rem;}

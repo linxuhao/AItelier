@@ -24,7 +24,7 @@ def test_a_question_block_carries_a_stable_id_the_reply_cites():
     assert "the service assigns one when you omit it" in text
     # An id-less send returns no segment id, so the id must be READ BACK before
     # it can be cited; the guide names the read that yields it.
-    assert "but the send returns only the message_id and no segment id" in text, (
+    assert "but the send returns the message_id and no segment id" in text, (
         "the guide must say the send does not return the segment id")
     assert ("read the message back with list_user_conversation(project_id, limit, cursor) "
             "to learn the id you must cite") in text, (

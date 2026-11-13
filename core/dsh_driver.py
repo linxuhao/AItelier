@@ -135,6 +135,54 @@ DSH_EXTRA_MCP_DEFAULTS = {
     "pwmcp": "http://127.0.0.1:8931/mcp",
 }
 
+# One Playwright MCP instance holds ONE client session: two drivers pointed at
+# the same URL do not share a browser, the second `initialize` evicts the first,
+# and the evicted driver's next call answers `-32001 Session not found` while
+# the service log stays silent (measured 2026-11-13). The instances already run
+# one per driver (`~/.AItelier/browser/run-pwmcp.sh <driver> <port>`); what was
+# missing is which port belongs to whom. This is that mapping, and it is the
+# only server with a per-driver override:
+#
+#     AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS="claude=8933,grok=8932"
+#
+# Unset or empty means "no mapping" - every driver keeps the shared default
+# above, exactly as before. A local service is not a prerequisite, so this knob
+# never changes failOnStartupError.
+PWMCP_DRIVER_PORTS_ENV = "AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS"
+
+
+def pwmcp_driver_ports(value=None):
+    """Parse `<driver_id>=<port>` pairs into `{driver_id: port}`.
+
+    Empty entries (a trailing comma, blank segment) are ignored, since "no
+    mapping" and "mapping with nothing in it" are the same statement. Whitespace
+    around an entry is allowed.
+
+    A malformed entry RAISES. Falling back to the shared default would restore
+    precisely the failure this mapping exists to prevent - two drivers taking
+    turns evicting each other - and it would leave no symptom to trace it back
+    from: the evicted driver only ever sees `-32001 Session not found`.
+    """
+    raw = os.environ.get(PWMCP_DRIVER_PORTS_ENV, "") if value is None else value
+    ports = {}
+    for segment in raw.split(","):
+        entry = segment.strip()
+        if not entry:
+            continue
+        driver_id, separator, port_text = entry.partition("=")
+        driver_id, port_text = driver_id.strip(), port_text.strip()
+        if not separator or not driver_id or not port_text.isdigit():
+            raise ValueError(
+                f"{PWMCP_DRIVER_PORTS_ENV} entry {segment!r} is not a "
+                "<driver_id>=<port> pair")
+        port = int(port_text)
+        if not 1024 <= port <= 65535:
+            raise ValueError(
+                f"{PWMCP_DRIVER_PORTS_ENV} entry {segment!r} has port {port}, "
+                "outside 1024..65535")
+        ports[driver_id] = port
+    return ports
+
 
 class DshDrivers:
     def __init__(self, db, registry, root: Path, *, command=None, base_url=None, host_controller=False):
@@ -322,16 +370,29 @@ class DshDrivers:
         # operator can take one away without editing code, and a host that does
         # not run these services keeps exactly the tool set it had before.
         #
+        # The browser is the one exception: it is per-driver, because one
+        # Playwright instance serves one client. See PWMCP_DRIVER_PORTS_ENV.
+        #
         # failOnStartupError stays False for these: they are capabilities, not
         # prerequisites. A service that is down must cost the driver its tools,
         # not its ability to start - which is why the State MCP above is the only
         # one that fails hard.
+        #
+        # The mapping is parsed unconditionally: a malformed value is a config
+        # error whether or not this driver's entry is the one that would be used.
+        driver_ports = pwmcp_driver_ports()
         extra = []
         for server, default_url in DSH_EXTRA_MCP_DEFAULTS.items():
             url = os.environ.get(
                 "AITELIER_DSH_MCP_" + server.upper(), default_url).strip()
             if not url:
+                # Blank withdraws the entry outright; the per-driver mapping must
+                # not resurrect a service the operator took away.
                 continue
+            if server == "pwmcp":
+                port = driver_ports.get(row["driver_id"])
+                if port is not None:
+                    url = f"http://127.0.0.1:{port}/mcp"
             extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
                 "serverName": server, "transport": "streamable-http", "url": url,
                 "failOnStartupError": False, "toolCallTimeoutMs": 960000}})

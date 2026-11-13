@@ -163,6 +163,8 @@ you choose (for example `q-deploy-window`), and make each question answerable al
 The user's answer comes back citing that id, as `answers` on their message. Use the
 box as the reason: an info message is washed away by the next one, while a question
 stays in the box until it is answered.
+To see which of your questions are still open (after a compaction, before asking
+again), call state_read(list_user_questions) instead of paging the conversation.
 
 Send when the user would otherwise be WRONG about the state of their work:
 - you finished what they asked: what changed, what you actually verified, what

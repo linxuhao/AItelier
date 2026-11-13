@@ -40,6 +40,8 @@ STATE_GRAPH_READ_DESCRIPTION = (
     "State query. Over MCP this whole tool requires writer authorization even though it does not mutate. "
     + ACTION_LIST_MARKER + ", ".join(DESCRIBED_READ_ACTIONS) + ACTION_LIST_END
     + "list_user_conversation reads both directions of one project's user conversation, keyset-paged. "
+    "list_user_questions lists that conversation's question blocks (open, answered or all) with the "
+    "replies citing each, newest first. "
     "get_driver_note returns the entry index, its counts and revision, never free text; the index "
     "(and driver_note_index) lists only current, listed entries unless "
     "include_superseded/include_delisted is set, and superseded_count/delisted_count report what it "

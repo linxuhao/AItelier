@@ -50,6 +50,7 @@ _ARGS = {
     'list_user_messages': {'project_id': C.OPEN},
     'list_user_conversation': {'project_id': C.OPEN},
     'user_conversation_unread': {},
+    'list_user_questions': {'project_id': C.OPEN},
     'wait_for_driver_inbox': {'timeout_seconds': 0},
     "events": {"project_id": C.OPEN},
     "get_claim": {"project_id": C.OPEN, "claim_id": "claim-canary-public-id"},

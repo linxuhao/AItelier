@@ -60,6 +60,44 @@ def _host_contracts(value):
             yield from _host_contracts(item)
 
 
+def _null_known_leaves(value):
+    """Set, in place, the two leaves the anonymous projection withholds, found by
+    an explicit walk over the keys this fixture carries: a `host_contract`'s
+    `source_repo` and any `context_hash`. It is deliberately NOT the product's
+    walker, so the expected side of the equality is independent of it."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "host_contract" and isinstance(item, dict):
+                item["source_repo"] = None
+            if key == "context_hash":
+                value[key] = None
+            _null_known_leaves(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _null_known_leaves(item)
+
+
+def _leaves(value, path=()):
+    """(path, leaf) for every scalar leaf of a JSON-like answer."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _leaves(item, path + (key,))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _leaves(item, path + (index,))
+    else:
+        yield path, value
+
+
+def _differing_leaf_names(a, b):
+    """The final key names of every leaf whose value differs between two answers
+    of the same shape. Lists are compared by position, so an added or dropped
+    row shows up as a difference too."""
+    left, right = dict(_leaves(a)), dict(_leaves(b))
+    assert left.keys() == right.keys(), "answers must have the same shape"
+    return {path[-1] for path in left if left[path] != right[path] and isinstance(path[-1], str)}
+
+
 def _args(action, aid):
     return {
         "get_attempt": {"attempt_id": aid},
@@ -118,13 +156,18 @@ def test_anonymous_answer_differs_from_trusted_only_in_source_repo(tmp_path, act
     trusted = _answer(service, True, action, aid)
     anonymous = _answer(service, False, action, aid)
 
-    # The anonymous answer equals the trusted one with source_repo blanked, and
-    # nothing else moved: the blanking is the only difference.
+    # The anonymous answer equals the trusted one with source_repo blanked AND
+    # the attempt's context digest nulled, and nothing else moved. The expected
+    # side is built here by an explicit closure over the digest/path keys this
+    # fixture is known to carry, NOT by the product's walker: the witness must
+    # not degenerate into "whatever the walker does".
     expected = _answer(service, True, action, aid)
-    for contract in _host_contracts(expected):
-        contract["source_repo"] = None
+    _null_known_leaves(expected)
     assert anonymous == expected
     assert anonymous != trusted, "the fixture must carry a path for the anonymous read to remove"
+    # And the only leaves that differ between the trusted and anonymous answers
+    # are exactly the two named ones: the host path and the attempt digest.
+    assert _differing_leaf_names(trusted, anonymous) == {"source_repo", "context_hash"}
 
 
 @pytest.mark.parametrize("action", ["get_attempt", "attempt_detail", "list_attempts", "get_node"])

@@ -125,6 +125,14 @@ DSH_EXTRA_MCP_DEFAULTS = {
     # Media definitions stay behind caller-scoped search_tools/call_tool for
     # the driver and native children. Blank the URL to disable this service.
     "agentmcp": "http://127.0.0.1:9003/mcp",
+    # The persistent Playwright (autoshot) browser. Registering it is what makes
+    # a UI claim checkable at all: without it every dashboard delivery can only
+    # say "the strings are in the bundle and the component tests pass", which
+    # cannot see a layout that renders nothing (measured 2026-11-13: the service
+    # answered initialize on this port while search_tools found 0 browser tools).
+    # The proxy in front of the browser answers MCP itself, so the URL is the
+    # proxy, not the Playwright CLI's own port behind it.
+    "pwmcp": "http://127.0.0.1:8931/mcp",
 }
 
 

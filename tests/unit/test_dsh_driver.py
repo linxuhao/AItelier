@@ -610,13 +610,40 @@ def test_local_mcp_servers_are_registered_by_default(runtime):
     assert by_id["mcp-aitelier"]["config"]["failOnStartupError"] is True
     for server, url in (("devmcp", "http://127.0.0.1:7676/mcp"),
                         ("zvec", "http://127.0.0.1:7999/mcp"),
-                        ("agentmcp", "http://127.0.0.1:9003/mcp")):
+                        ("agentmcp", "http://127.0.0.1:9003/mcp"),
+                        ("pwmcp", "http://127.0.0.1:8931/mcp")):
         entry = by_id["mcp-" + server]
         assert entry["config"]["serverName"] == server
         assert entry["config"]["url"] == url
         assert entry["config"]["transport"] == "streamable-http"
         # A capability that is down must not stop the driver from starting.
         assert entry["config"]["failOnStartupError"] is False
+
+
+def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch):
+    """The autoshot browser server is registered, redirectable and withdrawable.
+
+    Registering it is what makes a UI claim checkable at all: measured
+    2026-11-13, the endpoint answered `initialize` as "Playwright (autoshot)"
+    while search_tools found not one browser tool, so every dashboard delivery
+    could only report the bundle's strings. It must stay a CAPABILITY rather
+    than a prerequisite - pointing it at a port nobody listens on must not stop
+    the driver from being provisioned - and blanking the URL must withdraw
+    exactly that entry, like every other extra.
+    """
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    dead = "http://127.0.0.1:18931/mcp"
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", dead)
+    runtime._environment(row)  # generation never probes the URL
+    by_id = {e["id"]: e for e in next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)}
+    assert by_id["mcp-pwmcp"]["config"]["url"] == dead
+    assert by_id["mcp-pwmcp"]["config"]["failOnStartupError"] is False, (
+        "a browser that is down must cost the driver its screenshots, not its start")
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", "")
+    runtime._environment(row)
+    ids = {e["id"] for e in next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)}
+    assert "mcp-pwmcp" not in ids, "a blank URL must withdraw the browser entry"
+    assert {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp"} <= ids
 
 
 def test_agentmcp_can_be_redirected_or_disabled(runtime, monkeypatch):

@@ -1,0 +1,100 @@
+{
+  "_note": "ONE fixture family for the open-question rule, read by tests/unit/test_driver_questions_open_count.py (the server rule) and web/src/__tests__/views/StateProjectsQuestions.test.ts (the web rule). A question is open when no row's answers cites its (message_id, segment_id).",
+  "open_count": 2,
+  "rows": [
+    {
+      "message_id": "m1",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "driver",
+      "sender_driver_id": "ada",
+      "subject": "Report",
+      "body": "I need two decisions.",
+      "refs": {},
+      "reply_to_message_id": null,
+      "created_at": "2026-11-13T10:00:00+00:00",
+      "segments": [
+        {"id": "q1", "kind": "question", "text": "may I restart the build?"},
+        {"id": "q2", "kind": "question", "text": "may I deploy afterwards?"},
+        {"id": "i1", "kind": "info", "text": "the suite is green"}
+      ],
+      "answers": []
+    },
+    {
+      "message_id": "m2",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "user",
+      "sender_driver_id": null,
+      "subject": "Re: Report",
+      "body": "yes, restart it",
+      "refs": {},
+      "reply_to_message_id": "m1",
+      "created_at": "2026-11-13T10:05:00+00:00",
+      "segments": [
+        {"kind": "question", "text": "a question written without an id cannot be cited"}
+      ]
+    },
+    {
+      "message_id": "m3",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "user",
+      "sender_driver_id": null,
+      "subject": "Re: Report",
+      "body": "restarting now",
+      "refs": {},
+      "reply_to_message_id": "m1",
+      "created_at": "2026-11-13T10:10:00+00:00",
+      "segments": [],
+      "answers": [{"message_id": "m1", "segment_id": "q1"}]
+    },
+    {
+      "message_id": "m4",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "driver",
+      "sender_driver_id": "ada",
+      "subject": "Report",
+      "body": "restarted; two more questions.",
+      "refs": {},
+      "reply_to_message_id": null,
+      "created_at": "2026-11-13T10:15:00+00:00",
+      "segments": [
+        {"id": "q3", "kind": "question", "text": "should the retry be capped?"},
+        {"id": "q4", "kind": "question", "text": "and the timeout?"}
+      ],
+      "answers": []
+    },
+    {
+      "message_id": "m5",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "user",
+      "sender_driver_id": null,
+      "subject": "Re: Report",
+      "body": "cap it at three",
+      "refs": {},
+      "reply_to_message_id": "m4",
+      "created_at": "2026-11-13T10:20:00+00:00",
+      "segments": [],
+      "answers": [{"message_id": "m4", "segment_id": "q3"}]
+    },
+    {
+      "message_id": "m6",
+      "thread_id": "m1",
+      "project_id": "alpha",
+      "sender_kind": "driver",
+      "sender_driver_id": "ada",
+      "subject": "Report",
+      "body": "noted; one open question left from me.",
+      "refs": {},
+      "reply_to_message_id": null,
+      "created_at": "2026-11-13T10:25:00+00:00",
+      "segments": [
+        {"id": "q5", "kind": "question", "text": "may I deploy the new timeout?"}
+      ],
+      "answers": [{"message_id": "m4", "segment_id": "q4"}]
+    }
+  ]
+}

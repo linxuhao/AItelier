@@ -50,6 +50,31 @@ SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff
 _SEGMENT_ID = re.compile(r"[A-Za-z0-9._:-]+")
 
 
+def citation_fields(row):
+    """The citation part of ONE message row: its blocks, and the questions it answers.
+
+    This is the SINGLE projection of `segments_json`/`answers_json`. Both reads of
+    the same message build their citation here - the project's conversation
+    (`list_user_conversation`) and the addressed driver's private inbox
+    (`list_driver_messages`) - so one message can never carry one set of blocks in
+    the user's view and another set in the driver's. Both reads decode the two
+    columns only here, so they cannot drift apart one field at a time.
+
+    Each key appears only when its column holds something: a row written before
+    segments or answers existed gains no key, never an empty list, and the raw
+    `*_json` strings never leave here. Whether a caller wants the empty `segments`
+    list is that caller's business (`list_user_conversation` always shows it,
+    because the conversation UI renders the blocks area; an inbox row keeps its
+    historical shape instead).
+    """
+    fields = {}
+    if row["segments_json"]:
+        fields["segments"] = json.loads(row["segments_json"])
+    if row["answers_json"]:
+        fields["answers"] = json.loads(row["answers_json"])
+    return fields
+
+
 def encode_conversation_cursor(created_at, message_id):
     """Opaque keyset position: the (created_at, message_id) of the last row read.
 
@@ -585,6 +610,9 @@ class DriverInbox:
         page, more = rows[:limit], len(rows) > limit
         messages = []
         for row in page:
+            # Segments and answers come from the ONE shared citation projection,
+            # which the driver's own inbox read calls too (see `citation_fields`).
+            citation = citation_fields(row)
             messages.append({
                 "message_id": row["message_id"], "thread_id": row["thread_id"],
                 "project_id": row["project_id"],
@@ -595,11 +623,13 @@ class DriverInbox:
                 "sender_driver_id": row["sender_driver_id"],
                 "subject": row["subject"], "body": row["body"],
                 "refs": json.loads(row["refs_json"]),
-                "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
+                # The conversation always shows the blocks area, so `segments` is
+                # [] here even when the row carries none.
+                "segments": citation.pop("segments", []),
                 "reply_to_message_id": row["reply_to_message_id"],
                 # Present only when the reply cites a question; a row written
                 # before answers existed has no key, never an empty list.
-                **({"answers": json.loads(row["answers_json"])} if row["answers_json"] else {}),
+                **citation,
                 "created_at": row["created_at"]})
         next_cursor = (encode_conversation_cursor(page[-1]["created_at"], page[-1]["message_id"])
                        if more else None)
@@ -755,6 +785,15 @@ class DriverInbox:
 
     @writer_only_read('list_driver_messages')
     def list_driver_messages(self, driver_id=None, after=0, limit=100):
+        """One page of the deliveries addressed to this driver, ordered by seq.
+
+        A row is the delivery (`d.*`) plus the message's readable columns, so a
+        message that carries tagged blocks or answers a question reaches the
+        driver with the SAME `segments`/`answers` the conversation read projects
+        for it - both are built by `citation_fields`. Those two keys appear only
+        on a row that carries them: a plain message keeps exactly the shape it
+        had before, with no empty list and no raw `*_json` string.
+        """
         driver_id = driver_id or self.driver_id
         self._authorize(driver_id)
         if type(after) is not int or after<0 or type(limit) is not int or not 1<=limit<=100:
@@ -764,8 +803,14 @@ class DriverInbox:
         with self.store.transaction() as conn:
             self._driver(conn, driver_id)
             high=conn.execute("SELECT COALESCE(MAX(seq),0) FROM driver_inbox_deliveries WHERE target_driver_id=?", (driver_id,)).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
         page=rows[:limit]
+        for row in page:
+            citation=citation_fields(row)
+            # The storage columns are not payload: the citation part above is the
+            # only shape a reader sees them in.
+            del row["segments_json"], row["answers_json"]
+            row.update(citation)
         return {"driver_id":driver_id,"messages":page,"next_after":page[-1]["seq"] if len(rows)>limit else max(after,high),"truncated":len(rows)>limit}
 
     def transition(self, delivery_id, expected_version, request_key, target_status, break_glass_reason=None):

@@ -108,7 +108,11 @@
             </p>
           {/if}
           <div class="counts"><span><strong>{project.node_count}</strong> {st('total')}</span><span><strong>{project.verified_count}</strong> {st('verified')}</span></div>
-          {#if project.source.repo_path}<p class="source">{project.source.repo_path}</p>{:else}<p class="source">{st('noSource')}</p>{/if}
+          <!-- The binding is the SERVER's absolute path. It is a fact about the
+               host, not about the project, so only a writer sees it; an
+               anonymous visitor gets no source row at all (not even the
+               "no source" placeholder, which would say a binding exists). -->
+          {#if $authStore.canWrite}{#if project.source.repo_path}<p class="source">{project.source.repo_path}</p>{:else}<p class="source">{st('noSource')}</p>{/if}{/if}
           {#if project.policy.dispatch !== 'active'}<p class="hold-reason">⏸ {project.policy.reason}</p>{/if}
           <span class="open">{st('graph')} →</span>
         </button>

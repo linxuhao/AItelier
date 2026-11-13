@@ -112,7 +112,9 @@
     {#if !data && loading}<p aria-live="polite">{st('loading')}</p>{/if}
     {#if data}
       <header><div><p class="eyebrow">{st('project')}</p><h1>{data.project.title}</h1>
-        <details class="source" open={!compact}><summary>{st('source')}</summary><code>{data.source.repo_path ?? st('noSource')}</code></details></div>
+        <!-- The SERVER's absolute path stays a writer-only fact: an anonymous
+             reader sees no source block at all, rather than the host's layout. -->
+        {#if canWrite}<details class="source" open={!compact}><summary>{st('source')}</summary><code>{data.source.repo_path ?? st('noSource')}</code></details>{/if}</div>
         <div class="toolbar"><button class="outline" disabled={loading || syncing} onclick={() => retry++}>{st('reload')}</button>
           <button disabled={syncing || loading} onclick={syncRuns}>{syncing ? st('loading') : syncNext ? st('syncMore') : st('sync')}</button></div></header>
       <p class="sync-note">{st('syncNote')}</p>

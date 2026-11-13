@@ -1,4 +1,5 @@
 """Managed DSH drivers: existing State reader/writer authentication applies."""
+import asyncio
 import hashlib
 import json
 import logging
@@ -203,7 +204,13 @@ async def activity(project_id: str, body: Activity, request: Request, runtime=De
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     import json
-    runtime.update(project_id, phase=body.phase, subagents_json=json.dumps(body.subagents), last_error=body.error)
+    # The stamp is a sqlite write, so it waits for a write lock - on this thread
+    # that wait IS the event loop, and every other request in the process waits
+    # behind it. Handing the write to a worker thread keeps the loop free while
+    # the database is busy; the call is still the same keyword call, and the SSE
+    # push below still happens only after the row is committed.
+    await asyncio.to_thread(runtime.update, project_id, phase=body.phase,
+                            subagents_json=json.dumps(body.subagents), last_error=body.error)
     from api.sse_manager import stream_manager
     await stream_manager.push_log("dsh:" + row["driver_id"], json.dumps({
         "type": "driver_activity", "phase": body.phase, "subagents": body.subagents,

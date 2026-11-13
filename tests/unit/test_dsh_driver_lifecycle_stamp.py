@@ -49,12 +49,32 @@ be the waiter:
                                  lock is taken by the reaping stand-in, because by
                                  then the holder for the `stopping` stamp is gone.
 
-The RED arms live outside this file (they are runs of this file against a copy of
-`core/dsh_driver.py`): on the base revision every arm here goes red with a nearly
-frozen counter, and a mutant that puts back exactly one call site reddens exactly
-the arm named above while the other four stay green.
+HOST MODE - the three external-host stamps. `DshDrivers.external_host` is the
+branch selector: when the host controller is not this process, the driver is
+run by the host iff `<root>/runtime.json` says `{"mode": "host"}`. The three arms
+below write that file, assert the selector, and then run the REAL branch - no
+monkeypatched `update`, no monkeypatched `external_host`, and no host process:
+the host's process marker (`host-process.json`) is simply never created, except
+where an arm creates it on purpose.
+
+  * `test_start_external_...`       -> the `enabled=1, phase="starting"` stamp in
+                                       `start`'s external-host branch.
+  * `test_stop_external_...`        -> the `phase="stopping"` stamp in `stop`'s
+                                       external-host branch.
+  * `test_stop_external_final_...`  -> the final `phase="stopped"` stamp in the same
+                                       branch. Its mechanism is spelled out in its
+                                       own docstring: with the marker absent, `stop`
+                                       issues BOTH stamps back-to-back, so a lock
+                                       held across the call only contends the first.
+
+The RED runs live outside this file (they are runs of this file against a scratch
+copy of `core/dsh_driver.py`, with exactly one call site put back to the
+synchronous `self.update(...)`). On the base revision every arm here goes red with
+a nearly frozen counter, and a mutant that puts back exactly one call site reddens
+exactly the arm named above while the others stay green.
 """
 import asyncio
+import json
 import sqlite3
 import sys
 import threading
@@ -265,6 +285,46 @@ def provisioned(runtime, project_id="alpha"):
     return runtime._provision(project_id, "aitelier", "driver", "fixture")
 
 
+def host_mode(runtime):
+    """Select the external-host branch the way production does: `runtime.json`.
+
+    `DshDrivers.external_host` is true when no in-process host controller is set
+    and `<root>/runtime.json` reads `{"mode": "host"}`. Writing that file is the
+    only switch: the branch is then entered for real, with no host process behind
+    it. The assertion keeps a future change to the selector from quietly turning
+    these arms back into the process-mode ones.
+    """
+    runtime.root.mkdir(parents=True, exist_ok=True)
+    (runtime.root / "runtime.json").write_text(json.dumps({"mode": "host"}))
+    assert runtime.external_host is True, \
+        "runtime.json mode=host did not select the external-host branch"
+
+
+def host_marker(runtime, project_id="alpha"):
+    """The host's process marker for this project's driver (`host-process.json`)."""
+    return runtime.root / runtime.get(project_id)["driver_id"] / "host-process.json"
+
+
+async def hold_lock_across_the_marker_gap(runtime, lock, marker, project_id="alpha"):
+    """Play the host's shutdown acknowledgement, with a foreign write lock in hand.
+
+    Used only by the final-stamp arm. In the external branch `stop` issues
+    `phase="stopping"`, then polls the host's marker every 0.2 s until it is gone,
+    then issues `phase="stopped"`. This coroutine waits until the `stopping` stamp
+    has COMMITTED, takes the foreign write lock on a thread (so the loop itself
+    never waits on it), and removes the marker while the lock is held. The next
+    poll of `stop` sees the marker gone and issues the final stamp into a held
+    lock. Lock first, marker second: the marker is never gone while the lock is
+    still free.
+    """
+    deadline = time.monotonic() + 10
+    while runtime.get(project_id)["phase"] != "stopping":
+        assert time.monotonic() < deadline, "stop never issued its stopping stamp"
+        await asyncio.sleep(LOOP_TICK_SECONDS)
+    await asyncio.to_thread(lock.__enter__)
+    marker.unlink()
+
+
 async def test_start_stamps_off_the_event_loop(runtime):
     """Arm: the `phase="starting"` stamp inside `start`."""
     provisioned(runtime)
@@ -360,6 +420,93 @@ async def test_stop_final_stamp_off_the_event_loop(runtime):
         finally:
             await reaper.join()
     finally:
+        await runtime.close()
+
+
+async def test_start_external_stamps_off_the_event_loop(runtime):
+    """Arm: the `enabled=1, phase="starting"` stamp in `start`'s external-host branch.
+
+    Host mode, no host process: `start` provisions the row, stamps it as starting
+    and returns - it never spawns a child, because the host runs the driver.
+    """
+    provisioned(runtime)
+    host_mode(runtime)
+    try:
+        lock = _ForeignWriteLock(runtime.db.db_path, "alpha", BLOCKING_WRITE_SECONDS)
+        with lock:
+            async with running_counter() as times:
+                row = await runtime.start("alpha", actor="fixture")
+        assert_loop_kept_running(times, lock, "start-external")
+        # The stamp is off the loop, not skipped: the row carries it.
+        assert row["phase"] == "starting" and row["enabled"] == 1
+        assert not host_marker(runtime).exists(), "start must not create the host's marker"
+    finally:
+        await runtime.close()
+
+
+async def test_stop_external_stamps_off_the_event_loop(runtime):
+    """Arm: the `enabled=0, phase="stopping"` stamp in `stop`'s external-host branch.
+
+    With no host marker, `stop` has nothing to wait for: it issues `stopping`, sees
+    the marker already absent and issues the final `stopped` stamp straight away.
+    Both stamps therefore run back-to-back in this one call, and the lock held
+    across the call is contended by the FIRST of them only. The final stamp's own
+    window is the next arm.
+    """
+    provisioned(runtime)
+    host_mode(runtime)
+    try:
+        await runtime.start("alpha", actor="fixture")
+        lock = _ForeignWriteLock(runtime.db.db_path, "alpha", BLOCKING_WRITE_SECONDS)
+        with lock:
+            async with running_counter() as times:
+                row = await runtime.stop("alpha")
+        assert_loop_kept_running(times, lock, "stop-external")
+        assert row["phase"] == "stopped" and row["enabled"] == 0
+        assert not host_marker(runtime).exists()
+    finally:
+        await runtime.close()
+
+
+async def test_stop_external_final_stamp_off_the_event_loop(runtime):
+    """Arm: the final `phase="stopped"` stamp in `stop`'s external-host branch.
+
+    Mechanism. The external branch issues `stopping`, then polls the host's
+    `host-process.json` every 0.2 s until it is gone, then issues `stopped`. The
+    marker-absent case (the arm above) runs both stamps back-to-back, so one lock
+    held across the call only ever contends `stopping`. Here the marker is PRESENT
+    when `stop` starts, so `stop` must poll; a stand-in for the host
+    (`hold_lock_across_the_marker_gap`) waits for the `stopping` stamp to commit,
+    takes the foreign write lock, and removes the marker while the lock is held.
+    The next poll sees the marker gone and issues `stopped` into the held lock,
+    so the lock covers the second stamp and not the first.
+
+    The loop is not parked during the 0.2 s poll, so the whole-call floor is met
+    by those ticks; the contended tail is where a synchronous final stamp shows.
+    """
+    provisioned(runtime)
+    host_mode(runtime)
+    lock = _ForeignWriteLock(runtime.db.db_path, "alpha", BLOCKING_WRITE_SECONDS)
+    try:
+        await runtime.start("alpha", actor="fixture")
+        marker = host_marker(runtime)
+        # The host's publish, as core.dsh_host writes it: the marker exists while it runs.
+        marker.write_text(json.dumps({"pid": 1, "session_id": runtime.get("alpha")["session_id"],
+                                      "seen_at": time.time()}))
+        async with running_counter() as times:
+            host = asyncio.create_task(hold_lock_across_the_marker_gap(runtime, lock, marker))
+            try:
+                row = await runtime.stop("alpha")
+                await host
+            finally:
+                host.cancel()  # a no-op once the stand-in has finished
+        assert_loop_kept_running(times, lock, "stop-external-final")
+        assert row["phase"] == "stopped" and row["enabled"] == 0
+        assert not marker.exists()
+    finally:
+        if lock.thread is not None:
+            # Join the holder thread off the loop; releases the lock if it is still held.
+            await asyncio.to_thread(lock.__exit__, None, None, None)
         await runtime.close()
 
 

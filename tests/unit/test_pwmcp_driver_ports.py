@@ -32,12 +32,12 @@ def derived(driver_id):
     """The allocation rule the module docstring documents, recomputed here.
 
     Written out rather than imported: the docstring promises a stable sha256
-    fold into PORT_RANGE, and this is that promise, independently of the code
+    fold into ALLOCATABLE, and this is that promise, independently of the code
     that implements it.
     """
-    span = len(tool.PORT_RANGE)
+    span = len(tool.ALLOCATABLE)
     digest = hashlib.sha256(driver_id.encode("utf-8")).digest()
-    return tool.PORT_RANGE[int.from_bytes(digest[:8], "big") % span]
+    return tool.ALLOCATABLE[int.from_bytes(digest[:8], "big") % span]
 
 
 def no_process(monkeypatch):
@@ -87,7 +87,7 @@ def test_allocate_prints_exactly_one_port_inside_the_range(capsys):
     code, out, err = run(capsys, "allocate", "dsh-1a2b", "--mapping", "")
     assert (code, err) == (0, "")
     assert out.count("\n") == 1, f"stdout must be the port and nothing else: {out!r}"
-    assert int(out) in tool.PORT_RANGE
+    assert int(out) in tool.ALLOCATABLE
 
 
 def test_allocate_is_deterministic(capsys):
@@ -103,7 +103,7 @@ def test_allocate_is_deterministic(capsys):
 def test_allocate_follows_the_documented_rule(capsys):
     port = int(run(capsys, "allocate", "dsh-1a2b", "--mapping", "")[1])
     assert port == derived("dsh-1a2b")
-    assert port in tool.PORT_RANGE
+    assert port in tool.ALLOCATABLE
 
 
 def test_allocate_defaults_to_the_environment_variable(capsys, monkeypatch):
@@ -134,7 +134,7 @@ def test_allocate_skips_a_port_the_mapping_gives_another_driver(capsys):
     taken = int(run(capsys, "allocate", "dsh-1a2b", "--mapping", "")[1])
     code, out, err = run(capsys, "allocate", "dsh-1a2b", "--mapping", f"claude={taken}")
     assert (code, err) == (0, "")
-    assert int(out) in tool.PORT_RANGE and int(out) != taken, (
+    assert int(out) in tool.ALLOCATABLE and int(out) != taken, (
         "a probe that walks past a taken port, rather than sharing it")
 
 
@@ -142,6 +142,60 @@ def test_allocate_refuses_a_mapping_that_cannot_be_parsed(capsys):
     code, out, err = run(capsys, "allocate", "dsh-1a2b", "--mapping", "claude=9200,broken")
     assert code == 1 and out == ""
     assert "broken" in err
+
+
+# ── two bounds: ACCEPTED for what exists, ALLOCATABLE for what is invented ──
+
+
+def test_the_tool_accepts_and_refuses_exactly_what_the_reader_does():
+    """ACCEPTED is the reader's bound: the tool must never refuse what the driver
+    accepts, nor accept what the driver refuses. Checked at both edges, read
+    from the reader itself rather than from a copied number."""
+    reader_floor, reader_ceiling = tool.ACCEPTED.start, tool.ACCEPTED.stop - 1
+    assert pwmcp_driver_ports(f"dsh-1a2b={reader_floor}") == {"dsh-1a2b": reader_floor}
+    assert pwmcp_driver_ports(f"dsh-1a2b={reader_ceiling}") == {"dsh-1a2b": reader_ceiling}
+    for port in (reader_floor - 1, reader_ceiling + 1, 80, 70000):
+        value = f"dsh-1a2b={port}"
+        with pytest.raises(ValueError):
+            pwmcp_driver_ports(value)
+        with pytest.raises(ValueError):
+            tool.parse_mapping(value)
+    for value in ("dsh-1a2b=9400", "dsh-1a2b=8933", "dsh-1a2b=1024,dsh-3c4d=65535"):
+        assert tool.parse_mapping(value) == pwmcp_driver_ports(value)
+
+
+def test_a_legacy_port_below_the_allocation_range_renders_and_round_trips(tmp_path, capsys):
+    dropin = tmp_path / "dropins"
+    code, out, err = run(capsys, "render", "dsh-1a2b=8933", "--dropin", dropin)
+    assert (code, err) == (0, "")
+    text = (dropin / tool.DROPIN_FILENAME).read_text()
+    assert pwmcp_driver_ports(tool.environment_value(text)) == {"dsh-1a2b": 8933}
+
+
+def test_allocate_returns_an_existing_legacy_port_verbatim_with_one_note(capsys):
+    code, out, err = run(capsys, "allocate", "dsh-1a2b", "--mapping", "dsh-1a2b=8933")
+    assert (code, out) == (0, "8933\n")
+    assert err.count("\n") == 1, f"exactly one informational line on stderr: {err!r}"
+    assert "dsh-1a2b" in err and "8933" in err and "outside the allocation range" in err
+    code, out, err = run(capsys, "allocate", "dsh-1a2b", "--mapping", "dsh-1a2b=9400")
+    assert (code, out, err) == (0, "9400\n", ""), "an in-range existing port gets no note"
+
+
+def test_an_invented_port_stays_in_the_allocation_range_beside_a_legacy_entry(capsys):
+    code, out, err = run(capsys, "allocate", "dsh-3c4d", "--mapping", "dsh-1a2b=8933")
+    assert (code, err) == (0, "")
+    assert int(out) in tool.ALLOCATABLE and int(out) != 8933
+
+
+def test_status_reports_a_legacy_port_the_host_already_runs(tmp_path, capsys, monkeypatch):
+    dropin, profiles = status_fixture(
+        tmp_path, monkeypatch, live="dsh-1a2b=8933", listeners=[8933])
+    write_profile(profiles, "dsh-1a2b", "http://127.0.0.1:8933/mcp")
+    code, out, err = run(capsys, "status", "--unit", "fixture-host.service",
+                         "--dropin", dropin, "--profiles", profiles)
+    assert (code, err) == (0, "")
+    assert rows_after_table(out)["dsh-1a2b"] == [
+        "8933", "http://127.0.0.1:8933/mcp", "yes"]
 
 
 # ── refusals ─────────────────────────────────────────────────────────────────
@@ -153,8 +207,8 @@ def test_allocate_refuses_a_mapping_that_cannot_be_parsed(capsys):
     ("dsh-1a2b=9200,-dsh=9201", "-dsh=9201"),        # must start with an alnum
     ("dsh-1a2b=9200,dsh-=", "dsh-="),                # no port at all
     ("dsh-1a2b=9200,noport", "noport"),              # no "=" at all
-    ("dsh-1a2b=9200,dsh-abc=9099", "dsh-abc=9099"),  # below the range
-    ("dsh-1a2b=9200,dsh-abc=65535", "dsh-abc=65535"),  # above the range
+    ("dsh-1a2b=9200,dsh-abc=80", "dsh-abc=80"),      # below ACCEPTED (1024)
+    ("dsh-1a2b=9200,dsh-abc=70000", "dsh-abc=70000"),  # above ACCEPTED (65535)
     ("dsh-1a2b=9200,dsh-1a2b=9201", "dsh-1a2b=9201"),  # the same id twice
     ("dsh-1a2b=9200,dsh-abc=9200", "dsh-abc=9200"),  # two ids on one port
 ])
@@ -360,11 +414,11 @@ def test_status_never_prints_the_environment(tmp_path, capsys, monkeypatch):
 
 
 def test_status_refuses_a_live_mapping_the_driver_would_refuse(tmp_path, capsys, monkeypatch):
-    dropin, profiles = status_fixture(tmp_path, monkeypatch, live="dsh-1a2b=9099")
+    dropin, profiles = status_fixture(tmp_path, monkeypatch, live="dsh-1a2b=80")
     code, out, err = run(capsys, "status", "--unit", "fixture-host.service",
                          "--dropin", dropin, "--profiles", profiles)
     assert code == 1 and out == ""
-    assert "dsh-1a2b=9099" in err
+    assert "dsh-1a2b=80" in err
 
 
 def test_probe_unit_mapping_reads_only_the_one_variable(tmp_path, monkeypatch):
@@ -416,10 +470,11 @@ def test_probe_listening_reads_listen_sockets_only(tmp_path):
     assert tool.probe_listening(paths=(table,)) == {9409, 8080}
 
 
-def test_the_usage_text_prints_the_documented_range(capsys):
+def test_the_usage_text_prints_both_documented_bounds(capsys):
     with pytest.raises(SystemExit) as exited:
         tool.main(["--help"])
     assert exited.value.code == 0
     out = capsys.readouterr().out
-    assert f"port range: {tool.PORT_RANGE.start}..{tool.PORT_RANGE.stop - 1}" in out
+    assert f"{tool.ACCEPTED.start}..{tool.ACCEPTED.stop - 1}" in out
+    assert f"{tool.ALLOCATABLE.start}..{tool.ALLOCATABLE.stop - 1}" in out
     assert PWMCP_DRIVER_PORTS_ENV in out

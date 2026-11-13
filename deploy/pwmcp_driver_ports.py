@@ -30,24 +30,34 @@ value the driver would reject.
 Driver ids match `[a-z0-9][a-z0-9-]*` (the ids the runtime mints look like
 `dsh-<hex>`); anything else is refused rather than guessed at.
 
-THE PORT RANGE AND THE RULE
----------------------------
-The range is `PORT_RANGE`, defined once in this module and printed by `--help`.
-Those are the only two statements of it: the numbers are deliberately not
-repeated in this prose, because a second copy is a second place to go stale. It
-sits above the local MCP services in the low 9xxx block, so an allocated port
-does not land on one of them by construction - but this tool cannot see your
-host, so check with `status` before starting an instance on a port that was
-already taken.
+TWO PORT BOUNDS
+---------------
+There are two. Each is defined once in this module and printed by `--help`; the
+numbers are deliberately not repeated in this prose, because a second copy is a
+second place to go stale.
+
+  * `ACCEPTED` - what an entry of an EXISTING mapping may hold. It is the bound
+    `core.dsh_driver.pwmcp_driver_ports()` enforces, so this tool accepts exactly
+    what the driver accepts and refuses exactly what the driver refuses. A host
+    may already run a driver on a port below `ALLOCATABLE`; such an entry is
+    read, rendered and reported like any other.
+  * `ALLOCATABLE` - where `allocate` may INVENT a port for a driver that has
+    none. It lies above the legacy 89xx block already in service. This tool
+    cannot see your host, so check with `status` before starting an instance on
+    a port that was already taken.
+
+Only a port `allocate` invents is constrained to `ALLOCATABLE`. An id already in
+the mapping keeps its own port verbatim, and `allocate` says on stderr when that
+port lies outside `ALLOCATABLE`.
 
 `allocate` derives a port from the driver id, never from the clock or a counter,
 so the same id with the same mapping always prints the same port:
 
   1. id already in the mapping  -> print its port, unchanged (the mapping wins);
-  2. otherwise fold sha256(id)'s first 8 bytes into the range - that is the
+  2. otherwise fold sha256(id)'s first 8 bytes into ALLOCATABLE - that is the
      candidate;
   3. while the candidate is already assigned to a DIFFERENT id, step to the next
-     port in the range, wrapping once - linear probing, determinism preserved
+     port in ALLOCATABLE, wrapping once - linear probing, determinism preserved
      because the walk order is fixed.
 
 Two ids can therefore land on one port only where the mapping does not record
@@ -60,12 +70,17 @@ one port are refused outright.
 SUBCOMMANDS
 -----------
     python -m deploy.pwmcp_driver_ports allocate <driver_id> [--mapping <value>]
-        Print exactly one port on stdout, nothing else. `--mapping` defaults to
-        the current value of the environment variable, the same source the
-        reader uses; an empty/absent mapping means "nothing assigned yet".
+        Print exactly one port on stdout. `--mapping` defaults to the current
+        value of the environment variable, the same source the reader uses; an
+        empty/absent mapping means "nothing assigned yet". An id already in the
+        mapping gets its own port back verbatim, even one outside ALLOCATABLE
+        (a driver that runs below the range today); that case also prints one
+        informational line on stderr. Only a port invented here is in ALLOCATABLE.
 
     python -m deploy.pwmcp_driver_ports render <mapping> [--dropin <dir>] [--unit <name>]
-        Write ONE drop-in file - the default `10-pwmcp-driver-ports.conf` in
+        Validates every entry against ACCEPTED, so it renders whatever the host
+        already runs, including a legacy port below ALLOCATABLE. Writes ONE
+        drop-in file - the default `10-pwmcp-driver-ports.conf` in
         --dropin - containing exactly one `Environment="..."` assignment (entries
         sorted by driver id) plus the `[Service]` header the unit needs. The
         value is quoted because an unquoted systemd `Environment=` splits on the
@@ -78,7 +93,8 @@ SUBCOMMANDS
 
     python -m deploy.pwmcp_driver_ports status [--unit <name>] [--dropin <dir>]
                                               [--profiles <dir>]
-        Read-only report. For every driver named in the host unit's environment
+        Read-only report; entries are validated against ACCEPTED, as in render.
+        For every driver named in the host unit's environment
         and in the per-driver profile files it prints the port, the URL the
         generated profile holds, and whether something listens on that port. It
         also flags a profile URL whose port disagrees with the mapping - the
@@ -107,7 +123,7 @@ REFUSALS
 --------
 Exit status 1, with the offending entry quoted verbatim on stderr, for:
     * a driver id that does not match [a-z0-9][a-z0-9-]*;
-    * a port outside the documented range;
+    * a port outside ACCEPTED (the bound the reader enforces);
     * the same driver id twice;
     * two different driver ids on the same port;
     * a mapping the reader (`core.dsh_driver.pwmcp_driver_ports`) rejects.
@@ -127,10 +143,20 @@ import tempfile
 from core.datadir import aitelier_home
 from core.dsh_driver import PWMCP_DRIVER_PORTS_ENV, pwmcp_driver_ports
 
-# The one place the allocation range is defined. `--help`, the refusals and the
-# allocator all read it from here, so widening the block is a one-line change
-# that cannot leave the documentation describing a range the code no longer uses.
-PORT_RANGE = range(9100, 10000)
+# The two port bounds, each defined once. `--help`, the refusals and the code all
+# read them from here, so changing one is a one-line edit that cannot leave the
+# documentation describing a range the code no longer uses.
+#
+# ACCEPTED: what an entry of an EXISTING mapping may hold. Must equal the bound
+# `core.dsh_driver.pwmcp_driver_ports()` enforces, so the tool never accepts what
+# the driver refuses and never refuses what the driver accepts.
+ACCEPTED = range(1024, 65536)
+#
+# ALLOCATABLE: where `allocate` may INVENT a port for a driver that has none. It
+# lies above the legacy 89xx block already in service. It does NOT avoid 99xx by
+# construction (9900..9999 is inside it), so `status` is the check against the
+# live host before starting an instance on an allocated port.
+ALLOCATABLE = range(9100, 10000)
 
 DROPIN_FILENAME = "10-pwmcp-driver-ports.conf"
 
@@ -147,9 +173,9 @@ PROFILE_RELPATH = Path("home") / "profiles" / "driver" / "cordis.patch.yml"
 PROC_ROOT = Path("/proc")
 
 
-def range_text():
-    """The range as the operator sees and types it (`<start>..<stop-1>`)."""
-    return f"{PORT_RANGE.start}..{PORT_RANGE.stop - 1}"
+def range_text(bounds=ALLOCATABLE):
+    """A port range as the operator sees and types it (`<start>..<stop-1>`)."""
+    return f"{bounds.start}..{bounds.stop - 1}"
 
 
 # ── the mapping value ────────────────────────────────────────────────────────
@@ -172,18 +198,24 @@ def parse_mapping(text):
             continue
         driver_id, separator, port_text = entry.partition("=")
         driver_id, port_text = driver_id.strip(), port_text.strip()
-        if not separator or not driver_id or not (port_text.isdigit() and port_text.isascii()):
+        # The same digit test and conversion as the reader, so a port the reader
+        # refuses for its syntax is refused here too, with the entry quoted.
+        if not separator or not driver_id or not port_text.isdigit():
             raise ValueError(
                 f"entry {entry!r} is not a <driver_id>=<port> pair")
+        try:
+            port = int(port_text)
+        except ValueError:
+            raise ValueError(
+                f"entry {entry!r} is not a <driver_id>=<port> pair") from None
         if not DRIVER_ID_PATTERN.fullmatch(driver_id):
             raise ValueError(
                 f"entry {entry!r} has driver id {driver_id!r}, which does not match "
                 "[a-z0-9][a-z0-9-]*")
-        port = int(port_text)
-        if port not in PORT_RANGE:
+        if port not in ACCEPTED:
             raise ValueError(
-                f"entry {entry!r} has port {port}, outside the documented range "
-                f"{range_text()}")
+                f"entry {entry!r} has port {port}, outside the accepted range "
+                f"{range_text(ACCEPTED)}")
         if driver_id in mapping:
             raise ValueError(
                 f"entry {entry!r} names driver id {driver_id!r} a second time "
@@ -228,9 +260,13 @@ def checked_value(mapping):
 def allocate(driver_id, mapping):
     """The port for `driver_id`: its existing one, else a stable derived one.
 
+    An id already in the mapping keeps its port verbatim, even one outside
+    ALLOCATABLE: that is the port the driver already runs on. Only a port
+    invented here is constrained to ALLOCATABLE.
+
     Stable because nothing but the id and the mapping's contents feed it - not
     the clock, not a counter, not the order of the other entries. A collision
-    with a port already given to a DIFFERENT id walks the range instead of
+    with a port already given to a DIFFERENT id walks ALLOCATABLE instead of
     sharing, which is the whole point: one driver per Playwright instance.
     """
     if not DRIVER_ID_PATTERN.fullmatch(driver_id or ""):
@@ -239,16 +275,16 @@ def allocate(driver_id, mapping):
     if driver_id in mapping:
         return mapping[driver_id]
     taken = set(mapping.values())
-    span = len(PORT_RANGE)
+    span = len(ALLOCATABLE)
     digest = hashlib.sha256(driver_id.encode("utf-8")).digest()
     start = int.from_bytes(digest[:8], "big") % span
     for step in range(span):
-        port = PORT_RANGE[(start + step) % span]
+        port = ALLOCATABLE[(start + step) % span]
         if port not in taken:
             return port
     raise ValueError(
-        f"no free port in {range_text()} for {driver_id!r}: all {span} are "
-        f"already assigned")
+        f"no free port in {range_text(ALLOCATABLE)} for {driver_id!r}: all {span} "
+        f"are already assigned")
 
 
 # ── render ───────────────────────────────────────────────────────────────────
@@ -458,7 +494,12 @@ def port_of_url(url):
 def cmd_allocate(args):
     mapping = parse_mapping(
         os.environ.get(PWMCP_DRIVER_PORTS_ENV, "") if args.mapping is None else args.mapping)
-    print(allocate(args.driver_id, mapping))
+    port = allocate(args.driver_id, mapping)
+    print(port)
+    if args.driver_id in mapping and port not in ALLOCATABLE:
+        print(f"note: {args.driver_id} already runs on port {port}, the driver's existing "
+              f"port, outside the allocation range {range_text(ALLOCATABLE)}",
+              file=sys.stderr)
     return 0
 
 
@@ -541,16 +582,19 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m deploy.pwmcp_driver_ports",
         description=__doc__.split("\n\nTHE MAPPING VALUE")[0].strip(),
-        epilog=f"port range: {range_text()} (PORT_RANGE in this module). "
+        epilog=f"port bounds: accepted for an existing mapping entry {range_text(ACCEPTED)} "
+               f"(ACCEPTED, the reader's bound); allocated for a new driver "
+               f"{range_text(ALLOCATABLE)} (ALLOCATABLE). "
                f"the mapping variable is {PWMCP_DRIVER_PORTS_ENV}, entries joined by ','.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
     allocate = commands.add_parser(
         "allocate", help="print the port for one driver id and nothing else",
-        description="Print exactly one port on stdout. The mapping's own entry wins; "
-                    f"otherwise a deterministic sha256 fold into {range_text()} with "
-                    "linear probing around ports already given to other drivers.")
+        description="Print exactly one port on stdout. The mapping's own entry wins, even "
+                    f"one outside {range_text(ALLOCATABLE)} (then one stderr note says so); "
+                    f"otherwise a deterministic sha256 fold into {range_text(ALLOCATABLE)} "
+                    "with linear probing around ports already given to other drivers.")
     allocate.add_argument("driver_id", help="driver id, [a-z0-9][a-z0-9-]*")
     allocate.add_argument("--mapping", default=None,
                           help=f"mapping value to allocate against "

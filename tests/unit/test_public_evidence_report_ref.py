@@ -228,35 +228,45 @@ def test_anonymous_answer_differs_from_trusted_only_in_report_ref(tmp_path, acti
     trusted = _answer(service, True, action, aid)
 
     assert anonymous != trusted, "the fixture must carry a path for the anonymous read to remove"
-    assert _strip_report_refs(anonymous) == _strip_report_refs(trusted), \
-        f"anonymous {action} changed something other than report_ref"
+    # Two anonymous gates rewrite this answer: this lane's `report_ref` and the
+    # attempt-digest gate's `context_hash` (a sibling lane of the same change).
+    # Both are removed here, and what is left must be identical.
+    assert _strip_projected_leaves(anonymous) == _strip_projected_leaves(trusted), \
+        f"anonymous {action} changed something other than report_ref and context_hash"
 
 
-def _strip_report_refs(value):
-    """Copy with every `report_ref`, and the one inside `provenance_json`, removed:
-    what remains must be identical for the anonymous and the trusted answer."""
+PROJECTED_LEAVES = ("report_ref", "context_hash")
+
+
+def _strip_projected_leaves(value):
+    """Copy with the two leaves the anonymous projection rewrites removed: every
+    `report_ref` (and the one inside `provenance_json`) and every attempt
+    `context_hash`. The second is the sibling lane's leaf: anonymous attempt reads
+    withhold the pre-redaction context digest. What remains must be identical for
+    the anonymous and the trusted answer."""
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
-            if k == "report_ref":
+            if k in PROJECTED_LEAVES:
                 continue
             if k == "provenance_json" and isinstance(v, str):
-                out[k] = _provenance_without_report_ref(v)
+                out[k] = _provenance_without_projected(v)
             else:
-                out[k] = _strip_report_refs(v)
+                out[k] = _strip_projected_leaves(v)
         return out
     if isinstance(value, list):
-        return [_strip_report_refs(v) for v in value]
+        return [_strip_projected_leaves(v) for v in value]
     return value
 
 
-def _provenance_without_report_ref(text):
+def _provenance_without_projected(text):
     try:
         provenance = json.loads(text)
     except (TypeError, ValueError):
         return text
     if isinstance(provenance, dict):
-        provenance.pop("report_ref", None)
+        for leaf in PROJECTED_LEAVES:
+            provenance.pop(leaf, None)
     return json.dumps(provenance, sort_keys=True)
 
 

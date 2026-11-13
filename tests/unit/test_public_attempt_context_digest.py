@@ -256,6 +256,22 @@ def _accept_external(svc, reports, project_id, node_key, external_id):
     return attempt["attempt_id"], receipt
 
 
+def _assert_only_two_leaves_moved(recorded, anonymous, where):
+    """The acceptance/observation row is rewritten by two anonymous gates: this
+    lane nulls `context_hash`; the evidence lane replaces a host `report_ref` with
+    its store-relative tail. Assert exactly those two leaves move and no other key
+    does, and that the relative tail still identifies the recorded report."""
+    assert anonymous["context_hash"] is None, where
+    assert {k: v for k, v in anonymous.items() if k not in ("context_hash", "report_ref")} == \
+        {k: v for k, v in recorded.items() if k not in ("context_hash", "report_ref")}, where
+    if "report_ref" in recorded:
+        relative = anonymous.get("report_ref")
+        assert isinstance(relative, str) and not relative.startswith(("/", "file:")), \
+            f"{where}: report_ref is still a host path: {relative!r}"
+        assert recorded["report_ref"].endswith("/" + relative), \
+            f"{where}: report_ref no longer identifies the recorded report"
+
+
 def _external_service(tmp_path):
     svc = StateService(StateDatabase(str(tmp_path / "state.sqlite")),
                        actor="owner@example", project_read_trusted=True)
@@ -278,10 +294,9 @@ def test_external_observation_context_hash_is_withheld_from_anonymous_detail(tmp
     anon_rows = _answer(svc, False, "attempt_detail", aid)["external_observations"]
     assert len(anon_rows) == len(trusted_rows)
     assert all(row["context_hash"] is None for row in anon_rows)
-    # Every other observation column is kept.
+    # Every other observation column is kept (the sibling gate owns report_ref).
     for row, original in zip(anon_rows, trusted_rows):
-        assert {k: v for k, v in row.items() if k != "context_hash"} == \
-            {k: v for k, v in original.items() if k != "context_hash"}
+        _assert_only_two_leaves_moved(original, row, "external observation")
     # The trusted read is unchanged by the anonymous one.
     assert [row["context_hash"] for row in _answer(svc, True, "attempt_detail", aid)["external_observations"]] \
         == trusted_values
@@ -302,9 +317,8 @@ def test_acceptance_provenance_context_hash_is_withheld_from_anonymous_detail(tm
     anon_text = anon_receipts[0]["provenance_json"]
     anon_provenance = json.loads(anon_text)
     assert anon_provenance["context_hash"] is None
-    # The other provenance keys are intact.
-    assert {k: v for k, v in anon_provenance.items() if k != "context_hash"} == \
-        {k: v for k, v in trusted_provenance.items() if k != "context_hash"}
+    # The other provenance keys are intact (the sibling gate owns report_ref).
+    _assert_only_two_leaves_moved(trusted_provenance, anon_provenance, "attempt_detail provenance")
     assert recorded not in anon_text
 
 
@@ -338,9 +352,7 @@ def test_dependency_receipt_provenance_context_hash_is_withheld_from_anonymous_n
     anonymous = execute(svc, "get_node", {"project_id": PID, "node_key": "top"})
     anon_dep = anonymous["dependency_receipts"]["base"]["acceptance"]
     anon_provenance = json.loads(anon_dep["provenance_json"])
-    assert anon_provenance["context_hash"] is None
-    assert {k: v for k, v in anon_provenance.items() if k != "context_hash"} == \
-        {k: v for k, v in trusted_provenance.items() if k != "context_hash"}
+    _assert_only_two_leaves_moved(trusted_provenance, anon_provenance, "dependency provenance")
     assert base_context not in anon_dep["provenance_json"]
 
 

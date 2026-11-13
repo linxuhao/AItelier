@@ -210,6 +210,20 @@
     answering = question; replyTo = asked; sendError = '';
   }
   function cancelAnswer() { answering = null; replyTo = null; }
+  // ── the composer's echo is bounded ────────────────────────────────────────
+  // The band above the input echoes the question this reply is bound to, and a
+  // question can be thousands of characters. `.composer` is `flex:0 0 auto`
+  // inside `.conversation`, a fixed-height clipped column, so the echo used to
+  // grow the band until the input row and Send were pushed past the pane's
+  // bottom edge with no scroll path back to them: replying to a long question
+  // made the reply box disappear. The echo therefore renders at most ECHO_CHARS
+  // characters of the question, whitespace collapsed and trimmed first, and the
+  // whole of it stays reachable through the echo element's `title`.
+  const ECHO_CHARS = 168;
+  function echoText(raw: string): string {
+    const flat = (raw ?? '').replace(/\s+/g, ' ').trim();
+    return flat.length > ECHO_CHARS ? flat.slice(0, ECHO_CHARS).replace(/\s+$/, '') + '…' : flat;
+  }
   // The text a message shows in the thread, once. A body is the whole message;
   // a message sent with an empty body but tagged segments shows its segment texts
   // instead, so segmented text is never lost. No per-segment tags: one message,
@@ -433,17 +447,21 @@
   </details>
   <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>
     {#if answering}
-      <p class="identity" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}>
-        {st('driverQuestionsAnswering')} · {answering.text}
+      <p class="identity composer-echo" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}
+        title={answering.text}>
+        {st('driverQuestionsAnswering')} · {echoText(answering.text)}
         <button class="outline" type="button" onclick={cancelAnswer}>{st('driverConversationCancelReply')}</button></p>
     {:else if replyTo}
-      <p class="identity">{st('driverConversationReplyingTo')} · {replyTo.subject}
+      <p class="identity composer-echo" title={replyTo.subject}>
+        {st('driverConversationReplyingTo')} · {echoText(replyTo.subject)}
         <button class="outline" type="button" onclick={() => (replyTo = null)}>{st('driverConversationCancelReply')}</button></p>
     {/if}
     <!-- Send on the input's own row, and the input one line tall by default.
          The visible "write a message" label is gone - the accessible name is on
          the box itself - so the composer costs one line instead of three. The
-         box keeps `resize:vertical`, so it still grows when the user drags it. -->
+         box keeps `resize:vertical`, so the user can still drag it taller, but
+         only up to `max-height:6rem`: past that it scrolls its own text instead
+         of growing the band past the pane's clipped bottom edge. -->
     <div class="composer-row">
       <textarea bind:value={text} maxlength="8000" rows="1" disabled={sending}
         aria-label={st('driverConversationCompose')}></textarea>
@@ -494,6 +512,20 @@
   .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
   .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
     border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
+  /* The echo band's own bound. It sits in `.composer`, which never shrinks and is
+     the last band of a clipped, fixed-height column: with no bound of its own a
+     long question grew the band until the input row and Send were pushed past
+     the pane's bottom edge, with no scroll path back to them. Two guards, and the
+     second is the one that holds for ANY text: `echoText` cuts the echo to a
+     bounded excerpt (the whole question stays in `title`), and this rule pins the
+     band at 60px with its own scroll, so the excerpt scrolls inside a fixed slice
+     of the pane and whatever renders here can only ever cost the pane a constant.
+     The bound is in pixels because this dashboard's root font size is 20px on wide
+     screens: a rem value resolves against that root, so `3.6rem` was 72px on the
+     page, while a pixel value is the same number everywhere, the page and the test
+     that asserts it. The rule is on the band itself (a block `<p>`), not on an
+     inline wrapper, because `max-height` does not apply to an inline box. */
+  .composer-echo{max-height:60px;overflow-y:auto;overflow-wrap:anywhere;}
   /* One row: the input takes the width, the button keeps its own. `min-width:0`
      and `flex-wrap` mean a narrow pane wraps the button under the input instead
      of pushing it out of the box.
@@ -503,7 +535,7 @@
      The two selectors below out-specify that rule and pin the row to one line. */
   .composer-row{display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:.35rem;}
   .composer-row textarea{flex:1 1 6rem;width:auto;min-width:0;margin:0;resize:vertical;font-size:.8rem;
-    line-height:1.35;padding:.25rem .4rem;}
+    line-height:1.35;padding:.25rem .4rem;max-height:6rem;overflow-y:auto;}
   .composer-row button[type="submit"]{flex:0 0 auto;width:auto;margin:0;}
   button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}
   p{margin:.4rem 0;}

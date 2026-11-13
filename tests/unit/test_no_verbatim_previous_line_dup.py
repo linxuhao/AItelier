@@ -49,6 +49,11 @@ TEST_INTENTIONAL_REPEATS = [
     ("tests/unit/test_claim_precondition_bounded.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
     ("tests/unit/test_cli_client.py", 'client.approve_checkpoint("project", observed)', 1),
     ("tests/unit/test_debugctl_await_auth_headers.py", '"http://localhost:4444/api/events/stream",', 2),
+    # One recent instant written to two columns (last_heartbeat_at, updated_at)
+    # of the same attempt, in the live and the heartbeat arms of the external-
+    # owner liveness window; both columns must sit inside the window, so the
+    # repeat is the point, not a splice.
+    ("tests/unit/test_deployment_quiescence.py", "(reference - timedelta(minutes=1)).isoformat(),", 2),
     ("tests/unit/test_godot_harness.py", 'gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)', 1),
     ("tests/unit/test_godot_harness.py", "gh.run_script(str(tmp_path), [], timeout=30)", 1),
     ("tests/unit/test_knowledge_sync.py", '_call(repo, ws, "proj1")', 1),
@@ -123,7 +128,7 @@ def test_named_test_repeats_are_pinned_and_current():
     # The length is pinned as well: a silently DROPPED entry is invisible to the
     # equality above (its site would simply stop being a repeat), so the list's
     # size is written down here too.
-    assert len(TEST_INTENTIONAL_REPEATS) == 22
+    assert len(TEST_INTENTIONAL_REPEATS) == 23
 
 
 

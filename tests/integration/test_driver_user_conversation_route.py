@@ -232,3 +232,52 @@ def test_a_refused_citation_is_a_422_and_stores_nothing_over_http(world, monkeyp
     page = execute(world["user"], "list_user_conversation", {"project_id": "alpha", "limit": 50})
     assert [m["message_id"] for m in page["messages"]] == [asked["message_id"]]
     assert all("answers" not in m for m in page["messages"])
+
+
+def test_the_unread_badge_carries_the_open_question_count_it_computes(world, monkeypatch):
+    """A project with an OPEN question shows that count OUTSIDE the conversation.
+
+    The empty shape (`questions: {}`) is pinned above; this pins the NON-zero one
+    - the case the project list renders as its own badge - and pins it to the
+    number the service computes, over the HTTP surface the SPA reads. Without
+    this, the route could stop forwarding the two keys for a project that has
+    open questions and every delivered test would stay green.
+    """
+    asked = execute(world["driver"], "send_user_message",
+                    {"request_key": "ask", "project_id": "alpha", "subject": "Question",
+                     "body": "may I restart the build?",
+                     "segments": [
+                         {"id": "q1", "kind": "question", "text": "may I restart the build?"},
+                         {"id": "q2", "kind": "question", "text": "may I deploy afterwards?"}]},
+                    allow_write=True)
+    # The reply cites q1 by its exact pair, so exactly one question stays open.
+    execute(world["user"], "send_user_conversation_message",
+            {"request_key": "close-q1", "project_id": "alpha", "body": "yes, restart it",
+             "answers": [{"message_id": asked["message_id"], "segment_id": "q1"}]},
+            allow_write=True)
+    computed = execute(world["user"], "user_conversation_unread", {})["questions"]
+    assert computed == {"alpha": 1}
+
+    with client(world, monkeypatch) as reader:
+        body = reader.get("/api/dsh-drivers/unread").json()
+        # The route forwards the service's own map, not a second count of the rows.
+        assert body["questions"] == computed, body
+        assert body["questions_total"] == 1
+        # The message badge is a different number over the same rows: one
+        # driver-to-user message, and the user's own reply does not add to it.
+        assert (body["projects"], body["total"]) == ({"alpha": 1}, 1)
+        # Naming the project gives the same map, and a project with no open
+        # question stays absent from it - the empty shape, still reachable.
+        assert reader.get("/api/dsh-drivers/unread?project_id=alpha").json()["questions"] == \
+            computed
+        beta = reader.get("/api/dsh-drivers/unread?project_id=beta").json()
+        assert (beta["questions"], beta["questions_total"]) == ({}, 0)
+
+    # The two badges move independently: reading the thread clears the message
+    # badge and closes no question.
+    execute(world["user"], "mark_user_conversation_read",
+            {"project_id": "alpha", "message_id": asked["message_id"]}, allow_write=True)
+    with client(world, monkeypatch) as later:
+        after = later.get("/api/dsh-drivers/unread").json()
+        assert after["total"] == 0
+        assert after["questions"] == computed and after["questions_total"] == 1

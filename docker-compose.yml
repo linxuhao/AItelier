@@ -68,6 +68,14 @@ services:
       # returned outcome=locked (= "all slots busy"), and a fifth launched run never
       # entered the candidate window at all. Owner raised it to 10.
       AITELIER_MAX_CONCURRENT_PROJECTS: "10"
+      # glibc gives each thread that mallocs its own arena (up to 8 x cores = 128
+      # here) and keeps freed chunks in it. The backend runs ~125 threads and opens
+      # a fresh sqlite connection per call from whichever thread serves it, so the
+      # page caches churn through every arena: measured 2026-11-14 on the live
+      # process, 626 MB of 757 MB anon sat in ~100 non-main arenas, the main heap
+      # held 107 MB, and the previous container grew ~2.2 MB/min to the 4 GiB
+      # ceiling (OOM 20:02:25Z, iss-876a88032b6242ff). Two arenas bound that drift.
+      MALLOC_ARENA_MAX: "2"
       AITELIER_SECRETS_DIR: /run/aitelier-secrets
       AITELIER_GITHUB_TOKEN_FILE: /run/aitelier-secrets/GITHUB_TOKEN
       # Git auth for clone/push of GitHub repos. The credential helper feeds the

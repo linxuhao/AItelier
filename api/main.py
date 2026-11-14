@@ -446,10 +446,12 @@ async def write_gate(request: Request, call_next):
     return JSONResponse(authz.denial_body(code), status_code=403)
 
 
-# The godot harness the repository gate imports at run time. An authored gate's
-# subprocess imports this copy, baked into the image at build time, not the one
-# in the working tree; /health reports its identity so a stale image is visible
-# from outside. Module-level so a test can point it at a temporary file.
+# The godot harness an AUTHORED repository gate imports at run time. That gate's
+# subprocess imports this copy, baked into the image at build time, ahead of the
+# one in the working tree. A NORMAL gate imports neither: it takes the harness in
+# its binding's `source` directory. /health reports this copy's identity so a
+# stale image is visible from outside. Module-level so a test can point it at a
+# temporary file.
 GATE_EXPORT_HARNESS = _Path("/opt/aitelier-gate-imports/docker/godot/godot_harness.py")
 
 
@@ -473,9 +475,12 @@ def _gate_harness_identity() -> dict:
 def health_check():
     """系统探针
 
-    `gate_harness` identifies the harness the repository gate imports (see
-    GATE_EXPORT_HARNESS). An absent export is declared in that field; the probe
-    still answers 200 with `status` and `engine` unchanged.
+    `gate_harness` reports the harness copy inside the backend container running
+    right now (see GATE_EXPORT_HARNESS), read fresh on every request. It is NOT
+    the harness a gate imports: a normal gate imports the one in its binding's
+    `source` directory, and an authored repository gate imports the export inside
+    the image its tag names at gate time. An absent export is declared in that
+    field; the probe still answers 200 with `status` and `engine` unchanged.
     """
     return {"status": "ok", "engine": "DPE SOTA v3.0",
             "gate_harness": _gate_harness_identity()}

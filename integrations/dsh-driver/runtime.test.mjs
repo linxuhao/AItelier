@@ -196,7 +196,7 @@ test('dormancy parks the timed review, compacts once on the first idle, and wake
     notify:()=>{reviews++;},compact:()=>{compactions++;},onError:error=>{throw error;}});
   // Entered during the tool's turn (running), so the review timer is not armed yet.
   agent.status='running';review.statusChanged('running');
-  const entered=review.enterDormancy('nothing authorized');
+  const entered=review.enterDormancy('nothing authorized', 3600000);
   assert.equal(entered.reason,'nothing authorized');assert.ok(Date.parse(entered.since));
   agent.status='idle';review.statusChanged('idle');
   await Promise.resolve();await Promise.resolve();
@@ -335,7 +335,7 @@ test('idle review: continuation asks instead of arming the review; dormancy, ina
   assert.equal(asks, 1); assert.equal(reviews, 1, 'empty answer: the normal review');
   ok = false; continuation.observe(toolCall()); review.statusChanged('idle'); t.mock.timers.tick(100); await Promise.resolve();
   assert.equal(asks, 1, 'a failed completion is not asked again'); assert.equal(reviews, 2);
-  ok = true; review.enterDormancy('quiet'); continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
+  ok = true; review.enterDormancy('quiet', 3600000); continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
   t.mock.timers.tick(1000); await Promise.resolve();
   assert.equal(asks, 1, 'dormant: never asked'); assert.equal(reviews, 2);
   review.wake(); goal.phase = 'paused'; continuation.observe(toolCall()); review.statusChanged('idle'); await Promise.resolve();
@@ -411,7 +411,7 @@ test('a failing dormancy compaction is reported, never thrown, and dormancy hold
   const errors=[],agent={status:'idle'},goal={id:'g',phase:'active',activation:'disarmed'};
   const review=new IdleReview({agent,goals:{get:()=>goal,disarm:()=>{}},intervalMs:100,notify:()=>assert.fail('reviewed'),
     compact:async()=>{throw new Error('busy');},onError:error=>errors.push(String(error))});
-  review.enterDormancy('quiet');review.statusChanged('idle');
+  review.enterDormancy('quiet', 3600000);review.statusChanged('idle');
   for(let i=0;i<5;i++) await Promise.resolve();
   assert.deepEqual(errors,['Error: busy']);
   t.mock.timers.tick(1000);await Promise.resolve();

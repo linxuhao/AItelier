@@ -242,7 +242,17 @@ async def test_real_http_context_is_own_private_scope_and_compact_payload_is_min
             assert client.post("/api/dsh-drivers/alpha/heartbeat").status_code == 200
             update = client.post("/api/dsh-drivers/alpha/activity", json={"phase": "waiting", "subagents": ["native-child"]})
             assert update.status_code == 200, update.text
-            assert client.get("/api/dsh-drivers").json()["projects"]["alpha"]["running_subagents"] == 1
+            waiting = client.get("/api/dsh-drivers").json()["projects"]["alpha"]
+            assert waiting["running_subagents"] == 1
+            assert waiting["online"] == 1, waiting
+            # A dormant driver (idle_dormant) is a live driver that is asleep: its own
+            # phase on the dashboard, still online.
+            assert client.post("/api/dsh-drivers/alpha/activity", json={"phase": "dormant"}).status_code == 200
+            dormant = client.get("/api/dsh-drivers").json()["projects"]["alpha"]
+            assert dormant["managed"]["phase"] == "dormant" and dormant["online"] == 1, dormant
+            assert client.post("/api/dsh-drivers/alpha/activity", json={"phase": "failed"}).status_code == 200
+            assert client.get("/api/dsh-drivers").json()["projects"]["alpha"]["online"] == 0
+            assert client.post("/api/dsh-drivers/alpha/activity", json={"phase": "asleep"}).status_code == 422
             identity.driver_id = "other-driver"
             assert client.get("/api/dsh-drivers/alpha/context").status_code == 403
             assert client.post("/api/dsh-drivers/alpha/activity", json={"phase": "running"}).status_code == 403

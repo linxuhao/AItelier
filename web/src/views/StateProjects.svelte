@@ -4,7 +4,7 @@
   import { driverStatus, dshDriverConversationUnread, stateProjects, type DriverStatusResponse } from '../lib/api';
   import { isArchived, type StateProjectRow } from '../lib/stateGraph';
   import { rememberProject } from '../lib/navigation.svelte';
-  import { driverState, driverStateLabelKey, sortDagRows } from '../lib/driverList';
+  import { driverState, driverStateIcon, driverStateLabelKey, sortDagRows } from '../lib/driverList';
   import { st } from '../lib/stateI18n.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
@@ -93,7 +93,7 @@
                  that opens it: phase, drivers online/total, and what is running
                  right now. All four read from the same /api/dsh-drivers row. -->
             <p class="driver-line">
-              <span class="driver-state" data-phase={driverState(phase)} title={st(driverStateLabelKey(phase))}>{st(driverStateLabelKey(phase))}</span>
+              <span class="driver-state" data-phase={driverState(phase)} data-icon={driverStateIcon(phase)} title={st(driverStateLabelKey(phase))}>{st(driverStateLabelKey(phase))}</span>
               <span class="driver-facts" aria-label={st('driverFacts')}>
                 <span class="fact"><strong data-fact="drivers">{activity?.online ?? 0}/{activity?.total ?? 0}</strong> {st('driverCount')}</span>
                 <span class="fact"><strong data-fact="subagents">{activity?.running_subagents ?? 0}</strong> {st('driverSubagents')}</span>
@@ -169,10 +169,14 @@
      the card's own text colour in every theme. */
   .driver-facts strong { font-size:.8rem; color:inherit; font-weight:600; }
   .driver-state { display:inline-flex; align-items:center; gap:.3rem; color:var(--pico-muted-color,#64748b); }
-  .driver-state::before { content:''; width:.45rem; height:.45rem; border-radius:50%; background:#94a3b8; }
-  .driver-state[data-phase="running"]::before { background:#15803d; }
-  .driver-state[data-phase="idle"]::before { background:#2563eb; }
-  .driver-state[data-phase="failed"]::before { background:#b91c1c; }
+  /* The icon comes from data-icon (one glyph per state, driverList.ts), so the
+     label text stays the label; the colour says the same thing a second way. */
+  .driver-state::before { content:attr(data-icon); width:1em; text-align:center; color:#94a3b8; }
+  .driver-state[data-phase="running"]::before { color:#15803d; }
+  .driver-state[data-phase="idle"]::before { color:#2563eb; }
+  .driver-state[data-phase="dormant"]::before { color:#7c3aed; }
+  .driver-state[data-phase="starting"]::before, .driver-state[data-phase="stopping"]::before { color:#b45309; }
+  .driver-state[data-phase="failed"]::before { color:#b91c1c; }
   .unread { display:inline-block; padding:0 .35rem; border-radius:999px; background:var(--pico-primary,#2563eb); color:#fff; font-size:.6rem; line-height:1.5; }
   /* Amber, not the primary blue: a question is something the USER owes the
      driver, so it must not read as another message waiting to be read. */

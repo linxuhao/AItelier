@@ -194,7 +194,7 @@ export const inject = ['llm'];
 const post = async (path, body) => (await fetch(process.env.AITELIER_URL + path, { method: 'POST', body: JSON.stringify(body ?? {}) })).json();
 const plans = JSON.parse(process.env.AITELIER_TEST_PLANS);
 const call = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
-const idle = (id, reason) => call(id, 'idle_dormant', { reason });
+const idle = (id, reason) => call(id, 'idle_dormant', { reason, wake_after_minutes: 60 });
 export function apply(ctx) {
   const root = process.env.AITELIER_DSH_SESSION, done = new Set();
   // The settle hooks run BEFORE the tool call they precede, so the tool sees the

@@ -315,8 +315,10 @@ export const continueSource = 'aitelier-continue';
 export const NOTHING_LEFT = 'NOTHING_LEFT';
 /** Continuation questions in a row without real input before the director is left idle. */
 export const MAX_AUTO_CONTINUE = 5;
-export const continuationQuestion = 'AItelier continuation check: you ended a turn. Before parking, look for more work you can do now, in parallel with anything running: ready frontier nodes, open issues you can close or advance, next steps you promised yourself, results you can collect. If there is one, do it now. If not, answer with one line that starts with NOTHING_LEFT: naming why each candidate is blocked. For a long background job you started, call watch_process with its pid instead of polling it.';
-export const reviewInstruction = 'Recheck live State frontier (ready nodes), open issues, next steps you promised yourself, results you can collect, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. If nothing is actionable, reply with one line that starts with NOTHING_LEFT: naming why each candidate is blocked; if nothing is in flight either, call idle_dormant with that reason instead.';
+/** What a blocker that waits on the user must be: a question they can see. */
+export const askTheUser = 'Anything that waits on your user (a ruling, an authorization, a hold only they can lift) must be an open question block they can see: check list_user_questions and ask, with send_user_message segments, each such decision that is not already open, before you answer NOTHING_LEFT or go dormant.';
+export const continuationQuestion = 'AItelier continuation check: you ended a turn. Before parking, look for more work you can do now, in parallel with anything running: ready frontier nodes, open issues you can close or advance, next steps you promised yourself, results you can collect. If there is one, do it now. If not, answer with one line that starts with NOTHING_LEFT: naming why each candidate is blocked. For a long background job you started, call watch_process with its pid instead of polling it. ' + askTheUser;
+export const reviewInstruction = 'Recheck live State frontier (ready nodes), open issues, next steps you promised yourself, results you can collect, worker capacity and prior blockers. Continue independent authorized work; a blocked task does not block the whole project. ' + askTheUser + ' If nothing is actionable, reply with one line that starts with NOTHING_LEFT: naming why each candidate is blocked; if nothing is in flight either, call idle_dormant with that reason and how long to sleep instead.';
 
 /** Decides, at the end of each root turn, whether to ask the director once more.
  *  A turn that called a tool and did not answer NOTHING_LEFT may have stopped
@@ -417,6 +419,16 @@ export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], 
     ...(plans.some(p => p.ready_to_finish) ? { ready_to_finish: plans.filter(p => p.ready_to_finish).map(p => p.attempt_id) } : {}) };
   if (background.length) return { refused: 'background_processes', reason: 'jobs you started are still running; watch_process them or wait', pids: background };
   return null;
+}
+
+/** How long a director may choose to stay dormant, in minutes: no shorter than
+ *  the timed review it parks, no longer than a day. */
+export const DORMANT_MIN_MINUTES = 15, DORMANT_MAX_MINUTES = 24 * 60;
+/** Why a chosen sleep length must be refused, or null. */
+export function wakeAfterRefusal(minutes) {
+  if (Number.isInteger(minutes) && minutes >= DORMANT_MIN_MINUTES && minutes <= DORMANT_MAX_MINUTES) return null;
+  return { refused: 'wake_after_minutes_invalid',
+    reason: `say how long to stay dormant: an integer from ${DORMANT_MIN_MINUTES} to ${DORMANT_MAX_MINUTES} minutes` };
 }
 
 /** Drop from `live` every activation the agent registry can prove departed: its start
@@ -522,24 +534,41 @@ export const DORMANT_COMPACT_MIN_TOKENS = 32000;
  *
  *  Dormancy (idle_dormant) parks only the timed review: nothing is stopped, the
  *  State/inbox subscription and child messages still steer the agent, and the
- *  first such message ends dormancy (wake). On the first idle after entering it,
+ *  first such message ends dormancy (wake). The director also says how long to
+ *  sleep: when that runs out without input, dormancy ends and the review it parked
+ *  runs once (`notify('dormancy_timeout', was)`). On the first idle after entering it,
  *  `compact` runs once - the provider cache will be cold by the next wake anyway,
- *  so a large context is cheapest to shrink while it is still warm. */
+ *  so a large context is cheapest to shrink while it is still warm. `changed` is
+ *  told whenever dormancy starts or ends, so the reported phase follows it. */
 export class IdleReview {
-  constructor({ agent, goals, notify, onError, compact, continuation, ask, canContinue = () => true, intervalMs = 15 * 60 * 1000 }) {
-    Object.assign(this, { agent, goals, notify, onError, compact, continuation, ask, canContinue, intervalMs });
+  constructor({ agent, goals, notify, onError, compact, continuation, ask, canContinue = () => true, changed = () => {}, intervalMs = 15 * 60 * 1000 }) {
+    Object.assign(this, { agent, goals, notify, onError, compact, continuation, ask, canContinue, changed, intervalMs });
     this.closed = false;
   }
-  enterDormancy(reason) {
+  enterDormancy(reason, wakeAfterMs) {
     clearTimeout(this.timer);
-    this.dormant = { reason, since: new Date().toISOString(), compactPending: true };
+    clearTimeout(this.dormantTimer);
+    const since = new Date();
+    this.dormant = { reason, since: since.toISOString(), until: new Date(since.getTime() + wakeAfterMs).toISOString(), compactPending: true };
+    this.dormantTimer = setTimeout(() => this.timedOut(), wakeAfterMs);
+    this.dormantTimer.unref?.();
+    this.changed();
     return this.dormant;
   }
   /** Ends dormancy; returns what it was (undefined when not dormant). */
   wake() {
     const was = this.dormant;
+    clearTimeout(this.dormantTimer);
     this.dormant = undefined;
+    if (was) this.changed();
     return was;
+  }
+  /** The sleep the director chose ran out with no input: run the parked review now. */
+  timedOut() {
+    if (this.closed) return;
+    const was = this.wake();
+    if (!was || this.agent.status !== 'idle' || this.goals.get(this.agent)?.phase !== 'active') return;
+    Promise.resolve().then(() => this.notify('dormancy_timeout', was)).catch(this.onError);
   }
   statusChanged(status) {
     clearTimeout(this.timer);
@@ -566,7 +595,7 @@ export class IdleReview {
     }, this.intervalMs);
     this.timer.unref?.();
   }
-  close() { this.closed = true; clearTimeout(this.timer); }
+  close() { this.closed = true; clearTimeout(this.timer); clearTimeout(this.dormantTimer); }
 }
 
 /** The host-side todo plan store, reached only through `python -m core.todo_cli`.
@@ -1087,6 +1116,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const floorEnv = Number(env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS);
   const compactFloor = env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS !== undefined && Number.isFinite(floorEnv) && floorEnv >= 0
     ? floorEnv : DORMANT_COMPACT_MIN_TOKENS;
+  // Tests shrink a minute; production never sets it.
+  const dormantMinuteMs = Number(env.AITELIER_DSH_DORMANT_MINUTE_MS) > 0 ? Number(env.AITELIER_DSH_DORMANT_MINUTE_MS) : 60 * 1000;
   // idleReview is created after the agent; tools reach it only when called.
   let agent, agentCtx, idleReview, waiting = false, disposed = false;
   // watch_process: pid -> { note, since }. One poller while any watch exists.
@@ -1108,7 +1139,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   };
   let subscriptionError = '', completionError = '';
   let activity = Promise.resolve();
-  const currentPhase = () => waiting ? completionError ? 'failed' : 'waiting' : 'running';
+  // Dormant is still idle, reported apart so the dashboard can say "asleep", not "idle".
+  const currentPhase = () => waiting ? completionError ? 'failed' : idleReview?.dormant ? 'dormant' : 'waiting' : 'running';
   const report = (phase, error = completionError || subscriptionError, event) => {
     // One report per /activity request; `phaseReport` names the live child SESSIONS,
     // reconciled against the registry, never the runIds the registry cannot answer for.
@@ -1309,10 +1341,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       },
     }));
     scope.tools.register(defineTool({ name: 'idle_dormant',
-      description: 'Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. You stay subscribed: any State event, inbox message, owner message or child message wakes you and the review resumes. Refused while you have a live child, a live State claim or an unfinished todo plan whose State attempt has not settled.',
-      parameters: { reason: { type: 'string', required: true } }, output: jsonOutput,
+      description: `Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. wake_after_minutes (${DORMANT_MIN_MINUTES}-${DORMANT_MAX_MINUTES}) is how long you choose to sleep: when it runs out with no input you get one review, so pick it from when something you wait on could have changed. You stay subscribed: any State event, inbox message, owner message or child message wakes you earlier and the review resumes. Before calling it, every decision you wait on from your user must already be an open question block (list_user_questions). Refused while you have a live child, a live State claim or an unfinished todo plan whose State attempt has not settled.`,
+      parameters: { reason: { type: 'string', required: true }, wake_after_minutes: { type: 'integer', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+        const wakeAfter = Number(args.wake_after_minutes);
+        const badWake = reason && wakeAfterRefusal(wakeAfter);
+        if (badWake) return badWake;
         // Reconcile first: a departed child must not refuse dormancy at all (and the
         // readers below reconcile on their own, so an early return cannot skip it).
         pruneChildren();
@@ -1338,10 +1373,10 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
           claims, plans, background });
         if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
-        const dormant = idleReview.enterDormancy(reason);
-        return { dormant: true, since: dormant.since, reason,
+        const dormant = idleReview.enterDormancy(reason, wakeAfter * dormantMinuteMs);
+        return { dormant: true, since: dormant.since, until: dormant.until, wake_after_minutes: wakeAfter, reason,
           compaction: `once on the next idle if the context is at least ${compactFloor} tokens`,
-          wakes_on: ['State event', 'inbox message', 'owner message', 'child message'] };
+          wakes_on: ['State event', 'inbox message', 'owner message', 'child message', 'wake_after_minutes running out'] };
       },
     }));
     scope.tools.register(defineTool({ name: 'grep_chat_history',
@@ -1396,7 +1431,9 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       const result = await ctx.compaction.compactNow(agent, AbortSignal.timeout(10 * 60 * 1000));
       ctx.logger.info(`dormant at ${tokens} tokens: ${result ? 'compacted' : 'nothing safe to compact'}`);
     },
-    notify: async () => {
+    // A dormant phase is reported when it starts or ends, not only at the next status change.
+    changed: () => { if (waiting) void report(currentPhase()); },
+    notify: async (reason = 'idle_review_due', dormancy) => {
       let todoView;
       try {
         const { plans, settled } = await planWork();
@@ -1404,7 +1441,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       }
       catch (error) { ctx.logger.warn(String(error)); todoView = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier director review due:\n' + JSON.stringify({
-        project_id: project, reason: 'idle_review_due',
+        project_id: project, reason,
+        ...(dormancy ? { dormant_since: dormancy.since, dormant_reason: dormancy.reason } : {}),
         instruction: reviewInstruction,
         ...todoView,
       }));

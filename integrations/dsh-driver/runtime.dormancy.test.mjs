@@ -33,6 +33,65 @@ test('pruning a live-child set leaves only the ids the registry still holds', as
   assert.deepEqual([...remote], ['remote']);
 });
 
+test('the chosen sleep is an integer number of minutes between the review interval and a day', async () => {
+  const { wakeAfterRefusal, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } = await import('./runtime.mjs');
+  for (const ok of [DORMANT_MIN_MINUTES, 240, DORMANT_MAX_MINUTES]) assert.equal(wakeAfterRefusal(ok), null);
+  for (const bad of [undefined, NaN, 0, DORMANT_MIN_MINUTES - 1, DORMANT_MAX_MINUTES + 1, 30.5, '60'])
+    assert.equal(wakeAfterRefusal(bad)?.refused, 'wake_after_minutes_invalid', String(bad));
+});
+
+function review(overrides = {}) {
+  const calls = { notify: [], changed: 0 };
+  const agent = { status: 'idle' };
+  const r = new IdleReviewClass({ agent, goals: { get: () => ({ phase: 'active' }), disarm() {} },
+    notify: async (...args) => { calls.notify.push(args); }, onError: error => { throw error; },
+    changed: () => { calls.changed++; }, intervalMs: 10_000, ...overrides });
+  return { r, calls, agent };
+}
+let IdleReviewClass;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('dormancy that runs out ends itself and runs the parked review once, naming the timeout', async () => {
+  ({ IdleReview: IdleReviewClass } = await import('./runtime.mjs'));
+  const { r, calls } = review();
+  const entered = r.enterDormancy('nothing to do', 60);
+  assert.equal(Date.parse(entered.until) - Date.parse(entered.since), 60);
+  assert.equal(calls.changed, 1);
+  await sleep(150);
+  assert.equal(r.dormant, undefined);
+  assert.equal(calls.changed, 2);
+  assert.equal(calls.notify.length, 1);
+  assert.equal(calls.notify[0][0], 'dormancy_timeout');
+  assert.equal(calls.notify[0][1].reason, 'nothing to do');
+  r.close();
+});
+
+test('input before the sleep runs out cancels the timeout; a busy or paused director gets no review', async () => {
+  ({ IdleReview: IdleReviewClass } = await import('./runtime.mjs'));
+  const woken = review();
+  woken.r.enterDormancy('x', 60);
+  assert.ok(woken.r.wake());
+  await sleep(150);
+  assert.equal(woken.calls.notify.length, 0);
+  assert.equal(woken.calls.changed, 2);
+  const busy = review();
+  busy.agent.status = 'running';
+  busy.r.enterDormancy('x', 30);
+  await sleep(100);
+  assert.equal(busy.r.dormant, undefined, 'dormancy still ends');
+  assert.equal(busy.calls.notify.length, 0);
+  const paused = review({ goals: { get: () => ({ phase: 'paused' }), disarm() {} } });
+  paused.r.enterDormancy('x', 30);
+  await sleep(100);
+  assert.equal(paused.r.dormant, undefined);
+  assert.equal(paused.calls.notify.length, 0);
+  const closed = review();
+  closed.r.enterDormancy('x', 30);
+  closed.r.close();
+  await sleep(100);
+  assert.equal(closed.calls.notify.length, 0);
+});
+
 // Root script: refused while a claim is live, then dormant with a padded context,
 // then a State event wakes it. Compaction requests answer with a checkpoint.
 const PROVIDER = String.raw`
@@ -61,14 +120,15 @@ export function apply(ctx) {
         block = { type: 'text', text: 'CHILD_DONE' };
       }
       else if (!options.tools?.length || options.sessionId !== root) block = { type: 'text', text: 'Fixture session' };
-      else block = once('refused', tool('root-dormant-refused', 'idle_dormant', { reason: 'quiet' }))
-        ?? once('empty', tool('root-dormant-empty', 'idle_dormant', { reason: '  ' }))
-        ?? once('plans', tool('root-dormant-plans', 'idle_dormant', { reason: 'quiet' }))
+      else block = once('nowake', tool('root-dormant-nowake', 'idle_dormant', { reason: 'quiet' }))
+        ?? once('refused', tool('root-dormant-refused', 'idle_dormant', { reason: 'quiet', wake_after_minutes: 15 }))
+        ?? once('empty', tool('root-dormant-empty', 'idle_dormant', { reason: '  ', wake_after_minutes: 15 }))
+        ?? once('plans', tool('root-dormant-plans', 'idle_dormant', { reason: 'quiet', wake_after_minutes: 15 }))
         ?? once('spawn', () => (unlinkSync(process.env.AITELIER_TEST_PLAN_FILE), tool('root-spawn', 'subagent', { description: 'dormancy child', prompt: 'DORMANCY_CHILD stay alive' })))
-        ?? once('children', tool('root-dormant-children', 'idle_dormant', { reason: 'quiet' }))
+        ?? once('children', tool('root-dormant-children', 'idle_dormant', { reason: 'quiet', wake_after_minutes: 15 }))
         ?? once('release', () => (void post('/test/release', {}), { type: 'text', text: 'WAITING_FOR_CHILD' }))
         ?? (text.includes('CHILD_DONE') ? once('pad', { type: 'text', text: 'ROOT_PADDING ' + 'director context '.repeat(1500) }) : undefined)
-        ?? (done.has('woken') ? undefined : text.includes('ROOT_PADDING') && !done.has('dormant') ? (done.add('dormant'), tool('root-dormant', 'idle_dormant', { reason: 'nothing authorized is available' })) : undefined)
+        ?? (done.has('woken') ? undefined : text.includes('ROOT_PADDING') && !done.has('dormant') ? (done.add('dormant'), tool('root-dormant', 'idle_dormant', { reason: 'nothing authorized is available', wake_after_minutes: 15 })) : undefined)
         ?? (text.includes('AItelier runtime event') && !done.has('woken') ? (done.add('woken'), { type: 'text', text: 'WOKEN' }) : undefined)
         ?? { type: 'text', text: 'Director idle.' };
       yield { type: 'block-start', index: 0, blockType: block.type };
@@ -86,7 +146,7 @@ export function apply(ctx) {
 }
 `;
 
-async function scenario(t, floor) {
+async function scenario(t, floor, { minuteMs } = {}) {
   const entry = await measuredEntryForTest(t);
   if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-dormancy-'));
@@ -94,7 +154,7 @@ async function scenario(t, floor) {
   // real-DSH test files run their own drivers in parallel.
   const session = 'dormancy-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const here = dirname(fileURLToPath(import.meta.url));
-  const events = [], requests = [], claimQueries = [], parked = new Set();
+  const events = [], requests = [], claimQueries = [], parked = new Set(), phases = [];
   const held = new Set();
   let changed = false, released = false, output = '', proc;
   const server = createServer(async (req, res) => {
@@ -113,7 +173,8 @@ async function scenario(t, floor) {
     }
     if (req.url.endsWith('/context')) return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'fixture driver skill' });
-    if (req.url.endsWith('/activity') || req.url.endsWith('/heartbeat')) return send({ ok: true });
+    if (req.url.endsWith('/activity')) { phases.push({ phase: body.phase, at: Date.now(), events: events.length }); return send({ ok: true }); }
+    if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url === '/api/state/query/wait_for_state_change') {
       if (changed && body.after < 11) return send({ timed_out: false, next_after: 11, next_inbox_after: 0, events: [{ type: 'node_changed' }] });
       parked.add(res); res.on('close', () => parked.delete(res)); return;
@@ -166,10 +227,15 @@ async function scenario(t, floor) {
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_IDLE_REVIEW_MS: '400', AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS: String(floor),
+      ...(minuteMs ? { AITELIER_DSH_DORMANT_MINUTE_MS: String(minuteMs) } : {}),
       AITELIER_TODO_PYTHON: 'python3', AITELIER_TODO_CWD: cli, AITELIER_TEST_PLAN_FILE: planFile } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
     await until('dormancy never entered', () => result('root-dormant'));
+    // The director must say how long it sleeps: DSH refuses the call without the required argument.
+    const nowake = result('root-dormant-nowake').data.message.content.map(b => b.text ?? '').join('');
+    console.log('DORMANCY_NOWAKE ' + nowake.slice(0, 300));
+    assert.match(nowake, /wake_after_minutes/);
     const refused = json(result('root-dormant-refused'));
     assert.equal(refused.refused, 'live_claims');
     assert.deepEqual(refused.node_keys, ['n'], 'only this driver\'s live claims count');
@@ -192,6 +258,23 @@ async function scenario(t, floor) {
     const entered = json(result('root-dormant'));
     assert.equal(entered.dormant, true);
     assert.equal(entered.reason, 'nothing authorized is available');
+    assert.equal(entered.wake_after_minutes, 15);
+    assert.equal(Date.parse(entered.until) - Date.parse(entered.since), 15 * (minuteMs ?? 60000));
+    const enteredAt = Date.now();
+    if (minuteMs) {
+      // No input at all: the chosen sleep runs out and the parked review runs once, saying why.
+      const timedOut = () => reviews().filter(e => e.data.content[0].text.includes('"reason":"dormancy_timeout"'));
+      await until('the dormancy timeout never ran the review', () => timedOut().length === 1, 15 * minuteMs + 15000);
+      assert.ok(Date.now() - enteredAt >= 15 * minuteMs - 1000, 'the review ran before the chosen sleep ran out');
+      const review = JSON.parse(timedOut()[0].data.content[0].text.split('\n').slice(1).join('\n'));
+      assert.equal(review.dormant_reason, 'nothing authorized is available');
+      assert.match(review.instruction, /list_user_questions/);
+      const dormantAt = phases.findIndex(p => p.phase === 'dormant');
+      assert.ok(dormantAt >= 0, 'the dormant phase was never reported: ' + JSON.stringify(phases.map(p => p.phase)));
+      assert.ok(phases.slice(dormantAt).some(p => p.phase === 'running'), 'the phase stayed dormant after the timeout');
+      return { phases, output };
+    }
+    await until('the dormant phase was never reported: ' + JSON.stringify(phases.map(p => p.phase)), () => phases.at(-1)?.phase === 'dormant');
     // The refusals were turns too: by now the normal review may have fired between them. From the
     // dormant turn on, ten review intervals pass without one.
     const reviewsBefore = reviews().length;
@@ -206,6 +289,8 @@ async function scenario(t, floor) {
     change();
     await until('the State event did not wake the director', () => events.some(e => e.type === 'assistant/message' && JSON.stringify(e.data).includes('WOKEN')));
     await until('the review did not resume after waking', () => reviews().length > reviewsBefore);
+    assert.notEqual(phases.at(-1).phase, 'dormant', 'still reported dormant after waking');
+    assert.ok(!reviews().some(e => e.data.content[0].text.includes('dormancy_timeout')), 'an input wake must not also time out');
     return { compactions, summaryRequests, output };
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
@@ -221,6 +306,10 @@ test('real pinned DSH: dormancy is refused while work is live, parks reviews, co
   const { compactions, summaryRequests } = run;
   assert.equal(compactions.length, 1, 'expected exactly one compaction on entering dormancy');
   assert.equal(summaryRequests, 1);
+});
+
+test('real pinned DSH: with no input the chosen sleep runs out, the phase leaves dormant and the review runs', { timeout: 60000 }, async (t) => {
+  await scenario(t, 10_000_000, { minuteMs: 100 });
 });
 
 test('real pinned DSH: below the token floor dormancy does not compact', { timeout: 60000 }, async (t) => {

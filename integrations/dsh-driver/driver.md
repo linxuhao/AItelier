@@ -133,7 +133,10 @@ one line that starts with NOTHING_LEFT: naming why each candidate is blocked.
 A turn without a tool call or with NOTHING_LEFT parks you. For a long background
 job you started, call watch_process with its pid and note instead of polling its
 log: its exit wakes you. When nothing is actionable and nothing is in flight,
-call idle_dormant with the reason: the timed review stops until real input.
+call idle_dormant with the reason and wake_after_minutes (15 to 1440): the timed
+review stops until real input or until that sleep runs out, which brings one
+review. Choose the length from when something you wait on could have changed;
+the dashboard shows you as dormant meanwhile.
 While you wait on a live worker or a watched job, one NOTHING_LEFT answer holds
 until that set changes. Your own writes carry your actor - including your
 acknowledge and resolve of a message - so a tick of only those does not wake you.
@@ -165,6 +168,12 @@ box as the reason: an info message is washed away by the next one, while a quest
 stays in the box until it is answered.
 To see which of your questions are still open (after a compaction, before asking
 again), call state_read(list_user_questions) instead of paging the conversation.
+Anything that waits on your user - a ruling, an authorization, a hold only they
+can lift - MUST be an open question block. The user looks at the questions box,
+not at node holds, issue bodies or your transcript: a decision you wait on that
+is not in that box is a decision nobody will make. Before you answer NOTHING_LEFT
+or call idle_dormant naming such a blocker, check list_user_questions and ask
+each decision that is not already open.
 
 Send when the user would otherwise be WRONG about the state of their work:
 - you finished what they asked: what changed, what you actually verified, what

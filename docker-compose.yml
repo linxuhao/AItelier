@@ -155,13 +155,17 @@ services:
     # internet, where the callers are strangers and the cost of a request is
     # not something they have any reason to keep down.
     #
-    # A memory ceiling. `repo/archive` deflates the whole working tree into an
-    # in-memory BytesIO before it streams a byte, so one anonymous GET holds
-    # ~12MB for as long as the client is slow to read it. With no limit set the
-    # host simply runs out (14GB total, ~8GB free) and the kernel's OOM killer
-    # picks the largest process — which is this one, mid-pipeline-run, and the
-    # tokens already spent on the in-flight step die with it. A limit converts
-    # that into a container restart on our own terms.
+    # A memory ceiling. With no limit set the host simply runs out (14GB total,
+    # ~8GB free) and the kernel's OOM killer picks the largest process — which
+    # is this one, mid-pipeline-run, and the tokens already spent on the
+    # in-flight step die with it. A limit converts that into a container
+    # restart on our own terms.
+    #
+    # One route used to make that concrete: `repo/archive` deflated the whole
+    # working tree into an in-memory BytesIO before it streamed a byte (~12MB
+    # for the live repo, held for as long as the client read slowly). It now
+    # spools to a temporary file and streams 64 KiB chunks, so the ceiling no
+    # longer rests on that route; it stays as a backstop.
     mem_limit: 4g
     # A log ceiling. `json-file` with no options NEVER rotates, and every
     # anonymous request appends an access-log line. Docker keeps those under

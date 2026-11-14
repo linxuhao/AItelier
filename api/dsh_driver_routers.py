@@ -48,7 +48,7 @@ class HistoryEntry(BaseModel):
 
 class Activity(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: str = Field(pattern="^(running|waiting|failed)$")
+    phase: str = Field(pattern="^(running|waiting|dormant|failed)$")
     subagents: list[str] = Field(default_factory=list, max_length=1000)
     error: str = Field(default="", max_length=2000)
     event: HistoryEntry | None = None

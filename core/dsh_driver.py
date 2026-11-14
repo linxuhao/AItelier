@@ -718,7 +718,7 @@ class DshDrivers:
             for d in drivers:
                 if d["driver_id"] == row["driver_id"]:
                     d["presence"] = {"status": "online" if self.running(row["project_id"])
-                                     and row["phase"] in {"running", "waiting"} else "offline"}
+                                     and row["phase"] in {"running", "waiting", "dormant"} else "offline"}
         seen = {d["driver_id"]: d for d in drivers}
         projects = {}
         with self.db.get_connection() as conn:

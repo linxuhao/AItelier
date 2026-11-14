@@ -99,6 +99,9 @@ describe('driver state on the State DAG list', () => {
     expect(card('running-old').querySelector('.driver-state')?.textContent).toBe('Running');
     expect(card('idle-recent').querySelector('.driver-state')?.textContent).toBe('Idle');
     expect(card('stopped-new').querySelector('.driver-state')?.textContent).toBe('Stopped');
+    // Each state carries its icon beside the label (the label text itself is unchanged).
+    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u25B6\uFE0E');
+    expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u23F8\uFE0E');
     // The badge is read from the unread endpoint, not counted in the browser.
     expect(card('running-old').querySelector('.unread')?.textContent).toBe('2');
     expect(card('idle-recent').querySelector('.unread')).toBeNull();

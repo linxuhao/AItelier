@@ -38,11 +38,11 @@ export function apply(ctx) {
         ?? (questions >= 1 ? once('check', () => bash('root-check', 'echo CHECKED')) : undefined)
         ?? (questions >= 1 ? once('nothing', () => ({ type: 'text', text: 'NOTHING_LEFT: everything else waits on the owner' })) : undefined)
         ?? (text.includes('AItelier director review due') ? once('job', () => bash('root-job', 'setsid nohup sleep 3 >/dev/null 2>&1 < /dev/null & echo JOB_PID=$!')) : undefined)
-        ?? (pid ? once('dormant-refused', () => tool('root-dormant-refused', 'idle_dormant', { reason: 'only the job is left' })) : undefined)
+        ?? (pid ? once('dormant-refused', () => tool('root-dormant-refused', 'idle_dormant', { reason: 'only the job is left', wake_after_minutes: 60 })) : undefined)
         ?? (pid ? once('watch', () => tool('root-watch', 'watch_process', { pid: Number(pid), note: 'fixture sleep' })) : undefined)
         ?? (pid ? once('watch-missing', () => tool('root-watch-missing', 'watch_process', { pid: 2147483646, note: 'no such job' })) : undefined)
         ?? (pid ? once('watch-foreign', () => tool('root-watch-foreign', 'watch_process', { pid: Number(process.env.AITELIER_TEST_FOREIGN_PID), note: 'another driver job' })) : undefined)
-        ?? (pid ? once('dormant', () => tool('root-dormant', 'idle_dormant', { reason: 'only the watched job is left' })) : undefined)
+        ?? (pid ? once('dormant', () => tool('root-dormant', 'idle_dormant', { reason: 'only the watched job is left', wake_after_minutes: 60 })) : undefined)
         ?? (pid ? once('stop2', () => ({ type: 'text', text: 'STOP2 dormant, watching the job' })) : undefined)
         ?? (text.includes('AItelier background job finished') ? once('seen', () => ({ type: 'text', text: 'JOB_SEEN' })) : undefined)
         ?? { type: 'text', text: 'Director idle.' };

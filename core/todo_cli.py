@@ -1,4 +1,4 @@
-"""`python -m core.todo_cli <create|status|begin|done|report|handback|finish|list>`
+"""`python -m core.todo_cli <create|status|begin|done|report|handback|finish|list|batch-*>`
 
 The harness side of a todo plan. Every command prints one JSON object on stdout
 and exits 0, or - when the harness refuses - prints {"refused": code, "reason": ...}
@@ -18,6 +18,13 @@ walk the ledger's wait and ceiling deterministically; it is refused unless the
 environment sets AITELIER_TODO_CLOCK_OVERRIDE=1, because whoever picks the clock picks
 when an absence expires. Anything that is not a refusal is reported as
 {"refused": "internal"}: the exit status is 0 or 2, never a traceback.
+
+Batches (core/todo_batch.py): `batch-create` freezes a `kind: batch` template's find
+sub-plans, `batch-status` says what to dispatch, `batch-expand` expands the verify stage once
+every finder passed, `batch-fanin` writes the summary. A sub-plan (`<attempt>~find-<key>`,
+`<attempt>~verify-<key>`) is driven by the ordinary commands; `begin` on one enforces the
+batch's binding rules under the batch lock, and `finish` on the batch attempt checks every
+sub-plan's persisted observations (no predicate runs again) and produces one candidate.
 
 Trust: `create --plan-json` and AITELIER_TODO_TEMPLATES are not gated here. They rely on
 the DSH tool that calls `create` being root-only: a child must never pick the plan source
@@ -40,7 +47,7 @@ from typing import Any, Iterator
 
 from core.todo_plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
                             new_document, require_library_version, save_observations)
-from core import todo_templates as templates
+from core import todo_batch, todo_templates as templates
 from core.todo_runtime import builtin_library
 
 _BRIEF_CHARS = 600
@@ -102,6 +109,7 @@ class _Open:
             "deferred": report["deferred"], "unmeasurable": report["unmeasurable"],
             "child_session": self.document["child_session"],
             "rebound_from": self.document.get("rebound_from"),
+            **({"batch": self.plan.batch} if self.plan.batch else {}),
             "timeout_budget_seconds": budget, "finish_budget_seconds": sum(budget.values()),
             "episodes": {i.id: self.episode(i.id) for i in self.plan.items if self.episode(i.id)},
             "items": [{"id": i.id, "title": i.title, "needs": list(i.needs),
@@ -172,6 +180,9 @@ def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None, 
         except ValueError as exc:
             raise Refusal("bad_param", f"--params is not JSON: {exc}") from exc
         source = templates.load_template(args.template, library)
+        if source.kind == "batch":
+            raise Refusal("batch_template", f"template {source.name} is a batch template: freeze it with todo_batch_plan "
+                                            "(batch-create), not todo_plan")
         params = templates.resolve_params(source, supplied)
         plan = TodoPlan.from_json(templates.plan_data(
             source, params, attempt_id=args.attempt, node_key=args.node_key, context_hash=args.context_hash,
@@ -183,7 +194,14 @@ def _plan_from_args(args, library) -> tuple[TodoPlan, dict | None, dict | None, 
 def cmd_create(args, store: PlanStore, now: float) -> dict:
     library = builtin_library()
     plan, template, params, paths = _plan_from_args(args, library)
+    if plan.batch is not None:
+        raise Refusal("invalid_plan", "a batch sub-plan is frozen by batch-create or batch-expand, never by create")
+    if plan.attempt_id.endswith(todo_batch.RECORD_SUFFIX):
+        raise Refusal("invalid_attempt", f"attempt ids ending in {todo_batch.RECORD_SUFFIX!r} name batch records")
     with store.lock(plan.attempt_id):
+        if todo_batch.exists(store, plan.attempt_id):
+            raise Refusal("batch_exists", f"attempt {plan.attempt_id} already has a batch; one attempt is either a "
+                                          "plan or a batch")
         existing = store.read(plan.attempt_id)
         if existing is not None:
             if existing["plan_hash"] != plan.plan_hash:
@@ -200,6 +218,8 @@ def cmd_create(args, store: PlanStore, now: float) -> dict:
 
 
 def cmd_status(args, store: PlanStore, now: float) -> dict:
+    if store.read(args.attempt) is None and todo_batch.exists(store, args.attempt):
+        return todo_batch.status(store, builtin_library(), args.attempt, now)
     with _plan(store, args.attempt, now, locked=False) as p:
         return p.view()
 
@@ -214,6 +234,22 @@ def cmd_handback(args, store: PlanStore, now: float) -> dict:
 
 
 def cmd_begin(args, store: PlanStore, now: float) -> dict:
+    sub = todo_batch.parse_subplan(args.attempt)
+    if sub is None:
+        return _begin(args, store, now)
+    if not args.session:
+        raise Refusal("usage", "a batch sub-plan binds the session that works it: begin needs --session")
+    # The batch lock first, then the sub-plan's (the order every batch writer takes them in): the
+    # binding rules read and extend the batch's binding history, so check and record are one step.
+    with store.lock(todo_batch.record_key(sub[0])):
+        record = todo_batch.read_record(store, sub[0])
+        todo_batch.check_binding(record, args.attempt, args.session)
+        out = _begin(args, store, now)
+        todo_batch.record_binding(store, record, args.attempt, args.session)
+    return out
+
+
+def _begin(args, store: PlanStore, now: float) -> dict:
     with _plan(store, args.attempt, now, locked=True) as p:
         item = p.item(args.item)
         done = set(p.run.report()["done"])
@@ -305,10 +341,19 @@ def _list_row(attempt_id: str, exc: Exception) -> dict:
 def cmd_list(args, store: PlanStore, now: float) -> dict:
     plans = []
     for attempt_id in store.attempts():
+        if attempt_id.endswith(todo_batch.RECORD_SUFFIX):     # a batch record, not a plan
+            batch_id = attempt_id[:-len(todo_batch.RECORD_SUFFIX)]
+            try:
+                row = todo_batch.list_row(store, builtin_library(), batch_id, now)
+            except (Refusal, OSError, ValueError, KeyError) as exc:
+                row = _list_row(batch_id, exc)
+            if row is not None:
+                plans.append(row)
+            continue
         try:
             with _plan(store, attempt_id, now, locked=False) as p:
                 v = p.view()
-            plans.append({k: v[k] for k in _LIST_KEYS})
+            plans.append({k: v[k] for k in _LIST_KEYS} | ({"batch": v["batch"]} if "batch" in v else {}))
         except (Refusal, OSError, ValueError, KeyError) as exc:
             plans.append(_list_row(attempt_id, exc))
     return {"plans": plans}
@@ -338,7 +383,14 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def cmd_finish(args, store: PlanStore, now: float) -> dict:
-    """Re-evaluate every item; only when all pass, bundle HEAD and write the candidate report."""
+    """Re-evaluate every item; only when all pass, bundle HEAD and write the candidate report.
+
+    A batch attempt is finished from its sub-plans' PERSISTED observations instead (no predicate
+    runs again), and its candidate also names the fan-in summary and its sha256."""
+    if todo_batch.parse_subplan(args.attempt):
+        raise Refusal("subplan_finish", f"{args.attempt} is a batch sub-plan: finish its batch attempt instead")
+    if store.read(args.attempt) is None and todo_batch.exists(store, args.attempt):
+        return _finish_batch(args, store, now)
     with _plan(store, args.attempt, now, locked=True) as p:
         failing, observations = [], []
         for item in p.plan.items:
@@ -357,58 +409,123 @@ def cmd_finish(args, store: PlanStore, now: float) -> dict:
         if failing:
             raise Refusal("unfinished", f"{len(failing)} item(s) do not pass; no candidate was produced",
                           failing=failing, brief=p.run.brief(max_chars=_BRIEF_CHARS))
+        return _candidate(args.out, p.plan.workspace, p.plan.attempt_id, p.plan.plan_hash, observations,
+                          p.run.brief(max_chars=_BRIEF_CHARS))
 
-        workspace = p.plan.workspace
-        head = _git(workspace, "rev-parse", "HEAD")
-        branch = subprocess.run(["git", "-C", workspace, "symbolic-ref", "--short", "-q", "HEAD"],
-                                capture_output=True, text=True).stdout.strip()
-        out_dir = Path(args.out).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        bundle = out_dir / f"{p.plan.attempt_id}.bundle"
-        staged = bundle.with_name(f".{bundle.name}.{os.getpid()}.tmp")
-        try:
-            # No `base..head` range: the bundle carries the whole history it needs, so
-            # `git bundle verify` passes in a repository that has none of it.
-            _git(workspace, "bundle", "create", str(staged), branch and f"refs/heads/{branch}" or "HEAD")
-            with tempfile.TemporaryDirectory(prefix="todo-bundle-verify-") as empty:
-                _git(empty, "init", "--bare", "-q", ".")
-                _git(empty, "bundle", "verify", str(staged))
-            tips = {line.split()[0] for line in _git(workspace, "bundle", "list-heads", str(staged)).splitlines()
-                    if line.strip()}
-            if head not in tips:
-                raise Refusal("head_moved", f"HEAD was {head} when read but the bundle's tip is {sorted(tips)}; "
-                                            "something committed while finishing")
-            # `quiescent` is attested below, so look once more, right before writing it.
-            if _git(workspace, "status", "--porcelain") or _git(workspace, "rev-parse", "HEAD") != head:
-                raise Refusal("not_quiescent", "the working tree changed while the candidate was being produced")
-            os.replace(staged, bundle)
-        finally:
-            staged.unlink(missing_ok=True)
-        bundle_sha = hashlib.sha256(bundle.read_bytes()).hexdigest()
 
-        report_doc = {
-            "status": "candidate", "settled": True, "usable": True,
-            "artifact": head, "artifact_kind": "git-sha1",
-            "git_bundle": {"path": str(bundle), "sha256": bundle_sha},
-            "quiescent": True, "plan_hash": p.plan.plan_hash, "observations": observations,
-        }
-        report_bytes = (json.dumps(report_doc, sort_keys=True, indent=2) + "\n").encode("utf-8")
-        from core.state_graph import StateConflict
-        from core.state_report_integrity import validate_external_semantics
-        try:
-            validate_external_semantics(report_bytes, "candidate", head)
-        except StateConflict as exc:
-            raise Refusal("report_rejected", str(exc)) from exc
-        report_path = out_dir / f"{p.plan.attempt_id}-candidate.json"
-        _write_atomic(report_path, report_bytes)
-        return {"candidate": True, "artifact": head, "artifact_kind": "git-sha1",
-                "report": str(report_path), "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-                "git_bundle": report_doc["git_bundle"], "plan_hash": p.plan.plan_hash,
-                "brief": p.run.brief(max_chars=_BRIEF_CHARS)}
+def _finish_batch(args, store: PlanStore, now: float) -> dict:
+    library = builtin_library()
+    with store.lock(todo_batch.record_key(args.attempt)):
+        record = todo_batch.read_record(store, args.attempt)
+        failing, observations = todo_batch.completion(store, library, record)
+        brief = todo_batch.status(store, library, args.attempt, now)["brief"]
+        if failing:
+            raise Refusal("unfinished", f"{len(failing)} sub-plan item(s) have not passed; no candidate was produced",
+                          failing=failing, brief=brief)
+        summary, summary_sha, _ = todo_batch.write_fan_in(store, library, record)
+        return _candidate(args.out, record["workspace"], args.attempt, record["batch_hash"], observations, brief,
+                          {"batch": {"summary": str(summary), "summary_sha256": summary_sha, "evidence": False}})
+
+
+def _candidate(out: str, workspace: str, attempt_id: str, plan_hash: str, observations: list, brief: str,
+               extra: dict | None = None) -> dict:
+    """Bundle the workspace's HEAD and write the candidate report - for a plan and a batch alike."""
+    head = _git(workspace, "rev-parse", "HEAD")
+    branch = subprocess.run(["git", "-C", workspace, "symbolic-ref", "--short", "-q", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    out_dir = Path(out).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bundle = out_dir / f"{attempt_id}.bundle"
+    staged = bundle.with_name(f".{bundle.name}.{os.getpid()}.tmp")
+    try:
+        # No `base..head` range: the bundle carries the whole history it needs, so
+        # `git bundle verify` passes in a repository that has none of it.
+        _git(workspace, "bundle", "create", str(staged), branch and f"refs/heads/{branch}" or "HEAD")
+        with tempfile.TemporaryDirectory(prefix="todo-bundle-verify-") as empty:
+            _git(empty, "init", "--bare", "-q", ".")
+            _git(empty, "bundle", "verify", str(staged))
+        tips = {line.split()[0] for line in _git(workspace, "bundle", "list-heads", str(staged)).splitlines()
+                if line.strip()}
+        if head not in tips:
+            raise Refusal("head_moved", f"HEAD was {head} when read but the bundle's tip is {sorted(tips)}; "
+                                        "something committed while finishing")
+        # `quiescent` is attested below, so look once more, right before writing it.
+        if _git(workspace, "status", "--porcelain") or _git(workspace, "rev-parse", "HEAD") != head:
+            raise Refusal("not_quiescent", "the working tree changed while the candidate was being produced")
+        os.replace(staged, bundle)
+    finally:
+        staged.unlink(missing_ok=True)
+    bundle_sha = hashlib.sha256(bundle.read_bytes()).hexdigest()
+
+    report_doc = {
+        "status": "candidate", "settled": True, "usable": True,
+        "artifact": head, "artifact_kind": "git-sha1",
+        "git_bundle": {"path": str(bundle), "sha256": bundle_sha},
+        "quiescent": True, "plan_hash": plan_hash, "observations": observations, **(extra or {}),
+    }
+    report_bytes = (json.dumps(report_doc, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    from core.state_graph import StateConflict
+    from core.state_report_integrity import validate_external_semantics
+    try:
+        validate_external_semantics(report_bytes, "candidate", head)
+    except StateConflict as exc:
+        raise Refusal("report_rejected", str(exc)) from exc
+    report_path = out_dir / f"{attempt_id}-candidate.json"
+    _write_atomic(report_path, report_bytes)
+    return {"candidate": True, "artifact": head, "artifact_kind": "git-sha1",
+            "report": str(report_path), "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "git_bundle": report_doc["git_bundle"], "plan_hash": plan_hash,
+            **(extra or {}), "brief": brief}
+
+
+def _live(args) -> set[str] | None:
+    """--live-sessions: the sessions the caller knows to be running (a JSON list), or None when not given."""
+    if args.live_sessions is None:
+        return None
+    try:
+        live = json.loads(args.live_sessions)
+    except ValueError as exc:
+        raise Refusal("usage", f"--live-sessions is not JSON: {exc}") from exc
+    if not isinstance(live, list) or not all(isinstance(s, str) for s in live):
+        raise Refusal("usage", "--live-sessions must be a JSON list of session ids")
+    return set(live)
+
+
+def cmd_batch_create(args, store: PlanStore, now: float) -> dict:
+    missing = [f"--{f.replace('_', '-')}" for f in ("template", *_TEMPLATE_FLAGS) if not getattr(args, f)]
+    if missing:
+        raise Refusal("usage", f"batch-create needs {', '.join(missing)}")
+    try:
+        supplied = json.loads(args.params or "{}")
+    except ValueError as exc:
+        raise Refusal("bad_param", f"--params is not JSON: {exc}") from exc
+    library = builtin_library()
+    return todo_batch.create(store, library, templates.load_template(args.template, library), supplied,
+                             attempt_id=args.attempt, node_key=args.node_key, context_hash=args.context_hash,
+                             base_sha=args.base_sha, workspace=args.workspace, goal=args.goal, now=now)
+
+
+def cmd_batch_status(args, store: PlanStore, now: float) -> dict:
+    return todo_batch.status(store, builtin_library(), args.attempt, now, _live(args))
+
+
+def cmd_batch_expand(args, store: PlanStore, now: float) -> dict:
+    return todo_batch.expand(store, builtin_library(), args.attempt, now, _live(args))
+
+
+def cmd_batch_fanin(args, store: PlanStore, now: float) -> dict:
+    library = builtin_library()
+    with store.lock(todo_batch.record_key(args.attempt)):
+        record = todo_batch.read_record(store, args.attempt)
+        path, digest, summary = todo_batch.write_fan_in(store, library, record)
+    return {"summary": str(path), "summary_sha256": digest, "evidence": False, "counts": summary["counts"],
+            "brief": todo_batch.status(store, library, args.attempt, now)["brief"]}
 
 
 COMMANDS = {"templates": cmd_templates, "create": cmd_create, "status": cmd_status, "begin": cmd_begin, "done": cmd_done,
-            "report": cmd_report, "handback": cmd_handback, "finish": cmd_finish, "list": cmd_list}
+            "report": cmd_report, "handback": cmd_handback, "finish": cmd_finish, "list": cmd_list,
+            "batch-create": cmd_batch_create, "batch-status": cmd_batch_status, "batch-expand": cmd_batch_expand,
+            "batch-fanin": cmd_batch_fanin}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -445,6 +562,15 @@ def _parser() -> argparse.ArgumentParser:
     command("handback", attempt)
     command("finish", attempt, ("--out", {"required": True, "metavar": "DIR"}))
     command("list")
+    command("batch-create",
+            ("--template", {"metavar": "NAME", "help": "a `kind: batch` repository template"}),
+            ("--params", {"metavar": "JSON"}), ("--attempt", {}), ("--node-key", {}), ("--context-hash", {}),
+            ("--base-sha", {}), ("--workspace", {}), ("--goal", {}))
+    live = ("--live-sessions", {"metavar": "JSON", "help": "sessions known to be running; a sub-plan bound to any "
+                                                           "other is offered for re-dispatch"})
+    command("batch-status", attempt, live)
+    command("batch-expand", attempt, live)
+    command("batch-fanin", attempt)
     return parser
 
 

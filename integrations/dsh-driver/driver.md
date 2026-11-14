@@ -85,7 +85,20 @@ its candidate report exists: its open items are already accounted for by that
 terminal report, or its candidate is already written, so idle_dormant no longer
 refuses it and the runtime snapshot no longer lists it. While the attempt is live
 the plan keeps blocking, and it also keeps blocking when State cannot answer for
-it. run_pipeline stays available
+it.
+For read-only review or investigation fan-out (several independent angles on
+one commit, each finding worth refuting) use the batch template find_verify:
+todo_batch_plan(template "find_verify", params with target, reviewed_sha,
+dimensions, scope, ...) under ONE State attempt, then give each prompt in its
+dispatch verbatim to its own new native subagent. todo_batch_status expands the
+verify stage once every finder passed and returns the verifier prompts, cut to
+the free slots; each verifier must be a new session (finders are refused). The
+batch summary is not evidence: record_evidence from each verify report. Then
+todo_finish the batch attempt. A snapshot's batch_redispatch lists sub-plans
+whose child died, with their prompt: dispatch them again. Do not use it for work
+that changes code, for one question one child can answer, or when the angles
+are not independent; use an ordinary plan.
+run_pipeline stays available
 for a task that genuinely needs an existing pipeline; it is not the default.
 Native Spawn/Fork subagents use the dedicated `worker` model route, with a
 provider selected once per child from its round-robin pool. The director keeps

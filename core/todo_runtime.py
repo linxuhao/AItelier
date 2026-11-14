@@ -63,7 +63,12 @@ Outcome = Literal["pass", "fail", "absent"]
 #: broken binding (`argv` given as a string) is refused instead of measuring as
 #: an absence weeks later. Argument names mean the same thing in every predicate.
 _STR_LISTS = {"argv", "scope", "require_keys", "paths"}
-_STRINGS = {"path", "pattern", "contains", "base", "report"}
+_STRINGS = {"path", "pattern", "contains", "base", "report", "finding_id", "artifact_ref"}
+
+#: What a verifier may conclude about one finding (`verdict_enum`).
+VERDICTS = ("confirmed", "refuted", "unsure")
+#: A finding id a finder writes: plain, so a verify sub-plan id can be derived from it.
+_FINDING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,8 @@ class PredicateLibrary:
                 ok = isinstance(value, str) and bool(value)
             elif name == "expect":
                 ok = type(value) is int
+            elif name == "max":
+                ok = type(value) is int and value >= 1
             elif name == "timeout":
                 ok = value is None or (type(value) in (int, float) and value > 0)
             if not ok:
@@ -449,7 +456,63 @@ def _report_absence(workspace: Path, target: Path | None) -> tuple[dict | None, 
     return {**declared, "written": written}, ""
 
 
+def _json_object(workspace: Path, path: str) -> tuple[dict | None, str]:
+    """The report at `path` as a JSON object, or why it is not one."""
+    target = Path(workspace) / str(path)
+    if not target.is_file():
+        return None, f"{path} does not exist"
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        return None, f"{path} is not valid JSON: {str(exc)[:120]}"
+    if not isinstance(data, dict):
+        return None, f"{path} is not a JSON object"
+    return data, ""
+
+
+def findings_problem(data: Any, limit: int) -> str:
+    """Why a finder's report is not a well-formed list of at most `limit` findings, or "".
+
+    Each finding has a plain `id` unique in the report (compared case-insensitively, since a
+    verify sub-plan id is derived from it), a relative `file`, a `claim` and a
+    `failure_scenario`; `line` is optional (a positive integer). More than `limit` findings is
+    a failure, never a truncation: the finder ranks its own findings. Shared by the
+    `findings_shape` predicate and by the batch expansion that reads the same report.
+    """
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return "findings must be a list"
+    if len(findings) > limit:
+        return f"{len(findings)} findings; at most {limit} are allowed - rank them and keep the most important"
+    seen: set[str] = set()
+    for index, finding in enumerate(findings):
+        where = f"findings[{index}]"
+        if not isinstance(finding, dict):
+            return f"{where} is not an object"
+        fid = finding.get("id")
+        if not isinstance(fid, str) or not _FINDING_ID.match(fid):
+            return f"{where}.id must be 1-64 chars of [A-Za-z0-9._-], starting alphanumeric; got {fid!r}"
+        if fid.lower() in seen:
+            return f"{where}.id {fid!r} repeats an earlier id"
+        seen.add(fid.lower())
+        for key in ("file", "claim", "failure_scenario"):
+            if not isinstance(finding.get(key), str) or not finding[key].strip():
+                return f"{where} ({fid}) needs a non-empty string {key}"
+        file = finding["file"].strip()
+        if file.startswith("/") or ".." in file.split("/"):
+            return f"{where} ({fid}).file must be a path relative to the reviewed checkout; got {file!r}"
+        line = finding.get("line")
+        if line is not None and (type(line) is not int or line < 1):
+            return f"{where} ({fid}).line must be a positive integer when given; got {line!r}"
+    return ""
+
+
 def builtin_library() -> PredicateLibrary:
+    # v2 still: `findings_shape` and `verdict_enum` were ADDED to v2 and no v2 predicate changed, so
+    # every plan frozen under v2 binds exactly the predicates it bound. `require_library_version`
+    # compares versions exactly; bumping it for an addition would refuse every plan in flight for no
+    # change in their meaning. (An older v2 build reading a plan that binds a new predicate refuses it
+    # visibly as `unknown_predicate` - it never judges it.) Changing a predicate still means v3.
     library = PredicateLibrary(version="2")
 
     @library.define("files_present")
@@ -625,6 +688,35 @@ def builtin_library() -> PredicateLibrary:
         if missing:
             return PredicateResult("report_json", "fail", f"{path} lacks key(s) {missing}")
         return PredicateResult("report_json", "pass", f"{path} carries every required key")
+
+    @library.define("findings_shape")
+    def findings_shape(*, workspace: Path, pre_state: Mapping[str, Any], path: str, max: int) -> PredicateResult:
+        """A finder's report: `findings` is a list of at most `max` well-formed findings (`findings_problem`)."""
+        data, problem = _json_object(workspace, path)
+        problem = problem or findings_problem(data, max)
+        if problem:
+            return PredicateResult("findings_shape", "fail", f"{path}: {problem}")
+        return PredicateResult("findings_shape", "pass", f"{path} carries {len(data['findings'])} well-formed finding(s)")
+
+    @library.define("verdict_enum")
+    def verdict_enum(*, workspace: Path, pre_state: Mapping[str, Any], path: str, finding_id: str,
+                     artifact_ref: str) -> PredicateResult:
+        """A verifier's report: a verdict in VERDICTS, about the bound finding, of the bound artifact.
+
+        `finding_id` and `artifact_ref` are bound when the sub-plan is frozen; a report about another
+        finding or another commit is not this sub-plan's verdict, however well-formed it is.
+        """
+        data, problem = _json_object(workspace, path)
+        if not problem:
+            if data.get("verdict") not in VERDICTS:
+                problem = f"verdict must be one of {list(VERDICTS)}, got {data.get('verdict')!r}"
+            elif data.get("finding_id") != finding_id:
+                problem = f"finding_id is {data.get('finding_id')!r}; this sub-plan verifies {finding_id!r}"
+            elif data.get("artifact_ref") != artifact_ref:
+                problem = f"artifact_ref is {data.get('artifact_ref')!r}; the reviewed artifact is {artifact_ref!r}"
+        if problem:
+            return PredicateResult("verdict_enum", "fail", f"{path}: {problem}")
+        return PredicateResult("verdict_enum", "pass", f"{path}: {data['verdict']} for {finding_id} at {artifact_ref[:12]}")
 
     return library
 

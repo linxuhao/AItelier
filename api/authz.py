@@ -319,8 +319,40 @@ def may_read_private(request: Request) -> bool:
     return write_denial_reason(request) is None
 
 
+# The coarse run states an anonymous reader may see in `status`. Every one is a
+# bare label: none carries the ':' narrative suffix the scheduler appends
+# (`running:<step>`, `checkpoint:<label>`, `failed:<reason>`). `checkpoint` and
+# `waiting_user_approval` are the two more the shipped dashboard already renders
+# (web/src/lib/format.ts `statusIcon`); the rest is the run lifecycle.
+PUBLIC_STATUS_LABELS = frozenset({
+    "completed", "failed", "running", "pending", "planning", "paused",
+    "checkpoint", "waiting_user_approval",
+})
+
+
+def _public_status(value):
+    """Reduce a raw run status to a coarse label from PUBLIC_STATUS_LABELS.
+
+    `status` is the run's raw operator text: a run id, a budget sentence, a
+    pasted review verdict, product-decision prose. The anonymous catalog keeps
+    the structural row but not that narrative, so the suffix after ':' is dropped
+    and anything outside the fixed set becomes `unknown` rather than passing
+    through. None and empty stay None so an unset status is still unset.
+    """
+    if value is None or value == "":
+        return value
+    label = str(value).split(":", 1)[0].strip()
+    return label if label in PUBLIC_STATUS_LABELS else "unknown"
+
+
 def execution_progress(request: Request, row: dict) -> dict:
-    """Keep public progress separate from private source/context metadata."""
+    """Keep public progress separate from private source/context metadata.
+
+    A private reader (`may_read_private`) gets the row back unchanged. Everyone
+    else gets only the whitelisted structural fields, and their `status` is
+    reduced to a coarse label (see `_public_status`) so the run's narrative
+    never reaches an anonymous caller.
+    """
     if may_read_private(request):
         return row
     fields = {"id", "project_id", "name", "status", "config_name", "config_label",
@@ -331,4 +363,7 @@ def execution_progress(request: Request, row: dict) -> dict:
               "has_task_loop", "is_authoring", "repo_less", "step_count",
               "completed_steps", "failed_steps", "active_step",
               "idle_seconds", "liveness_from", "stalled"}
-    return {key: value for key, value in row.items() if key in fields}
+    public = {key: value for key, value in row.items() if key in fields}
+    if "status" in public:
+        public["status"] = _public_status(public["status"])
+    return public

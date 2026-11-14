@@ -8,6 +8,7 @@ import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { presentedTools, directorPresentedTools } from './tool-discovery.mjs';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { readHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
@@ -152,9 +153,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true }, { id: 'compaction-basic', config: { thresholdRatio: 0.8, retainTokens: 128, headroomTokens: 512 } },
-      ...[['tool-subagent', 'spawn', 'subagent'], ['tool-subagent-fork', 'fork', 'subagent_fork']]
-        .map(([id, provider, toolName]) => ({ id, config: { provider, toolName,
-          agentOptions: { provider: 'fixture', model: 'worker' } } })),
+      { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
+      // The production profile's switch-offs (core/dsh_driver.py UNUSED_BUILTIN_TOOL_PLUGINS).
+      ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
       { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
@@ -267,7 +268,20 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     for (const hidden of ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']) assert.ok(!tools.includes('mcp__aitelier__' + hidden));
     assert.ok(tools.includes('search_tools') && tools.includes('call_tool'));
     assert.ok(!tools.includes('wait'), 'manual wait tool is still exposed');
-    assert.ok(requests.filter(r=>!r.summary && r.options.tools?.length).every(r=>!r.options.tools.some(t=>t.name.startsWith('mcp__'))), 'root or child still receives full MCP schemas');
+    // Tiers: the director's requests carry exactly one MCP schema (its most-used
+    // write), a child's none; nobody gets a deferred built-in or a switched-off one,
+    // and every listed tool is on the presented list.
+    const listed = requests.filter(r=>!r.summary && r.options.tools?.length);
+    for (const r of listed) {
+      const names = r.options.tools.map(t => t.name);
+      assert.deepEqual(names.filter(n => n.startsWith('mcp__')), r.child ? [] : ['mcp__aitelier__state_graph_write'],
+        (r.child ? 'child' : 'root') + ' MCP schemas: ' + names.join(','));
+      for (const gone of ['subagent_fork', 'workflow', 'exit_plan_mode', 'todo_write', 'glob', 'web_fetch', 'web_search',
+        'interrupt_agent', 'create_goal', 'get_goal', 'update_goal', 'skill', 'working_directory', 'list_mcp_resources'])
+        assert.ok(!names.includes(gone), gone + ' is still listed');
+      assert.deepEqual(names.filter(n => !presentedTools.has(n) && !directorPresentedTools.has(n)), [], 'unlisted tool presented');
+    }
+    assert.ok(listed.some(r => !r.child) && listed.some(r => r.child), 'tiers were not observed for both root and child');
     for (const child of [false,true]) {
       const relevant = requests.filter(r=>r.child===child && !r.summary);
       assert.ok(relevant.some(r=>JSON.stringify(r.options).includes('agentmcp image')), 'root or child did not receive tool-search usage instructions');

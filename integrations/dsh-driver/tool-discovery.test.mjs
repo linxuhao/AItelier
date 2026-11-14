@@ -24,7 +24,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { installToolDiscovery, searchTools } from './tool-discovery.mjs';
+import { readFileSync } from 'node:fs';
+import { installToolDiscovery, searchTools, presentTools, presentedTools, directorPresentedTools } from './tool-discovery.mjs';
 import { DSH_PACKAGE, describeDeclinedToMeasure, resolveDshLibraries } from './dsh-entry.mjs';
 
 /** The install libraries these tests import; each one must come from the measured install. */
@@ -36,6 +37,17 @@ const libraries = await resolveDshLibraries();
 // A refused override is a request this runner must not answer with another
 // install, so it must not be answered with a cheerful skip either.
 if (libraries.status === 'refused') throw new Error(libraries.reason);
+
+test('every tool this runtime registers is presented; only the director gets its State write', () => {
+  const registered = [...readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]);
+  assert.ok(registered.length >= 14, 'could not read the registrations: ' + registered.length);
+  assert.deepEqual(registered.filter(name => !presentedTools.has(name)), [], 'a runtime tool would be hidden');
+  const tools = ['bash', 'glob', 'web_fetch', 'workflow', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'mcp__devmcp__x']
+    .map(name => ({ name }));
+  assert.deepEqual(presentTools(tools, { director: true }).map(t => t.name), ['bash', 'mcp__aitelier__state_graph_write']);
+  assert.deepEqual(presentTools(tools, { director: false }).map(t => t.name), ['bash']);
+  assert.deepEqual([...directorPresentedTools], ['mcp__aitelier__state_graph_write']);
+});
 
 test('search ranks exact names and Unicode descriptions, bounds results, and refuses empty queries', () => {
   const schemas = ['run_pipeline', 'get_pipeline', 'list_pipelines'].map(name => ({ name, description: '流水线 pipeline', parameters: { type: 'object' } }));
@@ -113,6 +125,19 @@ if (libraries.status === 'unmeasured') {
     added();
     assert.equal((await call('search_tools',{query:'newly connected'},root)).value.total_matches,0);
     assert.deepEqual((await ctx.systemPrompt.assemble({scope:root})).tools,before.tools, 'search changed the model tool prefix');
+  }));
+
+  test('tiers in the real assembly: deferred built-ins are unlisted but searchable and callable; the State write is listed for the director only', () => fixture(async ({ctx, agent, call}) => {
+    const root = agent('root'), child = agent('child');
+    for (const name of ['bash', 'glob', 'web_fetch', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read'])
+      ctx.tools.register(defineTool({ name, description: name + ' tool', parameters: {}, output, async execute(_a, exec) { return name + ':' + exec.agent.session.id; } }));
+    const listedFor = async subject => (await ctx.systemPrompt.assemble({ agent: subject, scope: subject })).tools.map(t => t.name).sort();
+    assert.deepEqual(await listedFor(root), ['bash', 'call_tool', 'mcp__aitelier__state_graph_write', 'search_tools']);
+    assert.deepEqual(await listedFor(child), ['bash', 'call_tool', 'search_tools']);
+    const found = await call('search_tools', { query: 'glob', limit: 1 }, child);
+    assert.equal(found.value.tools[0].name, 'glob', 'a deferred built-in is not searchable');
+    assert.equal((await call('call_tool', { name: 'glob', arguments: {} }, child)).value, 'glob:child');
+    assert.equal((await call('web_fetch', {}, root)).value, 'web_fetch:root', 'a deferred tool called by its known name');
   }));
 
   test('root and native child discovery/dispatch use their own restrictions and real caller identities', () => fixture(async ({ctx, agent, call}) => {

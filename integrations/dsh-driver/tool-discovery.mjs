@@ -17,6 +17,28 @@ export const workerJudgeRule = 'workers do not judge their own work; the directo
 const directorOnly = exec => directorOnlyTools.has(exec.name)
   || (exec.name === stateWriteTool && !childWriteActions.has(exec.arguments?.action));
 
+/** The tools every session's requests carry. Everything else stays registered and
+ *  callable - through call_tool, or directly by a known name - and is found with
+ *  search_tools. Chosen from measured use, 2026-11-07..14 (two directors ~40k tool
+ *  calls, 589 native children ~43k): each of these is used daily by the director or
+ *  by children (todo_begin/done/report and grep are children's), or the runtime asks
+ *  for it (idle_dormant, watch_process, todo_rebind after every host restart). Every
+ *  tool this runtime registers is listed; only rarely used DSH built-ins are
+ *  deferred. project_work is the workspace-mode child bridge; the todo_batch tools are presented while their pilot is measured. A tool
+ *  missing here is deferred, never lost: keep this list short and measured. */
+export const presentedTools = new Set(['bash', 'read', 'write', 'edit', 'grep', 'read_image',
+  'state_read', 'subagent', 'list_agents', 'send_message', 'send_user_message',
+  'job_output', 'job_kill', 'job_list', 'watch_process', 'idle_dormant', 'grep_chat_history',
+  'todo_plan', 'todo_status', 'todo_finish', 'todo_templates', 'todo_begin', 'todo_done', 'todo_report',
+  'todo_rebind', 'todo_batch_plan', 'todo_batch_status', 'project_work', 'search_tools', 'call_tool']);
+/** Presented to the director only: its most-used write (~8.3k calls in that week went
+ *  through call_tool, plus ~500 searches to find it). Children may only report_issue. */
+export const directorPresentedTools = new Set([stateWriteTool]);
+/** The request's tool list for one session: presented tools only. */
+export function presentTools(tools, { director }) {
+  return tools.filter(t => presentedTools.has(t.name) || (director && directorPresentedTools.has(t.name)));
+}
+
 export function searchTools(schemas, query, limit = 5) {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) throw new Error('query must not be empty');
@@ -39,14 +61,16 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     ? `${exec.name}${exec.name === stateWriteTool ? `(${String(exec.arguments?.action)})` : ''} is refused for a subagent: ${workerJudgeRule}` : undefined);
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
-  ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next();
-    return { ...assembly, tools: assembly.tools.filter(t => !t.name.startsWith('mcp__')) };
+    // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
+    const caller = context?.agent ?? context?.scope;
+    return { ...assembly, tools: presentTools(assembly.tools, { director: caller?.session?.id === rootSession }) };
   });
   ctx.systemPrompt.section({ name: 'aitelier:tool-discovery', order: 3090, interpolate: false,
-    text: 'MCP capabilities are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. For AgentMCP image, OCR, PDF, audio or video work, for example search_tools({query:"agentmcp image",limit:3}), then call_tool({name:"<exact returned tool name>",arguments:{/* fields from its returned schema */}}). Search again after compaction if you need an earlier schema. Known names may be called without searching first. Native coding and coordination tools remain directly callable. Discovery does not change your existing permissions.' });
+    text: 'MCP capabilities are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. For AgentMCP image, OCR, PDF, audio or video work, for example search_tools({query:"agentmcp image",limit:3}), then call_tool({name:"<exact returned tool name>",arguments:{/* fields from its returned schema */}}). Search again after compaction if you need an earlier schema. Known names may be called without searching first. The everyday coding and coordination tools are listed directly; less-used ones (glob, web_fetch, web_search, interrupt_agent, goals, MCP resources and the rest) are not listed but are found with search_tools and called the same way. Discovery does not change your existing permissions.' });
   ctx.tools.register(defineTool({ name: 'search_tools',
-    description: 'Find available tools by name or description and return their parameter schemas (default 5, maximum 10). Includes deferred MCP capabilities: State writes, pipelines, provider management, AgentMCP images/OCR/PDF/audio/video, devmcp and zvec. Use call_tool to invoke a result. The catalog follows live MCP updates and your own agent scope.',
+    description: 'Find available tools by name or description and return their parameter schemas (default 5, maximum 10). Includes the less-used native tools that are not listed (glob, web_fetch, web_search, interrupt_agent, goals, MCP resources) and the deferred MCP capabilities: State writes, pipelines, provider management, AgentMCP images/OCR/PDF/audio/video, devmcp and zvec. Use call_tool to invoke a result. The catalog follows live MCP updates and your own agent scope.',
     parameters: { query: { type: 'string', required: true }, limit: { type: 'integer', description: '1–10; defaults to 5' } },
     output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     isConcurrencySafe: () => true,

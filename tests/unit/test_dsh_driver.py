@@ -600,10 +600,12 @@ def test_native_spawn_and_fork_use_worker_without_changing_the_director(runtime)
     row = runtime._provision("alpha", "aitelier", "driver", "fixture")
     env = runtime._environment(row)
     patch = {p.get("id"): p for p in _patch_document(runtime, row)}
-    for tool in ("tool-subagent", "tool-subagent-fork"):
-        assert patch[tool]["config"]["agentOptions"] == {"provider": "aitelier", "model": "worker"}
+    assert patch["tool-subagent"]["config"]["agentOptions"] == {"provider": "aitelier", "model": "worker"}
     assert patch["tool-subagent"]["config"]["provider"] == "spawn"
-    assert patch["tool-subagent-fork"]["config"]["provider"] == "fork"
+    # Measured-unused built-ins are switched off, not configured: subagent_fork,
+    # workflow, exit_plan_mode and the shadowing todo_write.
+    for plugin in ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo"):
+        assert patch[plugin] == {"id": plugin, "disabled": True}, plugin
     assert env["AITELIER_DSH_MODEL"] == "driver"
     assert runtime.get("alpha")["model"] == "driver"
 

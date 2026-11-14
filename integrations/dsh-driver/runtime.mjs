@@ -1345,7 +1345,8 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
       parameters: { reason: { type: 'string', required: true }, wake_after_minutes: { type: 'integer', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-        const wakeAfter = Number(args.wake_after_minutes);
+        // Not coerced: the JSON string "30" is not an integer number of minutes.
+        const wakeAfter = args.wake_after_minutes;
         const badWake = reason && wakeAfterRefusal(wakeAfter);
         if (badWake) return badWake;
         // Reconcile first: a departed child must not refuse dormancy at all (and the

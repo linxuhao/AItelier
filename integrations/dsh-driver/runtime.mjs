@@ -697,7 +697,9 @@ async function fileExists(path) {
  *  Nothing here re-opens the items: `remaining` is empty, so no item is offered
  *  as work again. */
 export function awaitingFinish(plan) {
-  return Array.isArray(plan.remaining) && plan.remaining.length === 0 && plan.finish_reported !== true;
+  // A batch sub-plan (it names its `batch`) is never finished on its own: its batch
+  // attempt is, and `list` reports that attempt as its own row once everything passed.
+  return !plan.batch && Array.isArray(plan.remaining) && plan.remaining.length === 0 && plan.finish_reported !== true;
 }
 
 /** Attempt statuses State can store, split by whether the attempt is still work.
@@ -740,13 +742,42 @@ export function attemptSettled(answer) {
  *  This set only ever shrinks the blocking list by what State actually said. */
 export async function settledAttempts(plans, read, signal) {
   const settled = new Set();
+  // A batch sub-plan is named `<attempt>~<stage>-<key>`, which State has never heard
+  // of: it settles with the attempt its `batch` names, read once per attempt.
+  const reads = new Map();
+  const attemptRead = id => {
+    if (!reads.has(id)) reads.set(id, read('/api/state/query/get_attempt', { attempt_id: id }, signal));
+    return reads.get(id);
+  };
   await Promise.all(plans.filter(plan => plan.remaining?.length || awaitingFinish(plan)).map(async plan => {
     let answer;
-    try { answer = await read('/api/state/query/get_attempt', { attempt_id: plan.attempt_id }, signal); }
+    try { answer = await attemptRead(plan.batch ?? plan.attempt_id); }
     catch { return; /* fail closed: an unread plan is unfinished work, not settled */ }
     if (attemptSettled(answer)) settled.add(plan.attempt_id);
   }));
   return settled;
+}
+
+/** The batch attempts the startup snapshot must ask for `batch_redispatch`: those
+ *  with a sub-plan that still has items left and is bound to a session that is
+ *  not live (a host restart kills every native child). Settled attempts are
+ *  history, not work. */
+export function batchesToRedispatch(plans, liveSessions, settled = new Set()) {
+  return [...new Set(plans.filter(p => p.batch && !settled.has(p.attempt_id) && p.remaining?.length
+    && p.child_session && !liveSessions.has(p.child_session)).map(p => p.batch))].sort();
+}
+
+/** The snapshot's `batch_redispatch`: every batch sub-plan whose bound session is
+ *  not live and that has not passed, with the prompt to dispatch it again, as the
+ *  CLI's `batch-status` computes it against the same live sessions. */
+export async function batchRedispatchRows(todo, plans, live, settled = new Set(), signal) {
+  const rows = [];
+  for (const attempt of batchesToRedispatch(plans, new Set(live), settled)) {
+    const { code, result } = await todo.run(['batch-status', '--attempt=' + attempt, '--live-sessions=' + JSON.stringify([...live])], signal);
+    if (code !== 0) throw new Error('todo_cli batch-status refused: ' + JSON.stringify(result).slice(0, 1000));
+    rows.push(...result.redispatch.map(row => ({ attempt_id: attempt, ...row })));
+  }
+  return rows;
 }
 
 /** The post-compaction snapshot's view of plans the director still owns: enough
@@ -827,8 +858,8 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, todoPlans = async () => [] }) {
-    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, todoPlans });
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, todoPlans = async () => [], batchRedispatch = async () => [] }) {
+    Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, todoPlans, batchRedispatch });
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
@@ -853,8 +884,8 @@ export class DriverRuntime {
     this.snapshot = await this.request(`/api/dsh-drivers/${encodeURIComponent(this.project)}/context`);
     // Plans are an addition to the snapshot; a broken todo CLI must not stop
     // the director from reading State.
-    try { this.todo = await this.todoPlans(); this.todoError = undefined; }
-    catch (error) { this.todo = []; this.todoError = String(error.message ?? error).slice(0, 1000); }
+    try { this.todo = await this.todoPlans(); this.redispatch = await this.batchRedispatch(); this.todoError = undefined; }
+    catch (error) { this.todo = []; this.redispatch = []; this.todoError = String(error.message ?? error).slice(0, 1000); }
     this.dirty = false;
     return this.snapshot;
   }
@@ -870,6 +901,7 @@ export class DriverRuntime {
       ...(this.snapshot.issue_work?.length ? { issue_work: this.snapshot.issue_work } : {}),
       project_note: this.snapshot.project_note,
       private_note: this.snapshot.private_note, ...(this.todo?.length ? { todo: this.todo } : {}),
+      ...(this.redispatch?.length ? { batch_redispatch: this.redispatch } : {}),
       ...(this.todoError ? { todo_error: this.todoError } : {}) });
   }
   async pump() {
@@ -1068,13 +1100,14 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     execute: (args, exec) => todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal),
   }));
   ctx.tools.register(defineTool({ name: 'todo_begin',
-    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session.',
-    parameters: planRef, output: jsonOutput,
+    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session. prompt_sha256 (batch sub-plans, optional): the sha256 your prompt named; it is recorded with the binding.',
+    parameters: { ...planRef, prompt_sha256: { type: 'string' } }, output: jsonOutput,
     async execute(args, exec) {
       // The CLI refuses, under the plan lock, to take a plan bound to another
       // session. Rebind only when that session is verified dead: not the root
       // and not a live child of this process.
-      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id];
+      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id,
+        ...(args.prompt_sha256 ? ['--prompt-sha256=' + args.prompt_sha256] : [])];
       const result = await todo.call(args.attempt_id, begin, exec.signal);
       if (result.refused !== 'bound_to_other_session') return result;
       const bound = result.bound_session;
@@ -1106,10 +1139,18 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     const plans = await todo.plans(signal);
     return { plans, settled: await settledAttempts(plans, request, signal) };
   };
+  // The sessions a batch sub-plan may be bound to and still count as in flight: the
+  // live native children, and the director itself (todo_rebind binds the root).
+  const liveSessions = () => [...children.sessionSet(), env.AITELIER_DSH_SESSION].filter(Boolean);
+  // Batch sub-plans whose child is gone, each with the prompt to dispatch it again.
+  const batchRedispatch = async () => {
+    const { plans, settled } = await planWork();
+    return batchRedispatchRows(todo, plans, liveSessions(), settled);
+  };
   const runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
     directory: env.AITELIER_DSH_STATE_DIR, request,
     todoPlans: async () => { const { plans, settled } = await planWork();
-      return todoSummary(plans, children.sessionSet(), settled); } });
+      return todoSummary(plans, children.sessionSet(), settled); }, batchRedispatch });
   await runtime.init();
   const schema = await request('/api/state/schema');
   const watchIntervalMs = Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) > 0 ? Number(env.AITELIER_DSH_WATCH_INTERVAL_MS) : 15000;
@@ -1288,8 +1329,30 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
+    scope.tools.register(defineTool({ name: 'todo_batch_plan',
+      description: 'Director only. Freeze a todo BATCH for a State attempt from a kind: batch template (todo_templates lists find_verify): one find sub-plan per dimension now, one verify sub-plan per finding once every finder passed. Same arguments as todo_plan. dispatch holds the finder prompts, cut to the batch\'s max_parallel (concurrent finders; the rest are pending), each with its prompt_sha256: give each one verbatim to its own new native subagent, followed by a last line "prompt_sha256: <that sha>". A batch template refuses todo_plan, an ordinary template refuses this tool.',
+      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
+        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
+        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      output: jsonOutput,
+      execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
+        ? { refused: 'unknown_arguments', reason: `todo_batch_plan takes only ${[...planArgs].join(', ')}; sub-plans come from the template`, brief: null }
+        : todo.call(args.attempt_id, ['batch-create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
+        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
+    }));
+    scope.tools.register(defineTool({ name: 'todo_batch_status',
+      description: 'Director only. Where a todo batch stands and what to dispatch next. Once every finder passed it first expands the verify stage (findings deduplicated and capped; those over the cap are listed unverified, never dropped). dispatch holds prompts cut to the free slots of the stage (find_verify: 4 finders, 4 verifiers at a time), each offered once: give each verbatim to a NEW native subagent, followed by a last line "prompt_sha256: <its sha>" - a session that ever held another sub-plan of this batch is refused. An offered prompt whose child has not begun waits in awaiting_begin; a sub-plan is offered again only when the session bound to it is dead (replaces_session), never while it lives. deadline_passed is a notice only. When complete, run todo_finish on the batch attempt.',
+      parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
+      async execute(args, exec) {
+        const live = '--live-sessions=' + JSON.stringify(liveSessions());
+        const status = await todo.call(args.attempt_id, ['batch-status', '--attempt=' + args.attempt_id, live, '--record-dispatch'], exec.signal);
+        if (!status.expand_due) return status;
+        return todo.call(args.attempt_id, ['batch-expand', '--attempt=' + args.attempt_id, live, '--record-dispatch'], exec.signal);
+      },
+    }));
     scope.tools.register(defineTool({ name: 'todo_finish',
-      description: 'Director only. Re-evaluate every item of an attempt\'s plan; only when all pass, write the git bundle, its sha256 and the candidate report and return their paths for report_external_attempt. Otherwise it is refused with the failing items.',
+      description: 'Director only. Re-evaluate every item of an attempt\'s plan; only when all pass, write the git bundle, its sha256 and the candidate report and return their paths for report_external_attempt. Otherwise it is refused with the failing items. For a batch attempt it re-runs nothing: every sub-plan must already have passed, and the candidate also names the fan-in summary (evidence: false - record evidence from each verify report).',
       parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
       execute: async (args, exec) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(args.attempt_id)
         ? todo.call(args.attempt_id, ['finish', '--attempt=' + args.attempt_id,
@@ -1497,6 +1560,16 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
           : { todo_error: JSON.stringify(result).slice(0, 1000) };
       } catch (error) { payload = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
       await notify('AItelier todo handback:\n' + JSON.stringify({ reason: 'todo_unfinished', attempt_id: plan.attempt_id, ...payload }));
+    }
+    // A batch child that ended may leave its batch waiting on the director: every
+    // finder passed (expand and dispatch the verifiers) or everything passed (finish).
+    for (const attempt of new Set(plans.filter(p => p.batch && p.child_session === session).map(p => p.batch))) {
+      try {
+        const { code, result } = await todo.run(['batch-status', '--attempt=' + attempt]);
+        if (code === 0 && (result.expand_due || result.complete))
+          await notify('AItelier todo batch:\n' + JSON.stringify({ reason: result.expand_due ? 'batch_expand_due' : 'batch_complete',
+            attempt_id: attempt, brief: result.brief }));
+      } catch (error) { ctx.logger.warn(String(error)); }
     }
   };
   // Observe nested native children too: all activity belongs to this private

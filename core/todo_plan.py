@@ -43,6 +43,9 @@ MAX_PREDICATES = 4
 DELIVER = "deliver"
 MAX_NOTES = 20
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+#: A batch sub-plan: `<attempt_id>~<stage>-<key>`. `~` is not in `_ID`, so no State attempt id
+#: can collide with one (core/todo_batch.py derives the key).
+_SUB_ID = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]{0,127})~(find|verify)-([a-z0-9][a-z0-9._-]{0,119})\Z")
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _TOP = {"attempt_id", "node_key", "context_hash", "base_sha", "workspace", "scope", "goal", "items"}
 _ITEM = {"id", "title", "needs", "predicates"}
@@ -132,18 +135,29 @@ class TodoPlan:
     scope: tuple[str, ...]
     goal: str
     items: tuple[Item, ...]  # the director's items followed by the appended `deliver`
+    # Set only on a batch sub-plan (core/todo_batch.py): the attempt it belongs to. A sub-plan gets
+    # NO appended `deliver`: its children only write reports, and the batch attempt's own
+    # `finish` delivers once. Omitted from `as_json` when unset, so no existing plan_hash moves.
+    batch: str | None = None
 
     @classmethod
     def from_json(cls, data: Any, library: PredicateLibrary) -> "TodoPlan":
         if not isinstance(data, dict):
             raise Refusal("invalid_plan", "a plan is a JSON object")
-        stray = sorted(set(data) - _TOP)
+        stray = sorted(set(data) - _TOP - {"batch"})
         missing = sorted(_TOP - set(data))
         if stray or missing:
             raise Refusal("invalid_plan", f"plan keys: unexpected {stray}, missing {missing}")
         attempt_id = _text(data, "attempt_id", "")
-        if not _ID.match(attempt_id):
-            raise Refusal("invalid_plan", "attempt_id must be 1-128 chars of [A-Za-z0-9._-], starting alphanumeric")
+        batch = data.get("batch")
+        if "batch" not in data:
+            if not _ID.match(attempt_id):
+                raise Refusal("invalid_plan", "attempt_id must be 1-128 chars of [A-Za-z0-9._-], starting alphanumeric")
+        else:
+            sub = _SUB_ID.match(attempt_id) if isinstance(batch, str) else None
+            if not sub or sub.group(1) != batch:
+                raise Refusal("invalid_plan", f"a batch sub-plan's attempt_id is <batch>~<find|verify>-<key>; "
+                                              f"got {attempt_id!r} for batch {batch!r}")
         node_key, context_hash, goal = (_text(data, k, "") for k in ("node_key", "context_hash", "goal"))
         base_sha = _text(data, "base_sha", "")
         if not _SHA.match(base_sha):
@@ -164,12 +178,13 @@ class TodoPlan:
         items: list[Item] = []
         for raw in raw_items:
             items.append(cls._item(raw, [i.id for i in items], library))
-        items.append(Item(
-            id=DELIVER, title="Deliver: commit the work, inside the declared scope",
-            needs=tuple(i.id for i in items),
-            predicates=(cls._binding({"predicate": "git_delivered", "args": {"base": base_sha}}, DELIVER, library),
-                        cls._binding({"predicate": "changes_within", "args": {"scope": list(scope)}}, DELIVER, library))))
-        return cls(attempt_id, node_key, context_hash, base_sha, workspace, tuple(scope), goal, tuple(items))
+        if batch is None:
+            items.append(Item(
+                id=DELIVER, title="Deliver: commit the work, inside the declared scope",
+                needs=tuple(i.id for i in items),
+                predicates=(cls._binding({"predicate": "git_delivered", "args": {"base": base_sha}}, DELIVER, library),
+                            cls._binding({"predicate": "changes_within", "args": {"scope": list(scope)}}, DELIVER, library))))
+        return cls(attempt_id, node_key, context_hash, base_sha, workspace, tuple(scope), goal, tuple(items), batch)
 
     @classmethod
     def from_stored(cls, data: Mapping[str, Any], library: PredicateLibrary) -> "TodoPlan":
@@ -231,6 +246,7 @@ class TodoPlan:
             "items": [{"id": i.id, "title": i.title, "needs": list(i.needs),
                        "predicates": [{"predicate": b.predicate, "args": dict(b.args)} for b in i.predicates]}
                       for i in self.items],
+            **({"batch": self.batch} if self.batch is not None else {}),
         }
 
     @property
@@ -249,7 +265,7 @@ class PlanStore:
         self.root = Path(root)
 
     def path(self, attempt_id: str) -> Path:
-        if not isinstance(attempt_id, str) or not _ID.match(attempt_id):
+        if not isinstance(attempt_id, str) or not (_ID.match(attempt_id) or _SUB_ID.match(attempt_id)):
             raise Refusal("invalid_attempt", f"not a usable attempt id: {attempt_id!r}")
         return self.root / f"{attempt_id}.json"
 
@@ -293,7 +309,8 @@ class PlanStore:
             os.close(directory)
 
     def attempts(self) -> list[str]:
-        return sorted(p.stem for p in self.root.glob("*.json") if _ID.match(p.stem)) if self.root.is_dir() else []
+        return sorted(p.stem for p in self.root.glob("*.json")
+                      if _ID.match(p.stem) or _SUB_ID.match(p.stem)) if self.root.is_dir() else []
 
 
 def new_document(plan: TodoPlan, library: PredicateLibrary, now: float,

@@ -916,7 +916,12 @@ def test_every_shipped_template_is_proven_against_its_deliver_bindings():
             return _real(binding)
 
         library.check = record                     # what THIS expansion asked the library to judge
-        templates.load_template(name, library)     # a template that does not expand is refused
+        loaded = templates.load_template(name, library)   # a template that does not expand is refused
+        if loaded.kind == "batch":
+            # A batch's sub-plans carry no deliver item (the batch attempt's finish delivers once);
+            # what its expansion must have judged is the report predicate each stage binds.
+            assert {"findings_shape", "verdict_enum"} <= set(asked), f"template {name}: {asked}"
+            continue
         assert "git_delivered" in asked, f"template {name}: the deliver item's bindings were never checked"
 
 

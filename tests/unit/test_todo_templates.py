@@ -21,8 +21,9 @@ from tests.unit.test_todo_plan_cli import (  # noqa: F401
     Cli, T0, begin_done, base, cli, commit_all, deliver_results, git, item, plan, repo)
 
 TEMPLATES = Path(__file__).resolve().parents[2] / "todo_templates"
-SHIPPED = {"code_change", "test_fix", "docs_change", "investigate"}
-VERSIONS = {"code_change": 1, "test_fix": 1, "docs_change": 1, "investigate": 2}   # investigate: scope required, freshness
+SHIPPED = {"code_change", "test_fix", "docs_change", "investigate", "find_verify"}
+VERSIONS = {"code_change": 1, "test_fix": 1, "docs_change": 1, "investigate": 2,   # investigate: scope required, freshness
+            "find_verify": 1}   # a batch template (tests/unit/test_todo_batch.py)
 PASS = [sys.executable, "-c", "pass"]
 CODE = {"paths": ["app.py", "other.py"], "scope": ["app.py", "other.py"], "test_argv": PASS, "marker": "changed"}
 

@@ -79,6 +79,27 @@ _TITLE_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _TOP = {"name", "version", "description", "params", "items"}
 _PARAM = {"type", "required", "default", "description"}
 _SAMPLE = {"str": "x", "int": 1, "list[str]": ["x"]}
+# A `kind: batch` template (core/todo_batch.py): two fixed stages, find then verify, and a fan-in.
+_BATCH_TOP = {"name", "version", "description", "kind", "params", "stages", "fan_in"}
+_BATCH_OPTIONAL = {"budget"}
+#: `max_parallel` / `max_parallel_verify` stand for concurrent finder / verifier CONTAINERS; v1 enforces
+#: them as concurrent sub-plans per stage (a sub-plan is offered or bound and has not passed).
+BUDGET_DEFAULTS = {"max_parallel": 4, "max_parallel_verify": 4, "deadline_minutes": 120}
+#: The only predicates a batch stage may bind. Reports live in a report directory the target repo
+#: ignores, so anything comparing tracked files or the base commit (`changes_within`,
+#: `files_changed`, `file_changed`, `git_delivered`) would fail every sub-plan.
+BATCH_PREDICATES = ("report_json", "findings_shape", "verdict_enum")
+_STAGE_KEYS = {"find": {"id", "per", "report", "prompt", "items"},
+               "verify": {"id", "per", "after", "cap", "distinct_from", "report", "prompt", "items"}}
+#: The names a stage may embed as `${name}`: in item args (beyond whole-value `$param` refs) and in
+#: prompts (beyond the template's params). Nothing else is interpolated anywhere.
+STAGE_ARG_VARS = ("item", "report")
+STAGE_PROMPT_VARS = {"find": ("batch", "subplan", "item", "report", "workspace", "dimension"),
+                     "verify": ("batch", "subplan", "item", "report", "workspace", "finding", "finding_id",
+                                "find_report")}
+#: The predicate each stage must bind on its own report: the expansion reads the find reports and
+#: the fan-in reads the verify reports, so both must be judged in the shape they are read in.
+_STAGE_REPORT_PREDICATE = {"find": "findings_shape", "verify": "verdict_enum"}
 
 
 def default_dir() -> Path:
@@ -103,12 +124,25 @@ class Template:
     params: Mapping[str, Param]
     items: tuple[dict, ...]
     sha256: str
+    # `batch` only: the find and verify stages, the fan-in report and the budget (core/todo_batch.py).
+    kind: str = "plan"
+    stages: tuple[dict, ...] = ()
+    fan_in: Mapping[str, Any] | None = None
+    budget: Mapping[str, int] | None = None
+
+    def stage(self, stage_id: str) -> dict:
+        return next(s for s in self.stages if s["id"] == stage_id)
 
     def as_json(self) -> dict:
-        return {"name": self.name, "version": self.version, "description": self.description,
-                "sha256": self.sha256, "items": [i["id"] for i in self.items],
-                "params": {n: {"type": p.type, "required": p.required, "default": p.default,
-                               "description": p.description} for n, p in self.params.items()}}
+        listed = {"name": self.name, "version": self.version, "description": self.description,
+                  "sha256": self.sha256, "items": [i["id"] for i in self.items],
+                  "params": {n: {"type": p.type, "required": p.required, "default": p.default,
+                                 "description": p.description} for n, p in self.params.items()}}
+        if self.kind == "batch":
+            listed.update(kind="batch", budget=dict(self.budget or {}), fan_in=dict(self.fan_in or {}),
+                          stages=[{"id": s["id"], "per": s["per"], "items": [i["id"] for i in s["items"]]}
+                                  for s in self.stages])
+        return listed
 
 
 def _bad(name: str, reason: str) -> Refusal:
@@ -138,6 +172,8 @@ def load_template(name: str, library: PredicateLibrary, directory: Path | None =
         doc = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         raise _bad(name, f"not valid YAML: {str(exc)[:200]}") from exc
+    if isinstance(doc, dict) and "kind" in doc:
+        return _load_batch(name, doc, hashlib.sha256(raw).hexdigest(), library)
     template = _validate(name, doc, hashlib.sha256(raw).hexdigest())
     # Prove it expands, with sample values, with and without its optional params.
     for supplied in ({n: _SAMPLE[p.type] for n, p in template.params.items()},
@@ -161,6 +197,22 @@ def available(directory: Path | None = None) -> list[str]:
 def _validate(name: str, doc: Any, sha256: str) -> Template:
     if not isinstance(doc, dict) or set(doc) != _TOP:
         raise _bad(name, f"keys must be exactly {sorted(_TOP)}")
+    params = _header_and_params(name, doc)
+    _require_scope(name, params)
+    items = doc["items"]
+    if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
+        raise _bad(name, "items must be a non-empty list of mappings")
+    for item in items:
+        bindings = item.get("predicates")
+        if not isinstance(bindings, list) or not all(
+                isinstance(b, dict) and isinstance(b.get("args") or {}, dict) for b in bindings):
+            raise _bad(name, f"item {item.get('id')}: predicates must be a list of {{predicate, args}} mappings")
+        _check_refs(name, item, params)
+    return Template(name, doc["version"], doc["description"], params, tuple(items), sha256)
+
+
+def _header_and_params(name: str, doc: dict) -> dict[str, "Param"]:
+    """The checks every template kind shares: name, version, description and the typed params."""
     if doc["name"] != name:
         raise _bad(name, f"declares name {doc['name']!r}; the file name is the template name")
     if type(doc["version"]) is not int or doc["version"] < 1:
@@ -181,20 +233,18 @@ def _validate(name: str, doc: Any, sha256: str) -> Template:
         if "default" in spec and (required or not type_ok(spec["type"], spec["default"])):
             raise _bad(name, f"param {pname}: a default must match its type, and a required param has none")
         params[pname] = Param(spec["type"], required, spec.get("default"), str(spec.get("description", "")))
+    return params
+
+
+def _require_scope(name: str, params: Mapping[str, "Param"]) -> None:
+    """An ordinary template's `scope` is the scope of the appended deliver item, so it must exist.
+
+    A batch template has no deliver item (its sub-plans only write reports, which live in a
+    gitignored report directory), so this rule is not applied to it."""
     if "scope" not in params or params["scope"].type != "list[str]":
         raise _bad(name, "must declare a list[str] param `scope`: it is the scope of the appended deliver item")
     if not params["scope"].required and params["scope"].default is None:
         raise _bad(name, "param `scope` must be required or have a default: deliver cannot run without one")
-    items = doc["items"]
-    if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
-        raise _bad(name, "items must be a non-empty list of mappings")
-    for item in items:
-        bindings = item.get("predicates")
-        if not isinstance(bindings, list) or not all(
-                isinstance(b, dict) and isinstance(b.get("args") or {}, dict) for b in bindings):
-            raise _bad(name, f"item {item.get('id')}: predicates must be a list of {{predicate, args}} mappings")
-        _check_refs(name, item, params)
-    return Template(name, doc["version"], doc["description"], params, tuple(items), sha256)
 
 
 def _check_refs(name: str, item: dict, params: Mapping[str, Param]) -> None:
@@ -285,6 +335,205 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
         items.append(item)
     return {"attempt_id": attempt_id, "node_key": node_key, "context_hash": context_hash, "base_sha": base_sha,
             "workspace": workspace, "scope": list(resolved["scope"]), "goal": goal, "items": items}
+
+
+# -- batch templates (core/todo_batch.py) ------------------------------------------------------
+#
+# A `kind: batch` template is NOT a workflow language: it has exactly two stages, `find` (one
+# sub-plan per entry of a list[str] param) and `verify` (one sub-plan per finding the finders
+# reported, after every find sub-plan passed, capped, bound to sessions distinct from the finders),
+# and a `fan_in` report. Every key below is checked to have exactly that meaning; the expansion, the
+# binding rules and the fan-in live in core/todo_batch.py.
+
+_EMBED = re.compile(r"\$\{([^}]*)\}")
+
+
+def _embedded(text: str) -> list[str]:
+    return _EMBED.findall(text) if isinstance(text, str) else []
+
+
+def _load_batch(name: str, doc: dict, sha256: str, library: PredicateLibrary) -> Template:
+    template = _validate_batch(name, doc, sha256)
+    # Prove it expands, with sample values, with and without its optional params: one find sub-plan
+    # and one verify sub-plan each, plus both prompts.
+    for supplied in ({n: _SAMPLE[p.type] for n, p in template.params.items()},
+                     {n: _SAMPLE[p.type] for n, p in template.params.items() if p.required}):
+        resolved = resolve_params(template, supplied)
+        if resolve_cap(template, resolved) < 0:
+            raise _bad(name, "verify.cap must resolve to a non-negative integer")
+        for stage_id, key in (("find", "x"), ("verify", "x_x")):
+            report = stage_report(template, stage_id, key)
+            try:
+                TodoPlan.from_json(stage_plan_data(
+                    template, resolved, stage_id, batch="probe", subplan=f"probe~{stage_id}-{key}", item=key,
+                    node_key="probe", context_hash="probe", base_sha="0" * 40, workspace="/probe", goal="probe"),
+                    library)
+            except Refusal as refusal:
+                if refusal.code == "unknown_predicate":
+                    raise
+                raise _bad(name, f"stage {stage_id} does not expand to a valid plan: {refusal.reason}") from refusal
+            render_prompt(template, resolved, stage_id, {v: "x" for v in STAGE_PROMPT_VARS[stage_id]} | {"report": report})
+    return template
+
+
+def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
+    if doc.get("kind") != "batch":
+        raise _bad(name, f"kind must be 'batch' when given (an ordinary template has no kind); got {doc.get('kind')!r}")
+    if set(doc) - _BATCH_OPTIONAL != _BATCH_TOP:
+        raise _bad(name, f"a batch template's keys are exactly {sorted(_BATCH_TOP)} (and optionally {sorted(_BATCH_OPTIONAL)})")
+    params = _header_and_params(name, doc)
+    if "scope" in params and params["scope"].type != "list[str]":
+        raise _bad(name, "param `scope`, when declared, is a list[str] of globs")
+    budget = doc.get("budget") or {}
+    if not isinstance(budget, dict) or set(budget) - set(BUDGET_DEFAULTS) or not all(
+            type(v) is int and v >= 1 for v in budget.values()):
+        raise _bad(name, f"budget is a mapping of positive integers with keys from {sorted(BUDGET_DEFAULTS)}")
+    stages = doc["stages"]
+    if not isinstance(stages, list) or [s.get("id") if isinstance(s, dict) else None for s in stages] != ["find", "verify"]:
+        raise _bad(name, "stages must be exactly two mappings, id find then id verify")
+    find, verify = stages
+    for stage in stages:
+        sid = stage["id"]
+        if set(stage) != _STAGE_KEYS[sid]:
+            raise _bad(name, f"stage {sid}: keys must be exactly {sorted(_STAGE_KEYS[sid])}")
+        report = stage["report"]
+        if not isinstance(report, str) or set(_embedded(report)) != {"item"}:
+            raise _bad(name, f"stage {sid}: report must be a relative path that embeds ${{item}}")
+        if not _inside(report.replace("${item}", "x")):
+            raise _bad(name, f"stage {sid}: report must be a relative path inside the report directory")
+        if not isinstance(stage["prompt"], str) or not stage["prompt"].strip():
+            raise _bad(name, f"stage {sid}: prompt must be a non-empty string")
+        for ref in _embedded(stage["prompt"]):
+            if ref not in params and ref not in STAGE_PROMPT_VARS[sid]:
+                raise _bad(name, f"stage {sid}: prompt references ${{{ref}}}, which is neither a param nor one of "
+                                 f"{list(STAGE_PROMPT_VARS[sid])}")
+        items = stage["items"]
+        if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
+            raise _bad(name, f"stage {sid}: items must be a non-empty list of mappings")
+        bound_on_report = False
+        for item in items:
+            bindings = item.get("predicates")
+            if not isinstance(bindings, list) or not all(
+                    isinstance(b, dict) and isinstance(b.get("args") or {}, dict) for b in bindings):
+                raise _bad(name, f"stage {sid} item {item.get('id')}: predicates must be a list of {{predicate, args}} mappings")
+            _check_stage_refs(name, sid, item, params)
+            for b in bindings:
+                if b.get("predicate") not in BATCH_PREDICATES:
+                    raise _bad(name, f"stage {sid} item {item.get('id')}: a batch stage binds only {list(BATCH_PREDICATES)}, "
+                                     f"not {b.get('predicate')!r}: its reports are untracked, so a predicate over tracked "
+                                     "files or the base commit fails every sub-plan")
+            bound_on_report |= any(b.get("predicate") == _STAGE_REPORT_PREDICATE[sid]
+                                   and (b.get("args") or {}).get("path") == "${report}" for b in bindings)
+        if not bound_on_report:
+            raise _bad(name, f"stage {sid}: an item must bind {_STAGE_REPORT_PREDICATE[sid]} with path ${{report}}")
+    per = params.get(find["per"]) if isinstance(find["per"], str) else None
+    if per is None or per.type != "list[str]" or not per.required:
+        raise _bad(name, "stage find: per must name a required list[str] param (one finder per entry)")
+    if (verify["per"], verify["after"], verify["distinct_from"]) != ("findings", "find", "find"):
+        raise _bad(name, "stage verify: per must be findings, after find and distinct_from find")
+    cap = verify["cap"]
+    ref = _REF.match(cap) if isinstance(cap, str) else None
+    if not (type(cap) is int and cap >= 0) and not (
+            ref and ref.group(1) in params and params[ref.group(1)].type == "int"
+            and (params[ref.group(1)].required or params[ref.group(1)].default is not None)):
+        raise _bad(name, "stage verify: cap is a non-negative integer or $param naming an int param that always has a value")
+    fan_in = doc["fan_in"]
+    if not isinstance(fan_in, dict) or set(fan_in) != {"report"} or not isinstance(fan_in["report"], str) \
+            or not fan_in["report"].strip() or _embedded(fan_in["report"]):
+        raise _bad(name, "fan_in must be {report: <relative path>}")
+    if not _inside(fan_in["report"]):
+        raise _bad(name, "fan_in.report must be a relative path inside the report directory")
+    return Template(name, doc["version"], doc["description"], params, (), sha256, kind="batch",
+                    stages=tuple(stages), fan_in=dict(fan_in), budget={**BUDGET_DEFAULTS, **budget})
+
+
+def _inside(rel: str) -> bool:
+    path = PurePosixPath(rel)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def batch_doc(template: Template) -> dict:
+    """The batch template as the document it was validated from, so a batch record can carry it."""
+    return {"name": template.name, "version": template.version, "description": template.description, "kind": "batch",
+            "params": {n: {"type": p.type, "required": p.required, "description": p.description,
+                           **({"default": p.default} if p.default is not None else {})}
+                       for n, p in template.params.items()},
+            "budget": dict(template.budget or {}), "stages": [dict(s) for s in template.stages],
+            "fan_in": dict(template.fan_in or {})}
+
+
+def batch_template_from_doc(name: str, doc: Any, sha256: str) -> Template:
+    """Rebuild a batch template from `batch_doc`'s output, validated again."""
+    if not isinstance(doc, dict):
+        raise _bad(name, "the stored batch template is not a mapping")
+    return _validate_batch(name, doc, sha256)
+
+
+def _check_stage_refs(name: str, stage_id: str, item: dict, params: Mapping[str, Param]) -> None:
+    where = f"stage {stage_id} item {item.get('id')}"
+    for ref in _TITLE_REF.findall(str(item.get("title", ""))):
+        if ref not in params and ref != "item":
+            raise _bad(name, f"{where}: title references undeclared ${{{ref}}}")
+    for binding in item.get("predicates") or []:
+        for arg, value in (binding.get("args") or {}).items():
+            for element in (value if isinstance(value, list) else [value]):
+                m = _REF.match(element) if isinstance(element, str) else None
+                if m and m.group(1) not in params:
+                    raise _bad(name, f"{where}: {binding.get('predicate')}.{arg} references undeclared param ${m.group(1)}")
+                for embedded in _embedded(element) if not m else []:
+                    if embedded not in STAGE_ARG_VARS:
+                        raise _bad(name, f"{where}: {binding.get('predicate')}.{arg} embeds ${{{embedded}}}; "
+                                         f"only {['${' + v + '}' for v in STAGE_ARG_VARS]} may be embedded")
+
+
+def resolve_cap(template: Template, resolved: Mapping[str, Any]) -> int:
+    cap = template.stage("verify")["cap"]
+    return cap if type(cap) is int else int(resolved[cap[1:]])
+
+
+def stage_report(template: Template, stage_id: str, item: str) -> str:
+    """The report path, relative to the batch's report directory, of one sub-plan of a stage."""
+    return template.stage(stage_id)["report"].replace("${item}", item)
+
+
+def _fill(text: str, values: Mapping[str, Any]) -> str:
+    def one(m: re.Match) -> str:
+        value = values.get(m.group(1))
+        return ", ".join(value) if isinstance(value, list) else "" if value is None else str(value)
+    return _EMBED.sub(one, text)
+
+
+def stage_plan_data(template: Template, resolved: Mapping[str, Any], stage_id: str, *, batch: str, subplan: str,
+                    item: str, node_key: str, context_hash: str, base_sha: str, workspace: str, goal: str) -> dict:
+    """The free-form plan of one sub-plan of a stage: `${item}` and `${report}` filled, `$param` bound."""
+    embed = {"item": item, "report": stage_report(template, stage_id, item)}
+    items = []
+    for raw in template.stage(stage_id)["items"]:
+        preds = []
+        for binding in raw.get("predicates") or []:
+            args = {}
+            for arg, value in (binding.get("args") or {}).items():
+                if isinstance(value, list):
+                    args[arg] = [_fill(v, embed) if isinstance(v, str) else v for v in _expand_list(value, resolved)]
+                    continue
+                m = _REF.match(value) if isinstance(value, str) else None
+                if m and m.group(1) not in resolved:
+                    continue
+                args[arg] = resolved[m.group(1)] if m else _fill(value, embed) if isinstance(value, str) else value
+            preds.append({"predicate": binding.get("predicate"), "args": args})
+        entry = {"id": raw.get("id"), "title": _fill(str(raw.get("title", "")), {**resolved, "item": item}),
+                 "predicates": preds}
+        if raw.get("needs"):
+            entry["needs"] = raw["needs"]
+        items.append(entry)
+    return {"attempt_id": subplan, "batch": batch, "node_key": node_key, "context_hash": context_hash,
+            "base_sha": base_sha, "workspace": workspace, "scope": list(resolved.get("scope") or ["**"]), "goal": goal,
+            "items": items}
+
+
+def render_prompt(template: Template, resolved: Mapping[str, Any], stage_id: str, variables: Mapping[str, Any]) -> str:
+    """A stage's child prompt with its params and the stage variables filled in."""
+    return _fill(template.stage(stage_id)["prompt"], {**resolved, **variables})
 
 
 # -- the paths a frozen plan requires to change ----------------------------------------------

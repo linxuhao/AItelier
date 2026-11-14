@@ -193,6 +193,12 @@ def create(store: PlanStore, library: PredicateLibrary, template: "templates.Tem
     if not isinstance(workspace, str) or not os.path.isabs(workspace):
         raise Refusal("invalid_plan", "workspace must be an absolute path")
     params = templates.resolve_params(template, supplied)
+    # finish bundles exactly this commit, so it must BE a commit: a symbolic name
+    # (HEAD, a branch) moves with the checkout and would certify whatever is there.
+    reviewed = params.get("reviewed_sha")
+    if not isinstance(reviewed, str) or not _SHA.match(reviewed):
+        raise Refusal("bad_param", f"reviewed_sha must be a full lowercase commit hash, not {reviewed!r}: "
+                                   "finish bundles exactly the commit the verifiers certified", param="reviewed_sha")
     dimensions = params[template.stage("find")["per"]]
     if not dimensions:
         raise Refusal("bad_param", f"{template.stage('find')['per']} must name at least one finder")

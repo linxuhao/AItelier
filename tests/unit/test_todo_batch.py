@@ -335,6 +335,21 @@ def test_finish_refuses_a_head_the_verifiers_did_not_certify(cli, repo, base):
     assert done["artifact"] == base, done
 
 
+@pytest.mark.parametrize("symbolic", ["HEAD", "main", "master", "HEAD~0"])
+def test_a_symbolic_reviewed_sha_is_refused_at_create(cli, repo, base, symbolic):
+    """Director review C4 round 2: a name that moves with the checkout would make the
+    certified-HEAD guard compare HEAD with itself."""
+    out = cli.refused("batch-create", "--template", "find_verify", "--params",
+                      json.dumps(params(base, reviewed_sha=symbolic)), "--attempt", ATT, "--node-key", "n",
+                      "--context-hash", "c" * 64, "--base-sha", base, "--workspace", str(repo), "--goal", "g")
+    assert out["refused"] == "bad_param" and out["param"] == "reviewed_sha" and "reviewed_sha" in out["reason"], out
+    assert not (cli.store / f"{ATT}.batch.json").exists(), "a batch was frozen with a symbolic reviewed_sha"
+    short = cli.refused("batch-create", "--template", "find_verify", "--params",
+                        json.dumps(params(base, reviewed_sha=base[:12])), "--attempt", ATT, "--node-key", "n",
+                        "--context-hash", "c" * 64, "--base-sha", base, "--workspace", str(repo), "--goal", "g")
+    assert short["refused"] == "bad_param" and short["param"] == "reviewed_sha", short
+
+
 def test_the_summary_is_not_evidence_and_carries_each_verdict_with_its_artifact_ref(cli, repo, base):
     batch_create(cli, repo, base)
     finders_pass(cli)

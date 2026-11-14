@@ -307,12 +307,32 @@ def test_finish_waits_for_every_subplan_and_reads_their_observations_without_rer
     candidate = json.loads(Path(done["report"]).read_text())
     summary_path = reports(cli) / "find-verify-summary.json"
     assert candidate["batch"] == {"summary": str(summary_path), "evidence": False,
-                                  "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest()}
+                                  "summary_sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
+                                  "counts": {"confirmed": len(UNIQUE), "refuted": 0, "unsure": 0, "unverified": 0}}
     assert candidate["plan_hash"] == record(cli)["batch_hash"]
     assert {o["subplan"] for o in candidate["observations"]} == {FIND_C, FIND_S, *(f"{ATT}~verify-{k}" for k in UNIQUE)}
     assert Path(done["git_bundle"]["path"]).is_file()
     sub = cli.refused("finish", "--attempt", FIND_C, "--out", str(out_dir))
     assert sub["refused"] == "subplan_finish", sub
+
+
+def test_finish_refuses_a_head_the_verifiers_did_not_certify(cli, repo, base):
+    """Director review C4 (2026-11-14): one unreviewed commit after the verifiers certified
+    base must not become the candidate."""
+    batch_create(cli, repo, base)
+    finders_pass(cli)
+    cli.ok("batch-expand", "--attempt", ATT)
+    verifiers_pass(cli, base)
+    (repo / "unreviewed.txt").write_text("not reviewed\n")
+    moved = commit_all(repo, "unreviewed")
+    out_dir = cli.tmp_path / "finish"
+    out = cli.refused("finish", "--attempt", ATT, "--out", str(out_dir))
+    assert out["refused"] == "head_not_certified" and out["head"] == moved and out["certified"] == base, out
+    assert base in out["reason"] and moved in out["reason"], out
+    assert not out_dir.exists() or not list(out_dir.iterdir()), "a candidate was written for an uncertified HEAD"
+    git(repo, "reset", "-q", "--hard", base)
+    done = cli.ok("finish", "--attempt", ATT, "--out", str(out_dir))
+    assert done["artifact"] == base, done
 
 
 def test_the_summary_is_not_evidence_and_carries_each_verdict_with_its_artifact_ref(cli, repo, base):

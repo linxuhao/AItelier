@@ -424,15 +424,34 @@ def _finish_batch(args, store: PlanStore, now: float) -> dict:
         if failing:
             raise Refusal("unfinished", f"{len(failing)} sub-plan item(s) have not passed; no candidate was produced",
                           failing=failing, brief=brief)
-        summary, summary_sha, _ = todo_batch.write_fan_in(store, library, record)
+        summary, summary_sha, content = todo_batch.write_fan_in(store, library, record)
+        # The candidate is the commit the verifiers certified, never whatever HEAD is
+        # now: every verify report's artifact_ref, or reviewed_sha when nothing was
+        # verified. One certified commit, or the batch refuses.
+        certified = {f["artifact_ref"] for f in content["findings"]} or {record["params"]["reviewed_sha"]}
+        if len(certified) != 1:
+            raise Refusal("certified_shas_differ", f"the verify reports certify {sorted(certified)}, not one commit")
         return _candidate(args.out, record["workspace"], args.attempt, record["batch_hash"], observations, brief,
-                          {"batch": {"summary": str(summary), "summary_sha256": summary_sha, "evidence": False}})
+                          {"batch": {"summary": str(summary), "summary_sha256": summary_sha, "evidence": False,
+                                     "counts": content["counts"]}},
+                          certified=certified.pop())
 
 
 def _candidate(out: str, workspace: str, attempt_id: str, plan_hash: str, observations: list, brief: str,
-               extra: dict | None = None) -> dict:
-    """Bundle the workspace's HEAD and write the candidate report - for a plan and a batch alike."""
+               extra: dict | None = None, certified: str | None = None) -> dict:
+    """Bundle the workspace's HEAD and write the candidate report - for a plan and a batch alike.
+
+    `certified` (a batch): the commit the verifiers certified. HEAD must BE that commit,
+    checked before bundling and again on the bundle's tip, or nothing is produced."""
     head = _git(workspace, "rev-parse", "HEAD")
+    if certified is not None:
+        resolved = subprocess.run(["git", "-C", workspace, "rev-parse", "-q", "--verify", f"{certified}^{{commit}}"],
+                                  capture_output=True, text=True).stdout.strip()
+        if resolved != head:
+            raise Refusal("head_not_certified", f"HEAD is {head} but the verify reports certified {certified}"
+                                                f"{f' ({resolved})' if resolved and resolved != certified else ''}; "
+                                                "check out the certified commit or re-review the new one",
+                          head=head, certified=certified)
     branch = subprocess.run(["git", "-C", workspace, "symbolic-ref", "--short", "-q", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     out_dir = Path(out).resolve()
@@ -451,6 +470,9 @@ def _candidate(out: str, workspace: str, attempt_id: str, plan_hash: str, observ
         if head not in tips:
             raise Refusal("head_moved", f"HEAD was {head} when read but the bundle's tip is {sorted(tips)}; "
                                         "something committed while finishing")
+        if certified is not None and tips != {head}:
+            raise Refusal("head_not_certified", f"the bundle's tips {sorted(tips)} are not exactly the certified {head}",
+                          head=head, certified=certified)
         # `quiescent` is attested below, so look once more, right before writing it.
         if _git(workspace, "status", "--porcelain") or _git(workspace, "rev-parse", "HEAD") != head:
             raise Refusal("not_quiescent", "the working tree changed while the candidate was being produced")

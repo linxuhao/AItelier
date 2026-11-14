@@ -99,20 +99,23 @@ Three different objects carry the word "harness", and reading one as another has
 already sent two readers to opposite wrong conclusions (2026-11-14), so name
 which one is being asked about:
 
-- The harness a GATE imports is the one in the binding's `source` directory.
-  The gate container mounts that directory at `/app` with `PYTHONPATH=/app` and
-  runs `/app/tools/gate_binding.py` from it, so the reviewed `files` digests and
-  the executed bytes are the same bytes. Nothing else selects it.
-- `GET /health`'s `gate_harness` object reports the BACKEND IMAGE's own frozen
-  copy at `/opt/aitelier-gate-imports/docker/godot/godot_harness.py`, baked by
-  `COPY` at build time and read at request time (never cached). It answers "is
-  this image one build behind the tree", not "which bytes will a gate import":
-  after a harness merge it keeps naming the previous frozen source's digest
+- A NORMAL gate (this launcher) imports the harness from the binding's `source`
+  directory: the container mounts that directory at `/app` with `PYTHONPATH=/app`
+  and runs `/app/tools/gate_binding.py` from it, so the reviewed `files` digests
+  and the executed bytes are the same bytes.
+- An AUTHORED repository gate is the other case, and it is why `GET /health`
+  reports what it reports: the backend runs such a gate in the backend image and
+  puts that image's own frozen export at `/opt/aitelier-gate-imports` first on
+  the gate's `PYTHONPATH` (`core/repository_executor_entry.py`, GATE_IMPORT_ROOT,
+  only for the `bash`-plus-report-dir shape), so for that gate the export really
+  is what gets imported. It is baked by `COPY` at build time and read at request
+  time (never cached), so it keeps naming the previous frozen source's digest
   until the image is rebuilt, and a container recreate cannot change it.
-- The running backend's live import is the mounted checkout
-  (`/app/docker/godot/godot_harness.py`); `/opt/aitelier-gate-imports` is not on
-  its `sys.path`. A stale `gate_harness` digest therefore says nothing about the
-  code the backend is executing.
+- The running BACKEND's own import is none of those: it is the mounted checkout
+  (`/app/docker/godot/godot_harness.py`), and `/opt/aitelier-gate-imports` is not
+  on the backend's `sys.path`. A stale `gate_harness` digest therefore says
+  nothing about the code the backend is executing, and everything about which
+  harness an authored repository gate will import.
 
 When the identity tool could not be asked, the launcher writes a substitute
 spelling instead of an answer. `unanswered:receipt-tool-failed` means the

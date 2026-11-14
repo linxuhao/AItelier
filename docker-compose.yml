@@ -268,7 +268,8 @@ services:
     # default auto) and on Xvfb + llvmpipe otherwise. Compile stays --headless
     # and the windowed input gate stays on Xvfb either way.
     # Access is a BIND of /dev/dri (in volumes: below) plus a cgroup rule for
-    # the DRM character major 226 — deliberately NOT a `devices:` entry: a
+    # the render node's DRM character device 226:<minor> — deliberately NOT a
+    # `devices:` entry: a
     # `devices:` path missing on the host fails container creation, while a
     # short-syntax bind whose source is missing is created empty by rootful
     # Docker, so a host with no GPU still starts and the harness reports "no
@@ -276,19 +277,24 @@ services:
     # source (rootless Docker, podman) refuse instead: on a host without
     # /dev/dri point AITELIER_DRI_DIR at any empty directory (see .env.example).
     # The render node is group-owned by the host's `render` group, whose gid
-    # differs per host: set AITELIER_RENDER_GID.
-    # The bind and the cgroup rule are broader than the render node: they cover
-    # the whole /dev/dri, including card0 (the display/KMS node), and every DRM
-    # minor. What keeps card0 out of reach is ONLY file permissions plus the
-    # choice of user and group: the sidecar runs as a non-root uid (no
-    # CAP_MKNOD) with just the render gid added, and card0 is root:video 0660.
-    # Running it as root (AITELIER_UID=0), giving it the video group (as
-    # AITELIER_GID or another group_add), or a host where card0 is
-    # world-accessible (or carries a uaccess ACL) also hands it card0.
+    # differs per host: set AITELIER_RENDER_GID. Its minor can differ too: set
+    # AITELIER_RENDER_MINOR (default 128, renderD128; `stat -c %T
+    # /dev/dri/renderD128` prints it in hex, 80 = 128).
+    # The bind shows the whole /dev/dri, card0 (the display/KMS node) included,
+    # but the device cgroup lets the container read and write the render minor
+    # only: opening card0 (226:0), or any node made for it with mknod, is
+    # refused even for root in the container, whatever the file permissions,
+    # user or groups (Docker's default rules still let root mknod; the node it
+    # makes cannot be opened). A wrong minor shows as a render node that cannot
+    # be opened: auto renders on CPU with that reason, gpu fails.
+    # no-new-privileges keeps the image's setuid binaries from raising
+    # privileges inside the sidecar, which runs untrusted game code.
     group_add:
       - "${AITELIER_RENDER_GID:-993}"
     device_cgroup_rules:
-      - "c 226:* rmw"
+      - "c 226:${AITELIER_RENDER_MINOR:-128} rw"
+    security_opt:
+      - "no-new-privileges:true"
     environment:
       PORT: "8080"
       # Writable HOME for Godot's import cache when run as an arbitrary host uid

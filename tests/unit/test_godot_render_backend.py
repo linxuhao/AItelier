@@ -741,6 +741,26 @@ def test_health_reports_gpu_availability_and_mode(rig, monkeypatch):
     assert "mode_error" in gh.health_snapshot()["render_backend"]
 
 
+def test_health_in_cpu_mode_starts_nothing_on_the_gpu(rig, monkeypatch):
+    """cpu is the mode an operator picks when the GPU driver misbehaves: the
+    health check must not start weston or Xwayland on it either."""
+    monkeypatch.setenv("GODOT_RENDER_BACKEND", "cpu")
+    health = gh.health_snapshot()["render_backend"]
+    assert health["mode"] == "cpu"
+    assert health["render_node"] == str(rig.dri / "renderD128")
+    assert health["gpu_available"] is False
+    assert health["weston_start"] == {"ok": None, "reason": "not attempted: mode cpu",
+                                      "source": "skipped"}
+    assert "not attempted" in health["gpu_unavailable_reason"]
+    assert _lines(rig.weston_log) == [] and _lines(rig.xwayland_log) == []
+    assert list(rig.scratch.iterdir()) == []
+    assert gh._WESTON_START is None
+    # Back in auto, the probe runs as before.
+    monkeypatch.setenv("GODOT_RENDER_BACKEND", "auto")
+    assert gh.health_snapshot()["render_backend"]["weston_start"]["source"] == "probe"
+    assert len(_lines(rig.weston_log)) == 1
+
+
 @pytest.mark.parametrize("weston_mode,reason", [
     ("die", "weston exited"),
     ("software", "software GL"),
@@ -794,13 +814,17 @@ def test_compose_maps_the_render_node_without_a_devices_entry():
     service = yaml.safe_load((_ROOT / "docker-compose.yml").read_text())["services"]["godot-builder"]
     assert "devices" not in service
     assert "${AITELIER_DRI_DIR:-/dev/dri}:/dev/dri" in service["volumes"]
-    assert any(rule.startswith("c 226:") for rule in service["device_cgroup_rules"])
+    # The render minor only, read-write: card0 (226:0) stays outside the
+    # device cgroup even for root in the container.
+    assert service["device_cgroup_rules"] == ["c 226:${AITELIER_RENDER_MINOR:-128} rw"]
+    assert "no-new-privileges:true" in service["security_opt"]
     raw = (_ROOT / "docker-compose.yml").read_text()
     assert '"${AITELIER_RENDER_GID:-' in raw
     assert service["group_add"] == ["${AITELIER_RENDER_GID:-993}"]
     assert service["environment"]["GODOT_RENDER_BACKEND"] == "${GODOT_RENDER_BACKEND:-auto}"
     example = (_ROOT / ".env.example").read_text()
-    for name in ("AITELIER_RENDER_GID", "GODOT_RENDER_BACKEND", "AITELIER_DRI_DIR"):
+    for name in ("AITELIER_RENDER_GID", "AITELIER_RENDER_MINOR", "GODOT_RENDER_BACKEND",
+                 "AITELIER_DRI_DIR"):
         assert name in example, name
 
 

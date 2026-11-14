@@ -1507,16 +1507,24 @@ def render_backend_health() -> dict:
     GPU availability is the static render-node check AND whether weston really
     came up the last time something tried: the latest render pass, or — before
     any pass has — one private weston started for the purpose (_probe_weston_start).
+    In cpu mode nothing starts on the GPU, the health check included: the start
+    is reported as not attempted.
     """
     try:
         mode, mode_error = _render_backend_mode(), None
     except ValueError as exc:
         mode, mode_error = os.environ.get("GODOT_RENDER_BACKEND"), str(exc)
     node, reason = _gpu_render_node()
-    start = _probe_weston_start() if node is not None else None
-    if start is not None and not start["ok"]:
+    if node is None:
+        start = None
+    elif mode == "cpu":
+        start = {"ok": None, "reason": "not attempted: mode cpu", "source": "skipped"}
+        reason = "weston start not attempted: mode cpu"
+    else:
+        start = _probe_weston_start()
+    if start is not None and start["ok"] is False:
         reason = "weston did not come up (%s): %s" % (start["source"], start["reason"])
-    report = {"mode": mode, "gpu_available": node is not None and start["ok"],
+    report = {"mode": mode, "gpu_available": node is not None and start["ok"] is True,
               "render_node": node, "gpu_unavailable_reason": reason,
               "weston_start": start, "weston_ready_sec": WESTON_READY_SEC}
     if mode_error:

@@ -1,0 +1,74 @@
+# Static systemd user unit (no renderer, no @TOKEN@ substitution): the paths
+# below are this host's real ones. If the checkout moves, edit ExecStart and
+# WorkingDirectory; if HOME differs, edit the --out path. Install with:
+#
+#   install -d -m 700 ~/.AItelier/logs
+#   install -Dm644 deploy/mem_peak_watch.service \
+#       ~/.config/systemd/user/mem_peak_watch.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mem_peak_watch.service
+#   journalctl --user -u mem_peak_watch.service -f
+#
+# WHAT IT RECORDS. scripts/mem_peak_watch.py is a READ-ONLY host-side recorder:
+# every time the aitelier container's cgroup memory.peak takes a new value it
+# appends ONE JSON line to
+#   /home/linxuhao/.AItelier/logs/memory_peaks.jsonl
+# carrying the peak in bytes/MiB/share-of-memory.max, the memory.stat
+# decomposition, the memory.events counters and the RssAnon/VmHWM of EVERY pid
+# in cgroup.procs, sorted so the holder is the first entry. It never restarts,
+# recreates, execs into, attaches to or injects into the container: it reads
+# /sys/fs/cgroup/.../docker-<id>.scope/* and /proc/<pid>/*, plus one
+# `docker inspect -f {{.Id}} aitelier` to find the scope when it starts.
+# The log grows only when the peak moves, so an idle hour is zero lines.
+#
+# WIRING IT FROM CONTAINER START. A user unit CANNOT order itself against the
+# container: `aitelier` is a `docker run` container, not a systemd unit, so
+# PartOf=/Wants= on "the container start" has no unit to name (the transient
+# docker-<id>.scope is created by docker AFTER the container starts, and a user
+# manager cannot bind to a system scope). The unit therefore re-resolves the
+# container by name on every start and converts a restart into a restart of
+# itself:
+#   * container restarts => the old scope path disappears => the recorder
+#     records {"event":"cgroup_gone",...} and exits 3 (grep for it in the log);
+#   * Restart=always + RestartSec=10 => systemd starts it again, this time
+#     resolving the new container id/scope, so recording resumes without an
+#     operator. After a manual `docker restart aitelier` you can also do
+#     `systemctl --user restart mem_peak_watch.service` to resume immediately.
+# A system-level installer that wants strict ordering must hook the transient
+# scope itself, from a root shell:
+#   systemctl show docker-$(docker inspect -f '{{.Id}}' aitelier).scope
+#   # e.g. drop-in on the scope:  mkdir -p /run/systemd/system/\
+#   #   docker-<id>.scope.d  and add  [Unit]\nWants=mem_peak_watch.service
+# (not done here: run-time drop-ins on transient scopes are lost on restart).
+[Unit]
+Description=AItelier read-only container memory-peak recorder (one JSONL line per new cgroup memory.peak, naming every pid's anon RSS)
+# Never give up while the container is down: keep polling for its new scope.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/linxuhao/AItelier
+ExecStart=/usr/bin/python3 /home/linxuhao/AItelier/scripts/mem_peak_watch.py --interval 1 --duration 0 --out /home/linxuhao/.AItelier/logs/memory_peaks.jsonl
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# The recorder exits 3 (scope gone) or 4 (container not resolvable); both mean
+# "wait and re-resolve", never "give up".
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# Read-only recorder: nothing it reads is writable and nothing it does needs
+# privilege. Keep /sys/fs/cgroup a read-only view and leave only the log
+# directory writable (ProtectSystem=strict makes the rest of the tree, /home
+# included, read-only for this unit).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/sys/fs/cgroup
+ReadWritePaths=/home/linxuhao/.AItelier/logs
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

@@ -13,9 +13,11 @@
 
 import hashlib as _hashlib
 import os as _os
+import time as _time
 
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
+from datetime import datetime as _datetime, timezone as _timezone
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -471,6 +473,31 @@ def _gate_harness_identity() -> dict:
     return {"path": str(path), "sha256": digest, "reason": None}
 
 
+def _process_age() -> dict:
+    """When the serving process started and how long it has been up, read per request.
+
+    Both figures come from the kernel's record of THIS process (its start time in
+    /proc/self/stat, against the boot clock), so they describe the process that is
+    answering now. They are the age of the process, not of the container, and they
+    cannot count restarts: a process restarted in place starts again from zero, and
+    the one it replaced is simply gone. Missing /proc is declared, never raised.
+    """
+    try:
+        with open("/proc/self/stat", "rb") as handle:
+            stat = handle.read()
+    except OSError as exc:
+        return {"started_at": None, "uptime_seconds": None,
+                "reason": f"could not read /proc/self/stat: {type(exc).__name__}"}
+    # Field 2 (comm) may contain spaces; the fields after it start past its ')'.
+    # Field 22 (starttime, in clock ticks since boot) is index 19 of those.
+    start_ticks = int(stat[stat.rindex(b")") + 2:].split()[19])
+    uptime = (_time.clock_gettime(_time.CLOCK_BOOTTIME)
+              - start_ticks / _os.sysconf("SC_CLK_TCK"))
+    started = _datetime.fromtimestamp(_time.time() - uptime, _timezone.utc)
+    return {"started_at": started.isoformat(timespec="milliseconds"),
+            "uptime_seconds": round(uptime, 3), "reason": None}
+
+
 @app.get("/health")
 def health_check():
     """系统探针
@@ -481,9 +508,15 @@ def health_check():
     `source` directory, and an authored repository gate imports the export inside
     the image its tag names at gate time. An absent export is declared in that
     field; the probe still answers 200 with `status` and `engine` unchanged.
+
+    `process` reports when the serving process started and how long it has been
+    up (see _process_age), read fresh on every request. It is the age of this
+    process, not of the container: a restart by Docker's restart policy resets it,
+    and /health cannot count the restarts that came before.
     """
     return {"status": "ok", "engine": "DPE SOTA v3.0",
-            "gate_harness": _gate_harness_identity()}
+            "gate_harness": _gate_harness_identity(),
+            "process": _process_age()}
 
 
 @app.get("/api/me")

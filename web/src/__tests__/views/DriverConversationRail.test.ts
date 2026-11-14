@@ -145,9 +145,8 @@ describe('the questions box', () => {
     const body = view.container.querySelector('[data-questions-box] .questions-body') as HTMLElement;
     const style = getComputedStyle(body);
     expect(style.overflowY).toBe('auto');
-    // The bound itself, by value: the rule is `.questions-body{max-height:9rem}`.
-    // A bare truthiness check passed even with the bound removed (`none`).
-    expect(style.maxHeight).toBe('9rem');
+    // The rail now fills its own column and is allowed to shrink and scroll.
+    expect(style.minHeight).toBe('0');
     // The box's own rules, not the thread's: the thread keeps its own scroll.
     const threadStyle = getComputedStyle(view.container.querySelector('[data-conversation-thread]') as HTMLElement);
     expect(threadStyle.overflowY).toBe('auto');
@@ -322,10 +321,9 @@ describe('the rail reads the whole conversation, not the thread page', () => {
     await fireEvent.submit(view.container.querySelector('[data-conversation-composer]') as HTMLFormElement);
     await waitFor(() => expect(api.sendDriverConversationMessage).toHaveBeenCalled());
     const [, , options] = api.sendDriverConversationMessage.mock.calls[0];
-    // The citation is what closes the question; the message it belongs to is not
-    // on the thread, so there is no reply link to set - and none is invented.
+    // Both links use the durable question's message id even off the thread page.
     expect(options.answers).toEqual([{message_id: 'm0', segment_id: 'q1'}]);
-    expect(options.replyToMessageId).toBeUndefined();
+    expect(options.replyToMessageId).toBe('m0');
   });
 
   it('says the list may be missing older questions when it stopped short, instead of pretending', async () => {

@@ -109,11 +109,11 @@ describe('a project with open questions says so on its own card', () => {
       card(view.container, 'hot').querySelector('[data-pending-questions]')).not.toBeNull());
 
     const badge = card(view.container, 'hot').querySelector('[data-pending-questions]') as HTMLElement;
-    expect(badge.textContent?.trim()).toBe('2');
+    expect(badge.textContent?.trim()).toBe('2 pending');
     expect(badge.getAttribute('title')).toBe('unanswered questions');
     expect(badge.classList.contains('questions')).toBe(true);
     // Two badges, not one merged number: unread says 3, questions says 2.
-    expect(card(view.container, 'hot').querySelector('.unread')?.textContent).toBe('3');
+    expect(card(view.container, 'hot').querySelector('.unread')?.textContent).toBe('3 unread');
     expect(badge.textContent).not.toBe('3');
     // The project with no open question carries no question badge at all.
     expect(card(view.container, 'cold').querySelector('[data-pending-questions]')).toBeNull();
@@ -129,6 +129,6 @@ describe('a project with open questions says so on its own card', () => {
     await waitFor(() => expect(card(view.container, 'hot').querySelector('.unread')).not.toBeNull());
     expect(view.container.querySelector('[data-pending-questions]')).toBeNull();
     // The unread badge is untouched by the new one's absence.
-    expect(card(view.container, 'hot').querySelector('.unread')?.textContent).toBe('1');
+    expect(card(view.container, 'hot').querySelector('.unread')?.textContent).toBe('1 unread');
   });
 });

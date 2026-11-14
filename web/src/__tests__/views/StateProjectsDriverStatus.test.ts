@@ -103,7 +103,7 @@ describe('driver state on the State DAG list', () => {
     expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u25B6\uFE0E');
     expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u23F8\uFE0E');
     // The badge is read from the unread endpoint, not counted in the browser.
-    expect(card('running-old').querySelector('.unread')?.textContent).toBe('2');
+    expect(card('running-old').querySelector('.unread')?.textContent).toBe('2 unread');
     expect(card('idle-recent').querySelector('.unread')).toBeNull();
     // A DAG with no driver row at all still reads as stopped rather than blank.
     expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('running');
@@ -113,60 +113,23 @@ describe('driver state on the State DAG list', () => {
 describe('the split conversation pane', () => {
   const aside = (view: any) => view.container.querySelector('aside.conversation-pane') as HTMLElement;
 
-  it('resizes by dragging the separator and by keyboard, with no size buttons', async () => {
+  it('uses the available workspace instead of a persisted chat width', async () => {
+    storage.set('aitelier_dag_pane_width', '280');
     const view = render(StateProjects);
     await view.findByRole('heading', {name: 'running-old'});
-    const handle = view.getByRole('separator', {name: 'Resize conversation pane'});
-    expect(aside(view).style.width).toBe('420px');
-    await fireEvent.mouseDown(handle, {clientX: 800});
-    await fireEvent.mouseMove(window, {clientX: 700});
-    await fireEvent.mouseUp(window, {clientX: 700});
-    await waitFor(() => expect(aside(view).style.width).toBe('520px'));
-    expect(handle.getAttribute('aria-valuenow')).toBe('520');
-    expect(storage.get('aitelier_dag_pane_width')).toBe('520');
-    // Expand / Shrink / Restore are gone: they only moved a border the user can
-    // drag. The handle keeps the keyboard half of that capability, so the width
-    // is still settable without a mouse and without a button.
-    await fireEvent.keyDown(handle, {key: 'Home'});
-    await waitFor(() => expect(aside(view).style.width).toBe('280px'));
-    await fireEvent.keyDown(handle, {key: 'End'});
-    await waitFor(() => expect(aside(view).style.width).toBe('614px'));
-    expect(storage.get('aitelier_dag_pane_width')).toBe('614');
+    expect(aside(view).style.width).toBe('');
+    expect(view.queryByRole('separator')).toBeNull();
+    expect(view.container.querySelector('.dag-split.workbench')).not.toBeNull();
   });
 
-  it('survives a reload with the width the user chose', async () => {
-    const first = render(StateProjects);
-    await first.findByRole('heading', {name: 'running-old'});
-    await fireEvent.mouseDown(first.getByRole('separator', {name: 'Resize conversation pane'}), {clientX: 800});
-    await fireEvent.mouseMove(window, {clientX: 740});
-    await fireEvent.mouseUp(window, {clientX: 740});
-    await waitFor(() => expect(storage.get('aitelier_dag_pane_width')).toBe('480'));
-    cleanup();
-    const second = render(StateProjects);
-    await second.findByRole('heading', {name: 'running-old'});
-    expect(aside(second).style.width).toBe('480px');
-  });
-
-  it('degrades to one usable column on a narrow viewport', async () => {
+  it('keeps the current conversation while searching the project list', async () => {
     const view = render(StateProjects);
     await view.findByRole('heading', {name: 'running-old'});
-    expect(aside(view).dataset.narrow).toBe('false');
-    window.innerWidth = 600;
-    try {
-      window.dispatchEvent(new Event('resize'));
-      await waitFor(() => expect(aside(view).dataset.narrow).toBe('true'));
-      // No drag target and no fixed pixel width: the pane is a full-width row
-      // under the list, and its DAG link and mode switch still work.
-      expect(view.queryByRole('separator', {name: 'Resize conversation pane'})).toBeNull();
-      expect(aside(view).style.width).toBe('');
-      expect(view.getByRole('tab', {name: 'Conversation'})).toBeTruthy();
-      // The picker that used to switch DAGs is gone, header included; the link
-      // into the selected DAG is what the header carries instead.
-      expect(aside(view).querySelector('select')).toBeNull();
-      expect(view.getByLabelText('Open this State DAG')).toBeTruthy();
-      await selectDag(view, 'idle-recent');
-      await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('idle-recent'));
-    } finally { window.innerWidth = 1024; }
+    await selectDag(view, 'running-old');
+    await fireEvent.input(view.getByRole('searchbox'), {target: {value: 'idle'}});
+    await waitFor(() => expect(cards(view.container)).toEqual(['idle-recent', 'idle-older']));
+    expect(dagHref(view)).toContain('running-old');
+    expect(view.getByRole('tab', {name: 'Conversation'})).toBeTruthy();
   });
 
   it('keeps the selected DAG across two mode switches and does not reload the thread', async () => {
@@ -202,5 +165,35 @@ describe('the split conversation pane', () => {
     expect(api.dshDriverHistory.mock.calls.length).toBe(1);
     expect(dagHref(view)).toContain('idle-recent');
     expect(selectedCard().getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
+describe('workbench project drafts', () => {
+  it('retains separate drafts and exact question context while switching projects', async () => {
+    const question = {message_id:'q-message',thread_id:'q-message',project_id:'running-old',
+      sender_kind:'driver',sender_driver_id:'dsh-running',subject:'A long report title',body:'Report',refs:{},
+      created_at:'2026-11-14T21:00:00Z',reply_to_message_id:null,
+      segments:[{id:'q1',kind:'question',text:'Should we continue?'}]};
+    api.dshDriverConversation.mockImplementation(async (projectId: string) => ({project_id:projectId,
+      messages:projectId==='running-old'?[question]:[],has_more:false,next_cursor:null,end_of_history:true,
+      unread_count:0,matched_total:1}));
+    const view = render(StateProjects);
+    await view.findByRole('heading', {name:'running-old'});
+    await selectDag(view,'running-old');
+    await fireEvent.click(await view.findByRole('button',{name:'Answer this question: Should we continue?'}));
+    await fireEvent.input(view.getByRole('textbox'),{target:{value:'Project A answer'}});
+    await selectDag(view,'idle-recent');
+    await waitFor(()=>expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe(''));
+    await fireEvent.input(view.getByRole('textbox'),{target:{value:'Project B draft'}});
+    await selectDag(view,'running-old');
+    await waitFor(()=>expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Project A answer'));
+    expect(view.container.querySelector('[data-answering]')?.getAttribute('data-answer-segment-id')).toBe('q1');
+    await fireEvent.click(view.getByRole('button',{name:'Send'}));
+    await waitFor(()=>expect(api.sendDriverConversationMessage).toHaveBeenCalledWith('running-old','Project A answer',{
+      replyToMessageId:'q-message',targetDriverId:'dsh-running',answers:[{message_id:'q-message',segment_id:'q1'}],
+    }));
+    await selectDag(view,'idle-recent');
+    await waitFor(()=>expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Project B draft'));
+    expect(view.container.querySelector('[data-answering]')).toBeNull();
   });
 });

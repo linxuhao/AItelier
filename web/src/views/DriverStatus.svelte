@@ -91,15 +91,18 @@
         {/key}
       {/if}
       {#if conversationProject}
-        <DriverConversation projectId={conversationProject}
+        <div class="driver-conversation-host">
+        {#key conversationProject}<DriverConversation projectId={conversationProject}
           projectTitle={projects.find(p => p.project_id === conversationProject)?.title ?? conversationProject}
           driverId={status.projects[conversationProject]?.managed?.driver_id ?? ''}
-          onclose={closeConversation} onread={() => void loadUnread()} />
+          onclose={closeConversation} onread={() => void loadUnread()} />{/key}
+        </div>
       {/if}
     {/if}
   </details>
 {/if}
 <style>
+  .driver-conversation-host{display:flex;flex-direction:column;container-type:inline-size;height:min(760px,75dvh);min-height:360px;}
   .driver-status{margin:.45rem 0;font-size:.76rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;padding:.5rem .65rem;}
   summary{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem 1rem;margin:0;line-height:1.3;}
   .driver-state{display:inline-flex;align-items:center;gap:.3rem;}

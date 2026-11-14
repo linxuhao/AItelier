@@ -91,8 +91,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-describe('the project card keeps the host path for writers only', () => {
-  it('shows neither the path nor a placeholder to an anonymous visitor, then shows the path to a writer', async () => {
+describe('the compact project list omits server paths', () => {
+  it('keeps server paths out of navigation for both anonymous visitors and writers', async () => {
     authStore.set({ ...anonymous });
     const view = render(StateProjects);
     await view.findByRole('heading', { name: PROJECT_TITLE });
@@ -110,7 +110,8 @@ describe('the project card keeps the host path for writers only', () => {
 
     // The writer's branch, on the same mounted view: the guard reacts.
     authStore.set({ ...writer });
-    await waitFor(() => expect(view.container.textContent).toContain(HOST_PATH));
+    await waitFor(() => expect(view.container.querySelector('.conversation-pane')).not.toBeNull());
+    expect(view.container.textContent).not.toContain(HOST_PATH);
     expect(view.container.textContent).not.toContain(NO_SOURCE);
   });
 });

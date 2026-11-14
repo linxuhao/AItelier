@@ -35,7 +35,7 @@ const page = (messages: any[], extra: any = {}) =>
     matched_total: messages.length, unread_count: 0, read_upto_message_id: null,
     read_upto_created_at: null, ...extra});
 const subjects = (view: {container: HTMLElement}) =>
-  [...view.container.querySelectorAll('article.message .subject')].map(node => node.textContent ?? '');
+  [...view.container.querySelectorAll('article.message')].map(node => (node.querySelector('.subject') ?? node.querySelector('.message-content'))?.textContent ?? '');
 const articles = (view: {container: HTMLElement}) => view.container.querySelectorAll('article.message').length;
 
 // The two messages already on screen when the pane opens.
@@ -84,7 +84,7 @@ describe('new messages arrive while the pane is open', () => {
     const view = render(DriverConversation, {projectId: 'alpha'});
     await view.findByText('Second report');
     expect(api.dshDriverConversation).toHaveBeenCalledTimes(1);
-    expect(subjects(view)).toEqual(['Message from the user', 'Second report']);
+    expect(subjects(view)).toEqual(['body of Message from the user', 'Second report']);
 
     // The driver writes now. Before the fix the thread was fetched once on mount,
     // so the only way to this message was the page's Refresh button.
@@ -93,7 +93,7 @@ describe('new messages arrive while the pane is open', () => {
 
     await view.findByText('Fresh report');
     expect(api.dshDriverConversation).toHaveBeenCalledTimes(2);
-    expect(subjects(view)).toEqual(['Message from the user', 'Second report', 'Fresh report']);
+    expect(subjects(view)).toEqual(['body of Message from the user', 'Second report', 'Fresh report']);
   });
 
   it('picks the message up within one bounded cadence, not sooner and not later', async () => {
@@ -168,8 +168,8 @@ describe('a refresh does not disturb the reader', () => {
     const view = render(DriverConversation, {projectId: 'alpha'});
     await view.findByText('Second report');
     await fireEvent.click(view.getByRole('button', {name: 'Load earlier messages'}));
-    await view.findByText('Message from the user');
-    expect(subjects(view)).toEqual(['Message from the user', 'Second report']);
+    await view.findByText('body of Message from the user');
+    expect(subjects(view)).toEqual(['body of Message from the user', 'Second report']);
     expect(view.container.textContent).toContain('Beginning of the conversation');
 
     // The newest page repeats the whole thread PLUS a new message. The poll's own
@@ -181,7 +181,7 @@ describe('a refresh does not disturb the reader', () => {
     await vi.advanceTimersByTimeAsync(REFRESH_MS);
     await view.findByText('Fresh report');
 
-    expect(subjects(view)).toEqual(['Message from the user', 'Second report', 'Fresh report']);
+    expect(subjects(view)).toEqual(['body of Message from the user', 'Second report', 'Fresh report']);
     expect(new Set(subjects(view)).size).toBe(3);
     // The older page survived: the reader is still at the beginning of history,
     // with no "load earlier" affordance pointing back at pages already rendered.
@@ -380,8 +380,8 @@ describe('tagged segments', () => {
     const asking = [...view.container.querySelectorAll('article.message')]
       .find(a => a.querySelector('.subject')?.textContent === 'Deploy question') as HTMLElement;
     expect(asking).toBeTruthy();
-    expect(asking.querySelectorAll('pre')).toHaveLength(1);
-    expect(asking.querySelector('pre')?.textContent).toBe('Heads up.\nmay I restart the host now?');
+    expect(asking.querySelectorAll('.message-content')).toHaveLength(1);
+    expect(asking.querySelector('.message-content')?.textContent?.trim()).toBe('Heads up.\nmay I restart the host now?');
     expect(asking.textContent?.split('may I restart the host now?').length - 1).toBe(1);
     expect(asking.querySelector('.segments')).toBeNull();
     expect(asking.querySelector('.segment')).toBeNull();
@@ -391,16 +391,16 @@ describe('tagged segments', () => {
     // The same holds for every other segmented message in the thread.
     const info = [...view.container.querySelectorAll('article.message')]
       .find(a => a.querySelector('.subject')?.textContent === 'Just an update') as HTMLElement;
-    expect(info.querySelectorAll('pre')).toHaveLength(1);
+    expect(info.querySelectorAll('.message-content')).toHaveLength(1);
     expect(info.querySelector('.segments, .segment, .seg-tag, [data-kind]')).toBeNull();
 
-    // A segment-less message still renders its body in a <pre>.
-    expect(view.getByText('body of Plain message').tagName).toBe('PRE');
+    // A segment-less message still renders its body as Markdown.
+    expect(view.getByText('body of Plain message').tagName).toBe('P');
     // And nothing in the whole thread is split into tagged blocks.
     expect(view.container.querySelector('[data-conversation-thread] .segments, [data-conversation-thread] .segment, [data-conversation-thread] .seg-tag, [data-conversation-thread] [data-kind]')).toBeNull();
   });
 
-  it('shows a segmented message with an empty body as its segment texts, once, in ONE <pre>', async () => {
+  it('shows a segmented message with an empty body as its segment texts, once, in one message body', async () => {
     api.dshDriverConversation.mockResolvedValue(page([
       entry('e1', 'driver', 'Empty body', '2026-11-03T12:00:00+00:00', {body: '',
         segments: [{id: 's1', kind: 'info', text: 'Heads up.'},
@@ -412,11 +412,11 @@ describe('tagged segments', () => {
     const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
       .find(a => a.querySelector('.subject')?.textContent === 'Empty body') as HTMLElement;
     expect(message).toBeTruthy();
-    // Both texts, joined by a newline, in exactly one <pre>: the body is empty, so
+    // Both texts, joined by a newline, in exactly one message body: the body is empty, so
     // the segments are the message, and each text appears once.
-    const pres = message.querySelectorAll('pre');
+    const pres = message.querySelectorAll('.message-content');
     expect(pres).toHaveLength(1);
-    expect(pres[0].textContent).toBe('Heads up.\nmay I restart the host now?');
+    expect(pres[0].textContent?.trim()).toBe('Heads up.\nmay I restart the host now?');
     expect(message.textContent?.split('may I restart the host now?').length - 1).toBe(1);
     expect(message.textContent?.split('Heads up.').length - 1).toBe(1);
     // Still no split: no segment list, no tags, no kinded blocks.
@@ -444,8 +444,8 @@ describe('tagged segments', () => {
     const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
       .find(a => a.querySelector('.subject')?.textContent === 'Body wins') as HTMLElement;
     expect(message).toBeTruthy();
-    expect(message.querySelectorAll('pre')).toHaveLength(1);
-    expect(message.querySelector('pre')?.textContent).toBe('The body is the message.');
+    expect(message.querySelectorAll('.message-content')).toHaveLength(1);
+    expect(message.querySelector('.message-content')?.textContent?.trim()).toBe('The body is the message.');
     // Preferring the segments here would show the same message twice, under two
     // different wordings.
     expect(message.textContent).not.toContain('a stale segment copy');
@@ -464,9 +464,9 @@ describe('tagged segments', () => {
     const message = [...view.container.querySelectorAll('[data-conversation-thread] article.message')]
       .find(a => a.querySelector('.subject')?.textContent === 'Whitespace first') as HTMLElement;
     expect(message).toBeTruthy();
-    expect(message.querySelectorAll('pre')).toHaveLength(1);
+    expect(message.querySelectorAll('.message-content')).toHaveLength(1);
     // Exactly the readable text: no leading blank line, no padding around it.
-    expect(message.querySelector('pre')?.textContent).toBe('may I restart the host now?');
+    expect(message.querySelector('.message-content')?.textContent?.trim()).toBe('may I restart the host now?');
   });
 
   it('renders no text block at all for a message with neither a body nor segments', async () => {
@@ -481,6 +481,6 @@ describe('tagged segments', () => {
     expect(message).toBeTruthy();
     // An empty <pre> is a visible blank block in the thread; the message has no text,
     // so it must render no text element.
-    expect(message.querySelectorAll('pre')).toHaveLength(0);
+    expect(message.querySelectorAll('.message-content')).toHaveLength(0);
   });
 });

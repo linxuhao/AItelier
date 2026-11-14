@@ -25,21 +25,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglu1-mesa fontconfig libfontconfig1 \
         xvfb xauth libgl1-mesa-dri \
         xdotool \
-        weston libegl1 libegl-mesa0 libgles2 \
-        libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 \
+        weston xwayland libegl1 libegl-mesa0 libgles2 \
     && rm -rf /var/lib/apt/lists/*
 
 # The GPU render backend (godot_harness.py, GODOT_RENDER_BACKEND): a render pass
 # can draw on the host's GPU instead of llvmpipe when the render node is mapped
 # in (docker-compose.yml godot-builder). weston is the private headless
-# compositor (GL renderer, --backend=headless) each render pass starts for
-# itself; Godot joins it with --display-driver wayland, which loads
-# libwayland-client/-cursor/-egl and libxkbcommon at run time, and draws through
-# Mesa's EGL + GLES (libgl1-mesa-dri above carries the AMD radeonsi driver).
-# weston already depends on all of these; they are named so the backend's needs
-# do not hang on weston's dependency list. No XWayland, no Vulkan: Godot's
-# opengl3 driver talks Wayland directly. Xvfb, the software GL path and xdotool
-# stay — the CPU render path and the windowed input gate run on X11.
+# compositor (GL renderer through Mesa's EGL + GLES, --backend=headless) each
+# render pass starts for itself, and xwayland gives it a rootful X display that
+# Godot joins with the same --display-driver x11 the CPU path uses; Godot's GLX
+# context then runs on the GPU (libgl1-mesa-dri above carries the AMD radeonsi
+# driver). Godot's own Wayland driver is not used: it can deadlock or crash at
+# exit (see godot_harness.py). No Vulkan. Xvfb, the software GL path and
+# xdotool stay — the CPU render path and the windowed input gate run on Xvfb.
 
 # xdotool is the DRIVER for the windowed input gate, and it is a build-time
 # dependency for a reason. The play-test harness delivers its clicks with

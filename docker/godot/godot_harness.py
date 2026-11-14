@@ -1244,14 +1244,26 @@ def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
 # plus Mesa's software rasteriser (llvmpipe), which burns host CPU for every
 # frame. When the host's render node is mapped into this container, the same
 # pass can draw on the GPU instead: a private headless weston (GL renderer) is
-# the display, and Godot joins it through its Wayland driver. Measured on one
+# the compositor, a private rootful Xwayland on it is the X display, and Godot
+# joins that display through the SAME X11 driver the CPU path uses — its GLX
+# context then lands on the GPU's driver instead of llvmpipe. Measured on one
 # unchanged suite: about the same wall time and roughly half the CPU, with the
 # captured frames differing in well under one percent of their pixels.
 #
+# Why not Godot's own Wayland driver: it does not exit reliably. Its event
+# thread blocks in poll() with no timeout and checks its stop flag only after
+# poll returns; at exit the main thread sets that flag, does one roundtrip and
+# joins the thread. When the main thread itself reads the roundtrip's reply,
+# nothing ever wakes the event thread and the join waits forever (measured:
+# roughly one GPU pass in seven hung after its script had called quit()), and
+# exits that do return sometimes crash on the way out (SIGSEGV / SIGILL). The
+# X11 driver's event thread waits with a 1 ms timeout and rechecks its flag,
+# which is why the CPU path never showed either.
+#
 # GODOT_RENDER_BACKEND chooses, read per invocation:
 #   auto (default) — GPU when a render node is openable AND a private weston
-#                    comes up on a hardware GL renderer within
-#                    WESTON_READY_SEC; otherwise the unchanged
+#                    comes up on a hardware GL renderer and its Xwayland opens
+#                    a display within WESTON_READY_SEC; otherwise the unchanged
 #                    Xvfb + llvmpipe command, with the reason on the record.
 #   gpu            — GPU required: an unavailable GPU fails the invocation.
 #   cpu            — today's Xvfb + llvmpipe command, byte for byte.
@@ -1259,49 +1271,56 @@ def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
 # the GPU path its result is the result: there is no silent second run on CPU.
 #
 # Weston is started by a small launcher that is itself the invocation's process
-# (so the session leader `_kill_own_session` targets): weston, its helper
-# clients and Godot all live in that one session, and every existing kill —
-# wall clock, idle window, an exception — takes all of them down together.
-# Each invocation gets its own XDG_RUNTIME_DIR and socket name, removed in a
-# finally whatever happened, so concurrent passes never share a compositor.
+# (so the session leader `_kill_own_session` targets). weston runs with a
+# config that starts no helper clients (kiosk shell, no input method): the
+# desktop shell's helpers put themselves in process groups of their own, out of
+# reach of a group kill. So weston, Xwayland and Godot are all in the
+# launcher's process group, and every existing kill — wall clock, idle window,
+# an exception — takes all of them down together. Each invocation gets its own
+# XDG_RUNTIME_DIR, Wayland socket name, X display number (Xwayland picks a free
+# one) and X authority cookie, the directory removed in a finally whatever
+# happened, so concurrent passes never share a compositor or a display.
 RENDER_BACKEND_MODES = ("auto", "gpu", "cpu")
-# How long a private weston may take to publish its socket before `auto` falls
-# back (and `gpu` fails). Measured well under a second on an idle host.
+# How long a private weston and its Xwayland together may take to come up
+# before `auto` falls back (and `gpu` fails). Measured well under a second on
+# an idle host.
 WESTON_READY_SEC = 10.0
-# Vsync pins a Wayland client to the compositor's refresh, so the headless
-# output advertises an absurd refresh rate and Godot is told not to wait.
+# Vsync pins a client to the compositor's refresh, so the headless output
+# advertises an absurd refresh rate and Godot is told not to wait.
 WESTON_REFRESH_MHZ = 1000000
+# No desktop shell (its helper clients escape the process group) and no input
+# method (another helper client); one kiosk output is all a render pass needs.
+_WESTON_INI = "[core]\nshell=kiosk\n\n[input-method]\npath=\n"
 _GL_DEVICE_RE = re.compile(r"Using Device:[ \t]*([^\r\n]+)")
 
-# argv: weston socket width height ready_ticks godot-argv...
+# argv: weston xwayland socket width height ready_ticks godot-argv...
 # Silent on stdout/stderr on purpose: those streams are Godot's, and they are
 # parsed for diagnostics. Its own facts go to files in the private runtime dir.
 _GPU_LAUNCH_SH = r'''rt="$XDG_RUNTIME_DIR"
-weston="$1"; sock="$2"; width="$3"; height="$4"; ticks="$5"; shift 5
-# Every way out goes through here: TERM to this whole process group (weston and
-# the helper clients it started; this shell ignores it), KILL to weston in case
-# it ignores TERM, reap it, and exit with the status given.
+weston="$1"; xwayland="$2"; sock="$3"; width="$4"; height="$5"; ticks="$6"; shift 6
+# Every way out goes through here: TERM to this whole process group (weston,
+# Xwayland and Godot; this shell ignores it), KILL to the two servers in case
+# they ignore TERM, reap them, and exit with the status given.
 finish() {
     trap '' TERM
     kill -TERM 0 2>/dev/null
-    kill -KILL "$wpid" 2>/dev/null
+    kill -KILL "$wpid" $xpid 2>/dev/null
     wait
     exit "$1"
 }
-"$weston" --backend=headless --renderer=gl --no-config --socket="$sock" \
-    --width="$width" --height="$height" --refresh-rate=%d \
+unavailable() {
+    echo "$1" >"$rt/unavailable"
+    finish 0
+}
+xpid=
+"$weston" --backend=headless --renderer=gl --config="$rt/weston.ini" \
+    --socket="$sock" --width="$width" --height="$height" --refresh-rate=%d \
     >"$rt/weston.log" 2>&1 </dev/null &
 wpid=$!
 n=0
 while [ ! -S "$rt/$sock" ]; do
-    if ! kill -0 "$wpid" 2>/dev/null; then
-        echo "weston exited before its socket appeared" >"$rt/unavailable"
-        finish 0
-    fi
-    if [ "$n" -ge "$ticks" ]; then
-        echo "weston did not publish its socket within $ticks x 0.1s" >"$rt/unavailable"
-        finish 0
-    fi
+    kill -0 "$wpid" 2>/dev/null || unavailable "weston exited before its socket appeared"
+    [ "$n" -lt "$ticks" ] || unavailable "weston did not publish its socket within $ticks x 0.1s"
     n=$((n + 1))
     sleep 0.1
 done
@@ -1311,12 +1330,25 @@ done
 renderer=$(sed -n 's/.*GL renderer: *//p' "$rt/weston.log" | head -n 1)
 case "$renderer" in
     *llvmpipe*|*softpipe*|*swrast*|*SwiftShader*)
-        echo "weston came up on software GL ($renderer), not the GPU" >"$rt/unavailable"
-        finish 0
-        ;;
+        unavailable "weston came up on software GL ($renderer), not the GPU" ;;
 esac
+# A rootful Xwayland on the private weston: it picks a free display number and
+# writes it to fd 3 once it accepts connections. Same size as the CPU path's
+# Xvfb screen.
+"$xwayland" -auth "$rt/xauth" -displayfd 3 -nolisten tcp -noreset \
+    -geometry "${width}x${height}" 3>"$rt/display" >"$rt/xwayland.log" 2>&1 </dev/null &
+xpid=$!
+display=
+while :; do
+    display=$(sed -n '1s/^\([0-9][0-9]*\)$/\1/p' "$rt/display")
+    [ -z "$display" ] || break
+    kill -0 "$xpid" 2>/dev/null || unavailable "Xwayland exited before it opened a display"
+    [ "$n" -lt "$ticks" ] || unavailable "Xwayland did not open a display within $ticks x 0.1s of weston starting"
+    n=$((n + 1))
+    sleep 0.1
+done
 : >"$rt/launched"
-"$@"
+env -u WAYLAND_DISPLAY DISPLAY=":$display" XAUTHORITY="$rt/xauth" "$@"
 finish "$?"
 ''' % WESTON_REFRESH_MHZ
 
@@ -1338,6 +1370,10 @@ def _weston_bin() -> str | None:
     return shutil.which(os.environ.get("GODOT_WESTON_BIN", "weston"))
 
 
+def _xwayland_bin() -> str | None:
+    return shutil.which(os.environ.get("GODOT_XWAYLAND_BIN", "Xwayland"))
+
+
 def _gpu_render_node() -> tuple[str | None, str | None]:
     """(render node this process can open, None) or (None, why not).
 
@@ -1346,6 +1382,8 @@ def _gpu_render_node() -> tuple[str | None, str | None]:
     """
     if not _weston_bin():
         return None, "weston is not installed in this image"
+    if not _xwayland_bin():
+        return None, "Xwayland is not installed in this image"
     dri = Path(os.environ.get("GODOT_DRI_DIR", "/dev/dri"))
     try:
         nodes = sorted(dri.glob("renderD*"))
@@ -1509,24 +1547,41 @@ def _note_weston_start(ok: bool, reason: str | None, source: str) -> None:
     _WESTON_START = {"ok": ok, "reason": reason, "source": source}
 
 
+def _write_wildcard_xauth(path: Path) -> None:
+    """An Xauthority file holding one fresh MIT-MAGIC-COOKIE-1 for ANY display
+    number (FamilyWild, empty number): Xwayland picks its display only once it
+    starts, and refuses clients without a cookie. Owner-only, in the private
+    runtime dir."""
+    def field(data: bytes) -> bytes:
+        return len(data).to_bytes(2, "big") + data
+    record = ((0xFFFF).to_bytes(2, "big") + field(b"") + field(b"")
+              + field(b"MIT-MAGIC-COOKIE-1") + field(os.urandom(16)))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(record)
+
+
 @contextmanager
 def _weston_session(env: dict, tail: list[str]):
     """(runtime dir, launcher command, its env) for running `tail` on a private
-    weston; the runtime dir is removed on exit whatever happened."""
+    weston + Xwayland; the runtime dir is removed on exit whatever happened."""
     width, height = _render_size()
     runtime = Path(tempfile.mkdtemp(prefix="godot-wl-"))
     try:
         launcher = runtime / "launch.sh"
         launcher.write_text(_GPU_LAUNCH_SH)
+        (runtime / "weston.ini").write_text(_WESTON_INI)
+        _write_wildcard_xauth(runtime / "xauth")
         sock = "wl-" + uuid.uuid4().hex[:12]
         genv = dict(env)
         genv.pop("DISPLAY", None)
+        genv.pop("XAUTHORITY", None)
         genv.pop("LIBGL_ALWAYS_SOFTWARE", None)
         genv["XDG_RUNTIME_DIR"] = str(runtime)
         genv["WAYLAND_DISPLAY"] = sock
         ticks = max(1, math.ceil(WESTON_READY_SEC * 10))
-        cmd = ["sh", str(launcher), _weston_bin() or "weston", sock, width, height,
-               str(ticks), *tail]
+        cmd = ["sh", str(launcher), _weston_bin() or "weston",
+               _xwayland_bin() or "Xwayland", sock, width, height, str(ticks), *tail]
         yield runtime, cmd, genv
     finally:
         shutil.rmtree(runtime, ignore_errors=True)
@@ -1538,12 +1593,15 @@ def _weston_failure(runtime: Path, returncode) -> str:
         why = (runtime / "unavailable").read_text().strip()
     except OSError:
         why = "launcher exited %s before starting godot" % returncode
-    try:
-        tail = (runtime / "weston.log").read_text(errors="replace")
-        tail = " ".join(tail.strip().splitlines()[-3:])[-300:]
-    except OSError:
-        tail = ""
-    return why + ("; weston: " + tail if tail else "")
+    for name, log in (("weston", "weston.log"), ("Xwayland", "xwayland.log")):
+        try:
+            tail = (runtime / log).read_text(errors="replace")
+            tail = " ".join(tail.strip().splitlines()[-3:])[-300:]
+        except OSError:
+            tail = ""
+        if tail:
+            why += "; %s: %s" % (name, tail)
+    return why
 
 
 def _probe_weston_start() -> dict:
@@ -1568,15 +1626,16 @@ def _probe_weston_start() -> dict:
 
 
 def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
-    """One render pass on a private headless weston.
+    """One render pass on a private headless weston + Xwayland, Godot on its
+    X11 driver (see the section comment for why not its Wayland driver).
 
     Returns (CompletedProcess, None) once Godot was launched — whatever it then
-    did — or (None, reason) when the compositor never came up and Godot was
+    did — or (None, reason) when the display stack never came up and Godot was
     never started. A timeout propagates with the backend record attached:
-    `gpu` once Godot was running, `none` when it fired while weston was still
-    starting (nothing drew a frame).
+    `gpu` once Godot was running, `none` when it fired while weston or Xwayland
+    was still starting (nothing drew a frame).
     """
-    tail = [GODOT_BIN, "--display-driver", "wayland", "--rendering-driver", "opengl3",
+    tail = [GODOT_BIN, "--display-driver", "x11", "--rendering-driver", "opengl3",
             "--disable-vsync", *args]
     with _weston_session(env, tail) as (runtime, cmd, genv):
         info = {"render_backend": "gpu", "render_backend_mode": mode,
@@ -1587,7 +1646,7 @@ def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
             if not (runtime / "launched").exists():
                 info["render_backend"] = "none"
                 info["render_fallback_reason"] = (
-                    "timed out while weston was starting; godot was never launched")
+                    "timed out while weston/Xwayland was starting; godot was never launched")
             else:
                 _note_weston_start(True, None, "render_pass")
             info["render_gl_device"] = _gl_device(exc.stdout, exc.stderr)
@@ -1655,7 +1714,7 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
             cpu_timeout = timeout - (time.monotonic() - started)
             if cpu_timeout <= 0:
                 never_ran["render_fallback_reason"] = (
-                    "%s; weston used the whole budget, godot was never launched"
+                    "%s; weston/Xwayland used the whole budget, godot was never launched"
                     % reason)
                 exc = subprocess.TimeoutExpired(args, timeout)
                 exc.render_backend = _record_render_backend(never_ran)

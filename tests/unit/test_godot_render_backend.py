@@ -3,21 +3,24 @@
 `_run(render=True)` picks a backend per invocation (GODOT_RENDER_BACKEND =
 auto | gpu | cpu). These tests drive the REAL launcher, the real process
 session and the real teardown with stand-in programs: a fake `weston` that
-binds the Wayland socket it was told to (and starts a helper child, as the real
-one starts its shell client), a fake `godot` that prints the GL device line the
-real engine prints, a fake `xvfb-run` for the CPU path, and a stand-in render
-node. What they pin:
+binds the Wayland socket it was told to (and, unless its config turns them
+off, starts a helper client in a process group of its own, as the real desktop
+shell's helpers do), a fake `Xwayland` that reports a display number on its
+-displayfd, a fake `godot` that prints the GL device line the real engine
+prints, a fake `xvfb-run` for the CPU path, and a stand-in render node. What
+they pin:
 
   * selection: cpu is today's command byte for byte; auto uses the GPU when a
-    render node opens and weston comes up, otherwise the unchanged CPU command
-    with the reason recorded; gpu fails with a clear error instead of falling
-    back;
+    render node opens and weston + Xwayland come up, otherwise the unchanged
+    CPU command with the reason recorded; gpu fails with a clear error instead
+    of falling back;
   * once Godot was launched on the GPU there is no second run on CPU;
-  * the weston/godot command lines (size follows RENDER_RES, vsync off, a very
-    high refresh rate, the Wayland driver);
-  * teardown: no weston, helper child, godot or runtime dir survives a pass —
-    after success, after a failing engine and after a timeout — and concurrent
-    passes never share a runtime dir or socket;
+  * the weston/Xwayland/godot command lines (size follows RENDER_RES, vsync
+    off, a very high refresh rate, Godot on its X11 driver against the private
+    Xwayland — never its Wayland driver, which deadlocks at exit);
+  * teardown: no weston, Xwayland, helper client, godot or runtime dir survives
+    a pass — after success, after a failing engine and after a timeout — and
+    concurrent passes never share a runtime dir, socket or X display;
   * every result names the backend that ran (`none` when Godot never started)
     and the GL device Godot printed; the fallback is charged what weston spent;
   * a weston that comes up on Mesa's software rasteriser is not the GPU;
@@ -48,13 +51,19 @@ FAKE_WESTON = r'''#!/usr/bin/env python3
 import json, os, signal, socket, subprocess, sys, time
 mode = os.environ.get("FAKE_WESTON_MODE", "ok")
 sock = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--socket=")][0]
-helper = subprocess.Popen(["sleep", "300"])
+config = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--config=")]
+ini = open(config[0]).read().split() if config else []
+# The real weston's desktop shell and input method are helper CLIENTS that put
+# themselves in process groups of their own; only a config naming the kiosk
+# shell and an empty input-method path starts none.
+helper = None
+if not ("shell=kiosk" in ini and "path=" in ini):
+    helper = subprocess.Popen(["sleep", "300"], start_new_session=True).pid
 with open(os.environ["FAKE_WESTON_LOG"], "a") as f:
-    f.write(json.dumps({"pid": os.getpid(), "helper": helper.pid, "argv": sys.argv[1:],
+    f.write(json.dumps({"pid": os.getpid(), "helper": helper, "argv": sys.argv[1:],
                         "runtime": os.environ.get("XDG_RUNTIME_DIR"), "sock": sock}) + "\n")
 if mode == "die":
     print("fake weston: no usable GL device", file=sys.stderr)
-    helper.kill()
     sys.exit(3)
 if mode == "software":
     # Mesa's fallback when no driver for the node loads: weston still comes up.
@@ -65,10 +74,30 @@ if mode in ("ok", "software"):
     s = socket.socket(socket.AF_UNIX)
     s.bind(os.path.join(os.environ["XDG_RUNTIME_DIR"], sock))
     s.listen(1)
-def stop(*_):
-    helper.terminate()
-    sys.exit(0)
-signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(1)
+'''
+
+FAKE_XWAYLAND = r'''#!/usr/bin/env python3
+import json, os, signal, sys, time
+mode = os.environ.get("FAKE_XWAYLAND_MODE", "ok")
+argv = sys.argv[1:]
+opt = lambda name: argv[argv.index(name) + 1] if name in argv else None
+display = 100 + os.getpid() % 100000
+with open(os.environ["FAKE_XWAYLAND_LOG"], "a") as f:
+    f.write(json.dumps({"pid": os.getpid(), "argv": argv, "display": display,
+                        "wayland": os.environ.get("WAYLAND_DISPLAY"),
+                        "auth_mode": oct(os.stat(opt("-auth")).st_mode & 0o777)}) + "\n")
+if mode == "die":
+    print("fake Xwayland: cannot connect to the compositor", file=sys.stderr)
+    sys.exit(1)
+if mode == "ok":
+    os.write(int(opt("-displayfd")), b"%d\n" % display)
+if os.environ.get("FAKE_XWAYLAND_IGNORES_TERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+else:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(1)
 '''
@@ -79,7 +108,7 @@ with open(os.environ["FAKE_GODOT_LOG"], "a") as f:
     f.write(json.dumps({"pid": os.getpid(), "argv": sys.argv[1:],
                         "env": {k: os.environ.get(k) for k in (
                             "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DISPLAY",
-                            "LIBGL_ALWAYS_SOFTWARE")}}) + "\n")
+                            "XAUTHORITY", "LIBGL_ALWAYS_SOFTWARE")}}) + "\n")
 if "--headless" not in sys.argv:
     print("Godot Engine v4.x - https://godotengine.org")
     print("OpenGL API 4.6 (Core Profile) - Compatibility - Using Device: "
@@ -139,7 +168,8 @@ def _gone(pid: int, within: float = 5.0) -> bool:
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
-    """Stand-in weston/godot/xvfb-run and render node, wired through the env."""
+    """Stand-in weston/Xwayland/godot/xvfb-run and render node, wired through
+    the env."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     dri = tmp_path / "dri"
@@ -149,6 +179,7 @@ def rig(tmp_path, monkeypatch):
     scratch.mkdir()
     r = type("Rig", (), {})()
     r.weston_log = tmp_path / "weston.jsonl"
+    r.xwayland_log = tmp_path / "xwayland.jsonl"
     r.godot_log = tmp_path / "godot.jsonl"
     r.xvfb_log = tmp_path / "xvfb.jsonl"
     r.dri = dri
@@ -156,14 +187,18 @@ def rig(tmp_path, monkeypatch):
     r.godot = _exe(bindir / "godot", FAKE_GODOT)
     _exe(bindir / "xvfb-run", FAKE_XVFB_RUN)
     r.weston = _exe(bindir / "weston", FAKE_WESTON)
+    r.xwayland = _exe(bindir / "Xwayland", FAKE_XWAYLAND)
     monkeypatch.setenv("PATH", "%s:%s" % (bindir, os.environ.get("PATH", "")))
     monkeypatch.setenv("FAKE_WESTON_LOG", str(r.weston_log))
+    monkeypatch.setenv("FAKE_XWAYLAND_LOG", str(r.xwayland_log))
     monkeypatch.setenv("FAKE_GODOT_LOG", str(r.godot_log))
     monkeypatch.setenv("FAKE_XVFB_LOG", str(r.xvfb_log))
     monkeypatch.setenv("GODOT_WESTON_BIN", r.weston)
+    monkeypatch.setenv("GODOT_XWAYLAND_BIN", r.xwayland)
     monkeypatch.setenv("GODOT_DRI_DIR", str(dri))
     monkeypatch.delenv("GODOT_RENDER_BACKEND", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("XAUTHORITY", raising=False)
     monkeypatch.setattr(gh, "GODOT_BIN", r.godot)
     monkeypatch.setattr(gh, "RENDER_RES", "1280x720")
     monkeypatch.setattr(gh, "WESTON_READY_SEC", 5.0)
@@ -180,8 +215,11 @@ def _leftover_runtime_dirs(r) -> list:
 def _assert_torn_down(r):
     for row in _lines(r.weston_log):
         assert _gone(row["pid"]), "weston %d survived the pass" % row["pid"]
-        assert _gone(row["helper"]), "weston's helper %d survived the pass" % row["helper"]
+        assert row["helper"] is None or _gone(row["helper"]), (
+            "weston's helper client %d survived the pass" % row["helper"])
         assert not Path(row["runtime"]).exists(), row["runtime"]
+    for row in _lines(r.xwayland_log):
+        assert _gone(row["pid"]), "Xwayland %d survived the pass" % row["pid"]
     for row in _lines(r.godot_log):
         assert _gone(row["pid"]), "godot %d survived the pass" % row["pid"]
     assert _leftover_runtime_dirs(r) == []
@@ -267,27 +305,40 @@ def test_auto_uses_the_gpu_when_weston_comes_up(rig, monkeypatch):
     assert "--width=1920" in weston["argv"] and "--height=1080" in weston["argv"]
     assert "--refresh-rate=%d" % gh.WESTON_REFRESH_MHZ in weston["argv"]
     assert gh.WESTON_REFRESH_MHZ >= 1000000
+    assert weston["helper"] is None
+    (xwayland,) = _lines(rig.xwayland_log)
+    assert xwayland["wayland"] == weston["sock"]
+    assert xwayland["argv"][xwayland["argv"].index("-geometry") + 1] == "1920x1080"
+    assert "-nolisten" in xwayland["argv"] and "-displayfd" in xwayland["argv"]
+    assert xwayland["argv"][xwayland["argv"].index("-auth") + 1] == weston["runtime"] + "/xauth"
+    assert xwayland["auth_mode"] == "0o600"
     (godot,) = _lines(rig.godot_log)
-    assert godot["argv"] == ["--display-driver", "wayland", "--rendering-driver", "opengl3",
+    assert godot["argv"] == ["--display-driver", "x11", "--rendering-driver", "opengl3",
                              "--disable-vsync", "--path", "/p", "-s", "res://t.gd"]
-    assert godot["env"]["WAYLAND_DISPLAY"] == weston["sock"]
+    assert godot["env"]["DISPLAY"] == ":%d" % xwayland["display"]
+    assert godot["env"]["XAUTHORITY"] == weston["runtime"] + "/xauth"
+    assert godot["env"]["WAYLAND_DISPLAY"] is None
     assert godot["env"]["XDG_RUNTIME_DIR"] == weston["runtime"]
-    assert godot["env"]["DISPLAY"] is None and godot["env"]["LIBGL_ALWAYS_SOFTWARE"] is None
+    assert godot["env"]["LIBGL_ALWAYS_SOFTWARE"] is None
     assert Path(weston["runtime"]).parent == rig.scratch
     assert _lines(rig.xvfb_log) == []
     _assert_torn_down(rig)
 
 
 def test_gpu_pass_drops_the_software_gl_and_x11_env(rig, monkeypatch):
-    """An operator's DISPLAY / LIBGL_ALWAYS_SOFTWARE must not reach the GPU
-    pass: Godot would draw on llvmpipe while the record says gpu."""
+    """An operator's DISPLAY / XAUTHORITY / LIBGL_ALWAYS_SOFTWARE must not reach
+    the GPU pass: Godot would draw on llvmpipe (or on another X server) while
+    the record says gpu."""
     monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("XAUTHORITY", "/elsewhere/.Xauthority")
     monkeypatch.setenv("LIBGL_ALWAYS_SOFTWARE", "1")
     cp = gh._run(["--path", "/p"], timeout=30, render=True,
-                 extra_env={"LIBGL_ALWAYS_SOFTWARE": "1"})
+                 extra_env={"LIBGL_ALWAYS_SOFTWARE": "1", "DISPLAY": ":98"})
     assert cp.render_backend["render_backend"] == "gpu"
+    (xwayland,) = _lines(rig.xwayland_log)
     (godot,) = _lines(rig.godot_log)
-    assert godot["env"]["DISPLAY"] is None
+    assert godot["env"]["DISPLAY"] == ":%d" % xwayland["display"]
+    assert godot["env"]["XAUTHORITY"].endswith("/xauth")
     assert godot["env"]["LIBGL_ALWAYS_SOFTWARE"] is None
     _assert_torn_down(rig)
 
@@ -351,14 +402,21 @@ def test_entries_that_never_ran_still_name_their_backend(rig, tmp_path, monkeypa
     _assert_torn_down(rig)
 
 
-@pytest.mark.parametrize("weston_mode,reason", [
-    ("die", "weston exited"),
-    ("hang", "did not publish its socket"),
-    ("software", "software GL (llvmpipe"),
+@pytest.mark.parametrize("weston_mode,xwayland_mode,reason", [
+    ("die", "ok", "weston exited"),
+    ("hang", "ok", "did not publish its socket"),
+    ("software", "ok", "software GL (llvmpipe"),
+    ("ok", "die", "Xwayland exited before it opened a display"),
+    ("ok", "hang", "Xwayland did not open a display"),
 ])
-def test_auto_falls_back_to_cpu_before_godot_starts(rig, monkeypatch, weston_mode, reason):
+def test_auto_falls_back_to_cpu_before_godot_starts(rig, monkeypatch, weston_mode,
+                                                    xwayland_mode, reason):
     monkeypatch.setenv("FAKE_WESTON_MODE", weston_mode)
-    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5)
+    monkeypatch.setenv("FAKE_XWAYLAND_MODE", xwayland_mode)
+    # Short only where the window itself is under test: a stand-in that dies
+    # must be seen dying, not outlasted by a window a loaded host can miss.
+    hang = "hang" in (weston_mode, xwayland_mode)
+    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5 if hang else 5.0)
     cp = gh._run(["--path", "/p"], timeout=30, render=True)
     assert cp.render_backend["render_backend"] == "cpu"
     assert reason in cp.render_backend["render_fallback_reason"]
@@ -385,8 +443,10 @@ def test_auto_reports_a_render_node_it_cannot_open(rig, monkeypatch):
 @pytest.mark.parametrize("break_it,match", [
     ("no_node", "no render node"),
     ("no_weston", "weston is not installed"),
+    ("no_xwayland", "Xwayland is not installed"),
     ("weston_dies", "weston exited"),
     ("weston_on_software_gl", "software GL"),
+    ("xwayland_dies", "Xwayland exited"),
 ])
 def test_gpu_mode_fails_clearly_and_never_runs_cpu(rig, monkeypatch, break_it, match):
     monkeypatch.setenv("GODOT_RENDER_BACKEND", "gpu")
@@ -394,8 +454,12 @@ def test_gpu_mode_fails_clearly_and_never_runs_cpu(rig, monkeypatch, break_it, m
         (rig.dri / "renderD128").unlink()
     elif break_it == "no_weston":
         monkeypatch.setenv("GODOT_WESTON_BIN", str(rig.scratch / "absent-weston"))
+    elif break_it == "no_xwayland":
+        monkeypatch.setenv("GODOT_XWAYLAND_BIN", str(rig.scratch / "absent-Xwayland"))
     elif break_it == "weston_dies":
         monkeypatch.setenv("FAKE_WESTON_MODE", "die")
+    elif break_it == "xwayland_dies":
+        monkeypatch.setenv("FAKE_XWAYLAND_MODE", "die")
     else:
         monkeypatch.setenv("FAKE_WESTON_MODE", "software")
     with pytest.raises(gh.GpuRenderUnavailable, match=match) as info:
@@ -457,8 +521,63 @@ def test_concurrent_gpu_passes_never_share_a_compositor(rig, monkeypatch):
     assert len({w["runtime"] for w in westons}) == 3
     assert len({w["sock"] for w in westons}) == 3
     godots = _lines(rig.godot_log)
-    assert len({g["env"]["WAYLAND_DISPLAY"] for g in godots}) == 3
+    assert len({g["env"]["DISPLAY"] for g in godots}) == 3
+    assert len({g["env"]["XAUTHORITY"] for g in godots}) == 3
     _assert_torn_down(rig)
+
+
+def test_weston_starts_no_helper_client_a_group_kill_cannot_reach(rig, monkeypatch):
+    """The real desktop shell's helper clients run in process groups of their
+    own, so neither the launcher's TERM nor the session kill reaches them. The
+    pass gives weston a config that starts none (kiosk shell, no input method).
+    Positive control: without that config the stand-in's helper does escape."""
+    cp = gh._run(["--path", "/p"], timeout=30, render=True)
+    assert cp.render_backend["render_backend"] == "gpu"
+    (weston,) = _lines(rig.weston_log)
+    assert any(a.startswith("--config=") for a in weston["argv"])
+    assert "--no-config" not in weston["argv"]
+    assert weston["helper"] is None
+    _assert_torn_down(rig)
+
+    monkeypatch.setattr(gh, "_WESTON_INI", "")
+    gh._run(["--path", "/p"], timeout=30, render=True)
+    escaped = _lines(rig.weston_log)[-1]["helper"]
+    try:
+        assert escaped is not None and not _gone(escaped, within=1.0)
+        assert os.getpgid(escaped) != os.getpgid(0)
+    finally:
+        os.kill(escaped, 9)
+
+
+def test_an_xwayland_that_ignores_term_does_not_outlive_the_pass(rig, monkeypatch):
+    """The launcher reaps everything it started before it exits; a server that
+    shrugs off TERM is killed rather than waited on forever."""
+    monkeypatch.setenv("FAKE_XWAYLAND_IGNORES_TERM", "1")
+    t0 = time.monotonic()
+    cp = gh._run(["--path", "/p"], timeout=20, render=True)
+    assert time.monotonic() - t0 < 10
+    assert cp.returncode == 0 and cp.render_backend["render_backend"] == "gpu"
+    _assert_torn_down(rig)
+
+
+def test_the_x_cookie_is_private_and_matches_any_display(tmp_path):
+    """Xwayland picks its display number only once it runs, so the cookie is
+    FamilyWild with an empty display number; fresh per pass, owner-only."""
+    first, second = tmp_path / "a", tmp_path / "b"
+    gh._write_wildcard_xauth(first)
+    gh._write_wildcard_xauth(second)
+    assert first.stat().st_mode & 0o777 == 0o600
+    raw = first.read_bytes()
+    fields, at = [], 2
+    while at < len(raw):
+        size = int.from_bytes(raw[at:at + 2], "big")
+        fields.append(raw[at + 2:at + 2 + size])
+        at += 2 + size
+    assert raw[:2] == b"\xff\xff"
+    assert fields[:3] == [b"", b"", b"MIT-MAGIC-COOKIE-1"] and len(fields[3]) == 16
+    assert first.read_bytes() != second.read_bytes()
+    with pytest.raises(FileExistsError):
+        gh._write_wildcard_xauth(first)
 
 
 # ── what the results and /health say ──────────────────────────────────────
@@ -574,7 +693,6 @@ def test_health_says_unavailable_when_weston_cannot_start(rig, monkeypatch,
     driver for it in the image: weston dies, or Mesa falls back to llvmpipe)
     is not an available GPU."""
     monkeypatch.setenv("FAKE_WESTON_MODE", weston_mode)
-    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5)
     health = gh.health_snapshot()["render_backend"]
     assert health["render_node"] == str(rig.dri / "renderD128")
     assert health["gpu_available"] is False
@@ -630,6 +748,6 @@ def test_compose_maps_the_render_node_without_a_devices_entry():
 
 def test_image_carries_the_gpu_backend_and_keeps_the_x11_path():
     dockerfile = (_ROOT / "Dockerfile.godot").read_text()
-    for package in ("weston", "libegl-mesa0", "libgles2", "libwayland-egl1",
+    for package in ("weston", "xwayland", "libegl-mesa0", "libgles2",
                     "xvfb", "libgl1-mesa-dri", "xdotool"):
         assert package in dockerfile.split(), package

@@ -264,9 +264,9 @@ services:
       core: 0
     # The host GPU for RENDER passes, optional by construction. The harness
     # draws a render pass on the GPU when it can open a render node (a private
-    # headless weston + Godot's Wayland driver; GODOT_RENDER_BACKEND, default
-    # auto) and on Xvfb + llvmpipe otherwise. Compile stays --headless and the
-    # windowed input gate stays on Xvfb either way.
+    # headless weston + Xwayland, Godot on its X11 driver; GODOT_RENDER_BACKEND,
+    # default auto) and on Xvfb + llvmpipe otherwise. Compile stays --headless
+    # and the windowed input gate stays on Xvfb either way.
     # Access is a BIND of /dev/dri (in volumes: below) plus a cgroup rule for
     # the DRM character major 226 — deliberately NOT a `devices:` entry: a
     # `devices:` path missing on the host fails container creation, while a

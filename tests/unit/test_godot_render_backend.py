@@ -18,8 +18,11 @@ node. What they pin:
   * teardown: no weston, helper child, godot or runtime dir survives a pass —
     after success, after a failing engine and after a timeout — and concurrent
     passes never share a runtime dir or socket;
-  * every result names the backend that ran and the GL device Godot printed,
-    and /health reports availability and the configured mode.
+  * every result names the backend that ran (`none` when Godot never started)
+    and the GL device Godot printed; the fallback is charged what weston spent;
+  * a weston that comes up on Mesa's software rasteriser is not the GPU;
+  * /health reports the configured mode and whether weston really comes up
+    on the GPU, not only whether a render node opens.
 """
 import importlib.util
 import json
@@ -53,7 +56,12 @@ if mode == "die":
     print("fake weston: no usable GL device", file=sys.stderr)
     helper.kill()
     sys.exit(3)
-if mode == "ok":
+if mode == "software":
+    # Mesa's fallback when no driver for the node loads: weston still comes up.
+    print("GL renderer: llvmpipe (LLVM 19.1.7, 256 bits)", file=sys.stderr, flush=True)
+elif mode == "ok":
+    print("GL renderer: FakeVendor Fake GPU 9000", file=sys.stderr, flush=True)
+if mode in ("ok", "software"):
     s = socket.socket(socket.AF_UNIX)
     s.bind(os.path.join(os.environ["XDG_RUNTIME_DIR"], sock))
     s.listen(1)
@@ -159,6 +167,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "GODOT_BIN", r.godot)
     monkeypatch.setattr(gh, "RENDER_RES", "1280x720")
     monkeypatch.setattr(gh, "WESTON_READY_SEC", 5.0)
+    monkeypatch.setattr(gh, "_WESTON_START", None)
     # Every per-invocation runtime dir is made under this one, so a leak shows.
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     return r
@@ -269,9 +278,83 @@ def test_auto_uses_the_gpu_when_weston_comes_up(rig, monkeypatch):
     _assert_torn_down(rig)
 
 
+def test_gpu_pass_drops_the_software_gl_and_x11_env(rig, monkeypatch):
+    """An operator's DISPLAY / LIBGL_ALWAYS_SOFTWARE must not reach the GPU
+    pass: Godot would draw on llvmpipe while the record says gpu."""
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("LIBGL_ALWAYS_SOFTWARE", "1")
+    cp = gh._run(["--path", "/p"], timeout=30, render=True,
+                 extra_env={"LIBGL_ALWAYS_SOFTWARE": "1"})
+    assert cp.render_backend["render_backend"] == "gpu"
+    (godot,) = _lines(rig.godot_log)
+    assert godot["env"]["DISPLAY"] is None
+    assert godot["env"]["LIBGL_ALWAYS_SOFTWARE"] is None
+    _assert_torn_down(rig)
+
+
+def test_the_fallback_is_charged_what_weston_spent(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_WESTON_MODE", "hang")
+    monkeypatch.setattr(gh, "WESTON_READY_SEC", 1.0)
+    spawned = []
+    real_spawn = gh._spawn
+
+    def spawn(cmd, env, timeout, idle_window):
+        spawned.append((cmd[0], timeout))
+        return real_spawn(cmd, env, timeout, idle_window)
+
+    monkeypatch.setattr(gh, "_spawn", spawn)
+    cp = gh._run(["--path", "/p"], timeout=30, render=True)
+    assert cp.render_backend["render_backend"] == "cpu"
+    (gpu_try, cpu_pass) = spawned
+    assert gpu_try == ("sh", 30)
+    assert cpu_pass[0] == "xvfb-run"
+    # weston's ready window (>= 1 s of waiting) came out of the 30 s budget.
+    assert 20 < cpu_pass[1] <= 29.0, cpu_pass
+    _assert_torn_down(rig)
+
+
+def test_a_budget_spent_on_weston_is_a_pass_that_never_ran(rig, monkeypatch):
+    def slow_weston(*_a, **_k):
+        time.sleep(1.2)
+        return None, "weston did not publish its socket"
+
+    monkeypatch.setattr(gh, "_run_gpu", slow_weston)
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        gh._run(["--path", "/p"], timeout=1, render=True)
+    record = info.value.render_backend
+    assert record["render_backend"] == "none"
+    assert "weston did not publish" in record["render_fallback_reason"]
+    assert "never launched" in record["render_fallback_reason"]
+    assert _lines(rig.godot_log) == [] and _lines(rig.xvfb_log) == []
+
+
+def test_a_timeout_while_weston_starts_is_not_a_gpu_pass(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_WESTON_MODE", "hang")
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        gh._run(["--path", "/p"], timeout=1, render=True)
+    record = info.value.render_backend
+    assert record["render_backend"] == "none"
+    assert "godot was never launched" in record["render_fallback_reason"]
+    assert _lines(rig.godot_log) == [] and _lines(rig.xvfb_log) == []
+    _assert_torn_down(rig)
+
+
+def test_entries_that_never_ran_still_name_their_backend(rig, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_WESTON_MODE", "hang")
+    report = gh.run_script(str(_project(tmp_path)), ["res://tests/test_a.gd"],
+                           timeout=1, render=True)
+    (entry,) = report["results"]
+    assert entry["returncode"] == 124
+    assert entry["render_backend"] == "none"
+    assert report["render_backend"] == "none"
+    assert report["render_backend_counts"] == {"none": 1}
+    _assert_torn_down(rig)
+
+
 @pytest.mark.parametrize("weston_mode,reason", [
     ("die", "weston exited"),
     ("hang", "did not publish its socket"),
+    ("software", "software GL (llvmpipe"),
 ])
 def test_auto_falls_back_to_cpu_before_godot_starts(rig, monkeypatch, weston_mode, reason):
     monkeypatch.setenv("FAKE_WESTON_MODE", weston_mode)
@@ -303,6 +386,7 @@ def test_auto_reports_a_render_node_it_cannot_open(rig, monkeypatch):
     ("no_node", "no render node"),
     ("no_weston", "weston is not installed"),
     ("weston_dies", "weston exited"),
+    ("weston_on_software_gl", "software GL"),
 ])
 def test_gpu_mode_fails_clearly_and_never_runs_cpu(rig, monkeypatch, break_it, match):
     monkeypatch.setenv("GODOT_RENDER_BACKEND", "gpu")
@@ -310,11 +394,15 @@ def test_gpu_mode_fails_clearly_and_never_runs_cpu(rig, monkeypatch, break_it, m
         (rig.dri / "renderD128").unlink()
     elif break_it == "no_weston":
         monkeypatch.setenv("GODOT_WESTON_BIN", str(rig.scratch / "absent-weston"))
-    else:
+    elif break_it == "weston_dies":
         monkeypatch.setenv("FAKE_WESTON_MODE", "die")
+    else:
+        monkeypatch.setenv("FAKE_WESTON_MODE", "software")
     with pytest.raises(gh.GpuRenderUnavailable, match=match) as info:
         gh._run(["--path", "/p"], timeout=30, render=True)
     assert "GODOT_RENDER_BACKEND=gpu" in str(info.value)
+    assert info.value.render_backend["render_backend"] == "none"
+    assert match in info.value.render_backend["render_fallback_reason"]
     assert _lines(rig.godot_log) == [] and _lines(rig.xvfb_log) == []
     _assert_torn_down(rig)
 
@@ -459,6 +547,14 @@ def test_health_reports_gpu_availability_and_mode(rig, monkeypatch):
     assert health["render_backend"]["mode"] == "auto"
     assert health["render_backend"]["gpu_available"] is True
     assert health["render_backend"]["render_node"] == str(rig.dri / "renderD128")
+    assert health["render_backend"]["weston_start"] == {"ok": True, "reason": None,
+                                                        "source": "probe"}
+    # The probe ran once, as a render pass would, and left nothing behind.
+    assert len(_lines(rig.weston_log)) == 1
+    gh.health_snapshot()
+    assert len(_lines(rig.weston_log)) == 1
+    assert _lines(rig.godot_log) == []
+    _assert_torn_down(rig)
     monkeypatch.setenv("GODOT_RENDER_BACKEND", "cpu")
     (rig.dri / "renderD128").unlink()
     health = gh.health_snapshot()["render_backend"]
@@ -466,6 +562,39 @@ def test_health_reports_gpu_availability_and_mode(rig, monkeypatch):
     assert "no render node" in health["gpu_unavailable_reason"]
     monkeypatch.setenv("GODOT_RENDER_BACKEND", "bogus")
     assert "mode_error" in gh.health_snapshot()["render_backend"]
+
+
+@pytest.mark.parametrize("weston_mode,reason", [
+    ("die", "weston exited"),
+    ("software", "software GL"),
+])
+def test_health_says_unavailable_when_weston_cannot_start(rig, monkeypatch,
+                                                          weston_mode, reason):
+    """A render node that opens but cannot carry weston on the GPU (no working
+    driver for it in the image: weston dies, or Mesa falls back to llvmpipe)
+    is not an available GPU."""
+    monkeypatch.setenv("FAKE_WESTON_MODE", weston_mode)
+    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5)
+    health = gh.health_snapshot()["render_backend"]
+    assert health["render_node"] == str(rig.dri / "renderD128")
+    assert health["gpu_available"] is False
+    assert reason in health["gpu_unavailable_reason"]
+    assert health["weston_start"]["source"] == "probe"
+    _assert_torn_down(rig)
+    # A real pass that brings weston up corrects it; one that cannot, keeps it.
+    monkeypatch.setenv("FAKE_WESTON_MODE", "ok")
+    gh._run(["--path", "/p"], timeout=30, render=True)
+    health = gh.health_snapshot()["render_backend"]
+    assert health["gpu_available"] is True
+    assert health["weston_start"]["source"] == "render_pass"
+    monkeypatch.setenv("FAKE_WESTON_MODE", "die")
+    gh._run(["--path", "/p"], timeout=30, render=True)
+    health = gh.health_snapshot()["render_backend"]
+    assert health["gpu_available"] is False
+    assert health["weston_start"] == {"ok": False, "source": "render_pass",
+                                      "reason": health["weston_start"]["reason"]}
+    assert "weston exited" in health["gpu_unavailable_reason"]
+    _assert_torn_down(rig)
 
 
 def test_gl_device_is_read_from_the_engine_banner():
@@ -483,18 +612,20 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 def test_compose_maps_the_render_node_without_a_devices_entry():
     """A `devices:` path missing on the host fails container creation; a bind of
-    /dev/dri (created empty when missing) plus a cgroup rule degrades to CPU."""
+    /dev/dri (created empty by rootful Docker when missing, or pointed at an
+    empty directory with AITELIER_DRI_DIR) plus a cgroup rule degrades to CPU."""
     import yaml
     service = yaml.safe_load((_ROOT / "docker-compose.yml").read_text())["services"]["godot-builder"]
     assert "devices" not in service
-    assert "/dev/dri:/dev/dri" in service["volumes"]
+    assert "${AITELIER_DRI_DIR:-/dev/dri}:/dev/dri" in service["volumes"]
     assert any(rule.startswith("c 226:") for rule in service["device_cgroup_rules"])
     raw = (_ROOT / "docker-compose.yml").read_text()
     assert '"${AITELIER_RENDER_GID:-' in raw
     assert service["group_add"] == ["${AITELIER_RENDER_GID:-993}"]
     assert service["environment"]["GODOT_RENDER_BACKEND"] == "${GODOT_RENDER_BACKEND:-auto}"
     example = (_ROOT / ".env.example").read_text()
-    assert "AITELIER_RENDER_GID" in example and "GODOT_RENDER_BACKEND" in example
+    for name in ("AITELIER_RENDER_GID", "GODOT_RENDER_BACKEND", "AITELIER_DRI_DIR"):
+        assert name in example, name
 
 
 def test_image_carries_the_gpu_backend_and_keeps_the_x11_path():

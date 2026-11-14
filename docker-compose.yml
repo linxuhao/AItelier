@@ -270,10 +270,13 @@ services:
     # Access is a BIND of /dev/dri (in volumes: below) plus a cgroup rule for
     # the DRM character major 226 — deliberately NOT a `devices:` entry: a
     # `devices:` path missing on the host fails container creation, while a
-    # short-syntax bind whose source is missing is created empty, so a host with
-    # no GPU still starts and the harness reports "no render node" and renders
-    # on CPU. The render node is group-owned by the host's `render` group, whose
-    # gid differs per host: set AITELIER_RENDER_GID (see .env.example).
+    # short-syntax bind whose source is missing is created empty by rootful
+    # Docker, so a host with no GPU still starts and the harness reports "no
+    # render node" and renders on CPU. Engines that cannot create a missing bind
+    # source (rootless Docker, podman) refuse instead: on a host without
+    # /dev/dri point AITELIER_DRI_DIR at any empty directory (see .env.example).
+    # The render node is group-owned by the host's `render` group, whose gid
+    # differs per host: set AITELIER_RENDER_GID.
     group_add:
       - "${AITELIER_RENDER_GID:-993}"
     device_cgroup_rules:
@@ -320,7 +323,7 @@ services:
       # tests/unit/test_godot_sidecar_serves_the_checkout.py.
       - ./docker/godot:/srv:ro
       # The host's DRM nodes for the GPU render backend (see group_add above).
-      - /dev/dri:/dev/dri
+      - "${AITELIER_DRI_DIR:-/dev/dri}:/dev/dri"
     networks:
       - default
     restart: unless-stopped

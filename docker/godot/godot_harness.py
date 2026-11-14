@@ -1250,7 +1250,8 @@ def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
 #
 # GODOT_RENDER_BACKEND chooses, read per invocation:
 #   auto (default) — GPU when a render node is openable AND a private weston
-#                    comes up within WESTON_READY_SEC; otherwise the unchanged
+#                    comes up on a hardware GL renderer within
+#                    WESTON_READY_SEC; otherwise the unchanged
 #                    Xvfb + llvmpipe command, with the reason on the record.
 #   gpu            — GPU required: an unavailable GPU fails the invocation.
 #   cpu            — today's Xvfb + llvmpipe command, byte for byte.
@@ -1304,6 +1305,16 @@ while [ ! -S "$rt/$sock" ]; do
     n=$((n + 1))
     sleep 0.1
 done
+# Mesa falls back to its software rasteriser when the node opens but no driver
+# for it loads; weston then comes up anyway. That is not the GPU. weston logs
+# its GL renderer during start-up, before it publishes the socket.
+renderer=$(sed -n 's/.*GL renderer: *//p' "$rt/weston.log" | head -n 1)
+case "$renderer" in
+    *llvmpipe*|*softpipe*|*swrast*|*SwiftShader*)
+        echo "weston came up on software GL ($renderer), not the GPU" >"$rt/unavailable"
+        finish 0
+        ;;
+esac
 : >"$rt/launched"
 "$@"
 finish "$?"
@@ -1437,15 +1448,23 @@ def _with_render_backend_summary(body):
 
 
 def render_backend_health() -> dict:
-    """What /health says about the render backend; starts nothing."""
+    """What /health says about the render backend.
+
+    GPU availability is the static render-node check AND whether weston really
+    came up the last time something tried: the latest render pass, or — before
+    any pass has — one private weston started for the purpose (_probe_weston_start).
+    """
     try:
         mode, mode_error = _render_backend_mode(), None
     except ValueError as exc:
         mode, mode_error = os.environ.get("GODOT_RENDER_BACKEND"), str(exc)
     node, reason = _gpu_render_node()
-    report = {"mode": mode, "gpu_available": node is not None,
+    start = _probe_weston_start() if node is not None else None
+    if start is not None and not start["ok"]:
+        reason = "weston did not come up (%s): %s" % (start["source"], start["reason"])
+    report = {"mode": mode, "gpu_available": node is not None and start["ok"],
               "render_node": node, "gpu_unavailable_reason": reason,
-              "weston_ready_sec": WESTON_READY_SEC}
+              "weston_start": start, "weston_ready_sec": WESTON_READY_SEC}
     if mode_error:
         report["mode_error"] = mode_error
     return report
@@ -1477,56 +1496,111 @@ def _spawn(cmd: list[str], env: dict, timeout,
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
-    """One render pass on a private headless weston.
+# What the most recent attempt to bring up a private weston showed: a render
+# pass's own start-up, or the one probe /health runs when no pass has tried yet.
+# The static render-node check cannot see a node that opens but has no working
+# GL driver; this can. None until something has tried.
+_WESTON_START: dict | None = None
+_WESTON_START_LOCK = threading.Lock()
 
-    Returns (CompletedProcess, None) once Godot was launched — whatever it then
-    did — or (None, reason) when the compositor never came up and Godot was
-    never started. A timeout propagates with the backend record attached.
-    """
+
+def _note_weston_start(ok: bool, reason: str | None, source: str) -> None:
+    global _WESTON_START
+    _WESTON_START = {"ok": ok, "reason": reason, "source": source}
+
+
+@contextmanager
+def _weston_session(env: dict, tail: list[str]):
+    """(runtime dir, launcher command, its env) for running `tail` on a private
+    weston; the runtime dir is removed on exit whatever happened."""
     width, height = _render_size()
-    runtime = tempfile.mkdtemp(prefix="godot-wl-")
+    runtime = Path(tempfile.mkdtemp(prefix="godot-wl-"))
     try:
-        launcher = Path(runtime) / "launch.sh"
+        launcher = runtime / "launch.sh"
         launcher.write_text(_GPU_LAUNCH_SH)
         sock = "wl-" + uuid.uuid4().hex[:12]
         genv = dict(env)
         genv.pop("DISPLAY", None)
         genv.pop("LIBGL_ALWAYS_SOFTWARE", None)
-        genv["XDG_RUNTIME_DIR"] = runtime
+        genv["XDG_RUNTIME_DIR"] = str(runtime)
         genv["WAYLAND_DISPLAY"] = sock
         ticks = max(1, math.ceil(WESTON_READY_SEC * 10))
         cmd = ["sh", str(launcher), _weston_bin() or "weston", sock, width, height,
-               str(ticks), GODOT_BIN, "--display-driver", "wayland",
-               "--rendering-driver", "opengl3", "--disable-vsync", *args]
+               str(ticks), *tail]
+        yield runtime, cmd, genv
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
+def _weston_failure(runtime: Path, returncode) -> str:
+    """Why the launcher returned without starting its program."""
+    try:
+        why = (runtime / "unavailable").read_text().strip()
+    except OSError:
+        why = "launcher exited %s before starting godot" % returncode
+    try:
+        tail = (runtime / "weston.log").read_text(errors="replace")
+        tail = " ".join(tail.strip().splitlines()[-3:])[-300:]
+    except OSError:
+        tail = ""
+    return why + ("; weston: " + tail if tail else "")
+
+
+def _probe_weston_start() -> dict:
+    """The last weston start-up outcome; when nothing has tried yet, start a
+    private weston once exactly as a render pass would (running `true` in
+    place of Godot) and record what happened."""
+    with _WESTON_START_LOCK:
+        if _WESTON_START is None:
+            with _weston_session(dict(os.environ), ["true"]) as (runtime, cmd, genv):
+                try:
+                    cp = _spawn(cmd, genv, WESTON_READY_SEC + 5, None)
+                except subprocess.TimeoutExpired:
+                    _note_weston_start(False, "the weston start-up probe timed out",
+                                       "probe")
+                else:
+                    if (runtime / "launched").exists():
+                        _note_weston_start(True, None, "probe")
+                    else:
+                        _note_weston_start(False, _weston_failure(runtime, cp.returncode),
+                                           "probe")
+        return dict(_WESTON_START)
+
+
+def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
+    """One render pass on a private headless weston.
+
+    Returns (CompletedProcess, None) once Godot was launched — whatever it then
+    did — or (None, reason) when the compositor never came up and Godot was
+    never started. A timeout propagates with the backend record attached:
+    `gpu` once Godot was running, `none` when it fired while weston was still
+    starting (nothing drew a frame).
+    """
+    tail = [GODOT_BIN, "--display-driver", "wayland", "--rendering-driver", "opengl3",
+            "--disable-vsync", *args]
+    with _weston_session(env, tail) as (runtime, cmd, genv):
         info = {"render_backend": "gpu", "render_backend_mode": mode,
                 "render_fallback_reason": None, "render_gl_device": None}
         try:
             cp = _spawn(cmd, genv, timeout, idle_window)
         except subprocess.TimeoutExpired as exc:
-            if not (Path(runtime) / "launched").exists():
+            if not (runtime / "launched").exists():
+                info["render_backend"] = "none"
                 info["render_fallback_reason"] = (
                     "timed out while weston was starting; godot was never launched")
+            else:
+                _note_weston_start(True, None, "render_pass")
             info["render_gl_device"] = _gl_device(exc.stdout, exc.stderr)
             exc.render_backend = _record_render_backend(info)
             raise
-        if not (Path(runtime) / "launched").exists():
-            why = ""
-            try:
-                why = (Path(runtime) / "unavailable").read_text().strip()
-            except OSError:
-                why = "launcher exited %s before starting godot" % cp.returncode
-            try:
-                tail = (Path(runtime) / "weston.log").read_text(errors="replace")
-                tail = " ".join(tail.strip().splitlines()[-3:])[-300:]
-            except OSError:
-                tail = ""
-            return None, (why + ("; weston: " + tail if tail else ""))
+        if not (runtime / "launched").exists():
+            why = _weston_failure(runtime, cp.returncode)
+            _note_weston_start(False, why, "render_pass")
+            return None, why
+        _note_weston_start(True, None, "render_pass")
         info["render_gl_device"] = _gl_device(cp.stdout, cp.stderr)
         cp.render_backend = _record_render_backend(info)
         return cp, None
-    finally:
-        shutil.rmtree(runtime, ignore_errors=True)
 
 
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,
@@ -1564,17 +1638,28 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
             cp, reason = _run_gpu(args, env, timeout, idle_window, mode)
             if cp is not None:
                 return cp
+        # Godot has not run on either backend if we get past here without a
+        # CPU pass; a pass that ends now says so (`none`) and why.
+        never_ran = {"render_backend": "none", "render_backend_mode": mode,
+                     "render_fallback_reason": reason, "render_gl_device": None}
         if mode == "gpu":
-            raise GpuRenderUnavailable(
+            exc = GpuRenderUnavailable(
                 "GODOT_RENDER_BACKEND=gpu but the GPU render backend is "
                 "unavailable: %s" % reason)
+            exc.render_backend = _record_render_backend(never_ran)
+            raise exc
         fallback = reason
         if node is not None:
             # A compositor was attempted: what it spent comes out of this
             # invocation's budget. Godot never started, so this is not a retry.
             cpu_timeout = timeout - (time.monotonic() - started)
             if cpu_timeout <= 0:
-                raise subprocess.TimeoutExpired(args, timeout)
+                never_ran["render_fallback_reason"] = (
+                    "%s; weston used the whole budget, godot was never launched"
+                    % reason)
+                exc = subprocess.TimeoutExpired(args, timeout)
+                exc.render_backend = _record_render_backend(never_ran)
+                raise exc
     # --headless FORCES the dummy rendering driver, which draws nothing, so a
     # viewport capture comes back empty. To photograph frames Godot needs a
     # real display: Xvfb gives it one, and llvmpipe gives it a GL stack (the
@@ -7244,7 +7329,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 raw_logs.append({"label": Path(str(rel)).name, "stdout": "",
                                  "stderr": "unexpected engine/harness error: %r"
                                            % exc,
-                                 "returncode": None, "timed_out": False})
+                                 "returncode": None, "timed_out": False,
+                                 **_render_backend_fields(
+                                     getattr(exc, "render_backend", None))})
                 raise
             wall_sec = time.monotonic() - started_monotonic
             cpu_sec = max(0.0, _child_cpu_seconds() - cpu_before)

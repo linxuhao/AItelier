@@ -71,6 +71,7 @@ import ast
 import codecs
 import hashlib
 import fcntl
+import functools
 import json
 import os
 import math
@@ -1237,35 +1238,303 @@ def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
-def _run(args: list[str], timeout: int, extra_env: dict | None = None,
-         render: bool = False,
-         idle_window: float | None = None) -> subprocess.CompletedProcess:
-    """Run one engine invocation, bounded by `timeout` and, when asked, by
-    `idle_window` seconds of SILENCE (see SCRIPT_IDLE_WINDOW_SEC).
+# ── Render backend: the host iGPU through a private headless weston ────────
+#
+# A render pass needs a real display and a GL stack. The original path is Xvfb
+# plus Mesa's software rasteriser (llvmpipe), which burns host CPU for every
+# frame. When the host's render node is mapped into this container, the same
+# pass can draw on the GPU instead: a private headless weston (GL renderer) is
+# the compositor, a private rootful Xwayland on it is the X display, and Godot
+# joins that display through the SAME X11 driver the CPU path uses — its GLX
+# context then lands on the GPU's driver instead of llvmpipe. Measured on one
+# unchanged suite: about the same wall time and roughly half the CPU, with the
+# captured frames differing in well under one percent of their pixels.
+#
+# Why not Godot's own Wayland driver: it does not exit reliably. Its event
+# thread blocks in poll() with no timeout and checks its stop flag only after
+# poll returns; at exit the main thread sets that flag, does one roundtrip and
+# joins the thread. When the main thread itself reads the roundtrip's reply,
+# nothing ever wakes the event thread and the join waits forever (measured:
+# roughly one GPU pass in seven hung after its script had called quit()), and
+# exits that do return sometimes crash on the way out (SIGSEGV / SIGILL). The
+# X11 driver's event thread waits with a 1 ms timeout and rechecks its flag,
+# which is why the CPU path never showed either.
+#
+# GODOT_RENDER_BACKEND chooses, read per invocation:
+#   auto (default) — GPU when a render node is openable AND a private weston
+#                    comes up on a hardware GL renderer and its Xwayland opens
+#                    a display within WESTON_READY_SEC; otherwise the unchanged
+#                    Xvfb + llvmpipe command, with the reason on the record.
+#   gpu            — GPU required: an unavailable GPU fails the invocation.
+#   cpu            — today's Xvfb + llvmpipe command, byte for byte.
+# The fallback is decided BEFORE Godot starts. Once Godot has been launched on
+# the GPU path its result is the result: there is no silent second run on CPU.
+# A GPU pass whose Godot reports a software GL device (Xwayland handed its GLX
+# context to Mesa's rasteriser) keeps its result but is recorded `gpu-software`,
+# not `gpu`.
+#
+# Weston is started by a small launcher that is itself the invocation's process
+# (so the session leader `_kill_own_session` targets). weston runs with a
+# config that starts no helper clients (kiosk shell, no input method): the
+# desktop shell's helpers put themselves in process groups of their own, out of
+# reach of a group kill. So weston, Xwayland and Godot are all in the
+# launcher's process group, and every existing kill — wall clock, idle window,
+# an exception — takes all of them down together. Each invocation gets its own
+# XDG_RUNTIME_DIR, Wayland socket name, X display number (Xwayland picks a free
+# one) and X authority cookie, the directory removed in a finally whatever
+# happened, so concurrent passes never share a compositor or a display.
+RENDER_BACKEND_MODES = ("auto", "gpu", "cpu")
+# How long a private weston and its Xwayland together may take to come up
+# before `auto` falls back (and `gpu` fails). Measured well under a second on
+# an idle host.
+WESTON_READY_SEC = 10.0
+# Vsync pins a client to the compositor's refresh, so the headless output
+# advertises an absurd refresh rate and Godot is told not to wait.
+WESTON_REFRESH_MHZ = 1000000
+# The GPU pass's frame-rate cap (Godot's own limiter, --max-fps). Vsync stays
+# off, so without a cap Godot draws as fast as the GPU allows: several times the
+# software path's rate, and a different rate on every host. A suite that checks
+# something on every frame then samples moments the CPU path never reaches, and
+# its verdict depends on how fast the host is (measured: one suite red in about
+# a third of uncapped GPU passes, in none at a capped rate). A render gate judges
+# what a player sees at a normal display rate, so the GPU pass runs at that
+# rate. The CPU path's command is left exactly as it was.
+GPU_MAX_FPS = 60
+# Mesa's software rasterisers. The launcher refuses a weston that came up on
+# one (its case pattern lists the same names); a GPU pass whose Godot names one
+# as its GL device is labelled `gpu-software` (see _note_gpu_device).
+_SOFTWARE_GL_NAMES = ("llvmpipe", "softpipe", "swrast", "SwiftShader")
+# No desktop shell (its helper clients escape the process group) and no input
+# method (another helper client); one kiosk output is all a render pass needs.
+_WESTON_INI = "[core]\nshell=kiosk\n\n[input-method]\npath=\n"
+_GL_DEVICE_RE = re.compile(r"Using Device:[ \t]*([^\r\n]+)")
 
-    `idle_window=None` (every caller except `run_script`'s per-entry pass) is
-    the plain pipe-and-communicate behavior, byte for byte.
+# argv: weston xwayland socket width height ready_ticks godot-argv...
+# Silent on stdout/stderr on purpose: those streams are Godot's, and they are
+# parsed for diagnostics. Its own facts go to files in the private runtime dir.
+_GPU_LAUNCH_SH = r'''rt="$XDG_RUNTIME_DIR"
+weston="$1"; xwayland="$2"; sock="$3"; width="$4"; height="$5"; ticks="$6"; shift 6
+# Every way out goes through here: TERM to this whole process group (weston,
+# Xwayland and Godot; this shell ignores it), KILL to the two servers in case
+# they ignore TERM, reap them, and exit with the status given.
+finish() {
+    trap '' TERM
+    kill -TERM 0 2>/dev/null
+    kill -KILL "$wpid" $xpid 2>/dev/null
+    wait
+    exit "$1"
+}
+unavailable() {
+    echo "$1" >"$rt/unavailable"
+    finish 0
+}
+xpid=
+"$weston" --backend=headless --renderer=gl --config="$rt/weston.ini" \
+    --socket="$sock" --width="$width" --height="$height" --refresh-rate=%d \
+    >"$rt/weston.log" 2>&1 </dev/null &
+wpid=$!
+n=0
+while [ ! -S "$rt/$sock" ]; do
+    kill -0 "$wpid" 2>/dev/null || unavailable "weston exited before its socket appeared"
+    [ "$n" -lt "$ticks" ] || unavailable "weston did not publish its socket within $ticks x 0.1s"
+    n=$((n + 1))
+    sleep 0.1
+done
+# Mesa falls back to its software rasteriser when the node opens but no driver
+# for it loads; weston then comes up anyway. That is not the GPU. weston logs
+# its GL renderer during start-up, before it publishes the socket.
+renderer=$(sed -n 's/.*GL renderer: *//p' "$rt/weston.log" | head -n 1)
+case "$renderer" in
+    *llvmpipe*|*softpipe*|*swrast*|*SwiftShader*)
+        unavailable "weston came up on software GL ($renderer), not the GPU" ;;
+esac
+# A rootful Xwayland on the private weston: it picks a free display number and
+# writes it to fd 3 once it accepts connections. Same size as the CPU path's
+# Xvfb screen.
+"$xwayland" -auth "$rt/xauth" -displayfd 3 -nolisten tcp -noreset \
+    -geometry "${width}x${height}" 3>"$rt/display" >"$rt/xwayland.log" 2>&1 </dev/null &
+xpid=$!
+display=
+while :; do
+    display=$(sed -n '1s/^\([0-9][0-9]*\)$/\1/p' "$rt/display")
+    [ -z "$display" ] || break
+    kill -0 "$xpid" 2>/dev/null || unavailable "Xwayland exited before it opened a display"
+    [ "$n" -lt "$ticks" ] || unavailable "Xwayland did not open a display within $ticks x 0.1s of weston starting"
+    n=$((n + 1))
+    sleep 0.1
+done
+: >"$rt/launched"
+env -u WAYLAND_DISPLAY DISPLAY=":$display" XAUTHORITY="$rt/xauth" "$@"
+finish "$?"
+''' % WESTON_REFRESH_MHZ
+
+
+class GpuRenderUnavailable(RuntimeError):
+    """GODOT_RENDER_BACKEND=gpu, and the GPU render backend could not start."""
+
+
+def _render_backend_mode() -> str:
+    raw = os.environ.get("GODOT_RENDER_BACKEND", "auto")
+    mode = (raw or "auto").strip().lower()
+    if mode not in RENDER_BACKEND_MODES:
+        raise ValueError("GODOT_RENDER_BACKEND must be one of %s, got %r"
+                         % ("|".join(RENDER_BACKEND_MODES), raw))
+    return mode
+
+
+def _weston_bin() -> str | None:
+    return shutil.which(os.environ.get("GODOT_WESTON_BIN", "weston"))
+
+
+def _xwayland_bin() -> str | None:
+    return shutil.which(os.environ.get("GODOT_XWAYLAND_BIN", "Xwayland"))
+
+
+def _gpu_render_node() -> tuple[str | None, str | None]:
+    """(render node this process can open, None) or (None, why not).
+
+    A cheap static check — no compositor is started. Whether weston really
+    comes up is decided per invocation, inside its own session.
     """
-    env = dict(os.environ)
-    if extra_env:
-        env.update(extra_env)
-    if render:
-        # --headless FORCES the dummy rendering driver, which draws nothing, so a
-        # viewport capture comes back empty. To photograph frames Godot needs a
-        # real display: Xvfb gives it one, and llvmpipe gives it a GL stack (this
-        # container has no GPU). Compile stays on --headless — it needs no display
-        # and skipping the display is faster.
-        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
-        cmd = ["xvfb-run", "-a", "-s", f"-screen 0 {RENDER_RES}x24", GODOT_BIN,
-               "--display-driver", "x11", "--rendering-driver", "opengl3", *args]
+    if not _weston_bin():
+        return None, "weston is not installed in this image"
+    if not _xwayland_bin():
+        return None, "Xwayland is not installed in this image"
+    dri = Path(os.environ.get("GODOT_DRI_DIR", "/dev/dri"))
+    try:
+        nodes = sorted(dri.glob("renderD*"))
+    except OSError as exc:
+        return None, "cannot list %s: %s" % (dri, exc.strerror or exc)
+    if not nodes:
+        return None, "no render node under %s (device not mapped into the container)" % dri
+    refused = []
+    for node in nodes:
+        try:
+            fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+        except OSError as exc:
+            refused.append("%s: %s" % (node, exc.strerror or exc))
+            continue
+        os.close(fd)
+        return str(node), None
+    return None, "no render node is openable by this user (%s)" % "; ".join(refused)
+
+
+def _render_size() -> tuple[str, str]:
+    width, _, height = RENDER_RES.lower().partition("x")
+    if not (width.isdigit() and height.isdigit()):
+        raise ValueError("GODOT_PLAYTEST_RES must be WIDTHxHEIGHT, got %r" % RENDER_RES)
+    return width, height
+
+
+def _gl_device(*streams) -> str | None:
+    """The GL device string Godot printed (`... Using Device: X`), or None."""
+    for stream in streams:
+        if isinstance(stream, bytes):
+            stream = stream.decode(errors="replace")
+        match = _GL_DEVICE_RE.search(stream or "")
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+# Each render invocation's backend record, collected per request thread by the
+# report builders (`run_script`, `playtest_project`) — the same per-thread
+# channel shape as the request's abandonment predicate.
+_RENDER_BACKEND_LOG = threading.local()
+
+
+@contextmanager
+def _collect_render_backends():
+    previous = getattr(_RENDER_BACKEND_LOG, "entries", None)
+    entries: list = []
+    _RENDER_BACKEND_LOG.entries = entries
+    try:
+        yield entries
+    finally:
+        _RENDER_BACKEND_LOG.entries = previous
+        if previous is not None:
+            previous.extend(entries)
+
+
+def _record_render_backend(info: dict) -> dict:
+    entries = getattr(_RENDER_BACKEND_LOG, "entries", None)
+    if entries is not None:
+        entries.append(dict(info))
+    return info
+
+
+def _render_backend_fields(info) -> dict:
+    """The per-pass record a result row / evidence row carries, or {}."""
+    if not isinstance(info, dict):
+        return {}
+    return {k: info.get(k) for k in ("render_backend", "render_backend_mode",
+                                     "render_fallback_reason", "render_gl_device")}
+
+
+def _render_backend_summary(entries: list) -> dict:
+    """Report-level account of which backend the render passes ran on."""
+    if not entries:
+        return {}
+    counts: dict = {}
+    for entry in entries:
+        counts[entry["render_backend"]] = counts.get(entry["render_backend"], 0) + 1
+    devices = [e["render_gl_device"] for e in entries if e.get("render_gl_device")]
+    reasons = [e["render_fallback_reason"] for e in entries
+               if e.get("render_fallback_reason")]
+    return {"render_backend": (next(iter(counts)) if len(counts) == 1 else "mixed"),
+            "render_backend_mode": entries[-1].get("render_backend_mode"),
+            "render_backend_counts": counts,
+            "render_gl_device": devices[0] if devices else None,
+            "render_gl_devices": sorted(set(devices)),
+            "render_fallback_reason": reasons[0] if reasons else None}
+
+
+def _with_render_backend_summary(body):
+    """Wrap a render report builder so its report names the backend(s) used."""
+    @functools.wraps(body)
+    def wrapper(*args, **kwargs):
+        with _collect_render_backends() as entries:
+            report = body(*args, **kwargs)
+        if isinstance(report, dict):
+            report.update(_render_backend_summary(entries))
+        return report
+    return wrapper
+
+
+def render_backend_health() -> dict:
+    """What /health says about the render backend.
+
+    GPU availability is the static render-node check AND whether weston really
+    came up the last time something tried: the latest render pass, or — before
+    any pass has — one private weston started for the purpose (_probe_weston_start).
+    In cpu mode nothing starts on the GPU, the health check included: the start
+    is reported as not attempted.
+    """
+    try:
+        mode, mode_error = _render_backend_mode(), None
+    except ValueError as exc:
+        mode, mode_error = os.environ.get("GODOT_RENDER_BACKEND"), str(exc)
+    node, reason = _gpu_render_node()
+    if node is None:
+        start = None
+    elif mode == "cpu":
+        start = {"ok": None, "reason": "not attempted: mode cpu", "source": "skipped"}
+        reason = "weston start not attempted: mode cpu"
     else:
-        cmd = [GODOT_BIN, "--headless", *args]
-    if os.name != "posix":
-        raise ValueError("owned process-group execution requires POSIX sessions")
-    if not _valid_process_timeout(timeout):
-        raise ValueError("timeout must be finite, positive and fit native poll milliseconds")
-    if idle_window is not None and not _valid_process_timeout(idle_window):
-        raise ValueError("idle_window must be finite, positive and fit native poll milliseconds")
+        start = _probe_weston_start()
+    if start is not None and start["ok"] is False:
+        reason = "weston did not come up (%s): %s" % (start["source"], start["reason"])
+    report = {"mode": mode, "gpu_available": node is not None and start["ok"] is True,
+              "render_node": node, "gpu_unavailable_reason": reason,
+              "weston_start": start, "weston_ready_sec": WESTON_READY_SEC}
+    if mode_error:
+        report["mode_error"] = mode_error
+    return report
+
+
+def _spawn(cmd: list[str], env: dict, timeout,
+           idle_window) -> subprocess.CompletedProcess:
+    """Start `cmd` in a session of its own and wait for it, bounded."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env, start_new_session=True)
     if idle_window is not None:
@@ -1287,6 +1556,230 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
             proc.stderr.close()
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+# What the most recent attempt to bring up a private weston showed: a render
+# pass's own start-up, or the one probe /health runs when no pass has tried yet.
+# The static render-node check cannot see a node that opens but has no working
+# GL driver; this can. None until something has tried.
+_WESTON_START: dict | None = None
+_WESTON_START_LOCK = threading.Lock()
+
+
+def _note_weston_start(ok: bool, reason: str | None, source: str) -> None:
+    global _WESTON_START
+    _WESTON_START = {"ok": ok, "reason": reason, "source": source}
+
+
+def _write_wildcard_xauth(path: Path) -> None:
+    """An Xauthority file holding one fresh MIT-MAGIC-COOKIE-1 for ANY display
+    number (FamilyWild, empty number): Xwayland picks its display only once it
+    starts, and refuses clients without a cookie. Owner-only, in the private
+    runtime dir."""
+    def field(data: bytes) -> bytes:
+        return len(data).to_bytes(2, "big") + data
+    record = ((0xFFFF).to_bytes(2, "big") + field(b"") + field(b"")
+              + field(b"MIT-MAGIC-COOKIE-1") + field(os.urandom(16)))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(record)
+
+
+@contextmanager
+def _weston_session(env: dict, tail: list[str]):
+    """(runtime dir, launcher command, its env) for running `tail` on a private
+    weston + Xwayland; the runtime dir is removed on exit whatever happened."""
+    width, height = _render_size()
+    runtime = Path(tempfile.mkdtemp(prefix="godot-wl-"))
+    try:
+        launcher = runtime / "launch.sh"
+        launcher.write_text(_GPU_LAUNCH_SH)
+        (runtime / "weston.ini").write_text(_WESTON_INI)
+        _write_wildcard_xauth(runtime / "xauth")
+        sock = "wl-" + uuid.uuid4().hex[:12]
+        genv = dict(env)
+        genv.pop("DISPLAY", None)
+        genv.pop("XAUTHORITY", None)
+        genv.pop("LIBGL_ALWAYS_SOFTWARE", None)
+        genv["XDG_RUNTIME_DIR"] = str(runtime)
+        genv["WAYLAND_DISPLAY"] = sock
+        ticks = max(1, math.ceil(WESTON_READY_SEC * 10))
+        cmd = ["sh", str(launcher), _weston_bin() or "weston",
+               _xwayland_bin() or "Xwayland", sock, width, height, str(ticks), *tail]
+        yield runtime, cmd, genv
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
+def _weston_failure(runtime: Path, returncode) -> str:
+    """Why the launcher returned without starting its program."""
+    try:
+        why = (runtime / "unavailable").read_text().strip()
+    except OSError:
+        why = "launcher exited %s before starting godot" % returncode
+    for name, log in (("weston", "weston.log"), ("Xwayland", "xwayland.log")):
+        try:
+            tail = (runtime / log).read_text(errors="replace")
+            tail = " ".join(tail.strip().splitlines()[-3:])[-300:]
+        except OSError:
+            tail = ""
+        if tail:
+            why += "; %s: %s" % (name, tail)
+    return why
+
+
+def _probe_weston_start() -> dict:
+    """The last weston start-up outcome; when nothing has tried yet, start a
+    private weston once exactly as a render pass would (running `true` in
+    place of Godot) and record what happened."""
+    with _WESTON_START_LOCK:
+        if _WESTON_START is None:
+            with _weston_session(dict(os.environ), ["true"]) as (runtime, cmd, genv):
+                try:
+                    cp = _spawn(cmd, genv, WESTON_READY_SEC + 5, None)
+                except subprocess.TimeoutExpired:
+                    _note_weston_start(False, "the weston start-up probe timed out",
+                                       "probe")
+                else:
+                    if (runtime / "launched").exists():
+                        _note_weston_start(True, None, "probe")
+                    else:
+                        _note_weston_start(False, _weston_failure(runtime, cp.returncode),
+                                           "probe")
+        return dict(_WESTON_START)
+
+
+def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
+    """One render pass on a private headless weston + Xwayland, Godot on its
+    X11 driver (see the section comment for why not its Wayland driver).
+
+    Returns (CompletedProcess, None) once Godot was launched — whatever it then
+    did — or (None, reason) when the display stack never came up and Godot was
+    never started. A timeout propagates with the backend record attached:
+    `gpu` once Godot was running, `none` when it fired while weston or Xwayland
+    was still starting (nothing drew a frame).
+    """
+    tail = [GODOT_BIN, "--display-driver", "x11", "--rendering-driver", "opengl3",
+            "--disable-vsync", "--max-fps", str(GPU_MAX_FPS), *args]
+    with _weston_session(env, tail) as (runtime, cmd, genv):
+        info = {"render_backend": "gpu", "render_backend_mode": mode,
+                "render_fallback_reason": None, "render_gl_device": None}
+        try:
+            cp = _spawn(cmd, genv, timeout, idle_window)
+        except subprocess.TimeoutExpired as exc:
+            if not (runtime / "launched").exists():
+                info["render_backend"] = "none"
+                info["render_fallback_reason"] = (
+                    "timed out while weston/Xwayland was starting; godot was never launched")
+            else:
+                _note_weston_start(True, None, "render_pass")
+            _note_gpu_device(info, exc.stdout, exc.stderr)
+            exc.render_backend = _record_render_backend(info)
+            raise
+        if not (runtime / "launched").exists():
+            why = _weston_failure(runtime, cp.returncode)
+            _note_weston_start(False, why, "render_pass")
+            return None, why
+        _note_weston_start(True, None, "render_pass")
+        _note_gpu_device(info, cp.stdout, cp.stderr)
+        cp.render_backend = _record_render_backend(info)
+        return cp, None
+
+
+def _note_gpu_device(info: dict, *streams) -> None:
+    """Record the GL device Godot named on a GPU pass.
+
+    The launcher checked weston's renderer, but Godot's own GLX context is
+    Xwayland's to hand out: when Godot names a software rasteriser, that pass
+    did not draw on the GPU and is recorded `gpu-software` with the reason.
+    Not a fallback and not a retry — the pass's result stands as it is.
+    """
+    device = _gl_device(*streams)
+    info["render_gl_device"] = device
+    if (info["render_backend"] == "gpu" and device
+            and any(name.lower() in device.lower() for name in _SOFTWARE_GL_NAMES)):
+        info["render_backend"] = "gpu-software"
+        info["render_fallback_reason"] = (
+            "the GPU path ran, but Godot's GLX context landed on software GL (%s), "
+            "not the GPU" % device)
+
+
+def _run(args: list[str], timeout: int, extra_env: dict | None = None,
+         render: bool = False,
+         idle_window: float | None = None) -> subprocess.CompletedProcess:
+    """Run one engine invocation, bounded by `timeout` and, when asked, by
+    `idle_window` seconds of SILENCE (see SCRIPT_IDLE_WINDOW_SEC).
+
+    `idle_window=None` (every caller except `run_script`'s per-entry pass) is
+    the plain pipe-and-communicate behavior, byte for byte.
+
+    A render pass runs on the backend GODOT_RENDER_BACKEND selects (see
+    RENDER_BACKEND_MODES); the returned CompletedProcess — or a TimeoutExpired
+    raised from the pass — carries `render_backend`, the record of which
+    backend ran, why `auto` fell back if it did, and the GL device Godot named.
+    """
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    if os.name != "posix":
+        raise ValueError("owned process-group execution requires POSIX sessions")
+    if not _valid_process_timeout(timeout):
+        raise ValueError("timeout must be finite, positive and fit native poll milliseconds")
+    if idle_window is not None and not _valid_process_timeout(idle_window):
+        raise ValueError("idle_window must be finite, positive and fit native poll milliseconds")
+    if not render:
+        return _spawn([GODOT_BIN, "--headless", *args], env, timeout, idle_window)
+    mode = _render_backend_mode()
+    fallback = None
+    cpu_timeout = timeout
+    if mode != "cpu":
+        started = time.monotonic()
+        node, reason = _gpu_render_node()
+        if node is not None:
+            cp, reason = _run_gpu(args, env, timeout, idle_window, mode)
+            if cp is not None:
+                return cp
+        # Godot has not run on either backend if we get past here without a
+        # CPU pass; a pass that ends now says so (`none`) and why.
+        never_ran = {"render_backend": "none", "render_backend_mode": mode,
+                     "render_fallback_reason": reason, "render_gl_device": None}
+        if mode == "gpu":
+            exc = GpuRenderUnavailable(
+                "GODOT_RENDER_BACKEND=gpu but the GPU render backend is "
+                "unavailable: %s" % reason)
+            exc.render_backend = _record_render_backend(never_ran)
+            raise exc
+        fallback = reason
+        if node is not None:
+            # A compositor was attempted: what it spent comes out of this
+            # invocation's budget. Godot never started, so this is not a retry.
+            cpu_timeout = timeout - (time.monotonic() - started)
+            if cpu_timeout <= 0:
+                never_ran["render_fallback_reason"] = (
+                    "%s; weston/Xwayland used the whole budget, godot was never launched"
+                    % reason)
+                exc = subprocess.TimeoutExpired(args, timeout)
+                exc.render_backend = _record_render_backend(never_ran)
+                raise exc
+    # --headless FORCES the dummy rendering driver, which draws nothing, so a
+    # viewport capture comes back empty. To photograph frames Godot needs a
+    # real display: Xvfb gives it one, and llvmpipe gives it a GL stack (the
+    # CPU path; the GPU path is above). Compile stays on --headless — it needs
+    # no display and skipping the display is faster.
+    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    cmd = ["xvfb-run", "-a", "-s", f"-screen 0 {RENDER_RES}x24", GODOT_BIN,
+           "--display-driver", "x11", "--rendering-driver", "opengl3", *args]
+    info = {"render_backend": "cpu", "render_backend_mode": mode,
+            "render_fallback_reason": fallback, "render_gl_device": None}
+    try:
+        cp = _spawn(cmd, env, cpu_timeout, idle_window)
+    except subprocess.TimeoutExpired as exc:
+        info["render_gl_device"] = _gl_device(exc.stdout, exc.stderr)
+        exc.render_backend = _record_render_backend(info)
+        raise
+    info["render_gl_device"] = _gl_device(cp.stdout, cp.stderr)
+    cp.render_backend = _record_render_backend(info)
+    return cp
 
 
 # ── compile gate ───────────────────────────────────────────────────────────
@@ -3582,10 +4075,12 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
     if state_path.exists():
         state_path.unlink()
     t_proc = time.monotonic()
+    backend = {}
     try:
         cp = _run(args, timeout=timeout, extra_env=env, render=render)
         stdout, stderr = cp.stdout, cp.stderr
         returncode, timed_out = cp.returncode, False
+        backend = _render_backend_fields(getattr(cp, "render_backend", None))
     except subprocess.TimeoutExpired as e:
         # TimeoutExpired carries both streams as bytes; when a caller asked for
         # the raw log the killed run's own account must survive the kill.
@@ -3593,6 +4088,7 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
             return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
         stdout, stderr = _s(e.stdout), _s(e.stderr)
         returncode, timed_out = 124, True
+        backend = _render_backend_fields(getattr(e, "render_backend", None))
     except FileNotFoundError as e:
         # Render mode shells out to xvfb-run; if the image lacks it there is no
         # run at all. The caller's headless retry is what keeps the gate alive.
@@ -3606,7 +4102,7 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
         # stream (import / scenario:<name> / control:<scene>@<frames> / the
         # script's own name), so per-pass grouping survives the copy.
         raw.append({"label": raw_label, "stdout": stdout, "stderr": stderr,
-                    "returncode": returncode, "timed_out": timed_out})
+                    "returncode": returncode, "timed_out": timed_out, **backend})
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
     # A deferred call that never ran, or an atlas blit the engine refused, is a
     # runtime error of the game's own making — it just has no res:// frame. It
@@ -3622,6 +4118,9 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
         except json.JSONDecodeError:
             probe = {}
     parse_sec = time.monotonic() - t_parse
+    if probe and backend and isinstance(probe, dict):
+        # Which backend drew this pass, next to `render_mode` (set by the caller).
+        probe.update(backend)
     if timing is not None:
         timing["proc_sec"] = timing.get("proc_sec", 0.0) + proc_sec
         timing["snapshot_parse_sec"] = timing.get("snapshot_parse_sec", 0.0) + parse_sec
@@ -5581,6 +6080,10 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         shutil.rmtree(dst.parent, ignore_errors=True)
 
 
+# The report names the render backend(s) its passes ran on.
+playtest_project = _with_render_backend_summary(playtest_project)
+
+
 def _home_env(home: str) -> dict:
     """Keep Godot's user data and config inside this pass's disposable HOME."""
     return {"HOME": home, "XDG_DATA_HOME": str(Path(home) / ".local/share"),
@@ -6556,7 +7059,10 @@ def _retain_copy(declared: list, homes: list, raw_logs: list, corr: dict,
                     state["total"] += size
                     row = {"path": name, "source": "raw_%s" % stream, "size": size,
                            "sha256": digest, "pass": n, "label": log.get("label", "pass%d" % n)}
-                    row.update({k: log[k] for k in ("returncode", "timed_out") if k in log})
+                    row.update({k: log[k] for k in ("returncode", "timed_out",
+                                                    "render_backend", "render_backend_mode",
+                                                    "render_fallback_reason", "render_gl_device")
+                                if k in log})
                     raws.append(row)
         limit_hit = state["limit_hit"]
         ok = not refused and not missing and limit_hit is None
@@ -6880,11 +7386,13 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
             load_start = _host_load_average()
             started_monotonic = time.monotonic()
             idle_kill = None
+            backend = {}
             try:
                 cp = _run(["--path", str(dst), "-s", rel], timeout=timeout,
                           extra_env=_home_env(sc_home), render=render,
                           idle_window=idle_window)
                 rc, out, err = cp.returncode, cp.stdout, cp.stderr
+                backend = _render_backend_fields(getattr(cp, "render_backend", None))
             except ScriptIdleSilence as e:
                 # SILENCE, not the clock. The script is killed in its own
                 # session and this is a FAILED entry: it says which window
@@ -6897,6 +7405,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 out = _stream_text(e.stdout)
                 err = (_stream_text(e.stderr) + "\n" + e.describe()).lstrip()
                 idle_kill = e
+                backend = _render_backend_fields(getattr(e, "render_backend", None))
             except subprocess.TimeoutExpired as e:
                 # TimeoutExpired CARRIES the output produced before the kill —
                 # discarding it blinded the gate at the one moment its output
@@ -6911,6 +7420,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 rc = 124
                 out = _stream_text(e.stdout)
                 err = (_stream_text(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
+                backend = _render_backend_fields(getattr(e, "render_backend", None))
             except Exception as exc:
                 # An error nobody predicted (a missing Xvfb, a harness bug)
                 # must not take the pass's evidence down with it: the pass is
@@ -6920,7 +7430,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                 raw_logs.append({"label": Path(str(rel)).name, "stdout": "",
                                  "stderr": "unexpected engine/harness error: %r"
                                            % exc,
-                                 "returncode": None, "timed_out": False})
+                                 "returncode": None, "timed_out": False,
+                                 **_render_backend_fields(
+                                     getattr(exc, "render_backend", None))})
                 raise
             wall_sec = time.monotonic() - started_monotonic
             cpu_sec = max(0.0, _child_cpu_seconds() - cpu_before)
@@ -6929,7 +7441,8 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
             # artifacts below, and only then are all the homes cleaned up. The
             # full streams are kept for the manifest regardless of truncation.
             raw_logs.append({"label": Path(str(rel)).name, "stdout": out,
-                             "stderr": err, "returncode": rc, "timed_out": rc == 124})
+                             "stderr": err, "returncode": rc, "timed_out": rc == 124,
+                             **backend})
             # rc and the FAIL marker are what the SUITE says about itself.
             # They are silent about what the ENGINE said: test_encounter exited
             # 0, printed PASS, and left a deferred call that never ran in its
@@ -6967,7 +7480,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
                             "idle_started_at": (idle_kill.started_at
                                                 if idle_kill else None),
                             "last_output": last_line,
-                            "last_output_stream": last_stream})
+                            "last_output_stream": last_stream,
+                            # ── which render backend ran it (render only) ───
+                            **backend})
         # Retention runs while the entry points' homes are still on disk: a
         # declared relative path is taken from whichever owned user-data root
         # holds it, and the full raw streams recorded above go into the
@@ -7070,6 +7585,10 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600,
         for h in homes:
             shutil.rmtree(h, ignore_errors=True)
         shutil.rmtree(dst.parent, ignore_errors=True)
+
+
+# The report names the render backend(s) its passes ran on.
+run_script = _with_render_backend_summary(run_script)
 
 
 # ── HTTP transport (mirrors the Unity sidecar) ─────────────────────────────
@@ -7373,6 +7892,7 @@ def health_snapshot():
             "render_lock": {"held": held, "waiting": waiting},
             "render_lock_held": held,
             "render_lock_waiting": waiting,
+            "render_backend": render_backend_health(),
             "source_identity": {"path": str(Path(__file__).resolve()),
                                 "sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                 "loaded_sha256": _LOADED_SOURCE_SHA256,

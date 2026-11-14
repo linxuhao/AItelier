@@ -262,6 +262,39 @@ services:
     # No core dumps from crashing godot renders (same reason as aitelier).
     ulimits:
       core: 0
+    # The host GPU for RENDER passes, optional by construction. The harness
+    # draws a render pass on the GPU when it can open a render node (a private
+    # headless weston + Xwayland, Godot on its X11 driver; GODOT_RENDER_BACKEND,
+    # default auto) and on Xvfb + llvmpipe otherwise. Compile stays --headless
+    # and the windowed input gate stays on Xvfb either way.
+    # Access is a BIND of /dev/dri (in volumes: below) plus a cgroup rule for
+    # the render node's DRM character device 226:<minor> — deliberately NOT a
+    # `devices:` entry: a
+    # `devices:` path missing on the host fails container creation, while a
+    # short-syntax bind whose source is missing is created empty by rootful
+    # Docker, so a host with no GPU still starts and the harness reports "no
+    # render node" and renders on CPU. Engines that cannot create a missing bind
+    # source (rootless Docker, podman) refuse instead: on a host without
+    # /dev/dri point AITELIER_DRI_DIR at any empty directory (see .env.example).
+    # The render node is group-owned by the host's `render` group, whose gid
+    # differs per host: set AITELIER_RENDER_GID. Its minor can differ too: set
+    # AITELIER_RENDER_MINOR (default 128, renderD128; `stat -c %T
+    # /dev/dri/renderD128` prints it in hex, 80 = 128).
+    # The bind shows the whole /dev/dri, card0 (the display/KMS node) included,
+    # but the device cgroup lets the container read and write the render minor
+    # only: opening card0 (226:0), or any node made for it with mknod, is
+    # refused even for root in the container, whatever the file permissions,
+    # user or groups (Docker's default rules still let root mknod; the node it
+    # makes cannot be opened). A wrong minor shows as a render node that cannot
+    # be opened: auto renders on CPU with that reason, gpu fails.
+    # no-new-privileges keeps the image's setuid binaries from raising
+    # privileges inside the sidecar, which runs untrusted game code.
+    group_add:
+      - "${AITELIER_RENDER_GID:-993}"
+    device_cgroup_rules:
+      - "c 226:${AITELIER_RENDER_MINOR:-128} rw"
+    security_opt:
+      - "no-new-privileges:true"
     environment:
       PORT: "8080"
       # Writable HOME for Godot's import cache when run as an arbitrary host uid
@@ -271,6 +304,8 @@ services:
       GODOT_LIFECYCLE_DB: /var/lib/aitelier-godot/owners.sqlite3
       GODOT_DEPLOYMENT_LOCK: /var/lib/aitelier-godot/deployment-admission.lock
       GODOT_RENDER_EFFECT_LOCK: /var/lib/aitelier-godot/render-effect.lock
+      # auto | gpu | cpu — see the GPU note above and godot_harness.py.
+      GODOT_RENDER_BACKEND: "${GODOT_RENDER_BACKEND:-auto}"
     volumes:
       # Read-only view of the workspace at the IDENTICAL absolute path the main
       # container uses, so a project_dir passed over HTTP resolves the same here.
@@ -301,6 +336,8 @@ services:
       # /srv/godot_harness.py, the checkout's is 9345946f…). See
       # tests/unit/test_godot_sidecar_serves_the_checkout.py.
       - ./docker/godot:/srv:ro
+      # The host's DRM nodes for the GPU render backend (see group_add above).
+      - "${AITELIER_DRI_DIR:-/dev/dri}:/dev/dri"
     networks:
       - default
     restart: unless-stopped

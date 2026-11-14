@@ -1100,13 +1100,14 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     execute: (args, exec) => todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal),
   }));
   ctx.tools.register(defineTool({ name: 'todo_begin',
-    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session.',
-    parameters: planRef, output: jsonOutput,
+    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session. prompt_sha256 (batch sub-plans, optional): the sha256 your prompt named; it is recorded with the binding.',
+    parameters: { ...planRef, prompt_sha256: { type: 'string' } }, output: jsonOutput,
     async execute(args, exec) {
       // The CLI refuses, under the plan lock, to take a plan bound to another
       // session. Rebind only when that session is verified dead: not the root
       // and not a live child of this process.
-      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id];
+      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id,
+        ...(args.prompt_sha256 ? ['--prompt-sha256=' + args.prompt_sha256] : [])];
       const result = await todo.call(args.attempt_id, begin, exec.signal);
       if (result.refused !== 'bound_to_other_session') return result;
       const bound = result.bound_session;
@@ -1329,7 +1330,7 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_plan',
-      description: 'Director only. Freeze a todo BATCH for a State attempt from a kind: batch template (todo_templates lists find_verify): one find sub-plan per dimension now, one verify sub-plan per finding once every finder passed. Same arguments as todo_plan. dispatch holds the finder prompts, cut to the batch\'s max_parallel (the rest are pending): give each one verbatim to its own new native subagent. A batch template refuses todo_plan, an ordinary template refuses this tool.',
+      description: 'Director only. Freeze a todo BATCH for a State attempt from a kind: batch template (todo_templates lists find_verify): one find sub-plan per dimension now, one verify sub-plan per finding once every finder passed. Same arguments as todo_plan. dispatch holds the finder prompts, cut to the batch\'s max_parallel (concurrent finders; the rest are pending), each with its prompt_sha256: give each one verbatim to its own new native subagent, followed by a last line "prompt_sha256: <that sha>". A batch template refuses todo_plan, an ordinary template refuses this tool.',
       parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
         goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
         context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
@@ -1341,13 +1342,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_status',
-      description: 'Director only. Where a todo batch stands and what to dispatch next. Once every finder passed it first expands the verify stage (findings deduplicated and capped; those over the cap are listed unverified, never dropped). dispatch holds prompts cut to the free slots of the stage (find_verify: 6 finders, 4 verifiers at a time): give each verbatim to a NEW native subagent - a session that worked a finder of this batch is refused as verifier. A sub-plan whose child died is offered again (replaces_session); one offered but not yet begun is offered again too, so dispatch each once. deadline_passed is a notice only. When complete, run todo_finish on the batch attempt.',
+      description: 'Director only. Where a todo batch stands and what to dispatch next. Once every finder passed it first expands the verify stage (findings deduplicated and capped; those over the cap are listed unverified, never dropped). dispatch holds prompts cut to the free slots of the stage (find_verify: 4 finders, 4 verifiers at a time), each offered once: give each verbatim to a NEW native subagent, followed by a last line "prompt_sha256: <its sha>" - a session that ever held another sub-plan of this batch is refused. An offered prompt whose child has not begun waits in awaiting_begin; a sub-plan is offered again only when the session bound to it is dead (replaces_session), never while it lives. deadline_passed is a notice only. When complete, run todo_finish on the batch attempt.',
       parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const live = '--live-sessions=' + JSON.stringify(liveSessions());
-        const status = await todo.call(args.attempt_id, ['batch-status', '--attempt=' + args.attempt_id, live], exec.signal);
+        const status = await todo.call(args.attempt_id, ['batch-status', '--attempt=' + args.attempt_id, live, '--record-dispatch'], exec.signal);
         if (!status.expand_due) return status;
-        return todo.call(args.attempt_id, ['batch-expand', '--attempt=' + args.attempt_id, live], exec.signal);
+        return todo.call(args.attempt_id, ['batch-expand', '--attempt=' + args.attempt_id, live, '--record-dispatch'], exec.signal);
       },
     }));
     scope.tools.register(defineTool({ name: 'todo_finish',

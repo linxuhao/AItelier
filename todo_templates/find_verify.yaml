@@ -32,8 +32,10 @@ params:
     type: list[str]
     required: true
     description: Globs of the reviewed checkout the finders and verifiers look at.
+# Concurrent finder / verifier containers; v1 counts concurrent sub-plans per stage (offered or
+# bound, not yet passed). The deadline only produces a notice; nothing is stopped.
 budget:
-  max_parallel: 6
+  max_parallel: 4
   max_parallel_verify: 4
   deadline_minutes: 120
 stages:
@@ -46,7 +48,8 @@ stages:
       dimension only: ${dimension}. Look at: ${scope}. This is read-only work: do not modify the
       checkout and do not commit.
       Work the plan item by item with todo_status, todo_begin and todo_done, attempt_id ${subplan}
-      (item find).
+      (item find). If this prompt ends with a prompt_sha256 line, pass that value as prompt_sha256
+      to todo_begin.
       Write your report as one JSON object to the path below:
         {"findings": [{"id": "f1", "file": "<path relative to the checkout>", "line": 12,
                        "claim": "<what is wrong>", "failure_scenario": "<how it fails>"}]}
@@ -76,6 +79,7 @@ stages:
       --cpus 2 --memory 2g, one worker). Do not modify the checkout and do not commit.
       Finding: ${finding}
       Work the plan with todo_status, todo_begin and todo_done, attempt_id ${subplan} (item verify).
+      If this prompt ends with a prompt_sha256 line, pass that value as prompt_sha256 to todo_begin.
       Write your verdict as one JSON object to the path below:
         {"finding_id": "${finding_id}", "verdict": "confirmed" | "refuted" | "unsure",
          "evidence": "<what you ran or read, and what it showed>", "artifact_ref": "${reviewed_sha}"}

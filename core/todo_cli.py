@@ -236,6 +236,8 @@ def cmd_handback(args, store: PlanStore, now: float) -> dict:
 def cmd_begin(args, store: PlanStore, now: float) -> dict:
     sub = todo_batch.parse_subplan(args.attempt)
     if sub is None:
+        if args.prompt_sha256:
+            raise Refusal("usage", "--prompt-sha256 is recorded for batch sub-plans only")
         return _begin(args, store, now)
     if not args.session:
         raise Refusal("usage", "a batch sub-plan binds the session that works it: begin needs --session")
@@ -245,7 +247,7 @@ def cmd_begin(args, store: PlanStore, now: float) -> dict:
         record = todo_batch.read_record(store, sub[0])
         todo_batch.check_binding(record, args.attempt, args.session)
         out = _begin(args, store, now)
-        todo_batch.record_binding(store, record, args.attempt, args.session)
+        todo_batch.record_binding(store, record, args.attempt, args.session, now, args.prompt_sha256)
     return out
 
 
@@ -506,11 +508,12 @@ def cmd_batch_create(args, store: PlanStore, now: float) -> dict:
 
 
 def cmd_batch_status(args, store: PlanStore, now: float) -> dict:
-    return todo_batch.status(store, builtin_library(), args.attempt, now, _live(args))
+    return todo_batch.status(store, builtin_library(), args.attempt, now, _live(args), record=args.record_dispatch)
 
 
 def cmd_batch_expand(args, store: PlanStore, now: float) -> dict:
-    return todo_batch.expand(store, builtin_library(), args.attempt, now, _live(args))
+    return todo_batch.expand(store, builtin_library(), args.attempt, now, _live(args),
+                             record_dispatch=args.record_dispatch)
 
 
 def cmd_batch_fanin(args, store: PlanStore, now: float) -> dict:
@@ -555,7 +558,9 @@ def _parser() -> argparse.ArgumentParser:
     command("status", attempt)
     command("begin", attempt, item, ("--session", {"metavar": "SID"}),
             ("--rebind", {"action": "store_true",
-                          "help": "take over a plan bound to another session; only after that session is known dead"}))
+                          "help": "take over a plan bound to another session; only after that session is known dead"}),
+            ("--prompt-sha256", {"metavar": "HEX", "help": "batch sub-plans: the sha256 of the prompt the child was "
+                                                          "given, recorded with the binding (not enforced)"}))
     session = ("--session", {"metavar": "SID", "help": "the caller's session; refused if the plan is bound to another"})
     command("done", attempt, item, session)
     command("report", attempt, item, ("--note", {"required": True}), session)
@@ -568,8 +573,10 @@ def _parser() -> argparse.ArgumentParser:
             ("--base-sha", {}), ("--workspace", {}), ("--goal", {}))
     live = ("--live-sessions", {"metavar": "JSON", "help": "sessions known to be running; a sub-plan bound to any "
                                                            "other is offered for re-dispatch"})
-    command("batch-status", attempt, live)
-    command("batch-expand", attempt, live)
+    record = ("--record-dispatch", {"action": "store_true", "help": "record the sub-plans put in dispatch as offered, "
+                                                                     "so they are not offered twice"})
+    command("batch-status", attempt, live, record)
+    command("batch-expand", attempt, live, record)
     command("batch-fanin", attempt)
     return parser
 

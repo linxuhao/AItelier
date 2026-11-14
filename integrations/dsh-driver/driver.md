@@ -90,14 +90,17 @@ For read-only review or investigation fan-out (several independent angles on
 one commit, each finding worth refuting) use the batch template find_verify:
 todo_batch_plan(template "find_verify", params with target, reviewed_sha,
 dimensions, scope, ...) under ONE State attempt, then give each prompt in its
-dispatch verbatim to its own new native subagent. todo_batch_status expands the
-verify stage once every finder passed and returns the verifier prompts, cut to
-the free slots; each verifier must be a new session (finders are refused). The
-batch summary is not evidence: record_evidence from each verify report. Then
-todo_finish the batch attempt. A snapshot's batch_redispatch lists sub-plans
-whose child died, with their prompt: dispatch them again. Do not use it for work
-that changes code, for one question one child can answer, or when the angles
-are not independent; use an ordinary plan.
+dispatch verbatim to its own new native subagent, followed by a last line
+"prompt_sha256: <its sha>". Each prompt is offered once (unbegun ones wait in
+awaiting_begin); at most 4 finders and 4 verifiers run at a time. Once every
+finder passed, todo_batch_status expands the verify stage and returns the
+verifier prompts; a session that ever held another sub-plan of the batch is
+refused. The batch summary is not evidence: record_evidence from each verify
+report. Then todo_finish the batch attempt. A snapshot's batch_redispatch lists
+sub-plans whose bound child is dead, with their prompt: dispatch them again,
+never one whose child lives. Do not use it for work that changes code, for one
+question one child can answer, or when the angles are not independent; use an
+ordinary plan.
 run_pipeline stays available
 for a task that genuinely needs an existing pipeline; it is not the default.
 Native Spawn/Fork subagents use the dedicated `worker` model route, with a

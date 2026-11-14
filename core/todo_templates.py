@@ -82,7 +82,13 @@ _SAMPLE = {"str": "x", "int": 1, "list[str]": ["x"]}
 # A `kind: batch` template (core/todo_batch.py): two fixed stages, find then verify, and a fan-in.
 _BATCH_TOP = {"name", "version", "description", "kind", "params", "stages", "fan_in"}
 _BATCH_OPTIONAL = {"budget"}
-BUDGET_DEFAULTS = {"max_parallel": 6, "max_parallel_verify": 4, "deadline_minutes": 120}
+#: `max_parallel` / `max_parallel_verify` stand for concurrent finder / verifier CONTAINERS; v1 enforces
+#: them as concurrent sub-plans per stage (a sub-plan is offered or bound and has not passed).
+BUDGET_DEFAULTS = {"max_parallel": 4, "max_parallel_verify": 4, "deadline_minutes": 120}
+#: The only predicates a batch stage may bind. Reports live in a report directory the target repo
+#: ignores, so anything comparing tracked files or the base commit (`changes_within`,
+#: `files_changed`, `file_changed`, `git_delivered`) would fail every sub-plan.
+BATCH_PREDICATES = ("report_json", "findings_shape", "verdict_enum")
 _STAGE_KEYS = {"find": {"id", "per", "report", "prompt", "items"},
                "verify": {"id", "per", "after", "cap", "distinct_from", "report", "prompt", "items"}}
 #: The names a stage may embed as `${name}`: in item args (beyond whole-value `$param` refs) and in
@@ -192,6 +198,7 @@ def _validate(name: str, doc: Any, sha256: str) -> Template:
     if not isinstance(doc, dict) or set(doc) != _TOP:
         raise _bad(name, f"keys must be exactly {sorted(_TOP)}")
     params = _header_and_params(name, doc)
+    _require_scope(name, params)
     items = doc["items"]
     if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
         raise _bad(name, "items must be a non-empty list of mappings")
@@ -226,11 +233,18 @@ def _header_and_params(name: str, doc: dict) -> dict[str, "Param"]:
         if "default" in spec and (required or not type_ok(spec["type"], spec["default"])):
             raise _bad(name, f"param {pname}: a default must match its type, and a required param has none")
         params[pname] = Param(spec["type"], required, spec.get("default"), str(spec.get("description", "")))
+    return params
+
+
+def _require_scope(name: str, params: Mapping[str, "Param"]) -> None:
+    """An ordinary template's `scope` is the scope of the appended deliver item, so it must exist.
+
+    A batch template has no deliver item (its sub-plans only write reports, which live in a
+    gitignored report directory), so this rule is not applied to it."""
     if "scope" not in params or params["scope"].type != "list[str]":
         raise _bad(name, "must declare a list[str] param `scope`: it is the scope of the appended deliver item")
     if not params["scope"].required and params["scope"].default is None:
         raise _bad(name, "param `scope` must be required or have a default: deliver cannot run without one")
-    return params
 
 
 def _check_refs(name: str, item: dict, params: Mapping[str, Param]) -> None:
@@ -368,6 +382,8 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
     if set(doc) - _BATCH_OPTIONAL != _BATCH_TOP:
         raise _bad(name, f"a batch template's keys are exactly {sorted(_BATCH_TOP)} (and optionally {sorted(_BATCH_OPTIONAL)})")
     params = _header_and_params(name, doc)
+    if "scope" in params and params["scope"].type != "list[str]":
+        raise _bad(name, "param `scope`, when declared, is a list[str] of globs")
     budget = doc.get("budget") or {}
     if not isinstance(budget, dict) or set(budget) - set(BUDGET_DEFAULTS) or not all(
             type(v) is int and v >= 1 for v in budget.values()):
@@ -401,6 +417,11 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
                     isinstance(b, dict) and isinstance(b.get("args") or {}, dict) for b in bindings):
                 raise _bad(name, f"stage {sid} item {item.get('id')}: predicates must be a list of {{predicate, args}} mappings")
             _check_stage_refs(name, sid, item, params)
+            for b in bindings:
+                if b.get("predicate") not in BATCH_PREDICATES:
+                    raise _bad(name, f"stage {sid} item {item.get('id')}: a batch stage binds only {list(BATCH_PREDICATES)}, "
+                                     f"not {b.get('predicate')!r}: its reports are untracked, so a predicate over tracked "
+                                     "files or the base commit fails every sub-plan")
             bound_on_report |= any(b.get("predicate") == _STAGE_REPORT_PREDICATE[sid]
                                    and (b.get("args") or {}).get("path") == "${report}" for b in bindings)
         if not bound_on_report:
@@ -506,7 +527,8 @@ def stage_plan_data(template: Template, resolved: Mapping[str, Any], stage_id: s
             entry["needs"] = raw["needs"]
         items.append(entry)
     return {"attempt_id": subplan, "batch": batch, "node_key": node_key, "context_hash": context_hash,
-            "base_sha": base_sha, "workspace": workspace, "scope": list(resolved["scope"]), "goal": goal, "items": items}
+            "base_sha": base_sha, "workspace": workspace, "scope": list(resolved.get("scope") or ["**"]), "goal": goal,
+            "items": items}
 
 
 def render_prompt(template: Template, resolved: Mapping[str, Any], stage_id: str, variables: Mapping[str, Any]) -> str:

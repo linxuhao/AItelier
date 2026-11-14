@@ -31,9 +31,20 @@ only what a fan-out needs on top of that:
   that is or was bound to a find sub-plan of the batch (`distinct_from`); and a verify
   sub-plan is bound - or REBOUND - only while every find report it cites is on disk and
   still contains that finding.
+  "Never read the find report" cannot be enforced; one session per sub-plan per batch, for
+  good, is the approximation of a verifier's independence.
 * Budget, frozen in the record: `max_children` (finders + cap), `max_parallel` finders,
-  `max_parallel_verify` verifiers (the `dispatch` list is cut to the free slots), and
+  `max_parallel_verify` verifiers (concurrent containers; v1 counts concurrent sub-plans per
+  stage, offered or bound and not passed, and cuts `dispatch` to the free slots), and
   `deadline_minutes`, which only ever produces a notice (`deadline_passed`, `overdue`).
+* Dispatch is offered once: `status(record=True)` (what the runtime's tools call) records
+  each sub-plan it puts in `dispatch` with the session it replaces; an offered sub-plan
+  waits in `awaiting_begin` until its child binds, and is offered again only when the
+  session it is bound to is gone from the live set the runtime passes - never on a timer,
+  never while that session is live.
+* Prompt integrity: every rendered prompt is stored with its sha256 and returned with it;
+  `begin --prompt-sha256` records the sha the child says it was given in `binding_log`, so a
+  pilot can compare it with the runtime's bytes. Stored and exposed, not enforced.
 * Fan-in (`write_fan_in`): a summary JSON derived from the record and the verify reports
   only, with top-level `"evidence": false` - it is not evidence; the director records
   evidence from each verify report. Written once; re-running it on the same reports is
@@ -81,6 +92,21 @@ def slug(text: str) -> str:
 
 def reports_dir(store: PlanStore, attempt_id: str) -> Path:
     return store.root / "batch" / attempt_id
+
+
+#: How keys are derived, recorded in every batch record so a reader knows what "the same" meant.
+NORMALISATION = {
+    "dimension_key": "whitespace collapsed, lowercased, every run of characters outside [a-z0-9] -> '-', "
+                     "trimmed, at most 48 chars; two dimensions with one key are refused at freeze",
+    "finding_id": "[A-Za-z0-9][A-Za-z0-9._-]{0,63}, unique per report case-insensitively (findings_shape)",
+    "verify_key": "<dimension key>_<finding id lowercased>",
+    "dedup_key": "(file as a normalised relative POSIX path, line or null, claim with whitespace collapsed); "
+                 "case is kept",
+}
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _canonical(value: Any) -> str:
@@ -194,7 +220,8 @@ def create(store: PlanStore, library: PredicateLibrary, template: "templates.Tem
               "template_doc": template_doc,
               "template_doc_sha256": hashlib.sha256(_canonical(template_doc).encode()).hexdigest(),
               "reports_dir": str(reports), "fan_in": template.fan_in["report"], "created_at": now,
-              "find": [], "verify": None, "unverified": [], "expanded_at": None, "bindings": {}}
+              "normalisation": NORMALISATION, "find": [], "verify": None, "unverified": [], "expanded_at": None,
+              "bindings": {}, "binding_log": [], "offers": {}}
     plans = []
     for key, text in finders:
         sub = f"{attempt_id}~find-{key}"
@@ -202,10 +229,11 @@ def create(store: PlanStore, library: PredicateLibrary, template: "templates.Tem
         plans.append(TodoPlan.from_json(templates.stage_plan_data(
             template, params, "find", batch=attempt_id, subplan=sub, item=key, node_key=node_key,
             context_hash=context_hash, base_sha=base_sha, workspace=str(reports), goal=goal), library))
+        prompt = templates.render_prompt(template, params, "find", {
+            "batch": attempt_id, "subplan": sub, "item": key, "report": str(reports / report),
+            "workspace": workspace, "dimension": text})
         record["find"].append({"id": sub, "item": key, "dimension": text, "report": report,
-                               "prompt": templates.render_prompt(template, params, "find", {
-                                   "batch": attempt_id, "subplan": sub, "item": key, "report": str(reports / report),
-                                   "workspace": workspace, "dimension": text})})
+                               "prompt": prompt, "prompt_sha256": _sha(prompt)})
     with store.lock(record_key(attempt_id)):
         existing = store.read(record_key(attempt_id))
         if existing is not None:
@@ -222,7 +250,7 @@ def create(store: PlanStore, library: PredicateLibrary, template: "templates.Tem
                 _write_subplan(store, library, plan, record, "find", now)
             store.write(record_key(attempt_id), record)
             created = True
-    return {"created": created, **status(store, library, attempt_id, now)}
+    return {"created": created, **status(store, library, attempt_id, now, record=True)}
 
 
 # -- status -----------------------------------------------------------------
@@ -236,19 +264,38 @@ def _row(store: PlanStore, library: PredicateLibrary, record: Mapping[str, Any],
     session = document["child_session"]
     return {"id": entry["id"], "stage": stage, "item": entry["item"], "state": state, "child_session": session,
             "session_gone": bool(session) and live is not None and session not in live,
-            "report": str(Path(record["reports_dir"]) / entry["report"]), "prompt": entry["prompt"]}
+            "report": str(Path(record["reports_dir"]) / entry["report"]), "prompt": entry["prompt"],
+            "prompt_sha256": entry["prompt_sha256"],
+            "offered": (record["offers"].get(entry["id"]) or {}).get("session", False) == session}
 
 
 def status(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: float,
-           live: set[str] | None = None) -> dict:
+           live: set[str] | None = None, record: bool = False) -> dict:
     """Where the batch stands, and what the director dispatches next.
 
     `live` is the set of sessions known to be running (the runtime passes its live children and
     itself). A sub-plan bound to a session outside it is not in flight: it is listed in
     `redispatch` with its prompt and offered again in `dispatch`. Without `live` every bound
     sub-plan counts as in flight. `dispatch` is cut to the free slots of the active stage
-    (`max_parallel` finders, `max_parallel_verify` verifiers); the rest are `pending`.
+    (`max_parallel` finders, `max_parallel_verify` verifiers); the rest are `pending`. With
+    `record`, the sub-plans put in `dispatch` are recorded as offered (under the batch lock), so
+    the next call lists them in `awaiting_begin` instead of offering them twice.
     """
+    if record:
+        with store.lock(record_key(attempt_id)):
+            view = _status(store, library, attempt_id, now, live)
+            if view["dispatch"]:
+                stored = read_record(store, attempt_id)
+                for entry in view["dispatch"]:
+                    stored["offers"][entry["subplan"]] = {"session": entry.get("replaces_session"), "at": now,
+                                                          "prompt_sha256": entry["prompt_sha256"]}
+                store.write(record_key(attempt_id), stored)
+            return view
+    return _status(store, library, attempt_id, now, live)
+
+
+def _status(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: float,
+            live: set[str] | None) -> dict:
     record = read_record(store, attempt_id)
     _require_library(record, library)
     find = [_row(store, library, record, "find", e, live) for e in record["find"]]
@@ -262,8 +309,12 @@ def status(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: fl
     limit = budget["max_parallel"] if active == "find" else budget["max_parallel_verify"]
     open_rows = [r for r in rows if r["state"] != "pass"]
     in_flight = [r for r in open_rows if r["child_session"] and not r["session_gone"]]
-    waiting = [r for r in open_rows if r["session_gone"]] + [r for r in open_rows if not r["child_session"]]
-    slots = max(0, limit - len(in_flight))
+    # Offered for the session it is bound to now (None: unbound): its child has not begun yet.
+    awaiting = [r for r in open_rows if r not in in_flight and r["offered"]]
+    waiting = [r for r in open_rows if r["session_gone"] and not r["offered"]] + \
+        [r for r in open_rows if not r["child_session"] and not r["offered"]]
+    slots = max(0, limit - len(in_flight) - len(awaiting))
+    bound_sha = {(e["subplan"], e["session"]): e["prompt_sha256"] for e in record["binding_log"]}
     deadline_at = record["created_at"] + budget["deadline_minutes"] * 60
     deadline_passed = not complete and now >= deadline_at
     view = {
@@ -272,13 +323,17 @@ def status(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: fl
         "reports_dir": record["reports_dir"], "budget": budget,
         "stage": active or ("complete" if complete else "expand"),
         "expand_due": find_passed and not expanded, "expanded": expanded, "complete": complete,
-        "subplans": [{k: r[k] for k in ("id", "stage", "item", "state", "child_session", "session_gone", "report")}
-                     for r in find + verify],
-        "dispatch": [{"subplan": r["id"], "prompt": r["prompt"],
+        "subplans": [{**{k: r[k] for k in ("id", "stage", "item", "state", "child_session", "session_gone", "report",
+                                           "prompt_sha256")},
+                      "bound_prompt_sha256": bound_sha.get((r["id"], r["child_session"]))} for r in find + verify],
+        "dispatch": [{"subplan": r["id"], "prompt": r["prompt"], "prompt_sha256": r["prompt_sha256"],
                       **({"replaces_session": r["child_session"]} if r["session_gone"] else {})} for r in waiting[:slots]],
         "pending": [r["id"] for r in waiting[slots:]],
         "in_flight": [r["id"] for r in in_flight],
-        "redispatch": [{"subplan": r["id"], "stage": r["stage"], "dead_session": r["child_session"], "prompt": r["prompt"]}
+        "awaiting_begin": [{"subplan": r["id"], "prompt": r["prompt"], "prompt_sha256": r["prompt_sha256"]}
+                           for r in awaiting],
+        "redispatch": [{"subplan": r["id"], "stage": r["stage"], "dead_session": r["child_session"], "prompt": r["prompt"],
+                        "prompt_sha256": r["prompt_sha256"], "already_offered": r["offered"]}
                        for r in find + verify if r["state"] != "pass" and r["session_gone"]],
         "unverified": len(record["unverified"]),
         "deadline_at": deadline_at, "deadline_passed": deadline_passed,
@@ -289,7 +344,9 @@ def status(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: fl
     passed = lambda rows_: sum(r["state"] == "pass" for r in rows_)  # noqa: E731
     next_step = ("dispatch " + ", ".join(d["subplan"] for d in view["dispatch"]) if view["dispatch"]
                  else "expand the verify stage (todo_batch_status)" if view["expand_due"]
-                 else "todo_finish" if complete else "wait for " + ", ".join(view["in_flight"]) if in_flight else "(none)")
+                 else "todo_finish" if complete
+                 else "wait for " + ", ".join(view["in_flight"] + [a["subplan"] for a in view["awaiting_begin"]])
+                 if in_flight or awaiting else "(none)")
     view["brief"] = (f"{record['goal'][:160]}\nBatch {attempt_id} ({record['template']['name']}): stage {view['stage']}; "
                      f"find {passed(find)}/{len(find)} passed; verify "
                      + (f"{passed(verify)}/{len(verify)} passed, {view['unverified']} unverified" if expanded else "not expanded")
@@ -330,14 +387,14 @@ def _read_json(path: Path) -> Any:
 
 
 def expand(store: PlanStore, library: PredicateLibrary, attempt_id: str, now: float,
-           live: set[str] | None = None) -> dict:
+           live: set[str] | None = None, record_dispatch: bool = False) -> dict:
     """Expand the verify stage once every find sub-plan has passed; a second call changes nothing."""
     with store.lock(record_key(attempt_id)):
         record = read_record(store, attempt_id)
         _require_library(record, library)
         if record["verify"] is None:
             _expand(store, library, record, now)
-    return {**status(store, library, attempt_id, now, live)}
+    return status(store, library, attempt_id, now, live, record=record_dispatch)
 
 
 def _expand(store: PlanStore, library: PredicateLibrary, record: dict, now: float) -> None:
@@ -385,7 +442,8 @@ def _expand(store: PlanStore, library: PredicateLibrary, record: dict, now: floa
             "workspace": record["workspace"], "finding": json.dumps(shown, sort_keys=True, ensure_ascii=False),
             "finding_id": key, "find_report": str(reports / finding["sources"][0]["report"])})
         _write_subplan(store, library, plan, record, "verify", now)
-        entries.append({"id": sub, "item": key, "report": report, "prompt": prompt, "finding": finding})
+        entries.append({"id": sub, "item": key, "report": report, "prompt": prompt, "prompt_sha256": _sha(prompt),
+                        "finding": finding})
     record["verify"] = entries
     record["unverified"] = [{**f, "reason": f"beyond the verify cap: {allowed} verifier(s) for {len(order)} finding(s)"}
                             for f in order[allowed:]]
@@ -430,10 +488,15 @@ def _check_cited(record: Mapping[str, Any], finding: Mapping[str, Any]) -> None:
                                                    f"({finding['file']}: {finding['claim'][:80]})", find_report=str(path))
 
 
-def record_binding(store: PlanStore, record: dict, sub_id: str, session: str) -> None:
-    """Remember the binding for good: a session that held a sub-plan keeps that history in the batch."""
+def record_binding(store: PlanStore, record: dict, sub_id: str, session: str, now: float,
+                   prompt_sha256: str | None = None) -> None:
+    """Remember the binding for good: a session that held a sub-plan keeps that history in the batch.
+
+    `binding_log` gets one entry per first binding of a session, with the prompt sha the child
+    says it was given (or None) - stored and exposed for a pilot to compare, never enforced."""
     if record["bindings"].get(session) != sub_id:
         record["bindings"][session] = sub_id
+        record["binding_log"].append({"session": session, "subplan": sub_id, "at": now, "prompt_sha256": prompt_sha256})
         store.write(record_key(record["attempt_id"]), record)
 
 

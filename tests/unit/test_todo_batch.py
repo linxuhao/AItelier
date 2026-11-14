@@ -88,7 +88,7 @@ def subplan_doc(cli: Cli, sub: str) -> dict:
 def test_find_verify_loads_by_expansion_and_each_tool_refuses_the_other_kind(cli, repo, base):
     template = load_template("find_verify", builtin_library(), TEMPLATES)
     assert template.kind == "batch" and [s["id"] for s in template.stages] == ["find", "verify"]
-    assert template.budget == {"max_parallel": 6, "max_parallel_verify": 4, "deadline_minutes": 120}
+    assert template.budget == {"max_parallel": 4, "max_parallel_verify": 4, "deadline_minutes": 120}
     listed = {t["name"]: t for t in cli.ok("templates", store=False)["templates"]}
     assert listed["find_verify"]["kind"] == "batch" and "error" not in listed["find_verify"]
     assert {n: listed["find_verify"]["params"][n]["default"] for n in ("max_findings_per_finder", "max_verify")} == \
@@ -136,8 +136,9 @@ def test_create_freezes_one_find_subplan_per_dimension_and_is_idempotent(cli, re
     sub = subplan_doc(cli, FIND_C)
     assert sub["plan"]["batch"] == ATT and [i["id"] for i in sub["plan"]["items"]] == ["find"], \
         "a sub-plan has no appended deliver: the batch attempt delivers once"
-    assert record(cli)["budget"] == {"max_parallel": 6, "max_parallel_verify": 4, "deadline_minutes": 120,
+    assert record(cli)["budget"] == {"max_parallel": 4, "max_parallel_verify": 4, "deadline_minutes": 120,
                                      "max_children": 2 + 8}
+    assert set(record(cli)["normalisation"]) == {"dimension_key", "finding_id", "verify_key", "dedup_key"}
     again = batch_create(cli, repo, base)
     assert again[0] == 0 and again[1]["created"] is False and again[1]["batch_hash"] == out["batch_hash"]
     code, differs = batch_create(cli, repo, base, max_verify=3)
@@ -344,7 +345,7 @@ def tight(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "tpl"
     directory.mkdir()
     body = (TEMPLATES / "find_verify.yaml").read_text()
-    body = body.replace("max_parallel: 6", "max_parallel: 1").replace("max_parallel_verify: 4", "max_parallel_verify: 2")
+    body = body.replace("max_parallel: 4", "max_parallel: 1").replace("max_parallel_verify: 4", "max_parallel_verify: 2")
     (directory / "find_verify.yaml").write_text(body)
     monkeypatch.setenv("AITELIER_TODO_TEMPLATES", str(directory))
     return directory
@@ -357,8 +358,8 @@ def test_the_dispatch_list_is_cut_to_the_free_slots_and_a_dead_session_is_offere
     status = cli.ok("batch-status", "--attempt", ATT)
     assert status["dispatch"] == [] and status["in_flight"] == [FIND_C] and status["pending"] == [FIND_S]
     status = cli.ok("batch-status", "--attempt", ATT, "--live-sessions", json.dumps(["root"]))
-    assert status["redispatch"] == [{"subplan": FIND_C, "stage": "find", "dead_session": "s-find-c",
-                                     "prompt": record(cli)["find"][0]["prompt"]}]
+    assert [{k: r[k] for k in ("subplan", "stage", "dead_session", "prompt")} for r in status["redispatch"]] == \
+        [{"subplan": FIND_C, "stage": "find", "dead_session": "s-find-c", "prompt": record(cli)["find"][0]["prompt"]}]
     assert [(d["subplan"], d.get("replaces_session")) for d in status["dispatch"]] == [(FIND_C, "s-find-c")]
 
     write_json(reports(cli) / "find-correctness.json", {"findings": CORRECTNESS})
@@ -399,3 +400,94 @@ def test_list_shows_subplans_under_their_batch_and_the_batch_only_when_the_next_
     assert rows[ATT]["remaining"] == [] and rows[ATT]["next"] is None and rows[ATT]["child_session"] is None
     status = cli.ok("status", "--attempt", ATT)
     assert status["kind"] == "batch" and status["complete"] is True and "todo_finish" in status["brief"]
+
+
+# -- 7. second director review: loader, dispatch-once, prompt sha, one session per batch -----
+
+@pytest.fixture
+def custom(tmp_path, monkeypatch) -> Path:
+    directory = tmp_path / "tpl"
+    directory.mkdir()
+    monkeypatch.setenv("AITELIER_TODO_TEMPLATES", str(directory))
+    return directory
+
+
+SCOPE_PARAM = """  scope:
+    type: list[str]
+    required: true
+    description: Globs of the reviewed checkout the finders and verifiers look at.
+"""
+
+
+def test_a_batch_template_needs_no_scope_and_binds_no_predicate_over_tracked_files(cli, repo, base, custom):
+    shipped = (TEMPLATES / "find_verify.yaml").read_text()
+    assert SCOPE_PARAM in shipped
+    (custom / "find_verify.yaml").write_text(shipped.replace(SCOPE_PARAM, "").replace("Look at: ${scope}. ", ""))
+    body = params(base)
+    del body["scope"]
+    out = cli.ok("batch-create", "--template", "find_verify", "--params", json.dumps(body), "--attempt", ATT,
+                 "--node-key", "n", "--context-hash", "c" * 64, "--base-sha", base, "--workspace", str(repo), "--goal", "g")
+    assert out["created"] is True
+    assert [i["id"] for i in subplan_doc(cli, FIND_C)["plan"]["items"]] == ["find"], "no deliver item is forced on it"
+
+    forbidden = {"changes_within": "{scope: [\"**\"]}", "files_changed": "{paths: [\"${report}\"]}",
+                 "git_delivered": "{base: $reviewed_sha}"}
+    for predicate, args in forbidden.items():
+        bad = shipped.replace("          - predicate: findings_shape\n",
+                              f"          - predicate: {predicate}\n            args: {args}\n"
+                              "          - predicate: findings_shape\n", 1)
+        (custom / "find_verify.yaml").write_text(bad)
+        code, out = cli.run("templates", store=False)
+        listed = {t["name"]: t for t in out["templates"]}
+        assert predicate in listed["find_verify"]["error"] and "binds only" in listed["find_verify"]["error"], listed
+
+
+def test_each_prompt_is_offered_once_with_its_sha_and_a_live_session_is_never_offered_again(cli, repo, base):
+    out = batch_create(cli, repo, base)[1]
+    for entry in out["dispatch"]:
+        assert entry["prompt_sha256"] == hashlib.sha256(entry["prompt"].encode()).hexdigest()
+    assert [e["prompt_sha256"] for e in record(cli)["find"]] == [e["prompt_sha256"] for e in out["dispatch"]]
+    again = cli.ok("batch-status", "--attempt", ATT, "--record-dispatch")
+    assert again["dispatch"] == [] and [a["subplan"] for a in again["awaiting_begin"]] == [FIND_C, FIND_S]
+
+    sha = out["dispatch"][0]["prompt_sha256"]
+    cli.ok("begin", "--attempt", FIND_C, "--item", "find", "--session", "s-find-c", "--prompt-sha256", sha)
+    assert record(cli)["binding_log"] == [{"session": "s-find-c", "subplan": FIND_C, "at": T0, "prompt_sha256": sha}]
+    live = cli.ok("batch-status", "--attempt", ATT, "--record-dispatch", "--live-sessions", json.dumps(["s-find-c"]))
+    row = next(r for r in live["subplans"] if r["id"] == FIND_C)
+    assert row["bound_prompt_sha256"] == sha == row["prompt_sha256"]
+    assert live["dispatch"] == [] and live["redispatch"] == [] and live["in_flight"] == [FIND_C], \
+        "a live finder is never offered again"
+
+    dead = cli.ok("batch-status", "--attempt", ATT, "--record-dispatch", "--live-sessions", "[]")
+    assert [(d["subplan"], d["replaces_session"]) for d in dead["dispatch"]] == [(FIND_C, "s-find-c")]
+    later = cli.ok("batch-status", "--attempt", ATT, "--record-dispatch", "--live-sessions", "[]")
+    assert later["dispatch"] == [] and {a["subplan"] for a in later["awaiting_begin"]} == {FIND_C, FIND_S}
+    assert later["redispatch"][0]["already_offered"] is True
+    code, refused = cli.run("begin", "--attempt", "att-x", "--item", "x", "--prompt-sha256", sha)
+    assert code == 2 and refused["refused"] == "usage"
+
+
+def test_a_session_holds_one_subplan_per_batch_even_across_rebinds(cli, repo, base):
+    batch_create(cli, repo, base)
+    finders_pass(cli)
+    cli.ok("batch-expand", "--attempt", ATT)
+    one, two = f"{ATT}~verify-correctness_f1", f"{ATT}~verify-correctness_f2"
+    cli.ok("begin", "--attempt", one, "--item", "verify", "--session", "s-v1")
+    cli.ok("begin", "--attempt", two, "--item", "verify", "--session", "s-v2")
+    # s-v2 died; s-v1 (a verifier of this batch) may not take its sub-plan over.
+    out = cli.refused("begin", "--attempt", two, "--item", "verify", "--session", "s-v1", "--rebind")
+    assert out["refused"] == "session_holds_other_subplan" and out["bound_subplan"] == one, out
+    cli.ok("begin", "--attempt", two, "--item", "verify", "--session", "s-v3", "--rebind")
+    # s-v2 was rebound away from `two`; it still held a sub-plan of this batch, for good.
+    out = cli.refused("begin", "--attempt", f"{ATT}~verify-security_s2", "--item", "verify", "--session", "s-v2")
+    assert out["refused"] == "session_holds_other_subplan" and out["bound_subplan"] == two, out
+
+
+@pytest.mark.parametrize("ids", [["F1", "f1"], [" f1", "f2"], ["f 1", "f2"]])
+def test_finding_ids_that_differ_only_in_case_or_carry_whitespace_are_refused(cli, repo, base, ids):
+    batch_create(cli, repo, base)
+    findings = [{**CORRECTNESS[0], "id": ids[0]}, {**CORRECTNESS[1], "id": ids[1]}]
+    write_json(reports(cli) / "find-correctness.json", {"findings": findings})
+    out = work(cli, FIND_C, "find", "s-find-c")
+    assert out["outcome"] == "fail" and "findings[" in json.dumps(out["results"]), out

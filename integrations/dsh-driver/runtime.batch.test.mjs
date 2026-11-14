@@ -93,7 +93,8 @@ export function apply(ctx) {
     const views = [plan, ...statusIds.map(id => results.get(id)).filter(Boolean)];
     for (const view of views) for (const entry of view.dispatch ?? []) if (!spawned.has(entry.subplan)) {
       spawned.add(entry.subplan);
-      return tool('root-spawn-' + entry.subplan, 'subagent', { description: 'batch child', prompt: entry.prompt });
+      return tool('root-spawn-' + entry.subplan, 'subagent', { description: 'batch child',
+        prompt: entry.prompt + '\nprompt_sha256: ' + entry.prompt_sha256 });
     }
     if (results.has('root-finish')) return onceBlock('root-done', text('ROOT_DONE')) ?? text('Director idle.');
     if (views.at(-1).complete) return onceBlock('finish', tool('root-finish', 'todo_finish', { attempt_id: T.attempt })) ?? text('Director idle.');
@@ -105,10 +106,11 @@ export function apply(ctx) {
   };
   const childBlock = (session, all) => {
     if (!children.has(session)) children.set(session, { finder: all.includes('You are a FINDER'),
-      sub: /Sub-plan: ([^\s\\"]+)/.exec(all)?.[1], report: /Report: ([^\s\\"]+)/.exec(all)?.[1], step: 0, probes: 0 });
+      sub: /Sub-plan: ([^\s\\"]+)/.exec(all)?.[1], report: /Report: ([^\s\\"]+)/.exec(all)?.[1],
+      sha: /prompt_sha256: ([0-9a-f]{64})/.exec(all)?.[1], step: 0, probes: 0 });
     const c = children.get(session), step = c.step++, item = c.finder ? 'find' : 'verify';
     const key = c.sub.split(c.finder ? '~find-' : '~verify-')[1];
-    const script = [tool('begin-' + c.sub, 'todo_begin', { attempt_id: c.sub, item_id: item }),
+    const script = [tool('begin-' + c.sub, 'todo_begin', { attempt_id: c.sub, item_id: item, prompt_sha256: c.sha }),
       writeJson('write-' + c.sub, c.report, c.finder ? { findings: T.findings[key] }
         : { finding_id: key, verdict: 'confirmed', evidence: 'fixture read the code', artifact_ref: T.base }),
       tool('done-' + c.sub, 'todo_done', { attempt_id: c.sub, item_id: item })];
@@ -243,7 +245,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
     assert.ok(!activity.some(a => a.phase === 'failed'), JSON.stringify(activity.filter(a => a.phase === 'failed')) + output);
     assert.ok(progress.done, `${progress.message}\n` + diagnostics());
 
-    // The freeze: one finder per dimension, both prompts dispatched at once (max_parallel 6).
+    // The freeze: one finder per dimension, both prompts dispatched at once (max_parallel 4).
     const plan = json('root-batch-plan');
     assert.equal(plan.refused, undefined, JSON.stringify(plan));
     assert.deepEqual(plan.dispatch.map(d => d.subplan), [attempt + '~find-correctness', attempt + '~find-security']);
@@ -267,6 +269,11 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
     assert.equal(finderSessions.length, 2);
     assert.equal(bound.filter(([, sub]) => sub.includes('~verify-')).length, 4);
     assert.ok(bound.filter(([, sub]) => sub.includes('~verify-')).every(([session]) => !finderSessions.includes(session)));
+    // Each binding carries the sha of the prompt the child was given, and it is the runtime's.
+    const shaOf = Object.fromEntries([...record.find, ...record.verify].map(e => [e.id, e.prompt_sha256]));
+    assert.equal(record.binding_log.length, 6);
+    for (const entry of record.binding_log) assert.equal(entry.prompt_sha256, shaOf[entry.subplan], JSON.stringify(entry));
+    assert.deepEqual(plan.dispatch.map(d => d.prompt_sha256), record.find.map(e => e.prompt_sha256));
 
     // One candidate for the one attempt; the summary is not evidence and names each verdict's artifact.
     const finish = json('root-finish');

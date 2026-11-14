@@ -119,6 +119,10 @@ def _is_lock_error(error):
 # on 9003 and dev-tools-mcp (files, bash, subagent jobs) on 7676. Both are plain
 # streamable-HTTP and need no token from loopback - agentmcp's gate only demands
 # one beyond the Cloudflare edge.
+# DSH built-in tool plugins the driver profile switches off (see the patch list in
+# _provision): measured unused, or shadowing the runtime's own tools.
+UNUSED_BUILTIN_TOOL_PLUGINS = ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo")
+
 DSH_EXTRA_MCP_DEFAULTS = {
     "devmcp": "http://127.0.0.1:7676/mcp",
     "zvec": "http://127.0.0.1:7999/mcp",
@@ -426,10 +430,15 @@ class DshDrivers:
                 "thresholdRatio": 0.5,
                 "modelPolicies": [{"provider": row["provider"], "model": row["model"],
                                    "thresholdRatio": ratio, "retainTokens": 0}]}},
-            *[{"id": tool, "config": {"provider": provider, "toolName": name,
-                "agentOptions": {"provider": "aitelier", "model": "worker"}}}
-              for tool, provider, name in (("tool-subagent", "spawn", "subagent"),
-                                           ("tool-subagent-fork", "fork", "subagent_fork"))],
+            {"id": "tool-subagent", "config": {"provider": "spawn", "toolName": "subagent",
+                "agentOptions": {"provider": "aitelier", "model": "worker"}}},
+            # Built-in tools no driver used in a measured week (2026-11-07..14, ~83k
+            # tool calls across two directors and 589 children): subagent_fork,
+            # workflow, exit_plan_mode, and todo_write, which also shadows the
+            # runtime's own todo_* plans. Off, not merely unlisted, so neither a
+            # director nor a child can reach them. Rarely used tools stay loaded and
+            # deferred instead (integrations/dsh-driver/tool-discovery.mjs).
+            *[{"id": plugin, "disabled": True} for plugin in UNUSED_BUILTIN_TOOL_PLUGINS],
             {"insert": [{"id": "aitelier-driver", "name": str(source)},
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",

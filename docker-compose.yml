@@ -174,7 +174,13 @@ services:
     # for the live repo, held for as long as the client read slowly). It now
     # spools to a temporary file and streams 64 KiB chunks, so the ceiling no
     # longer rests on that route; it stays as a backstop.
-    mem_limit: 4g
+    #
+    # 6g, not 4g (owner, 2026-11-14): the process killed at 4 GiB twice
+    # (2026-11-12 09:25Z, 2026-11-14 20:02Z, iss-876a88032b6242ff) with a
+    # 2.72 GiB lifetime peak on a fresh process whose steady anon is ~0.8 GiB, so
+    # 4 GiB left too little room for a transient on top of arena drift
+    # (MALLOC_ARENA_MAX above). The host has 22 GB.
+    mem_limit: 6g
     # A log ceiling. `json-file` with no options NEVER rotates, and every
     # anonymous request appends an access-log line. Docker keeps those under
     # /var/lib/docker on the ROOT filesystem — 91% full — while the roomy

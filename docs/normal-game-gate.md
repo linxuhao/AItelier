@@ -103,19 +103,24 @@ which one is being asked about:
   directory: the container mounts that directory at `/app` with `PYTHONPATH=/app`
   and runs `/app/tools/gate_binding.py` from it, so the reviewed `files` digests
   and the executed bytes are the same bytes.
-- An AUTHORED repository gate is the other case, and it is why `GET /health`
-  reports what it reports: the backend runs such a gate in the backend image and
-  puts that image's own frozen export at `/opt/aitelier-gate-imports` first on
+- An AUTHORED repository gate is the other case: the backend runs it in the image
+  the tag names at gate time (`AITELIER_TEST_IMAGE`, default `aitelier:latest`)
+  and puts that image's frozen export at `/opt/aitelier-gate-imports` first on
   the gate's `PYTHONPATH` (`core/repository_executor_entry.py`, GATE_IMPORT_ROOT,
-  only for the `bash`-plus-report-dir shape), so for that gate the export really
-  is what gets imported. It is baked by `COPY` at build time and read at request
-  time (never cached), so it keeps naming the previous frozen source's digest
-  until the image is rebuilt, and a container recreate cannot change it.
+  only for the `bash`-plus-report-dir shape). The export is baked by `COPY` at
+  build time, so a rebuild moves what such a gate imports as soon as the tag
+  moves to the new image.
+- `GET /health`'s `gate_harness` object reports neither of those: it hashes the
+  copy inside the BACKEND CONTAINER RUNNING RIGHT NOW, read at request time and
+  never cached (`api/main.py`). A rebuild alone leaves it naming the previous
+  export while later authored gates already import the new one, because the
+  running container keeps its own layers; a recreate does move it, because the
+  new container carries the new image. It answers "which image is this backend
+  running", not "which bytes will a gate import".
 - The running BACKEND's own import is none of those: it is the mounted checkout
   (`/app/docker/godot/godot_harness.py`), and `/opt/aitelier-gate-imports` is not
   on the backend's `sys.path`. A stale `gate_harness` digest therefore says
-  nothing about the code the backend is executing, and everything about which
-  harness an authored repository gate will import.
+  nothing about the code the backend is executing.
 
 When the identity tool could not be asked, the launcher writes a substitute
 spelling instead of an answer. `unanswered:receipt-tool-failed` means the

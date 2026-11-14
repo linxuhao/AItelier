@@ -277,6 +277,14 @@ services:
     # /dev/dri point AITELIER_DRI_DIR at any empty directory (see .env.example).
     # The render node is group-owned by the host's `render` group, whose gid
     # differs per host: set AITELIER_RENDER_GID.
+    # The bind and the cgroup rule are broader than the render node: they cover
+    # the whole /dev/dri, including card0 (the display/KMS node), and every DRM
+    # minor. What keeps card0 out of reach is ONLY file permissions plus the
+    # choice of user and group: the sidecar runs as a non-root uid (no
+    # CAP_MKNOD) with just the render gid added, and card0 is root:video 0660.
+    # Running it as root (AITELIER_UID=0), giving it the video group (as
+    # AITELIER_GID or another group_add), or a host where card0 is
+    # world-accessible (or carries a uaccess ACL) also hands it card0.
     group_add:
       - "${AITELIER_RENDER_GID:-993}"
     device_cgroup_rules:

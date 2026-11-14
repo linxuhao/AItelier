@@ -1269,6 +1269,9 @@ def _wait_with_idle_window(proc: subprocess.Popen, cmd: list[str], timeout,
 #   cpu            — today's Xvfb + llvmpipe command, byte for byte.
 # The fallback is decided BEFORE Godot starts. Once Godot has been launched on
 # the GPU path its result is the result: there is no silent second run on CPU.
+# A GPU pass whose Godot reports a software GL device (Xwayland handed its GLX
+# context to Mesa's rasteriser) keeps its result but is recorded `gpu-software`,
+# not `gpu`.
 #
 # Weston is started by a small launcher that is itself the invocation's process
 # (so the session leader `_kill_own_session` targets). weston runs with a
@@ -1288,6 +1291,19 @@ WESTON_READY_SEC = 10.0
 # Vsync pins a client to the compositor's refresh, so the headless output
 # advertises an absurd refresh rate and Godot is told not to wait.
 WESTON_REFRESH_MHZ = 1000000
+# The GPU pass's frame-rate cap (Godot's own limiter, --max-fps). Vsync stays
+# off, so without a cap Godot draws as fast as the GPU allows: several times the
+# software path's rate, and a different rate on every host. A suite that checks
+# something on every frame then samples moments the CPU path never reaches, and
+# its verdict depends on how fast the host is (measured: one suite red in about
+# a third of uncapped GPU passes, in none at a capped rate). A render gate judges
+# what a player sees at a normal display rate, so the GPU pass runs at that
+# rate. The CPU path's command is left exactly as it was.
+GPU_MAX_FPS = 60
+# Mesa's software rasterisers. The launcher refuses a weston that came up on
+# one (its case pattern lists the same names); a GPU pass whose Godot names one
+# as its GL device is labelled `gpu-software` (see _note_gpu_device).
+_SOFTWARE_GL_NAMES = ("llvmpipe", "softpipe", "swrast", "SwiftShader")
 # No desktop shell (its helper clients escape the process group) and no input
 # method (another helper client); one kiosk output is all a render pass needs.
 _WESTON_INI = "[core]\nshell=kiosk\n\n[input-method]\npath=\n"
@@ -1636,7 +1652,7 @@ def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
     was still starting (nothing drew a frame).
     """
     tail = [GODOT_BIN, "--display-driver", "x11", "--rendering-driver", "opengl3",
-            "--disable-vsync", *args]
+            "--disable-vsync", "--max-fps", str(GPU_MAX_FPS), *args]
     with _weston_session(env, tail) as (runtime, cmd, genv):
         info = {"render_backend": "gpu", "render_backend_mode": mode,
                 "render_fallback_reason": None, "render_gl_device": None}
@@ -1649,7 +1665,7 @@ def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
                     "timed out while weston/Xwayland was starting; godot was never launched")
             else:
                 _note_weston_start(True, None, "render_pass")
-            info["render_gl_device"] = _gl_device(exc.stdout, exc.stderr)
+            _note_gpu_device(info, exc.stdout, exc.stderr)
             exc.render_backend = _record_render_backend(info)
             raise
         if not (runtime / "launched").exists():
@@ -1657,9 +1673,27 @@ def _run_gpu(args: list[str], env: dict, timeout, idle_window, mode: str):
             _note_weston_start(False, why, "render_pass")
             return None, why
         _note_weston_start(True, None, "render_pass")
-        info["render_gl_device"] = _gl_device(cp.stdout, cp.stderr)
+        _note_gpu_device(info, cp.stdout, cp.stderr)
         cp.render_backend = _record_render_backend(info)
         return cp, None
+
+
+def _note_gpu_device(info: dict, *streams) -> None:
+    """Record the GL device Godot named on a GPU pass.
+
+    The launcher checked weston's renderer, but Godot's own GLX context is
+    Xwayland's to hand out: when Godot names a software rasteriser, that pass
+    did not draw on the GPU and is recorded `gpu-software` with the reason.
+    Not a fallback and not a retry — the pass's result stands as it is.
+    """
+    device = _gl_device(*streams)
+    info["render_gl_device"] = device
+    if (info["render_backend"] == "gpu" and device
+            and any(name.lower() in device.lower() for name in _SOFTWARE_GL_NAMES)):
+        info["render_backend"] = "gpu-software"
+        info["render_fallback_reason"] = (
+            "the GPU path ran, but Godot's GLX context landed on software GL (%s), "
+            "not the GPU" % device)
 
 
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,

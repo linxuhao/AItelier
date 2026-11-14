@@ -16,14 +16,16 @@ they pin:
     of falling back;
   * once Godot was launched on the GPU there is no second run on CPU;
   * the weston/Xwayland/godot command lines (size follows RENDER_RES, vsync
-    off, a very high refresh rate, Godot on its X11 driver against the private
-    Xwayland — never its Wayland driver, which deadlocks at exit);
+    off, a very high refresh rate, Godot capped at 60 frames per second on the
+    GPU only, on its X11 driver against the private Xwayland — never its
+    Wayland driver, which deadlocks at exit);
   * teardown: no weston, Xwayland, helper client, godot or runtime dir survives
     a pass — after success, after a failing engine and after a timeout — and
     concurrent passes never share a runtime dir, socket or X display;
   * every result names the backend that ran (`none` when Godot never started)
     and the GL device Godot printed; the fallback is charged what weston spent;
-  * a weston that comes up on Mesa's software rasteriser is not the GPU;
+  * a weston that comes up on Mesa's software rasteriser is not the GPU, and
+    a GPU pass whose Godot names a software GL device is `gpu-software`;
   * /health reports the configured mode and whether weston really comes up
     on the GPU, not only whether a render node opens.
 """
@@ -62,6 +64,8 @@ if not ("shell=kiosk" in ini and "path=" in ini):
 with open(os.environ["FAKE_WESTON_LOG"], "a") as f:
     f.write(json.dumps({"pid": os.getpid(), "helper": helper, "argv": sys.argv[1:],
                         "runtime": os.environ.get("XDG_RUNTIME_DIR"), "sock": sock}) + "\n")
+# A start-up as slow as a loaded host makes it.
+time.sleep(float(os.environ.get("FAKE_WESTON_START_SEC", "0")))
 if mode == "die":
     print("fake weston: no usable GL device", file=sys.stderr)
     sys.exit(3)
@@ -313,8 +317,11 @@ def test_auto_uses_the_gpu_when_weston_comes_up(rig, monkeypatch):
     assert xwayland["argv"][xwayland["argv"].index("-auth") + 1] == weston["runtime"] + "/xauth"
     assert xwayland["auth_mode"] == "0o600"
     (godot,) = _lines(rig.godot_log)
+    # Vsync off and a fixed 60 fps cap: a per-frame check samples what a player
+    # at a normal display rate sees, not however fast this host's GPU goes.
     assert godot["argv"] == ["--display-driver", "x11", "--rendering-driver", "opengl3",
-                             "--disable-vsync", "--path", "/p", "-s", "res://t.gd"]
+                             "--disable-vsync", "--max-fps", "60",
+                             "--path", "/p", "-s", "res://t.gd"]
     assert godot["env"]["DISPLAY"] == ":%d" % xwayland["display"]
     assert godot["env"]["XAUTHORITY"] == weston["runtime"] + "/xauth"
     assert godot["env"]["WAYLAND_DISPLAY"] is None
@@ -413,10 +420,16 @@ def test_auto_falls_back_to_cpu_before_godot_starts(rig, monkeypatch, weston_mod
                                                     xwayland_mode, reason):
     monkeypatch.setenv("FAKE_WESTON_MODE", weston_mode)
     monkeypatch.setenv("FAKE_XWAYLAND_MODE", xwayland_mode)
-    # Short only where the window itself is under test: a stand-in that dies
-    # must be seen dying, not outlasted by a window a loaded host can miss.
-    hang = "hang" in (weston_mode, xwayland_mode)
-    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5 if hang else 5.0)
+    # weston and Xwayland share one start-up window, and the stand-in weston is
+    # a Python process that a loaded host can keep from starting for a good
+    # part of a short one. So only a weston that NEVER publishes its socket
+    # gets the short window (no stand-in has to start inside it; the stage it
+    # fails at cannot change). Every case that needs weston up first — Xwayland
+    # hanging or dying, weston dying or on software GL — gets a window no
+    # stand-in start-up comes near, so the reason names the stage under test —
+    # even with weston taking a whole second to come up, as on a loaded host.
+    monkeypatch.setattr(gh, "WESTON_READY_SEC", 0.5 if weston_mode == "hang" else 5.0)
+    monkeypatch.setenv("FAKE_WESTON_START_SEC", "1.0")
     cp = gh._run(["--path", "/p"], timeout=30, render=True)
     assert cp.render_backend["render_backend"] == "cpu"
     assert reason in cp.render_backend["render_fallback_reason"]
@@ -429,6 +442,51 @@ def test_auto_falls_back_to_cpu_before_godot_starts(rig, monkeypatch, weston_mod
     assert xvfb["argv"] == _todays_cpu_cmd(["--path", "/p"])[1:]
     assert xvfb["libgl"] == "1"
     _assert_torn_down(rig)
+
+
+@pytest.mark.parametrize("device", [
+    "Mesa - llvmpipe (LLVM 19.1.7, 256 bits)",
+    "Mesa - softpipe",
+    "Mesa - swrast",
+    "Google - swiftshader Device (Subzero)",
+])
+def test_a_gpu_pass_whose_godot_draws_on_software_gl_is_not_gpu(rig, tmp_path, monkeypatch,
+                                                                device):
+    """weston came up on the GPU, but Godot's own GLX context (Xwayland's to
+    hand out) landed on a software rasteriser: the pass is `gpu-software` with
+    the reason, its result stands as it is, and nothing is run a second time."""
+    monkeypatch.setenv("FAKE_DEVICE", device)
+    monkeypatch.setenv("FAKE_GODOT_RC", "1")
+    cp = gh._run(["--path", "/p"], timeout=30, render=True)
+    assert cp.returncode == 1
+    assert cp.render_backend["render_backend"] == "gpu-software"
+    assert cp.render_backend["render_gl_device"] == device
+    assert "software GL" in cp.render_backend["render_fallback_reason"]
+    assert device in cp.render_backend["render_fallback_reason"]
+    assert len(_lines(rig.godot_log)) == 1 and _lines(rig.xvfb_log) == []
+    _assert_torn_down(rig)
+    monkeypatch.delenv("FAKE_GODOT_RC")
+    report = gh.run_script(str(_project(tmp_path)), ["res://tests/test_a.gd"],
+                           timeout=30, render=True)
+    assert report["render_backend"] == "gpu-software"
+    assert report["render_backend_counts"] == {"gpu-software": 1}
+    assert report["results"][0]["render_backend"] == "gpu-software"
+    _assert_torn_down(rig)
+
+
+def test_a_gpu_timeout_on_software_gl_is_not_gpu_either(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_DEVICE", CPU_DEVICE)
+    monkeypatch.setenv("FAKE_GODOT_SLEEP", "60")
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        gh._run(["--path", "/p"], timeout=3, render=True)
+    assert info.value.render_backend["render_backend"] == "gpu-software"
+    assert info.value.render_backend["render_gl_device"] == CPU_DEVICE
+    _assert_torn_down(rig)
+
+
+def test_godot_and_the_launcher_name_the_same_software_rasterisers():
+    for name in gh._SOFTWARE_GL_NAMES:
+        assert "*%s*" % name in gh._GPU_LAUNCH_SH, name
 
 
 def test_auto_reports_a_render_node_it_cannot_open(rig, monkeypatch):

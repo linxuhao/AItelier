@@ -8,6 +8,7 @@ Docker and the process table replaced at their boundary.
 import hashlib
 import json
 import sqlite3
+import subprocess
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -806,3 +807,100 @@ def test_normal_godot_override_retains_regular_identity_refusal(normal, bound, t
     with pytest.raises(ValueError, match="required regular identity file unavailable"):
         server.recreate_godot_builder(**args, override_decision=unexpected)
     assert normal[1] == [] and not Path(args["report_file"]).exists()
+
+
+# ── a browser's renderer child is not a Godot render owner ────────────────────
+#
+# Measured 2026-11-14: a godot-only recreate was refused because an idle browser
+# session's children were classified resource="render" — the render vocabulary is
+# substring-matched and Chromium spells its children `--type=renderer`. The rows
+# stay in the inventory; they are not render owners, and they must not reach
+# `external_active`, which is what every scope decides on.
+
+BROWSER_LINE = ("/opt/google/chrome/chrome --type=renderer --extension-process "
+                "--renderer-client-id=7 "
+                "--user-data-dir=/home/linxuhao/.AItelier/browser/profile/Default")
+BROWSER_GPU_LINE = ("/opt/google/chrome/chrome --type=gpu-process "
+                    "--user-data-dir=/home/linxuhao/.AItelier/browser/profile/Default")
+GODOT_X11_LINE = ("/usr/local/bin/godot --display-driver x11 --rendering-driver opengl3 "
+                  "--disable-vsync --max-fps 60 --path /tmp/proj -s tests/mini_pass.gd")
+GODOT_HEADLESS_LINE = "/usr/local/bin/godot --headless --path /tmp/proj -s tests/build.gd"
+XVFB_LINE = ("/bin/sh /usr/bin/xvfb-run -a -s -screen 0 1280x720x24 /usr/local/bin/godot "
+             "--display-driver x11 --rendering-driver opengl3 --path /tmp/proj -s tests/mini.gd")
+
+
+def process_table(*commands, first_pid=900001):
+    """An injected process table: real `external_owners` classification, fake ps."""
+    rows = [f"{first_pid + n} {first_pid - 1} {command}" for n, command in enumerate(commands)]
+
+    def runner(argv):
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        assert argv[:2] == ["ps", "-axo"], argv
+        return subprocess.CompletedProcess(argv, 0, "\n".join(rows) + "\n", "")
+
+    return runner
+
+
+def owners_for(*commands):
+    owners, errors = dq.external_owners(runner=process_table(*commands))
+    assert errors == []
+    return owners
+
+
+def row_for(owners, needle):
+    return next(row for row in owners if needle in row["command"])
+
+
+@pytest.mark.parametrize("line,needle", [(BROWSER_LINE, "--type=renderer"),
+                                         (BROWSER_GPU_LINE, "--type=gpu-process")])
+def test_a_browser_renderer_child_is_not_a_render_owner(line, needle):
+    owners = owners_for(line)
+    row = row_for(owners, needle)          # still inventoried: it is a real process
+    assert row["active"] is False
+    assert row["resource"] == ""
+
+
+def test_the_three_real_render_shapes_keep_their_render_resource():
+    owners = owners_for(BROWSER_LINE, GODOT_X11_LINE, GODOT_HEADLESS_LINE, XVFB_LINE)
+    for needle in ("--max-fps 60", "--headless", "xvfb-run -a"):
+        row = row_for(owners, needle)
+        assert row["active"] is True, needle
+        assert row["resource"] == "render", needle
+    assert row_for(owners, "--type=renderer")["active"] is False
+
+
+def test_the_producer_never_puts_a_browser_row_into_external_active():
+    owners = owners_for(BROWSER_LINE, GODOT_X11_LINE)
+    blockers = dq._normalized_owner_blockers(
+        runs=[], sidecar_owners=[], external_owners=owners,
+        registered_external_owners=[], godot_render_owners=[])
+    assert [row for row in blockers["external_active"]
+            if "--type=renderer" in row["command"]] == []
+    assert [row for row in blockers["external_active"] if "--max-fps 60" in row["command"]]
+
+
+@pytest.mark.parametrize("commands,vetoed", [
+    ((BROWSER_LINE,), []),
+    ((BROWSER_GPU_LINE,), []),
+    ((GODOT_X11_LINE,), ["--max-fps 60"]),
+    ((XVFB_LINE,), ["xvfb-run -a"]),
+    ((BROWSER_LINE, GODOT_X11_LINE), ["--max-fps 60"]),
+])
+def test_the_godot_only_scope_vetoes_a_render_and_not_a_browser(commands, vetoed):
+    # The same construction for both answers: measure, project through the
+    # producer's blocker rules, then ask the scope what still vetoes.
+    observation = {
+        "blockers": dq._normalized_owner_blockers(
+            runs=[], sidecar_owners=[], external_owners=owners_for(*commands),
+            registered_external_owners=[], godot_render_owners=[]),
+        "errors": [],
+        "observed_at": "2026-11-14T18:00:00+00:00",
+    }
+    authoritative, unknown_owners = dq._classify_blockers(observation, godot_only=True)
+    active = authoritative.get("external_active", [])
+    seen = [needle for needle in ("--type=renderer", "--type=gpu-process",
+                                  "--max-fps 60", "xvfb-run -a")
+            if any(needle in row["command"] for row in active)]
+    assert seen == vetoed
+    assert [row for row in unknown_owners if "--type=" in row.get("command", "")] == []

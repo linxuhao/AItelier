@@ -128,6 +128,17 @@ MEASUREMENT_NAME_PATTERN = re.compile(
     r"(?:[^a-z0-9]|$)")
 UNKNOWN_PROCESS_ERROR_PREFIX = (
     "unregistered external measurement process has unknown ownership: ")
+# A browser's own renderer children are not render owners of the Godot engine.
+# Chromium names them on its command line, and the bare `render` needle a real
+# render invocation needs also catches `--type=renderer`; without this list an
+# idle tab became an authoritative active owner and refused a Godot-only
+# recreate (iss-0caccfcada7843eb, 2026-11-14).
+BROWSER_PROCESS_NAMES = frozenset({
+    "chrome", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
+    "chrome-headless-shell", "headless_shell", "msedge", "microsoft-edge",
+    "firefox", "firefox-bin", "firefox-esr",
+})
+BROWSER_RENDERER_FLAGS = ("--type=renderer", "--type=gpu-process")
 BLOCKER_IDENTITY_FIELDS = {
     "active_runs": ("run_id",),
     "active_operations": ("run_id",),
@@ -1405,6 +1416,20 @@ def measurer_pids() -> set[str]:
     return pids
 
 
+def _browser_renderer(program: str | None, line: str) -> bool:
+    """Whether this line is a browser's own renderer/gpu child.
+
+    The render vocabulary below is matched as substrings, and Chromium spells its
+    renderer children ``--type=renderer`` / ``--type=gpu-process``; a browser
+    process holding a page open was therefore measured as an authoritative render
+    owner and vetoed a Godot-only recreation it cannot disturb. The row stays in
+    the inventory — it is a real process — but it is not a render owner.
+    """
+    if program is not None and Path(program).name.lower() in BROWSER_PROCESS_NAMES:
+        return True
+    return any(flag in line for flag in BROWSER_RENDERER_FLAGS)
+
+
 def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess]
                     = _run_command,
                     registered_external_owners: list[dict] | None = None
@@ -1450,6 +1475,7 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
             named = (program or subject).lower()
             native_render = (program is not None
                              and Path(program).name.lower() in {"godot", "xvfb-run"})
+            browser_renderer = _browser_renderer(program, lowered)
             measurement_name = (bool(MEASUREMENT_NAME_PATTERN.search(named))
                                 or "--long-gate" in lowered)
             command = line.strip()
@@ -1464,9 +1490,14 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                                    and not _kernel_thread(line)
                                    and not _resident_service_identity(line)))
             if native_render or any(needle in subject for needle in needles) or unknown_measurement or matched:
-                active = native_render or any(token in subject for token in (
-                    "godot --", "godot --headless", "xvfb-run",
-                    "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement or bool(matched)
+                # The render vocabulary is substring-matched, so a browser's own
+                # renderer child must be excluded BEFORE it can make the row an
+                # active render owner. Everything else keeps its classification.
+                active = ((not browser_renderer
+                           and (native_render or any(token in subject for token in (
+                               "godot --", "godot --headless", "xvfb-run",
+                               "playtest", "render", "x11_input_smoke", "run_script"))))
+                          or unknown_measurement or bool(matched))
                 ownership = "registered" if matched else "unregistered"
                 owners.append({"kind": "process", "command": command,
                                "active": active,

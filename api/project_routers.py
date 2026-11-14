@@ -537,6 +537,28 @@ def repo_status(
     return ws.repo_status(project_id)
 
 
+# Archive bytes kept in memory before the spool rolls over to a temp file, and
+# the size of the pieces it is streamed out in. Both are fixed, so the archive
+# bytes a download holds in RAM do not grow with the size of the repository.
+_ARCHIVE_SPOOL_MAX_BYTES = 1024 * 1024
+_ARCHIVE_CHUNK_BYTES = 64 * 1024
+
+
+def _stream_and_close(fp):
+    """Yield a spooled archive in fixed-size chunks, then close it.
+
+    Not `iter(fp)`: that splits on newlines, and a zip is binary, so one "line"
+    can be most of the archive."""
+    try:
+        while True:
+            chunk = fp.read(_ARCHIVE_CHUNK_BYTES)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        fp.close()
+
+
 @router.get("/{project_id}/repo/archive")
 def repo_archive(
     project_id: str,
@@ -551,13 +573,20 @@ def repo_archive(
     the workspace file-tree/file-content reads, which already expose every file".
     That argument is about CONFIDENTIALITY and it was sound; the cost was never
     considered. The file reads are one file per request. This one walks the whole
-    working tree and deflates it into an in-memory buffer BEFORE streaming a
-    byte — measured 12.6MB for the live repo, ~0.6s of CPU, `cf-cache-status:
-    DYNAMIC` so the edge absorbs none of it, and 18 distinct project URLs return
-    the same blob. A slow reader pins that buffer for as long as it likes.
-    On a public hostname that is the cheapest route to an OOM kill of the
-    process running the pipelines, which is why this one is gated on cost even
-    though the bytes themselves are already readable one file at a time."""
+    working tree and compresses all of it: ~0.6s of CPU and a 12.6MB archive for
+    the live repo, `cf-cache-status: DYNAMIC` so the edge absorbs none of it, and
+    18 distinct project URLs return the same archive. On a public hostname that
+    is the cheapest way to starve the process running the pipelines of CPU, which
+    is why this one is gated on cost even though the bytes themselves are already
+    readable one file at a time.
+
+    The archive is written to a SpooledTemporaryFile: its bytes stay in memory up
+    to _ARCHIVE_SPOOL_MAX_BYTES and then roll over to a temporary file on disk.
+    The response streams that file out in _ARCHIVE_CHUNK_BYTES pieces and closes
+    it when the stream ends, so a slow reader holds a temp file, not a RAM buffer.
+    The archive bytes held in RAM are bounded by that constant. The per-entry
+    index (the sorted path list and zipfile's member table) still grows with the
+    number of files, but that is a few hundred bytes per file, not the content."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -571,21 +600,25 @@ def repo_archive(
     if not code_path.exists():
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    import io
+    import tempfile
     import zipfile
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for item in sorted(code_path.rglob("*")):
-            if ".git" in item.parts:
-                continue
-            if item.is_file():
-                zf.write(item, arcname=str(item.relative_to(code_path)))
-    buf.seek(0)
+    spool = tempfile.SpooledTemporaryFile(max_size=_ARCHIVE_SPOOL_MAX_BYTES)
+    try:
+        with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as zf:
+            for item in sorted(code_path.rglob("*")):
+                if ".git" in item.parts:
+                    continue
+                if item.is_file():
+                    zf.write(item, arcname=str(item.relative_to(code_path)))
+        spool.seek(0)
+    except BaseException:
+        spool.close()
+        raise
 
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in project_id)
     return StreamingResponse(
-        buf,
+        _stream_and_close(spool),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe}.zip"'},
     )

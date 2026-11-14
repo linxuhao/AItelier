@@ -156,7 +156,8 @@ describe('one conversation with the driver', () => {
     await waitFor(() => expect(view.container.querySelector('.unread')).toBeNull());
     // One chronological order with both senders visible.
     expect([...view.container.querySelectorAll('article.message .subject')].map(e => e.textContent))
-      .toEqual(['Message from the user', 'Second report']);
+      .toEqual(['Second report']);
+    expect(view.getByText('start with node a')).toBeTruthy();
     expect([...view.container.querySelectorAll('article.message .sender')].map(e => e.textContent))
       .toEqual(['You', 'dsh-alpha']);
     // Reading a conversation is not reading a run: the history/live stream stays shut.

@@ -33,7 +33,9 @@ describe('one conversation, both directions', () => {
     await view.findByText('Second report');
     // The API pages newest-first; the thread reads oldest-first.
     expect(texts(view.container.querySelectorAll('article.message .subject')))
-      .toEqual(['Message from the user', 'Second report']);
+      .toEqual(['Second report']);
+    expect(view.container.querySelectorAll('article.message')).toHaveLength(2);
+    expect(view.queryByText('Message from the user')).toBeNull();
     expect(texts(view.container.querySelectorAll('article.message .sender')))
       .toEqual(['You', 'dsh-alpha']);
     expect(view.getByText('start with node a')).toBeTruthy();
@@ -113,5 +115,42 @@ describe('one conversation, both directions', () => {
     const view = render(DriverConversation, {projectId: 'alpha'});
     await view.findByText('answering you');
     expect(view.getByText(/Replying to #abcdef12/)).toBeTruthy();
+  });
+});
+
+describe('readable messages and composing', () => {
+  it('renders safe Markdown for driver messages while keeping user text literal', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('d', 'driver', 'Result', '**Done**\n\n- tested\n\n<script>window.bad = true</script><input placeholder="secret">', '2026-11-03T10:00:00Z'),
+      entry('u', 'user', 'Message from the user', '**literal**', '2026-11-03T09:00:00Z'),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Done');
+    const message = view.container.querySelector('[data-message-id="d"]')!;
+    expect(message.querySelector('.message-content strong')?.textContent).toBe('Done');
+    expect(message.querySelector('li')?.textContent).toBe('tested');
+    expect(message.querySelector('script,input')).toBeNull();
+    expect(view.container.querySelector('[data-message-id="u"] .message-content')?.textContent?.trim()).toBe('**literal**');
+    expect(view.queryByText('Message from the user')).toBeNull();
+  });
+
+  it('preserves text and the reply citation after a failed send and retries with Ctrl+Enter', async () => {
+    api.sendDriverConversationMessage.mockRejectedValueOnce(new Error('Connection lost'));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Second report');
+    await fireEvent.click(view.getByRole('button', {name: 'Reply: Second report'}));
+    const input = view.getByRole('textbox', {name: 'Write a message'}) as HTMLTextAreaElement;
+    await fireEvent.input(input, {target: {value: 'Keep my draft'}});
+    await fireEvent.keyDown(input, {key: 'Enter', ctrlKey: true, isComposing: true});
+    await fireEvent.keyDown(input, {key: 'Enter'});
+    expect(api.sendDriverConversationMessage).not.toHaveBeenCalled();
+    await fireEvent.keyDown(input, {key: 'Enter', metaKey: true});
+    await view.findByText('Connection lost');
+    expect(input.value).toBe('Keep my draft');
+    expect(view.getByText(/Replying to · Second report/)).toBeTruthy();
+    await fireEvent.keyDown(input, {key: 'Enter', ctrlKey: true});
+    await waitFor(() => expect(input.value).toBe(''));
+    expect(api.sendDriverConversationMessage).toHaveBeenCalledTimes(2);
+    expect(api.sendDriverConversationMessage.mock.calls[1][2].replyToMessageId).toBe('m2');
   });
 });

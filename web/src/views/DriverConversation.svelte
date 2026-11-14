@@ -4,13 +4,15 @@
     type DriverConversationEntry } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
   import { railQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
+  import { renderMarkdown } from '../lib/markdown';
+  import type { ConversationDraft } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {} }: {
+  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts }: {
     projectId: string; projectTitle?: string; driverId?: string;
     // Only a host that can actually dismiss the thread passes `onclose`: the
     // dashboard pane always shows it, so it passes nothing and gets no close
     // button (the one it had closed nothing there).
-    onclose?: () => void; onread?: () => void;
+    onclose?: () => void; onread?: () => void; drafts?: Map<string, ConversationDraft>;
   } = $props();
   // How often an open thread re-reads its newest page: the same bounded cadence
   // the DAG list polls driver status with, so one tick of latency is the floor.
@@ -61,6 +63,24 @@
   // box) never resets it for the life of the mounted pane.
   let questionsOpen = $state(true);
   let text = $state(''), sending = $state(false), sendError = $state('');
+  let input = $state<HTMLTextAreaElement | null>(null);
+  let selectedQuestion = $state('');
+  let draftReady = $state(false);
+  $effect(() => {
+    if (draftReady) drafts?.set(projectId, {text, replyTo, answering});
+  });
+  function composeKey(event: KeyboardEvent) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+      event.preventDefault(); void send();
+    }
+  }
+  function questionKey(question: OpenQuestion) { return question.message_id + ':' + question.segment_id; }
+  function replyLabel(entry: DriverConversationEntry): string {
+    const parent = messages.find(message => message.message_id === entry.reply_to_message_id);
+    return parent ? echoText(parent.sender_kind === 'user' ? messageText(parent) : parent.subject || messageText(parent))
+      : '#' + entry.reply_to_message_id?.slice(0, 8);
+  }
+
   let generation = 0;
   // An older page is loaded, so the pagination cursor points BELOW the newest
   // page and belongs to that older page. A newest-page refresh must then leave
@@ -194,20 +214,31 @@
       // `answers` is passed only when a question is bound, so an ordinary send is
       // the same options object it always was.
       await sendDriverConversationMessage(projectId, body, {
-        replyToMessageId: replying?.message_id, targetDriverId: driverId || undefined,
+        replyToMessageId: answering?.message_id ?? replying?.message_id, targetDriverId: driverId || undefined,
         ...(cited ? {answers: cited} : {})});
       text = ''; replyTo = null; answering = null;
+      // A response can finish after switching projects. Preserve newer text
+      // if the user returned and started another draft in the meantime.
+      if (drafts?.get(projectId)?.text.trim() === body) drafts.delete(projectId);
+      onread();
       await loadNewest();
       await scrollToNewest();
     } catch (e) { sendError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
-  function reply(entry: DriverConversationEntry) { replyTo = entry; answering = null; sendError = ''; }
+  function focusComposer() {
+    const width = thread?.parentElement?.clientWidth ?? 0;
+    // On compact layouts the question drawer shares the vertical space with
+    // messages. Keep its count visible and give that space to the reply.
+    if (width > 0 && width <= 680) questionsOpen = false;
+    input?.focus();
+  }
+  function reply(entry: DriverConversationEntry) { replyTo = entry; answering = null; sendError = ''; focusComposer(); }
   // A rail item binds the composer to that one question, and the thread's reply
   // target to the message that asked it, so the reply threads onto it too.
   function answer(question: OpenQuestion) {
     const asked = messages.find((m) => m.message_id === question.message_id) ?? null;
-    answering = question; replyTo = asked; sendError = '';
+    answering = question; replyTo = asked; sendError = ''; focusComposer();
   }
   function cancelAnswer() { answering = null; replyTo = null; }
   // ── the composer's echo is bounded ────────────────────────────────────────
@@ -316,6 +347,9 @@
   }
   onMount(() => {
     alive = true;
+    const draft = drafts?.get(projectId);
+    if (draft) { text = draft.text; replyTo = draft.replyTo; answering = draft.answering; }
+    draftReady = true;
     document.addEventListener('visibilitychange', onVisibility);
     void loadNewest();
     startTimer();
@@ -326,22 +360,18 @@
     };
   });
 </script>
-<!-- Three bands: a fixed header, ONE scroll box for the thread, and a composer
-     that is a sibling of that box. The composer therefore never moves with the
-     messages: it sits at the bottom of the pane's own box, not at the end of the
-     scrolled content, so reaching Send never means scrolling anything else.
-     The header is only for a host that has to name and dismiss the thread; in
-     the dashboard pane the picker above already names it, and every band here is
-     height the thread loses. -->
+<!-- The message viewport, question sidebar and composer own separate grid areas. -->
 <section class="conversation" aria-label={st('driverConversation')}>
-  {#if onclose}
-    <header class="conversation-head">
-      <strong>{st('driverConversation')} · {projectTitle || projectId}</strong>
-      <button class="outline" type="button" onclick={onclose}>{st('driverMessagesClose')}</button>
-    </header>
-  {/if}
-  {#if error}<p role="alert">{error}</p>{/if}
-  {#if loading && !ready}<p role="status">{st('loading')}</p>{/if}
+  <div class="conversation-status">
+    {#if onclose}
+      <header class="conversation-head">
+        <strong>{st('driverConversation')} · {projectTitle || projectId}</strong>
+        <button class="outline" type="button" onclick={onclose}>{st('driverMessagesClose')}</button>
+      </header>
+    {/if}
+    {#if error}<p role="alert">{error}</p>{/if}
+    {#if loading && !ready}<p role="status">{st('loading')}</p>{/if}
+  </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <!-- A scroll container has to be focusable to be scrollable from the keyboard:
        role=log keeps it a named region instead of a widget. -->
@@ -355,10 +385,10 @@
       {/if}
       {#if !messages.length}<p>{st('driverConversationEmpty')}</p>{/if}
       {#each messages as entry (entry.message_id)}
-        <article class="message" class:mine={entry.sender_kind === 'user'}>
+        <article class="message" data-message-id={entry.message_id} class:mine={entry.sender_kind === 'user'}>
           <header>
             <span class="sender">{entry.sender_kind === 'user' ? st('driverConversationYou') : (entry.sender_driver_id ?? st('driverConversationDriver'))}</span>
-            <span class="identity"> · {new Date(entry.created_at).toLocaleString()}</span>
+            <time class="identity" datetime={entry.created_at} title={new Date(entry.created_at).toLocaleString()}>{new Date(entry.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</time>
             {#if entry.sender_kind === 'driver'}
               <button class="outline" type="button" aria-label="{st('driverConversationReply')}: {entry.subject}" onclick={() => reply(entry)}>{st('driverConversationReply')}</button>
             {/if}
@@ -366,33 +396,26 @@
               <span class="asks" title={st('messageAsksQuestion')} aria-label={st('messageAsksQuestion')}>?</span>
             {/if}
           </header>
-          {#if entry.reply_to_message_id}<p class="identity">{st('driverConversationReplyingTo')} #{entry.reply_to_message_id.slice(0, 8)}</p>{/if}
-          <strong class="subject">{entry.subject}</strong>
+          {#if entry.reply_to_message_id}<p class="identity">{st('driverConversationReplyingTo')} {replyLabel(entry)}</p>{/if}
+          {#if entry.sender_kind !== 'user'}<strong class="subject">{entry.subject}</strong>{/if}
           <!-- The message's text, rendered once: its body, or - when the body is
                empty - its segment texts. A message is not split into info and
                question blocks: a split would scatter one message across the thread,
-               and the questions it asks live in the questions box below, which later
+               and the questions it asks live in the question sidebar, which later
                info messages cannot wash away. -->
-          {#if messageText(entry)}<pre>{messageText(entry)}</pre>{/if}
+          {#if messageText(entry)}
+            <div class="message-content" class:plain={entry.sender_kind === 'user'}>
+              {#if entry.sender_kind === 'user'}{messageText(entry)}{:else}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown sanitizes with DOMPurify -->
+                {@html renderMarkdown(messageText(entry))}
+              {/if}
+            </div>
+          {/if}
         </article>
       {/each}
     {/if}
   </div>
-  <!-- The questions box: a PERMANENT, foldable band between the thread and the
-       composer. It is a sibling of the thread's scroll box, never inside it, so
-       the thread scrolling never moves it and it never moves the thread. It is
-       always rendered - with no question it says so - because an absent box reads
-       as "no questions were ever asked" when the walk may not have finished.
-       Info blocks never appear here; the questions are the only thing it lists.
-       Its rows are the WHOLE conversation (`railRows`), not this thread's page, so
-       a question 30 or more info messages have pushed off the page is still listed.
-       `<details>` gives the fold natively; `questionsOpen` keeps the user's toggle
-       for the life of the pane. The summary always carries the open count, and an
-       incomplete walk also shows a short marker there, so the caveat survives the
-       box being collapsed. The full sentence sits in the expanded body.
-       Two groups: the OPEN questions, each with its reply control, and the
-       ANSWERED ones (kept so the reader can look back), each marked with the
-       answer the user gave and no reply control - it is answered already. -->
+  <!-- The complete question history stays independent of thread pagination. -->
   <details class="questions-box" data-questions-box aria-label={st('driverQuestionsRail')} bind:open={questionsOpen}>
     <summary class="questions-summary">
       <span class="questions-summary-label">{st('driverQuestionsHeading')} ({questions.length})</span>
@@ -420,8 +443,11 @@
           <ul class="questions-list">
             {#each questions as question (question.message_id + ':' + question.segment_id)}
               <li class="question-item" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id}>
-                <span class="question-subject">{question.subject}</span>
-                <span class="question-text">{question.text}</span>
+                <button class="question-preview" type="button" aria-expanded={selectedQuestion === questionKey(question)}
+                  onclick={() => selectedQuestion = selectedQuestion === questionKey(question) ? '' : questionKey(question)}>
+                  <span class="question-subject" title={question.subject}>{question.subject}</span>
+                  <span class="question-text" class:expanded={selectedQuestion === questionKey(question)}>{question.text}</span>
+                </button>
                 <button class="outline" type="button"
                   data-answer-message-id={question.message_id} data-answer-segment-id={question.segment_id}
                   aria-label="{st('driverQuestionsReply')}: {question.text}"
@@ -431,16 +457,17 @@
           </ul>
         {/if}
         {#if answeredQuestions.length}
-          <p class="questions-title" data-questions-answered>{st('driverQuestionsAnswered')} ({answeredQuestions.length})</p>
+          <details class="answered-group"><summary class="questions-title" data-questions-answered>{st('driverQuestionsAnswered')} ({answeredQuestions.length})</summary>
           <ul class="questions-list questions-list-answered">
             {#each answeredQuestions as question (question.message_id + ':' + question.segment_id)}
               <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-answered-by={question.answered?.message_id}>
-                <span class="question-subject">{question.subject}</span>
+                <span class="question-subject" title={question.subject}>{question.subject}</span>
                 <span class="question-text">{question.text}</span>
                 <span class="question-answered-note">{st('driverQuestionsAnswerPrefix')}</span><span class="question-answer-text">{question.answered?.text}</span>
               </li>
             {/each}
           </ul>
+          </details>
         {/if}
       </div>
     {/if}
@@ -456,96 +483,76 @@
         {st('driverConversationReplyingTo')} · {echoText(replyTo.subject)}
         <button class="outline" type="button" onclick={() => (replyTo = null)}>{st('driverConversationCancelReply')}</button></p>
     {/if}
-    <!-- Send on the input's own row, and the input one line tall by default.
-         The visible "write a message" label is gone - the accessible name is on
-         the box itself - so the composer costs one line instead of three. The
-         box keeps `resize:vertical`, so the user can still drag it taller, but
-         only up to `max-height:6rem`: past that it scrolls its own text instead
-         of growing the band past the pane's clipped bottom edge. -->
     <div class="composer-row">
-      <textarea bind:value={text} maxlength="8000" rows="1" disabled={sending}
+      <textarea bind:this={input} bind:value={text} maxlength="8000" rows="2" disabled={sending}
+        onkeydown={composeKey} placeholder={st('driverConversationPlaceholder')}
         aria-label={st('driverConversationCompose')}></textarea>
+    </div>
+    <div class="composer-footer"><span>{st('driverConversationShortcut')}</span>
       <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
     </div>
     {#if sendError}<p role="alert">{sendError}</p>{/if}
   </form>
 </section>
 <style>
-  /* The box chain that makes the pane own its scroll: this section is a flex
-     column that is allowed to shrink (min-height:0) and clips, the thread is the
-     only scroll box, and the composer is a non-shrinking band after it. No
-     margin or border of its own: the pane's header already draws the line above
-     it, and this band would be height taken from the thread. */
-  .conversation{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:hidden;}
-  .conversation-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;flex:0 0 auto;
-    padding:.25rem 0;border-top:1px solid var(--pico-muted-border-color,#ddd);}
-  .conversation-thread{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding-right:.2rem;}
-  /* The questions box: a permanent, foldable sibling band between the thread and
-     the composer. It takes only the height it needs, never more than a bounded
-     share: the expanded body scrolls on its own (max-height + overflow-y:auto on
-     the box's own body), so a long list of open questions never moves the thread,
-     and the thread never moves it. Collapsed, the box is its one summary line. */
-  .questions-box{flex:0 0 auto;min-height:0;margin:.25rem 0 0;padding:.25rem 0 0;
-    border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
-  .questions-summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:.2rem .5rem;cursor:pointer;
-    font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
-  .questions-summary-label{flex:0 0 auto;}
-  .questions-body{max-height:9rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;margin:.2rem 0 0;}
-  .questions-empty{margin:0 0 .2rem;font-size:.75rem;color:var(--pico-muted-color,#64748b);}
-  /* The incompleteness marker: a short muted caveat on the summary line (so it
-     survives the box being collapsed) and the full sentence in the body. Ordinary
-     case and muted, so it reads as a caveat rather than another question. */
-  .questions-note-short{font-size:.65rem;font-weight:400;text-transform:none;letter-spacing:0;font-style:italic;overflow-wrap:anywhere;}
-  .questions-title{margin:0 0 .2rem;font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--pico-muted-color,#64748b);}
-  .questions-note{margin:0 0 .2rem;font-size:.7rem;line-height:1.3;overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
-  .questions-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.3rem;}
-  .question-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .4rem;font-size:.8rem;line-height:1.35;}
-  .question-subject{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
-  .question-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;font-weight:600;}
-  /* An answered question: the same row, then the user's own answer under it.
-     The answer is bounded to two lines so a long reply cannot take the rail's
-     scroll height from the questions still open; the full answer is in the
-     thread. The note is muted, so it reads as a caption, not a question. */
-  .question-answered-note{flex:0 0 auto;color:var(--pico-muted-color,#64748b);font-size:.7rem;}
-  .question-answer-text{flex:1 1 8rem;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
-  .question-item-answered{color:var(--pico-muted-color,#475569);}
-  .conversation-thread:focus-visible{outline:2px solid var(--pico-primary,#0066cc);outline-offset:-2px;}
-  .composer{display:flex;flex-direction:column;flex:0 0 auto;margin:.25rem 0 0;padding-top:.25rem;
-    border-top:1px solid var(--pico-muted-border-color,#e6ebf1);}
-  /* The echo band's own bound. It sits in `.composer`, which never shrinks and is
-     the last band of a clipped, fixed-height column: with no bound of its own a
-     long question grew the band until the input row and Send were pushed past
-     the pane's bottom edge, with no scroll path back to them. Two guards, and the
-     second is the one that holds for ANY text: `echoText` cuts the echo to a
-     bounded excerpt (the whole question stays in `title`), and this rule pins the
-     band at 60px with its own scroll, so the excerpt scrolls inside a fixed slice
-     of the pane and whatever renders here can only ever cost the pane a constant.
-     The bound is in pixels because this dashboard's root font size is 20px on wide
-     screens: a rem value resolves against that root, so `3.6rem` was 72px on the
-     page, while a pixel value is the same number everywhere, the page and the test
-     that asserts it. The rule is on the band itself (a block `<p>`), not on an
-     inline wrapper, because `max-height` does not apply to an inline box. */
-  .composer-echo{max-height:60px;overflow-y:auto;overflow-wrap:anywhere;}
-  /* One row: the input takes the width, the button keeps its own. `min-width:0`
-     and `flex-wrap` mean a narrow pane wraps the button under the input instead
-     of pushing it out of the box.
-     Pico's global form rule is `button[type=submit],select,textarea{width:100%}`:
-     left alone it makes the submit button a full-width block and the textarea's
-     base size the whole row, so Send would always wrap to a line of its own.
-     The two selectors below out-specify that rule and pin the row to one line. */
-  .composer-row{display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:.35rem;}
-  .composer-row textarea{flex:1 1 6rem;width:auto;min-width:0;margin:0;resize:vertical;font-size:.8rem;
-    line-height:1.35;padding:.25rem .4rem;max-height:6rem;overflow-y:auto;}
-  .composer-row button[type="submit"]{flex:0 0 auto;width:auto;margin:0;}
-  button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}
-  p{margin:.4rem 0;}
-  .asks{display:inline-flex;align-items:center;justify-content:center;width:1.1rem;height:1.1rem;
-    border-radius:999px;background:var(--pico-primary,#2563eb);color:#fff;font-size:.7rem;font-weight:700;}
-  .identity{overflow-wrap:anywhere;color:var(--pico-muted-color,#64748b);}
-  .message{margin:.45rem 0;padding:.35rem .55rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;}
-  .message.mine{border-color:var(--pico-primary-border,#93c5fd);}
-  .message header{display:block;}
-  .message .sender{font-weight:600;}
-  .message .subject{display:block;margin:.2rem 0;}
-  pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow-y:auto;overflow-x:hidden;font-size:.75rem;padding:.5rem;margin:.25rem 0 0;}
+  .conversation{display:grid;grid-template-columns:minmax(0,1fr) 280px;grid-template-rows:auto minmax(0,1fr) auto;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;font-size:14px;}
+  .conversation-status{grid-column:1;grid-row:1;min-width:0;}
+  .conversation-status p{font-size:13px;padding:8px 16px;margin:0;}
+  .conversation-head{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;font-size:14px;}
+  .conversation-thread{grid-column:1;grid-row:2;min-height:0;min-width:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;padding:20px 24px 8px;}
+  .identity{font-size:12px;overflow-wrap:anywhere;color:var(--pico-muted-color);}
+  .conversation-thread>.identity{text-align:center;margin:0 0 18px;}
+  .message{margin:0 0 24px;padding:0;border:0;border-radius:0;box-shadow:none;background:transparent;min-width:0;overflow-wrap:anywhere;}
+  .message.mine{margin-left:15%;}
+  .message header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;padding:0;background:transparent;border:0;font-size:12px;color:var(--pico-muted-color);}
+  .mine header{justify-content:flex-end;}
+  .sender{font-weight:600;}.message .subject{display:block;margin:0 0 8px;font-size:14px;font-weight:600;}
+  .message-content{font-size:14px;line-height:1.7;overflow-wrap:anywhere;min-width:0;}
+  .message-content.plain{white-space:pre-wrap;padding:10px 14px;border-radius:10px 2px 10px 10px;background:color-mix(in srgb,var(--pico-primary) 9%,var(--pico-background-color));}
+  .message-content :global(p){margin:0 0 10px;}.message-content :global(p:last-child){margin-bottom:0;}
+  .message-content :global(ul),.message-content :global(ol){margin:8px 0;padding-left:22px;}
+  .message-content :global(pre){max-width:100%;overflow-x:auto;padding:12px;font-size:12px;}
+  .message-content :global(code){font-size:12px;overflow-wrap:anywhere;}
+  .message-content :global(h1),.message-content :global(h2),.message-content :global(h3){font-size:16px;margin:16px 0 8px;}
+  .message-content :global(table){display:block;max-width:100%;overflow-x:auto;font-size:13px;}
+  .message-content :global(blockquote){margin:10px 0;padding:4px 12px;font-size:13px;}
+  .questions-box{position:relative;grid-column:2;grid-row:1/-1;display:flex;flex-direction:column;min-width:0;min-height:0;margin:0;padding:18px 14px;border:0;border-left:1px solid var(--pico-muted-border-color);background:var(--pico-card-sectioning-background-color);overflow:hidden;}
+  .questions-summary{flex:0 0 auto;margin:0;font-size:13px;font-weight:600;overflow-wrap:anywhere;cursor:pointer;}
+  .questions-note-short{display:block;margin-top:4px;font-size:11px;font-weight:400;color:var(--pico-muted-color);}
+  .questions-body{position:absolute;top:62px;bottom:14px;left:14px;right:14px;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;margin:0;}
+  .questions-box:has(.questions-note-short) .questions-body{top:82px;}
+  .questions-empty,.questions-note{margin:0 0 12px;font-size:12px;color:var(--pico-muted-color);}
+  .questions-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;}
+  .question-item{display:flex;flex-direction:column;align-items:stretch;min-width:0;gap:8px;margin:0;padding:12px;border:1px solid var(--pico-muted-border-color);border-radius:8px;background:var(--pico-background-color);overflow-wrap:anywhere;}
+  .question-item:has(.question-preview[aria-expanded=true]){border-color:var(--pico-primary);}
+  .question-preview{display:flex;flex-direction:column;gap:6px;width:100%;margin:0;padding:0;border:0;border-radius:0;box-shadow:none;background:transparent;color:inherit;text-align:left;}
+  .question-subject{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-width:0;font-size:11px;line-height:1.5;color:var(--pico-muted-color);overflow-wrap:anywhere;}
+  .question-text{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;min-width:0;font-size:13px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
+  .question-text.expanded{-webkit-line-clamp:unset;}
+  .question-item>button.outline{background:transparent;color:var(--pico-primary);align-self:flex-start;margin:0;font-size:12px;}
+  .answered-group{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--pico-muted-border-color);}
+  .questions-title{margin-bottom:12px;font-size:12px;color:var(--pico-muted-color);}
+  .question-item-answered .question-text{-webkit-line-clamp:2;}
+  .question-answered-note{font-size:11px;color:var(--pico-muted-color);}
+  .question-answer-text{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;}
+  .composer{grid-column:1;grid-row:-2/-1;min-width:0;flex:0 0 auto;margin:0;padding:12px 20px 16px;border-top:1px solid var(--pico-muted-border-color);}
+  .composer-echo{display:flex;align-items:flex-start;gap:8px;justify-content:space-between;max-height:60px;overflow-y:auto;overflow-wrap:anywhere;margin:0 0 8px;padding:8px 10px;background:color-mix(in srgb,var(--pico-primary) 8%,var(--pico-background-color));border-radius:6px;color:var(--pico-primary);font-size:12px;}
+  .composer-echo button{flex-shrink:0;margin:0;}
+  .composer-row textarea{width:100%;min-width:0;min-height:64px;max-height:160px;resize:vertical;margin:0;padding:10px 12px;font-size:14px;line-height:1.6;overflow-y:auto;}
+  .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:8px;}
+  .composer-footer span{font-size:11px;color:var(--pico-muted-color);}
+  .composer-footer button{margin:0;}
+  button{width:auto;font-size:12px;padding:5px 9px;margin:0;}
+  .asks{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);font-size:11px;}
+  @container(max-width:900px){.conversation{grid-template-columns:minmax(0,1fr) 240px;}.conversation-thread{padding:16px;}.composer{padding:12px 16px;}}
+  @container(max-width:680px){
+    .conversation{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto auto;}
+    .questions-box{grid-column:1;grid-row:-3/-2;border-left:0;border-top:1px solid var(--pico-muted-border-color);padding:10px 12px;max-height:170px;}
+    .questions-box:has(.questions-note-short) .questions-body{top:60px;}
+    .questions-box[open]{height:170px;}
+    .questions-body{top:40px;bottom:10px;left:12px;right:12px;}.questions-list{gap:8px;}
+    .conversation-thread{padding:14px 12px;}.composer{padding:10px 12px;}
+    .composer-row textarea{min-height:54px;font-size:16px;}.composer-footer span{font-size:11px;}
+  }
+  @media(pointer:coarse){button{min-height:44px;}.question-preview{min-height:44px;}}
 </style>

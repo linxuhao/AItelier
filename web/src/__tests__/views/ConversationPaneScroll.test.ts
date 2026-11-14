@@ -134,23 +134,22 @@ describe('the conversation pane owns its own scrolling', () => {
     expect(css(pane, 'flex-direction')).toBe('column');
     expect(overflowY(pane)).toBe('hidden');
     expect(css(pane, 'height')).not.toBe('auto');
-    expect(css(pane, 'max-height')).not.toBe('');
+    expect(css(pane, 'height')).toBe('100%');
 
     // The thread is the one scroll box: shrinkable, bounded, its own overflow.
     expect(pane.querySelector('[data-conversation-thread]')).toBeTruthy();
     expect(overflowY(thread)).toBe('auto');
     expect(css(thread, 'min-height')).toBe('0');
-    expect(css(thread, 'flex-grow')).toBe('1');
-    expect(Number(css(thread, 'flex-shrink'))).toBe(1);
+    expect(css(thread.parentElement, 'display')).toBe('grid');
 
     // Every box between the thread and the pane may shrink (min-height:0) and
-    // is a flex column, otherwise the bounded height stops here and the thread
+    // is a bounded flex column or grid, otherwise the bounded height stops here and the thread
     // grows past the pane.
     const chain = chainBetween(thread, pane);
     expect(chain.length).toBeGreaterThan(0);
     for (const el of chain) {
       expect(css(el, 'min-height')).toBe('0');
-      expect(css(el, 'display')).toBe('flex');
+      expect(css(el, 'display')).toBe(el.classList.contains('conversation') ? 'grid' : 'flex');
       expect(['hidden', 'clip']).toContain(overflowY(el));
     }
 

@@ -40,7 +40,7 @@ describe('archived state projects',()=>{
   });
   it('shows them again when asked, and searching does not resurrect hidden ones',async()=>{
     const view=render(StateProjects);await view.findByRole('heading',{name:'live'});
-    await fireEvent.input(view.getByPlaceholderText('Find a goal'),{target:{value:'canary'}});
+    await fireEvent.input(view.getByRole('searchbox'),{target:{value:'canary'}});
     expect(view.queryByRole('heading',{name:'old-canary'})).toBeNull();
     await fireEvent.click(view.getByLabelText(/Show archived/));
     await view.findByRole('heading',{name:'old-canary'});

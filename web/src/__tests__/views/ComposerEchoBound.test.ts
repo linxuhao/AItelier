@@ -148,11 +148,11 @@ describe('the composer echo is bounded', () => {
     expect(style.overflowY).toBe('auto');
     expect(style.display).not.toBe('inline');
 
-    // A user-dragged textarea scrolls its own text past 6rem instead of growing
+    // A user-dragged textarea scrolls its own text past 160px instead of growing
     // the composer past the clipped pane.
     const textarea = view.getByLabelText('Write a message') as HTMLTextAreaElement;
     const textareaStyle = getComputedStyle(textarea);
-    expect(textareaStyle.maxHeight).toBe('6rem');
+    expect(textareaStyle.maxHeight).toBe('160px');
     expect(textareaStyle.overflowY).toBe('auto');
   });
 

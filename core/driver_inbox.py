@@ -8,6 +8,7 @@ import time
 from uuid import uuid4
 from core.driver_questions import CONVERSATION, all_questions, conversation_rows, open_question_count
 from core.drivers import recipient_presence_block, touch_driver
+from core.message_secret_guard import refuse_credential_values
 from core.state_graph import StateGraphError, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
 from core.state_schema_migration import add_column_if_missing
@@ -319,6 +320,9 @@ class DriverInbox:
             raise StateGraphError("invalid_request: subject must be a non-empty string of at most 200 characters")
         if type(body) is not str or len(body)>8000:
             raise StateGraphError("invalid_request: body must be a string of at most 8000 characters")
+        # The one credential guard for the driver inbox. Before the request key is
+        # replayed or any row is written, so a refused body leaves nothing behind.
+        refuse_credential_values(body, lambda detail: StateGraphError("invalid_request: " + detail))
         if bool(target_driver_id) and bool(project_members):
             raise StateGraphError("invalid_request: target_driver_id and project_members are mutually exclusive; set exactly one")
         if not target_driver_id and not project_members:

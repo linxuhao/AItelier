@@ -118,17 +118,20 @@ check refuses (measured on 2026-11-15 with the `mountable` command below: the
 record naming a linked worktree exited 71, the record naming a `git clone
 --local` exited 0). Naming the production checkout itself is NOT refused -- its
 `.git` is a real directory, so the check answers 0 (measured the same day, same
-command) -- and that measured pass is the reason to leave it out of a record: the
-gate would read a live read-write tree that moves under the run, so the commit a
-record freezes would not be the bytes that were measured. A clone cannot drift
-away from the record that names it.
+command) -- but it is still wrong to put in a record, and the reason is drift, not
+refusal: the gate would read a live read-write tree that moves under the run, so
+the commit a record freezes would not be the bytes that were measured. That drift
+is recorded rather than silent -- the verdict names the moved head and tree and
+reads `unreviewed <differences>` -- but an unreviewed green is a measurement, not
+release evidence. A clone cannot drift away from the record that names it.
 
 An operator can decide this before dispatch instead of meeting the refusal. The
 mount table is the launcher's own `-v` list, not a guess: repeat every `-v
 HOST:CONTAINER` of tools/gate_run.sh that the Source's identity can be reached
-through as `--carries CONTAINER=HOST` -- today three of its four, the record's own
-`-v` being a file inside a directory already carried -- and add a new `-v` in
-both places, or a readable Source becomes a refusal.
+through as `--carries CONTAINER=HOST` -- today three of its four: the record's
+own `-v` is a single file, and a single-file mount can never carry a git
+repository, so no Source's identity is reachable through it -- and add a new `-v`
+in both places, or a readable Source becomes a refusal.
 
     python3 tools/gate_binding.py mountable <record> --binding-sha256 <sha256 of the record> \
       --carries "/app=<source>" --carries "/home/linxuhao/AItelier=<source>" \

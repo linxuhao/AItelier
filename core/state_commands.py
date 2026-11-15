@@ -626,7 +626,13 @@ class NotebookScopeRequest(Request):
     @model_validator(mode="after")
     def one_notebook_scope(self):
         if bool(self.project_id) == bool(self.driver_id):
-            raise ValueError("exactly one project_id or driver_id is required")
+            if self.project_id:
+                raise ValueError(
+                    "project_id and driver_id both name a notebook, so send only one of them.")
+            raise ValueError(
+                "name the notebook with project_id (the project's public notebook) or driver_id "
+                "(your private notebook); nothing is defaulted, because a default would publish "
+                "text you may have meant for your private notebook.")
         return self
 
 class DriverNoteEntry(NotebookScopeRequest):
@@ -1628,11 +1634,16 @@ def _sole_project(service, driver_id):
 def _driver_defaults(service, action, arguments):
     """Fill the arguments a registered driver's credential already answers.
 
-    director_identity defaults to the driver id. A REQUIRED project_id (or a
-    notebook entry's scope, when no driver_id is named) defaults to the
-    driver's project when it is an active member of exactly one. An optional
-    project_id is left alone, because omitting it has its own meaning there.
-    Explicit values are kept and checked as before; this grants nothing.
+    director_identity defaults to the driver id. A REQUIRED project_id defaults
+    to the driver's project when it is an active member of exactly one. An
+    optional project_id is left alone, because omitting it has its own meaning
+    there. A notebook READ with no scope named (no project_id, no driver_id)
+    also defaults to that project, so reads keep their convenience. A notebook
+    WRITE is never defaulted: it must name its notebook, because a default would
+    publish text the caller may have meant for its private notebook (the
+    measured defect: a write whose driver_id was lost was completed as a public
+    project-notebook write). Explicit values are kept and checked as before;
+    this grants nothing.
     """
     driver_id = getattr(service, "driver_id", None)
     if not driver_id or _anonymous(service):
@@ -1643,8 +1654,12 @@ def _driver_defaults(service, action, arguments):
     if "director_identity" in fields and out.get("director_identity") is None:
         out["director_identity"] = driver_id
     field = fields.get("project_id")
-    wanted = field is not None and action not in _NO_PROJECT_DEFAULT and (
-        field.is_required() or (issubclass(model, NotebookScopeRequest) and not out.get("driver_id")))
+    notebook = issubclass(model, NotebookScopeRequest)
+    if notebook and action in WRITE_REQUESTS:
+        wanted = False  # a notebook write names its notebook; it is never defaulted
+    else:
+        wanted = field is not None and action not in _NO_PROJECT_DEFAULT and (
+            field.is_required() or (notebook and not out.get("driver_id")))
     if wanted and out.get("project_id") is None:
         sole = _sole_project(service, driver_id)
         if sole is not None:

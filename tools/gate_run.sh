@@ -43,12 +43,19 @@ done
 # here -- before running anything -- whenever one literal was stale, so a single
 # platform rebuild (2026-10-24 -> 11-03) stopped EVERY project's every gate in
 # seconds and made "did not measure" look exactly like "measured and failed".
-# So the binding is read, the platform identity is OBSERVED and recorded beside
-# the receipt ($SUFFIX.platform-binding.json), and the gate ALWAYS runs.
+# A STALE literal is still never a reason to refuse: the binding is read, the
+# platform identity is OBSERVED and recorded beside the receipt
+# ($SUFFIX.platform-binding.json), and the gate runs and is judged on its own
+# exit code.
 #
-# What is still fatal here is only "there is nothing to dispatch": an unreadable
-# or malformed binding names no Source and no image, and inventing either from
-# whatever is on disk would measure a platform nobody reviewed.
+# Two things are still fatal here, and neither of them is staleness. (1) "There
+# is nothing to dispatch": an unreadable or malformed binding names no Source and
+# no image, and inventing either from whatever is on disk would measure a
+# platform nobody reviewed (exit 69). (2) The record names a Source whose Git
+# identity no mount of THIS gate carries (the guard below, exit 71): the gate
+# would run and then record that commit as unobserved, i.e. produce a comparison
+# nobody could make, so it is refused by name before anything is mounted.
+# docs/normal-game-gate.md names that class, the operator's check and the remedy.
 BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
 PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69

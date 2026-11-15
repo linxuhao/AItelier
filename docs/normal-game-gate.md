@@ -68,18 +68,19 @@ operator must choose and freeze `sdk` from an independently reviewed exact
 immutable image. It is a required exact `X.Y.Z` release string; the example
 above does not approve an image. Source dependency declarations and currently
 observed metadata cannot select or update this expectation. Missing pins and
-extra fields refuse without migration. Actual `skillflow-py` metadata must
+extra fields refuse without migration (exit 69, nothing dispatched). Actual
+`skillflow-py` metadata must
 equal the explicit pin. Unit controls use 1.5.85 and 1.5.99 pins; those controls
 do not establish runtime compatibility or approve either image.
 
 Manifest parsing and SHA256 consume the same single read from an opened regular
 non-symlink file. The launcher freezes that hash before dispatch and uses it for
 Source/image selection, execution and receipt authorization. The binding is a
-RECORD OF REVIEW, not a pre-dispatch licence: it is never a reason to refuse.
-That was the 2026-11-04 owner ruling (wuxia `iss-5e51a56608c64f60`) -- refusing
-while one literal was stale stopped every project's every gate after a platform
-rebuild, in seconds, and made "did not measure" look exactly like "measured and
-failed". So:
+RECORD OF REVIEW, not a pre-dispatch licence: a literal in it that is merely
+STALE is never a reason to refuse. That was the 2026-11-04 owner ruling (wuxia
+`iss-5e51a56608c64f60`) -- refusing while one literal was stale stopped every
+project's every gate after a platform rebuild, in seconds, and made "did not
+measure" look exactly like "measured and failed". So:
 
 - the identity actually in front of the gate is observed at dispatch
   (`*.platform-binding.json`) and inside the container before and after
@@ -94,6 +95,41 @@ failed". So:
   is not silently accepted and not turned into a failure;
 - an explicit binding (or its sha256) can still be passed in to judge a run
   against a historical review.
+
+One case is not about staleness, and it does refuse. Before anything is
+mounted, the launcher asks whether the Git identity of the record's `source` can
+be reached from INSIDE the gate's own mount table -- the `mountable` call in
+tools/gate_run.sh, before the first `-v`. A `source` whose `.git` is a POINTER
+(a linked worktree's gitfile, or a `.git` symlink) at a repository no mount of
+the gate carries would run and then report its commit as unobserved -- a
+comparison nobody could make -- so that record is refused by name before
+dispatch:
+
+    refusing: the frozen platform Source cannot be identified from inside the gate's mount; see <suffix>.gate.log
+
+exit code 71, nothing mounted, no snapshot taken, nothing written to
+`<suffix>.gate.exit` -- so a caller that reads 71 reads "the gate was not run",
+not "measured and failed". The remedy is in the record, not in the launcher:
+`source` must be a SELF-CONTAINED clone of the reviewed tree (`git clone --local
+<checkout> <dir>`, checked out at the reviewed commit). The production checkout
+and any `git worktree` of it are exactly the shapes this check refuses, because
+their `.git` points at a repository outside the directory the gate mounts
+(measured on 2026-11-15 with the `mountable` command below: the record naming a
+linked worktree exited 71, the record naming a `git clone --local` exited 0).
+
+An operator can decide this before dispatch instead of meeting the refusal. The
+mount table is the launcher's own `-v` list, not a guess: repeat every `-v
+HOST:CONTAINER` of tools/gate_run.sh as `--carries CONTAINER=HOST`, and add a new
+`-v` in both places, or a readable Source becomes a refusal.
+
+    python3 tools/gate_binding.py mountable <record> --binding-sha256 <sha256 of the record> \
+      --carries "/app=<source>" --carries "/home/linxuhao/AItelier=<source>" \
+      --carries /home/linxuhao/.AItelier
+
+It exits 0 when that Source's identity is reachable from inside the mount, and
+otherwise prints one reason on stderr and exits non-zero (71 for the pointer
+case above). The launcher turns any failure into its own refusal line and exit
+71, and appends that reason to `<suffix>.gate.log`.
 
 Three different objects carry the word "harness", and reading one as another has
 already sent two readers to opposite wrong conclusions (2026-11-14), so name

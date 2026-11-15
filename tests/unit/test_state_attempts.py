@@ -1,4 +1,5 @@
 """Real SkillFlow + SQLite scenarios; no manufactured completed state nodes."""
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -820,6 +821,224 @@ async def test_recovery_scope_propagates_any_union_and_all_intersection(system, 
     _, ok = recover_page(service, "game", 0, ["a"], [d["attempt_id"]], "any")
     assert ok is True
     assert attempts.get(d["attempt_id"])["status"] == "paused"
+
+
+def _count_transactions(service):
+    """Count the SERVICE's own store transactions, by kind.
+
+    ``StateService`` builds its own ``StateGraphStore``, so patching the
+    fixture's store would count nothing; the counter goes on
+    ``service.store.transaction`` exactly as ``_recover_page`` will use it.
+    """
+    original, counted = service.store.transaction, {"write": 0, "read": 0}
+
+    @contextlib.contextmanager
+    def counting(*args, **kwargs):
+        counted["write" if kwargs.get("write") else "read"] += 1
+        with original(*args, **kwargs) as conn:
+            yield conn
+
+    service.store.transaction = counting
+    return counted
+
+
+def _observed(store):
+    return [event for event in store.events("game") if event["event_type"] == "attempt_observed"]
+
+
+@pytest.mark.parametrize("paused", [True, False], ids=["already-paused", "running"])
+def test_unchanged_observation_opens_no_write_transaction(system, tmp_path, paused):
+    """A recovery page reconciles every in-scope attempt once a second. An
+    observation that changes nothing — an attempt already recorded ``paused``
+    whose engine row still says ``paused``, or a ``running`` attempt with no
+    change — must not cost a committed write on the shared sqlite and must not
+    append another ``attempt_observed`` event."""
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    if paused:
+        sf.pause_run(rid)
+    service = _recovery_service(system, tmp_path)
+    first = service.reconcile_attempt(a["attempt_id"])
+    assert first["status"] == ("paused" if paused else "running"), first
+    before_events = _observed(store)
+    before_seq = store.events("game")[-1]["seq"]
+    engine = sf.get_run
+    engine_reads = []
+
+    def counted_engine_read(run_id, *args, **kwargs):
+        engine_reads.append(run_id)
+        return engine(run_id, *args, **kwargs)
+
+    counted = _count_transactions(service)
+    sf.get_run = counted_engine_read
+    try:
+        again = service.reconcile_attempt(a["attempt_id"])
+    finally:
+        sf.get_run = engine
+        del service.store.transaction
+    print(json.dumps({"arm": "already-paused" if paused else "running",
+                      "status": again["status"], "transactions": counted,
+                      "engine_row_reads": len(engine_reads),
+                      "events_before": len(before_events), "events_after": len(_observed(store))}))
+    # The counter is really installed and really sees the read phase.
+    assert counted["read"] >= 1, counted
+    assert engine_reads == [rid], "the engine row is still read on every call"
+    assert counted["write"] == 0, counted
+    assert _observed(store) == before_events
+    assert store.events("game")[-1]["seq"] == before_seq
+    assert attempts.get(a["attempt_id"])["status"] == first["status"]
+    assert again["status"] == first["status"]
+    assert again["stale_inputs"] == first["stale_inputs"] is False
+
+
+def test_a_real_transition_still_commits_a_write(system, tmp_path):
+    """The saving is only the unchanged observation. A ``running`` attempt whose
+    engine row now reports ``paused`` still writes: at least one write
+    transaction, the recorded status becomes ``paused``, and the transition is
+    durably announced by an ``attempt_observed`` event."""
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    service = _recovery_service(system, tmp_path)
+    assert service.reconcile_attempt(a["attempt_id"])["status"] == "running"
+    sf.pause_run(rid)
+    before_events = _observed(store)
+    counted = _count_transactions(service)
+    try:
+        observed = service.reconcile_attempt(a["attempt_id"])
+    finally:
+        del service.store.transaction
+    after_events = _observed(store)
+    print(json.dumps({"arm": "running-to-paused", "status": observed["status"],
+                      "transactions": counted, "events_before": len(before_events),
+                      "events_after": len(after_events)}))
+    assert counted["write"] >= 1, counted
+    assert observed["status"] == "paused"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    assert len(after_events) == len(before_events) + 1
+    assert after_events[-1]["payload"]["attempt_id"] == a["attempt_id"]
+    assert after_events[-1]["payload"]["status"] == "paused"
+    assert after_events[-1]["payload"]["workflow_observation"]["workflow_status"] == "paused"
+
+
+def _claim_row(store, claim_id):
+    with store.transaction() as conn:
+        return dict(conn.execute("SELECT * FROM state_node_claims WHERE claim_id=?", (claim_id,)).fetchone())
+
+
+def _released_claims(store, claim_id):
+    with store.transaction() as conn:
+        rows = conn.execute("SELECT payload_json FROM state_events WHERE event_type='claim_released'").fetchall()
+    return [payload for payload in (json.loads(row[0]) for row in rows) if payload["claim_id"] == claim_id]
+
+
+def test_artifact_pending_candidate_reconciles_without_a_write_transaction(system, tmp_path):
+    """An artifact-pending candidate stays in the wait-recovery selection
+    (``status='candidate' AND artifact_ref IS NULL``), so every page observes it.
+    It already holds the state it reports and has no bound claim to settle — the
+    write would be empty — so repeated reconciliation must open NO write
+    transaction and must not append anything to the project stream."""
+    store, attempts, sf = system
+    a = reserve(system)
+    _, rid = _complete_without_artifact(system, a)
+    _record_dead_worktree(store, rid, tmp_path)
+    service = _recovery_service(system, tmp_path)
+    before = _wait_history_rows(store)
+    counted = _count_transactions(service)
+    per_call = []
+    try:
+        for _ in range(3):
+            writes = counted["write"]
+            result = service.reconcile_attempt(a["attempt_id"])
+            per_call.append(counted["write"] - writes)
+    finally:
+        del service.store.transaction
+    print(json.dumps({"arm": "artifact-pending-candidate", "write_tx_per_call": per_call,
+                      "reads": counted["read"], "status": result["status"],
+                      "artifact_pending_reason": result.get("artifact_pending_reason")}))
+    assert counted["read"] >= 1, counted
+    assert per_call == [0, 0, 0], per_call
+    assert result["status"] == "candidate" and result["artifact_ref"] is None
+    assert result["artifact_pending_reason"] == "owned_worktree_unavailable"
+    assert attempts.get(a["attempt_id"])["artifact_ref"] is None
+    assert _wait_history_rows(store) == before
+
+
+def _live_claim_attempt(system, request):
+    """A live implement claim bound to a freshly reserved, launched attempt."""
+    from core.state_claims import StateClaims
+    store, attempts, sf = system
+    claim = StateClaims(store, "driver:grok", "grok").claim_node("game", "a", "implement", 1, request + "-claim")
+    attempt = attempts.reserve("game", "a", 1, "feature", request, owner_driver_id="grok",
+                               claim_id=claim["claim_id"], fence=claim["fence"])
+    return claim, attempt, launch(system, attempt)
+
+
+def _complete_run(sf, rid):
+    sf.advance_run(rid)
+    claimed = sf.claim_next_step(rid)
+    assert claimed is not None, "fixture must execute a real step"
+    sf.confirm_step(claimed.token, StepResult(outputs={"implementation": "candidate"}))
+    sf.advance_run(rid)
+    assert sf.get_run(rid)["status"] == "completed"
+
+
+def test_a_quiescent_attempt_still_settles_a_live_bound_claim(system, tmp_path):
+    """Skipping an unchanged quiescent observation must not skip the settlement
+    it would have performed: a quiescent attempt holding a live bound claim is
+    reconciled in a write transaction, the claim is released, and the
+    ``claim_released`` event is written. The leftover-claim half is the part that
+    actually decides on claim presence, so it is witnessed too — without it, a
+    flag that always said "no claim" would pass the transition above and silently
+    stop repairing stranded claims."""
+    store, attempts, sf = system
+    claim, a, rid = _live_claim_attempt(system, "claim-bound")
+    _complete_run(sf, rid)
+    service = _recovery_service(system, tmp_path)
+    counted = _count_transactions(service)
+    try:
+        observed = service.attempts.reconcile(a["attempt_id"], sf, ARTIFACT, actor="claim-arm")
+    finally:
+        del service.store.transaction
+    events = _released_claims(store, claim["claim_id"])
+    print(json.dumps({"arm": "quiescent-live-claim", "write_tx": counted["write"],
+                      "claim_status": _claim_row(store, claim["claim_id"])["status"],
+                      "claim_released_events": len(events)}))
+    assert counted["write"] >= 1, counted
+    assert observed["status"] == "candidate"
+    assert _claim_row(store, claim["claim_id"])["status"] == "released"
+    assert len(events) == 1 and events[0]["attempt_id"] == a["attempt_id"]
+
+    # A leftover live bound claim on an ALREADY-terminal attempt (written before
+    # this fix): nothing about the observation changed, so the claim's presence
+    # is the only reason a write may happen — and it must happen.
+    with store.transaction(write=True) as conn:
+        conn.execute("UPDATE state_node_claims SET status='live' WHERE claim_id=?", (claim["claim_id"],))
+    counted = _count_transactions(service)
+    try:
+        again = service.attempts.reconcile(a["attempt_id"], sf, ARTIFACT, actor="claim-arm")
+    finally:
+        del service.store.transaction
+    repaired = _released_claims(store, claim["claim_id"])
+    print(json.dumps({"arm": "unchanged-quiescent-leftover-claim", "write_tx": counted["write"],
+                      "claim_status": _claim_row(store, claim["claim_id"])["status"],
+                      "claim_released_events": len(repaired)}))
+    assert counted["write"] >= 1, counted
+    assert again["status"] == "candidate"
+    assert _claim_row(store, claim["claim_id"])["status"] == "released"
+    assert len(repaired) == 2
+
+    # Once settled, the same unchanged observation is back to zero writes: the
+    # claim-presence answer is re-read, never remembered.
+    counted = _count_transactions(service)
+    try:
+        settled = service.attempts.reconcile(a["attempt_id"], sf, ARTIFACT, actor="claim-arm")
+    finally:
+        del service.store.transaction
+    assert counted["write"] == 0, counted
+    assert settled["status"] == "candidate"
+    assert len(_released_claims(store, claim["claim_id"])) == 2
 
 
 @pytest.mark.asyncio

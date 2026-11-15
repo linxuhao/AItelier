@@ -325,17 +325,18 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     });
     assert.equal(proc.exitCode, null, output);
     assert.ok(resumedProgress.done, `${resumedProgress.message}\n` + output);
-    const resumed = requests.slice(before).find(r => r.host && r.options.tools?.some(t => t.name === 'state_read'));
+    const resumed = requests.slice(before).find(r => r.host && !r.summary && r.options.tools?.some(t => t.name === 'state_read'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
     assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
     assert.equal(events.filter(e=>e.type==='goal/change'&&e.data.operation==='create').length,1,'restart replaced the persisted goal');
     const rearmed=events.find(e=>e.type==='goal/change'&&e.data.operation==='resume');
     assert.equal(rearmed?.data.goal.id,created[0].data.goal.id,'active goal was not rearmed after restart');
-    // Which of the resumed process's requests tripped it: the driver's own
-    // envelope or the compaction backend replaying the recorded one. A red that
-    // cannot say that sends the next reader through the whole scenario.
-    assert.ok(!resumed.options.tools.some(t => t.name === 'project_work'), 'host kept obsolete coding bridge\n'
+    // The driver's own requests never carry the obsolete bridge (the registry
+    // decides them). A compaction summary may replay the recorded envelope as cache
+    // prefix; the runtime no longer rewrites that record (see runtime.mjs).
+    assert.ok(requests.slice(before).filter(r => !r.summary && r.options.tools?.length)
+      .every(r => !r.options.tools.some(t => t.name === 'project_work')), 'host kept obsolete coding bridge\n'
       + JSON.stringify(requests.slice(before).map(r => ({ summary: r.summary, child: r.child, host: r.host,
         tools: r.options.tools?.length, codingBridge: r.options.tools?.some(t => t.name === 'project_work') }))));
     assert.equal(await readFile(join(outsideDirectory, 'root-host-proof.txt'), 'utf8'), 'ROOT_HOST_OK');
@@ -345,6 +346,19 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     const childRequest = requests.slice(before).find(r => r.host && r.child && r.options.tools?.some(t=>t.name==='bash'));
     assert.match(JSON.stringify(childRequest.options), /danger-full-access/);
     assert.doesNotMatch(JSON.stringify(childRequest.options), /Current DSH file policy: workspace-write/);
+    // A THIRD boot must load what the second one persisted. The mode change above
+    // is exactly the case that once made the runtime append a request/header
+    // outside an open turn at boot, which DSH accepted then and refused to load on
+    // the next start (both production drivers, 2026-11-15 00:39Z).
+    proc.kill('SIGTERM'); await once(proc, 'exit');
+    const third = requests.length;
+    proc = launch();
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline && proc.exitCode === null && !/SessionPersistenceCorruptionError|stored log is corrupt/.test(output)
+      && !requests.slice(third).some(r => !r.summary && r.options.tools?.length)) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/, 'the third boot could not load the session the second persisted\n' + output.slice(-2000));
+    assert.equal(proc.exitCode, null, output.slice(-2000));
+    assert.ok(requests.slice(third).some(r => !r.summary && r.options.tools?.length), 'the third boot never served a turn\n' + output.slice(-2000));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();

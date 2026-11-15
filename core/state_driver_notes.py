@@ -10,6 +10,7 @@ from core.state_driver_index import (ENTRY_SCHEMA, DRIVER_ENTRY_SCHEMA, index_li
                                      entry_id_value, entry_summary, force_value,
                                      landed_text, new_entry_id, reason_text,
                                      referenced_addresses)
+from core.message_body_guard import refuse_credential_body
 from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
                               text)
 from core.state_privacy import (UntrustedDatabase, refuse_private_read,
@@ -518,6 +519,9 @@ class StateDriverNotes:
                      force, landed, timestamp) -> str:
         if not self.driver_scope and ("dnote://" in assertion or "dnote://" in body):
             raise StateGraphError("private_notebook_reference")
+        # The one credential guard for the notebook. write_entry and supersede_entry
+        # both write through here, so one call covers both; it runs before the INSERT.
+        refuse_credential_body(body)
         entry_id = new_entry_id()
         dangling = self._unresolved(conn, project_id, [("body", body), ("assertion", assertion)])
         if dangling:

@@ -263,3 +263,23 @@ def test_c2_guard_is_defined_once_and_called_from_both_paths():
         calls = re.findall(r"\brefuse_credential_values\(", (root / name).read_text())
         assert len(calls) == 1, (name, len(calls))
     assert "def _configured_values" in inspect.getsource(guard)
+
+
+def test_docstring_states_the_measured_coverage_boundary():
+    """The module docstring carries the three statements: which credentials are
+    checked, which are not and why (per-driver tokens: HMAC only, token directory
+    not visible to the backend), and the rule for what a writer does instead
+    (name the location, never the value). Asserted on the docstring as written."""
+    doc = guard.__doc__ or ""
+    # (i) the coverage set: the two credentials the server holds in plaintext.
+    assert "Checked: the two credentials this server holds in plaintext" in doc
+    assert "AITELIER_ADMIN_TOKEN" in doc
+    assert "AITELIER_MCP_EXTERNAL_TOKEN" in doc
+    # (ii) the per-driver-token gap, with its reason.
+    assert "NOT checked: each driver's own ``AITELIER_DRIVER_TOKEN``" in doc
+    assert "HMAC" in doc and "drivers.token_hash" in doc
+    assert "~/.aitelier-drivers/" in doc
+    assert "not visible to" in doc and "backend process" in doc
+    # (iii) the rule for writers: name the location, never the value.
+    assert "name where the token lives" in doc
+    assert "never its value" in doc

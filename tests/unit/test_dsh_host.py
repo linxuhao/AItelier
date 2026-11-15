@@ -180,11 +180,13 @@ def crashing(tmp_path):
 
 
 async def test_a_foreign_last_error_survives_a_recovery(crashing):
-    """Clearing the stamp takes back only the supervisor's own words.
+    """A recovery writes nothing on the row, so a foreign diagnosis survives it.
 
     `last_error` is shared: the runtime writes exit codes there, and an operator
-    can too. A recovery this supervisor happens to observe must not erase a
-    diagnosis it did not make.
+    can too. The supervisor's own failed-start text is dropped by the next
+    `start()` (which stamps `phase='starting', last_error=''`), so the loop has
+    nothing to clear on recovery - and a write here is exactly the write that
+    would erase a diagnosis the supervisor did not make.
     """
     backend, host = crashing
     row = await backend.start('alpha', actor='fixture')

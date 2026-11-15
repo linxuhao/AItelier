@@ -179,22 +179,12 @@ def stamp_start_failure(runtime, row, attempts, error):
                    last_error=_start_failure_text(attempts, error))
 
 
-def clear_start_failure_stamp(runtime, row):
-    """Take back the supervisor's own stamp; a foreign diagnosis stays.
-
-    The row is read FIRST, before anything is cleared: `last_error` is written by
-    other components too, and one of their texts is not this loop's to erase just
-    because the supervisor's own start happened to recover.
-
-    It falls back to `starting`, not `running`: outliving the window only proves
-    the child is still alive, and `start()` wrote `starting` for this very spawn.
-    `running` is the runtime's own claim to make - it reports activity only once
-    it actually serves, tens of seconds after boot.
-    """
-    current = runtime.get(row["project_id"])
-    if current is None or not (current.get("last_error") or "").startswith(START_FAILURE_PREFIX):
-        return
-    runtime.update(row["project_id"], phase="starting", last_error="")
+# Deliberately NO clear-on-recovery. A recovery needs no writer: `start()` already
+# stamped `phase='starting', last_error=''` for the spawn being judged, so by the
+# time a streak can end, the supervisor's own text is gone. Measured 2026-11-15 on
+# this candidate: with such a helper present and then disabled, all 15 tests of
+# tests/unit/test_dsh_host.py still passed - nothing depended on it, and the only
+# thing it could still do is erase a diagnosis somebody else wrote.
 
 
 def _overwritten_by_runtime_exit(text):
@@ -259,13 +249,9 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 spawned_at.pop(project)
                                 failures.pop(project, None)
                                 last_errors.pop(project, None)
-                                try:
-                                    # Reads the row before clearing anything, so
-                                    # a diagnosis somebody else wrote survives.
-                                    clear_start_failure_stamp(runtime, row)
-                                except Exception as exc:  # the row is shared, writable storage
-                                    print(f"DSH host {project}: cannot clear the failure "
-                                          f"stamp: {exc}", flush=True)
+                                # The row needs no clearing here: this spawn's own
+                                # `start()` wrote `phase='starting', last_error=''`
+                                # before the streak could end (see the note above).
                                 clear_startup_failure(runtime, row["driver_id"])
                             elif spawned is not None and not alive:
                                 spawned_at.pop(project)

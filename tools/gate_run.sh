@@ -51,12 +51,13 @@ done
 # Two things are still fatal here, and neither of them is staleness. (1) "There
 # is nothing to dispatch": a binding that cannot be read or is not a record, or
 # a well-formed record whose `source` is not an absolute non-symlink directory.
-# It names no mountable Source -- inventing one from whatever is on disk would
-# measure a platform nobody reviewed (exit 69); the image it still names is not
-# what is missing. (2) The record names a Source whose Git identity no mount of
-# THIS gate carries (the guard below, exit 71): the gate would run and then
-# record that commit as unobserved, i.e. produce a comparison nobody could
-# make, so it is refused by name before anything is mounted.
+# Such a record names no mountable Source -- inventing one from whatever
+# is on disk would measure a platform nobody reviewed (exit 69); the
+# image it still names is not what is missing. (2) The record names a
+# Source whose Git identity no mount of THIS gate carries (the guard
+# below, exit 71): the gate would run and then record that commit as
+# unobserved, i.e. produce a comparison nobody could make, so it is
+# refused by name before anything is mounted.
 # docs/normal-game-gate.md names that class, the operator's check and the remedy.
 BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
 PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69

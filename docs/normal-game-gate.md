@@ -118,12 +118,27 @@ check refuses (measured on 2026-11-15 with the `mountable` command below: the
 record naming a linked worktree exited 71, the record naming a `git clone
 --local` exited 0). Naming the production checkout itself is NOT refused -- its
 `.git` is a real directory, so the check answers 0 (measured the same day, same
-command) -- but it is still wrong to put in a record, and the reason is drift, not
-refusal: the gate would read a live read-write tree that moves under the run, so
-the commit a record freezes would not be the bytes that were measured. That drift
-is recorded rather than silent -- the verdict names the moved head and tree and
-reads `unreviewed <differences>` -- but an unreviewed green is a measurement, not
-release evidence. A clone cannot drift away from the record that names it.
+command) -- but it is still wrong to put in a record, and the reason is drift,
+not refusal: the gate would read a live read-write tree that moves under the
+run, so the commit a record freezes would not be the bytes that were measured.
+That drift is recorded and is never release evidence; which answer records it
+depends on what moved, and when. A tree that had already moved before the run
+STARTED still settles -- both snapshots agree -- and the comparison
+`record_observation` builds with `compare_to_binding` names the moved head and
+tree, once per mounted coordinate, which `platform_status` re-derives and
+prints as `unreviewed binding=<short> differs=<N> <field>:<bound>-><observed>
+...` (the retained 2026-11-15 measurement is that line with three engine/image
+differences). A tree that moves BETWEEN the before and after snapshots cannot
+settle at all: `run_bound` records `identity: mismatch`, the launcher's
+`receipt` call answers `mismatch` and writes `mismatch-platform-identity` on
+that exit line, and the review question stops there -- `platform_status` asks
+`receipt_identity` first and, short of `unchanged`, answers `unknown terminal
+receipt cannot say which platform measured` without reading the receipt's
+platform block. Uncommitted edits in the bound Source are the third shape and
+are not a moved head or tree: `observe_root` counts them, and `compare_source`
+records the field `dirty` (bound 0) on the same `unreviewed` line. All three
+are recorded rather than silent, and none of them is release evidence. A clone
+cannot drift away from the record that names it.
 
 An operator can decide this before dispatch instead of meeting the refusal. The
 mount table is the launcher's own `-v` list, not a guess: repeat every `-v

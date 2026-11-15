@@ -11,6 +11,7 @@ import unicodedata
 from uuid import UUID, uuid4
 
 from core.director_messaging_protocol import DirectorMessageError, SCHEMA_ID, V3_SCHEMA_ID, ERROR_CODES
+from core.message_secret_guard import refuse_credential_values
 from core.drivers import recipient_presence_block
 from core.state_driver_notes import _redact
 from core.state_privacy import UntrustedDatabase, writer_only_read
@@ -411,6 +412,10 @@ class SQLiteDirectorMessaging:
             if self.reply_schema == V3_SCHEMA_ID:
                 raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)
             _invalid()
+        # The one credential guard for the project mailbox. Before any row is
+        # written, so a refused body leaves no message and no delivery behind.
+        refuse_credential_values(body, lambda detail: DirectorMessageError(
+            "invalid_request", self.reply_schema, message=detail))
         payload = {
             "body": body, "broadcast": broadcast, "director_identity": director_identity,
             "reply_to_delivery_id": reply_to_delivery_id, "request_key": request_key,

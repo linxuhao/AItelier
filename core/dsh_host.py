@@ -144,6 +144,64 @@ def clear_startup_failure(runtime, driver_id):
     startup_failure_path(runtime, driver_id).unlink(missing_ok=True)
 
 
+# What the supervisor writes into `last_error`, and the only thing it will ever
+# take back out: `last_error` is a shared field, so the shape it can recognise as
+# its own is what lets a recovery clear its stamp without erasing somebody else's
+# diagnosis.
+START_FAILURE_PREFIX = "DSH: failed start "
+
+# The runtime's own diagnosis of the same death, written by `DshDrivers._observe`
+# from a monitor thread when the child it spawned exits. It can land after the
+# supervisor's stamp - both describe one death, and the row keeps the last writer.
+# Recognising it is what lets the streak be put back without touching a text that
+# somebody else wrote.
+RUNTIME_EXIT_NOTICE = "DSH exited with code "
+
+
+def _start_failure_text(attempts, error):
+    """One line: how long the streak is, then the record's own bounded error."""
+    return f"{START_FAILURE_PREFIX}{attempts} in a row: {_bounded(error)}"
+
+
+def stamp_start_failure(runtime, row, attempts, error):
+    """Put the failed start on the driver row, where the owner's page reads it.
+
+    The record beside the marker is evidence for whoever opens the driver
+    directory; the ROW is the only thing the owner's page renders - `phase`
+    (with `failed` mapped to a warning label) and `last_error` under it. Without
+    this, a driver that dies on every start looked merely stopped there, however
+    many times the supervisor had counted it.
+
+    Same text bounds as the record, because both are read by people and one of
+    them can echo a credential.
+    """
+    runtime.update(row["project_id"], phase="failed",
+                   last_error=_start_failure_text(attempts, error))
+
+
+def clear_start_failure_stamp(runtime, row):
+    """Take back the supervisor's own stamp; a foreign diagnosis stays.
+
+    The row is read FIRST, before anything is cleared: `last_error` is written by
+    other components too, and one of their texts is not this loop's to erase just
+    because the supervisor's own start happened to recover.
+
+    It falls back to `starting`, not `running`: outliving the window only proves
+    the child is still alive, and `start()` wrote `starting` for this very spawn.
+    `running` is the runtime's own claim to make - it reports activity only once
+    it actually serves, tens of seconds after boot.
+    """
+    current = runtime.get(row["project_id"])
+    if current is None or not (current.get("last_error") or "").startswith(START_FAILURE_PREFIX):
+        return
+    runtime.update(row["project_id"], phase="starting", last_error="")
+
+
+def _overwritten_by_runtime_exit(text):
+    """Did the runtime's monitor write its exit notice over the streak?"""
+    return str(text or "").startswith(RUNTIME_EXIT_NOTICE)
+
+
 async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WINDOW_SECONDS):
     """One controller per installation; systemd owns its entire process group.
 
@@ -167,6 +225,9 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         retry_at = {}
         failures = {}
+        # project -> the bounded error line of the streak's last failed start, so
+        # the row can be re-stamped with the same words it was stamped with.
+        last_errors = {}
         # project -> the monotonic instant the child being watched was spawned.
         # A start is undecided until this entry has aged past `startup_window`;
         # dropping the entry is what decides it, once.
@@ -184,6 +245,7 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                         if not row["enabled"]:
                             retry_at.pop(project, None)
                             failures.pop(project, None)
+                            last_errors.pop(project, None)
                             spawned_at.pop(project, None)
                             if project in runtime.processes:
                                 await runtime.stop(project)
@@ -196,6 +258,14 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 # counter and any record left by earlier starts go.
                                 spawned_at.pop(project)
                                 failures.pop(project, None)
+                                last_errors.pop(project, None)
+                                try:
+                                    # Reads the row before clearing anything, so
+                                    # a diagnosis somebody else wrote survives.
+                                    clear_start_failure_stamp(runtime, row)
+                                except Exception as exc:  # the row is shared, writable storage
+                                    print(f"DSH host {project}: cannot clear the failure "
+                                          f"stamp: {exc}", flush=True)
                                 clear_startup_failure(runtime, row["driver_id"])
                             elif spawned is not None and not alive:
                                 spawned_at.pop(project)
@@ -206,6 +276,7 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                     # and kept, so a credential the driver echoed
                                     # must not reach it any more than the file.
                                     error = _bounded(last_startup_error(runtime, row["driver_id"]))
+                                    last_errors[project] = error
                                     record_startup_failure(runtime, row, failures[project], error)
                                     # One line per failed start, in the unit
                                     # journal, where somebody who is not tailing
@@ -214,8 +285,30 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                     print(f"DSH host {project}: {row['driver_id']} died "
                                           f"{now - spawned:.1f}s after start, failed start "
                                           f"{failures[project]} in a row: {error}", flush=True)
+                                    try:
+                                        stamp_start_failure(runtime, row, failures[project], error)
+                                    except Exception as exc:
+                                        # A row this cannot be written must cost the
+                                        # project's visibility, never its retry, its
+                                        # marker or the rest of the loop.
+                                        print(f"DSH host {project}: cannot stamp the failure "
+                                              f"on its row: {exc}", flush=True)
                                 # A child that lived past the window and left later is
                                 # not a failed start; the row is simply restarted below.
+                            if (failures.get(project) and spawned is None and not alive
+                                    and _overwritten_by_runtime_exit(row["last_error"])):
+                                # `DshDrivers._observe` diagnoses the same death
+                                # from a monitor thread, and its write can land
+                                # after the stamp above. The row is what the
+                                # owner's page renders, so the streak is put back -
+                                # and only over that notice, never over a text
+                                # somebody else wrote.
+                                try:
+                                    stamp_start_failure(runtime, row, failures[project],
+                                                        last_errors[project])
+                                except Exception as exc:
+                                    print(f"DSH host {project}: cannot stamp the failure "
+                                          f"on its row: {exc}", flush=True)
                             if not alive and project not in spawned_at and now >= retry_at.get(project, 0):
                                 # Back off per project: a driver that cannot start at
                                 # all must not be respawned every interval forever.
@@ -226,8 +319,14 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 except Exception as exc:
                                     failures[project] = failures.get(project, 0) + 1
                                     error = _bounded(str(exc))
+                                    last_errors[project] = error
                                     record_startup_failure(runtime, row, failures[project], error)
                                     print(f"DSH host {project}: {error}", flush=True)
+                                    try:
+                                        stamp_start_failure(runtime, row, failures[project], error)
+                                    except Exception as stamp_error:
+                                        print(f"DSH host {project}: cannot stamp the failure "
+                                              f"on its row: {stamp_error}", flush=True)
                                 else:
                                     if runtime.processes.get(project) is not None:
                                         spawned_at[project] = time.monotonic()

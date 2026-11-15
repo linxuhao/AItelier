@@ -133,6 +133,12 @@ async def test_one_project_failure_does_not_end_supervision(runtimes):
         # Backoff grows instead of hammering every interval.
         await asyncio.sleep(0.2)
         assert calls['alpha'] == 1, f'retried {calls["alpha"]} times despite backoff'
+        # A start that raised is the same failed start as a child that died, and
+        # it reaches the row the owner reads the same way.
+        failed_row = backend.get('alpha')
+        assert failed_row['phase'] == 'failed', failed_row
+        assert failed_row['last_error'].startswith('DSH: failed start 1 in a row: '), failed_row
+        assert 'database is locked' in failed_row['last_error'], failed_row
     finally:
         stopped.set()
         await task
@@ -171,6 +177,133 @@ def crashing(tmp_path):
     host = DshDrivers(db, registry, root, host_controller=True,
                       command=[sys.executable, str(script)])
     return backend, host
+
+
+async def test_a_foreign_last_error_survives_a_recovery(crashing):
+    """Clearing the stamp takes back only the supervisor's own words.
+
+    `last_error` is shared: the runtime writes exit codes there, and an operator
+    can too. A recovery this supervisor happens to observe must not erase a
+    diagnosis it did not make.
+    """
+    backend, host = crashing
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    try:
+        await eventually(record.exists)
+        await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
+    finally:
+        stopped.set(); await task
+    foreign = 'quota exhausted; the driver retries after 12:00'
+    recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
+                           command=host.command)
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01, startup_window=1))
+    try:
+        await eventually(lambda: recovered.running('alpha'))
+        # The foreign text lands while this start is still inside the window,
+        # so the recovery branch is what reads it.
+        backend.update('alpha', last_error=foreign)
+        await eventually(lambda: not record.exists())
+        await asyncio.sleep(0.2)
+        current = backend.get('alpha')
+        assert current['last_error'] == foreign, current
+        assert current['phase'] != 'failed', current
+        assert recovered.processes['alpha'].returncode is None
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_row_that_cannot_be_stamped_does_not_end_supervision(crashing, capsys, monkeypatch):
+    """A row write that raises costs visibility, never the record, the line or the loop."""
+    backend, host = crashing
+    alpha = await backend.start('alpha', actor='fixture')
+    beta = await backend.start('beta', actor='fixture')
+    record = host.root / alpha['driver_id'] / 'startup-failures.json'
+
+    def locked(project_id, **fields):
+        # Only the supervisor's own stamp is unwritable; anything else on the row
+        # (the runtime's exit-code diagnosis, a start) still writes normally.
+        if project_id == 'alpha' and str(fields.get('last_error') or '').startswith(
+                'DSH: failed start '):
+            raise RuntimeError('database is locked')
+        return real_update(project_id, **fields)
+
+    real_update = host.update
+    monkeypatch.setattr(host, 'update', locked)
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    try:
+        await eventually(record.exists)  # the on-disk record is still written
+        assert json.loads(record.read_text())['attempts'] >= 1
+        out = capsys.readouterr().out
+        assert 'died' in out and 'failed start 1 in a row' in out, out  # the line is printed
+        assert 'cannot stamp the failure' in out, out
+        assert not task.done()
+        # The retry and the marker still happened, and the other project's row was
+        # still handled in the same iteration.
+        await eventually(lambda: host.running('beta'))
+        assert host.processes['beta'].returncode is None
+        assert (host.root / beta['driver_id'] / 'host-process.json').exists()
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_start_that_outlives_the_window_is_never_stamped(crashing):
+    """The healthy path stays silent: a good start needs no failure text."""
+    backend, host = crashing
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    try:
+        await eventually(record.exists)  # alpha's one death is spent on this run
+        await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
+    finally:
+        stopped.set(); await task
+    # A fresh supervisor whose FIRST start of alpha outlives the window: it must
+    # end with no failure text and no failed phase of the supervisor's making.
+    recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
+                           command=host.command)
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01, startup_window=0.3))
+    try:
+        await eventually(lambda: not record.exists())  # the window passed, survived
+        await asyncio.sleep(0.4)
+        current = backend.get('alpha')
+        assert (current['last_error'] or '') == '', current
+        assert current['phase'] != 'failed', current
+        assert recovered.processes['alpha'].returncode is None
+    finally:
+        stopped.set(); await task
+
+
+async def test_the_runtime_exit_notice_does_not_hide_the_streak(crashing):
+    """`_observe` diagnoses the same death from a thread; the notice can land last.
+
+    When it does, the row would show `DSH exited with code 1` instead of the
+    streak, so the supervisor puts its own text back - over that notice only,
+    never over a text somebody else wrote (the foreign test above).
+    """
+    backend, host = crashing
+    alpha = await backend.start('alpha', actor='fixture')
+    record = host.root / alpha['driver_id'] / 'startup-failures.json'
+    streak = 'DSH: failed start 1 in a row: '
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    try:
+        await eventually(record.exists)
+        await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(streak))
+        # The monitor won the race this time; the sampler reads the row next tick.
+        backend.update('alpha', last_error='DSH exited with code 1; see runtime.log')
+        await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(streak))
+        current = backend.get('alpha')
+        assert current['phase'] == 'failed', current
+        assert 'session log is corrupt' in current['last_error'], current
+    finally:
+        stopped.set(); await task
 
 
 def test_last_startup_error_is_the_first_line_of_the_last_attempt(tmp_path):
@@ -226,6 +359,18 @@ async def test_a_child_that_dies_after_spawn_is_a_failed_start(crashing):
         assert 'deadbeef1234' not in state['last_error'], state['last_error']
         assert len(state['last_error']) <= 500
         assert 'healthy' not in record.read_text().lower()
+        # The record is not the only sink, and not the one the owner reads: the
+        # driver ROW is what the project page renders (`phase` + `last_error`),
+        # so the same failed start has to land there or a driver that dies on
+        # every start still looks merely stopped.
+        await eventually(
+            lambda: 'DSH: failed start 1 in a row: ' in (backend.get('alpha')['last_error'] or ''))
+        await asyncio.sleep(0.2)  # it stays there, not just for a moment
+        driver_row = backend.get('alpha')
+        assert driver_row['phase'] == 'failed', driver_row
+        assert driver_row['last_error'].startswith('DSH: failed start 1 in a row: '), driver_row
+        assert 'session log is corrupt' in driver_row['last_error'], driver_row
+        assert 'deadbeef1234' not in driver_row['last_error'], driver_row
     finally:
         stopped.set(); await task
 
@@ -239,6 +384,9 @@ async def test_a_start_that_stays_up_clears_the_record(crashing):
     task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
     try:
         await eventually(record.exists)
+        # The failed start was stamped on the row too; a recovery has to undo
+        # both halves of it, or the page keeps a warning nobody can clear.
+        await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
     finally:
         stopped.set(); await task
     # A new supervisor process, the way the fault gets fixed: the driver it
@@ -253,6 +401,9 @@ async def test_a_start_that_stays_up_clears_the_record(crashing):
         await asyncio.sleep(0.2)
         assert not record.exists()
         assert recovered.processes['alpha'].returncode is None
+        recovered_row = backend.get('alpha')
+        assert not (recovered_row['last_error'] or '').startswith('DSH: failed start '), recovered_row
+        assert recovered_row['phase'] != 'failed', recovered_row
     finally:
         stopped.set(); await task
 

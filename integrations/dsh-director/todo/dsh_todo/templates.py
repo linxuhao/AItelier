@@ -1,7 +1,7 @@
 """Plans are expanded from reusable repository templates, never written per task.
 
-A template is a versioned asset in `todo_templates/<name>.yaml` (override the
-directory with AITELIER_TODO_TEMPLATES), reviewed like the predicate library it
+A template is a versioned asset in `todo_templates/<name>.yaml` (the host's TEMPLATES_DIR hook
+names its own directory; AITELIER_TODO_TEMPLATES overrides both), reviewed like the predicate library it
 binds. It declares typed params and items whose predicate args may reference a param
 as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
 
@@ -26,7 +26,7 @@ as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
   scope it is judged under - the item's own, the scope of every item that NEEDS it
   (which includes the appended `deliver` item: it needs every item, and binds the
   plan's own `scope`), and the scope of every item the runtime PRESENTS AFTER it -
-  with the run's own matcher (`core.todo_runtime._scope_regex`): a path no
+  with the run's own matcher (`dsh_todo.runtime._scope_regex`): a path no
   scope glob matches is refused, because then no tree can satisfy both predicates -
   changing the file fails `changes_within`, leaving it alone fails `files_changed` -
   and the plan would freeze an item that can never pass. The presentation half exists
@@ -61,16 +61,17 @@ from typing import Any, Mapping, NamedTuple
 # validation (`TodoPlan._binding`, inside `TodoPlan.from_json`) answers first, while the plan is
 # constructed; this audit's call for delta paths is a backstop for a plan built without `from_json`.
 # (For a report the audit IS the answering site, since `report` is not one of `_binding`'s keys.)
-# A report's PARENT is judged by `core.security_jail.verify_path_safe`, the call the run makes
-# (`core.todo_runtime._owned_entry`), so the audit and the run cannot disagree about which parent
-# escapes through a symlink. `core.security_jail` imports nothing from `core`, so no cycle.
-from core.security_jail import SecurityException, verify_path_safe
-from core.todo_plan import Refusal, TodoPlan, _relative
+# A report's PARENT is judged by `dsh_todo.security_jail.verify_path_safe`, the call the run makes
+# (`dsh_todo.runtime._owned_entry`), so the audit and the run cannot disagree about which parent
+# escapes through a symlink. `dsh_todo.security_jail` imports nothing from `dsh_todo`, so no cycle.
+from dsh_todo.hooks import TEMPLATES_DIR
+from dsh_todo.security_jail import SecurityException, verify_path_safe
+from dsh_todo.plan import Refusal, TodoPlan, _relative
 # `_scope_regex` is reused, not restated: at run time `changes_within` compiles each scope glob with
 # this function and matches every changed path with `rx.match(p)`. A second, hand-rolled glob rule
 # here could refuse a plan the run would accept, or accept one the run can never satisfy - exactly
 # the disagreement this audit exists to end. The audit's scope check below calls THIS function.
-from core.todo_runtime import PredicateLibrary, _scope_regex
+from dsh_todo.runtime import PredicateLibrary, _scope_regex
 
 TYPES = ("str", "int", "list[str]")
 _NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -79,7 +80,7 @@ _TITLE_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _TOP = {"name", "version", "description", "params", "items"}
 _PARAM = {"type", "required", "default", "description"}
 _SAMPLE = {"str": "x", "int": 1, "list[str]": ["x"]}
-# A `kind: batch` template (core/todo_batch.py): two fixed stages, find then verify, and a fan-in.
+# A `kind: batch` template (dsh_todo/batch.py): two fixed stages, find then verify, and a fan-in.
 _BATCH_TOP = {"name", "version", "description", "kind", "params", "stages", "fan_in"}
 _BATCH_OPTIONAL = {"budget"}
 #: `max_parallel` / `max_parallel_verify` stand for concurrent finder / verifier CONTAINERS; v1 enforces
@@ -105,7 +106,8 @@ _STAGE_REPORT_PREDICATE = {"find": "findings_shape", "verify": "verdict_enum"}
 def default_dir() -> Path:
     """AITELIER_TODO_TEMPLATES, like `create --plan-json`, is not gated: both rely on the DSH tool
     that calls `create` being root-only (a child must never choose the template directory)."""
-    return Path(os.environ.get("AITELIER_TODO_TEMPLATES") or Path(__file__).resolve().parents[1] / "todo_templates")
+    return Path(os.environ.get("AITELIER_TODO_TEMPLATES") or TEMPLATES_DIR
+                or Path(__file__).resolve().parents[1] / "todo_templates")
 
 
 @dataclass(frozen=True)
@@ -124,7 +126,7 @@ class Template:
     params: Mapping[str, Param]
     items: tuple[dict, ...]
     sha256: str
-    # `batch` only: the find and verify stages, the fan-in report and the budget (core/todo_batch.py).
+    # `batch` only: the find and verify stages, the fan-in report and the budget (dsh_todo/batch.py).
     kind: str = "plan"
     stages: tuple[dict, ...] = ()
     fan_in: Mapping[str, Any] | None = None
@@ -374,13 +376,13 @@ def plan_data(template: Template, resolved: Mapping[str, Any], *, attempt_id: st
             "workspace": workspace, "scope": list(resolved["scope"]), "goal": goal, "items": items}
 
 
-# -- batch templates (core/todo_batch.py) ------------------------------------------------------
+# -- batch templates (dsh_todo/batch.py) ------------------------------------------------------
 #
 # A `kind: batch` template is NOT a workflow language: it has exactly two stages, `find` (one
 # sub-plan per entry of a list[str] param) and `verify` (one sub-plan per finding the finders
 # reported, after every find sub-plan passed, capped, bound to sessions distinct from the finders),
 # and a `fan_in` report. Every key below is checked to have exactly that meaning; the expansion, the
-# binding rules and the fan-in live in core/todo_batch.py.
+# binding rules and the fan-in live in dsh_todo/batch.py.
 
 _EMBED = re.compile(r"\$\{([^}]*)\}")
 
@@ -589,14 +591,14 @@ def render_prompt(template: Template, resolved: Mapping[str, Any], stage_id: str
 # -- the paths a frozen plan requires to change ----------------------------------------------
 
 #: The predicates whose verdict is "this path differs from its state at the start of the step",
-#: with the argument that carries those paths. `core/todo_runtime.capture_pre_state` captures a
+#: with the argument that carries those paths. `dsh_todo/runtime.capture_pre_state` captures a
 #: pre-state for exactly these two, so a path bound here is one the item REQUIRES to change: a
 #: path the predicate cannot see change (see `check_declared_paths`) leaves the item unable to
 #: pass as written, however good the work is.
 DELTA_PATHS = {"file_changed": "path", "files_changed": "paths"}
 
 #: The argument that names the file a command CLEARS before it runs and reads afterwards
-#: (`core.todo_runtime._clear_report` / `_report_absence`; `_STRINGS` is what types it as a string).
+#: (`dsh_todo.runtime._clear_report` / `_report_absence`; `_STRINGS` is what types it as a string).
 #: Only `command_exit` takes it today, and this audit names it by ARGUMENT, not by predicate, so a
 #: second predicate that clears a report cannot escape the containment rule below. The name is the
 #: honest source available here: a `TodoPlan` carries bindings, not the library's definitions, and
@@ -609,10 +611,10 @@ REPORT_ARG = "report"
 #
 # * `PathAudit.as_json` (below) emits `workspace`, `workspace_is_a_directory`, `declared`, and the
 #   three buckets `existing`, `not_yet_existing` and `notes`.
-# * The only in-repo consumer is `core/todo_cli.py`: `_plan_from_args` calls `check_declared_paths`
+# * The only in-repo consumer is `dsh_todo/cli.py`: `_plan_from_args` calls `check_declared_paths`
 #   (line 174) and `cmd_create` forwards `paths.as_json()` unchanged under the key `paths` (line 193).
 #   No other module calls `check_declared_paths` or reads `PathAudit`.
-# * The refusal payload is `Refusal.as_json` (`core/todo_plan.py`), and `todo_cli.main` prints it with
+# * The refusal payload is `Refusal.as_json` (`dsh_todo/plan.py`), and `todo_cli.main` prints it with
 #   exit status 2. Both keep their fields and their exit status unchanged in this commit.
 # * The DSH tool wrapper is `TodoCli` in `integrations/dsh-driver/runtime.mjs`, which is in this repo
 #   (`TodoCli.call`, lines 512-518). On success it passes the buckets through unchanged: `create`
@@ -620,8 +622,8 @@ REPORT_ARG = "report"
 #   buckets (`cmd_create` raises before `paths` is built), and for a refusal the wrapper ADDS a
 #   `brief` field (`{ ...value, brief: ... }`). So a refusal payload is not byte-verbatim from the
 #   CLI. Documented in `docs/dsh-driver.md`.
-# * The plan-store rehydrate path (`core/todo_plan.py` `new_document`, `from_stored` and `load_run`;
-#   `_Open` in `core/todo_cli.py`) never calls `check_declared_paths`. The buckets are not persisted
+# * The plan-store rehydrate path (`dsh_todo/plan.py` `new_document`, `from_stored` and `load_run`;
+#   `_Open` in `dsh_todo/cli.py`) never calls `check_declared_paths`. The buckets are not persisted
 #   in the plan file, so nothing re-reads them after `create` returns.
 # * Nothing under `web/` or `docs/` interprets `existing`, `not_yet_existing`, `notes` or
 #   `workspace_is_a_directory`.
@@ -637,7 +639,7 @@ REPORT_ARG = "report"
 # inside `TodoPlan.from_json`, is what refuses a delta path on the production route), but the
 # answering site here: `report` is not one of the keys `_binding` contains, so no earlier check exists.
 # It also refuses a report whose PARENT resolves outside the workspace through a symlink, judged by
-# `core.security_jail.verify_path_safe` - the call the run makes - so a symlinked parent cannot freeze
+# `dsh_todo.security_jail.verify_path_safe` - the call the run makes - so a symlinked parent cannot freeze
 # a report the run can never clear. A link the run creates after the freeze is not visible here; that
 # boundary is stated in `check_declared_paths`.
 # Main accepted all of those and discovered the escape only at run time, where `_clear_report`
@@ -716,7 +718,7 @@ def _report_parent_contained(plan: TodoPlan, report: str, where: str) -> None:
     """Refuse a report whose PARENT the run would not clear, judged the way the run judges it.
 
     The run builds the report's path from the RESOLVED workspace and contains its parent with
-    `verify_path_safe` (`core.todo_runtime._report_path`, `_owned_entry`). This does the same
+    `verify_path_safe` (`dsh_todo.runtime._report_path`, `_owned_entry`). This does the same
     join and the same call, so a symlinked parent that leaves the workspace is refused here
     rather than discovered when the item runs. A parent that cannot be resolved at all (a loop,
     an OSError) is refused too: the run treats that as a reason it cannot clear the report, so
@@ -780,7 +782,7 @@ def _judged_before(plan: TodoPlan, item_id: str) -> list[str]:
 #: the program itself makes satisfiable, with every other test green (iss-f7d7793371a34bec) - and for
 #: a delta git excludes the opposite: a program that could expose it stops keeping the refusal. So a
 #: name belongs here only together with the measurement showing its words arriving in `argv`, the name
-#: `core.todo_runtime._STR_LISTS` fixes for a program's argv.
+#: `dsh_todo.runtime._STR_LISTS` fixes for a program's argv.
 COMMAND_PREDICATES = ("command_exit",)
 
 #: Files whose CONTENT decides whether git excludes a path. An item that declares a change to one of
@@ -809,7 +811,7 @@ def _path_components(value: object) -> tuple[str, ...]:
 def _invisible_to_changes_within(workspace: Path, rel: str) -> bool:
     """True when git itself excludes `rel` from the changed set `changes_within` measures.
 
-    `changes_within` (``core.todo_runtime.changes_within``) builds its set from `git diff
+    `changes_within` (``dsh_todo.runtime.changes_within``) builds its set from `git diff
     base..HEAD`, `git diff HEAD` and `git ls-files --others --exclude-standard`, so an ignored
     UNTRACKED path is in none of the three and can never make that predicate fail. git answers the
     exclusion question itself, which is the only answer worth having: tracked files are not subject
@@ -838,7 +840,7 @@ def _runs_a_command(item: Any) -> bool:
 def _argv_of(item: Any) -> list[str]:
     """Every argv word the item's program bindings carry, in binding order.
 
-    `argv` is the argument name `core.todo_runtime._STR_LISTS` fixes for a program's argv, and the one
+    `argv` is the argument name `dsh_todo.runtime._STR_LISTS` fixes for a program's argv, and the one
     `tests/unit/test_todo_templates_command_predicates.py` measures every registered program-running
     predicate against: a predicate whose words arrived in some other argument would name nothing here,
     and the audit would then withhold no refusal for the very item that can revert the delta.
@@ -1011,7 +1013,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       - a path outside the workspace (absolute, or holding a `..` component). On the production route
         this one is NOT refused here: `TodoPlan.from_json` applies `todo_plan._relative` to every
         `path`/`paths`/`pattern` argument while the plan is CONSTRUCTED (`TodoPlan._binding`), and
-        `core.todo_cli._plan_from_args` - this audit's only production caller - always hands the audit
+        `dsh_todo.cli._plan_from_args` - this audit's only production caller - always hands the audit
         a plan built there, so the plan refuses and this audit is never entered. The `_relative` call
         below is a backstop, reachable only for a plan built without `from_json`, kept so the same
         rule answers on both routes (never two rules). A test measures the route rather than the
@@ -1050,7 +1052,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       delta declared LATER than the scope that judges it: the scope item is presented first, while
       the tree is still clean, so such a plan freezes and runs (a test drives it by following
       `status.next`). Only an item carrying BOTH halves itself is judged immediately, inside its own
-      turn, and by the same rule. The match is made by `core.todo_runtime._scope_regex` -
+      turn, and by the same rule. The match is made by `dsh_todo.runtime._scope_regex` -
       the function `changes_within` itself compiles its globs with at run time - imported rather
       than restated, so the freeze and the run cannot apply two different glob rules. Like the
       duplicate rule, this reads the plan and not the workspace, so it runs whether or not the
@@ -1109,7 +1111,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
       the answering site, because `report` is not one of the keys `_binding` validates: a
       report that is absolute or holds a `..` component is refused. Second, the report's PARENT is
       judged the way the run judges it: the parent is joined onto the RESOLVED workspace and
-      contained with `core.security_jail.verify_path_safe`, which resolves symlinks. So a parent
+      contained with `dsh_todo.security_jail.verify_path_safe`, which resolves symlinks. So a parent
       that is a symlink pointing outside the workspace is refused here, as is a parent whose
       resolution fails (a symlink loop, an OSError), because the run cannot clear such a report
       either. Why: at run time the report's PARENT must resolve inside the workspace before the
@@ -1187,8 +1189,8 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             if REPORT_ARG in binding.args:
                 where = f"item {item.id}: {binding.predicate}.{REPORT_ARG}"
                 # ONE value, ONE check. The plan's own binding validation requires `report` to be a
-                # non-empty STRING (`core/todo_runtime` `_STRINGS`), and it runs inside
-                # `TodoPlan.from_json` - the only way `core/todo_cli._plan_from_args`, this audit's
+                # non-empty STRING (`dsh_todo/runtime` `_STRINGS`), and it runs inside
+                # `TodoPlan.from_json` - the only way `dsh_todo/cli._plan_from_args`, this audit's
                 # only production caller, ever gets a plan. So exactly one string arrives here, and an
                 # element-wise loop would be a branch no frozen plan can reach.
                 # Keep these two together: `_relative` judges `PurePosixPath(str(value))`, so a list
@@ -1216,7 +1218,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
             for value in (raw if isinstance(raw, list) else [raw]):
                 # backstop, not the production answering site: `TodoPlan._binding`, inside
                 # `TodoPlan.from_json`, applied this same rule to `path`/`paths` while the plan was
-                # constructed, so on the route `core.todo_cli._plan_from_args` drives this is only
+                # constructed, so on the route `dsh_todo.cli._plan_from_args` drives this is only
                 # reached by a plan built without `from_json`. Kept so no plan escapes the one rule.
                 _relative(value, where)
                 rel = str(PurePosixPath(str(value)))
@@ -1278,7 +1280,7 @@ def check_declared_paths(plan: TodoPlan) -> PathAudit:
         # from its pre-state, `changes_within` fails on any changed path outside the scope. Every scope
         # the item binds must admit the path, since the item passes only when all its predicates pass.
         # SAME MATCHER AS THE RUN: `changes_within` builds its patterns with
-        # `core.todo_runtime._scope_regex` and tests `rx.match(p)` against each changed path, so this
+        # `dsh_todo.runtime._scope_regex` and tests `rx.match(p)` against each changed path, so this
         # calls that imported function on the normalised declared path. Nothing about globbing is
         # restated here, so the freeze cannot disagree with the run about what a scope matches.
         if item_delta:

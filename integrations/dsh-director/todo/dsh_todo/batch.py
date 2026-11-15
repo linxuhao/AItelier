@@ -3,7 +3,7 @@
 A batch extends the plan of one State attempt; it adds no State record and no attempt.
 It is expanded from a `kind: batch` repository template (`todo_templates/find_verify.yaml`)
 and reuses the plan machinery for every child: each sub-plan is an ordinary frozen
-`TodoPlan` (`core/todo_plan.py`) whose `batch` names the attempt, bound to one child
+`TodoPlan` (`dsh_todo/plan.py`) whose `batch` names the attempt, bound to one child
 session at `begin` and judged by its own predicates at `done`. What this module adds is
 only what a fan-out needs on top of that:
 
@@ -17,7 +17,7 @@ only what a fan-out needs on top of that:
   only in spacing, case or punctuation - are refused as duplicates when the batch is
   created, so two finders can never share a plan file. A verify key is
   `<find key>_<finding id>`; finding ids are plain and unique per report
-  (`core.todo_runtime.findings_problem`), so verify keys cannot collide either.
+  (`dsh_todo.runtime.findings_problem`), so verify keys cannot collide either.
 * Sub-plans evaluate in the batch's report directory `<store>/batch/<attempt_id>/`, not in
   the reviewed checkout: children only write reports there, nothing is committed, and the
   checkout the batch attempt delivers stays exactly as reviewed. A sub-plan therefore has
@@ -61,10 +61,10 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Mapping
 
-from core import todo_templates as templates
-from core.todo_plan import (_ID, _SHA, _SUB_ID, PlanStore, Refusal, TodoPlan, item_state, new_document,
-                            require_library_version)
-from core.todo_runtime import VERDICTS, PredicateLibrary, findings_problem
+from dsh_todo import templates
+from dsh_todo.plan import (_ID, _SHA, _SUB_ID, PlanStore, Refusal, TodoPlan, item_state, new_document,
+                           require_library_version)
+from dsh_todo.runtime import VERDICTS, PredicateLibrary, findings_problem
 
 RECORD_SUFFIX = ".batch"
 _SLUG_CHARS = 48

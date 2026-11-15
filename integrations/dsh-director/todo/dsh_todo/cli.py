@@ -1,4 +1,4 @@
-"""`python -m core.todo_cli <create|status|begin|done|report|handback|finish|list|batch-*>`
+"""`python -m dsh_todo <create|status|begin|done|report|handback|finish|list|batch-*>`
 
 The harness side of a todo plan. Every command prints one JSON object on stdout
 and exits 0, or - when the harness refuses - prints {"refused": code, "reason": ...}
@@ -19,7 +19,7 @@ environment sets AITELIER_TODO_CLOCK_OVERRIDE=1, because whoever picks the clock
 when an absence expires. Anything that is not a refusal is reported as
 {"refused": "internal"}: the exit status is 0 or 2, never a traceback.
 
-Batches (core/todo_batch.py): `batch-create` freezes a `kind: batch` template's find
+Batches (dsh_todo/batch.py): `batch-create` freezes a `kind: batch` template's find
 sub-plans, `batch-status` says what to dispatch, `batch-expand` expands the verify stage once
 every finder passed, `batch-fanin` writes the summary. A sub-plan (`<attempt>~find-<key>`,
 `<attempt>~verify-<key>`) is driven by the ordinary commands; `begin` on one enforces the
@@ -45,10 +45,11 @@ import tempfile
 import time
 from typing import Any, Iterator
 
-from core.todo_plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
-                            new_document, require_library_version, save_observations)
-from core import todo_batch, todo_templates as templates
-from core.todo_runtime import builtin_library
+from dsh_todo.plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
+                           new_document, require_library_version, save_observations)
+from dsh_todo import batch as todo_batch, templates
+from dsh_todo.hooks import candidate_rejection
+from dsh_todo.runtime import builtin_library
 
 _BRIEF_CHARS = 600
 
@@ -488,12 +489,9 @@ def _candidate(out: str, workspace: str, attempt_id: str, plan_hash: str, observ
         "quiescent": True, "plan_hash": plan_hash, "observations": observations, **(extra or {}),
     }
     report_bytes = (json.dumps(report_doc, sort_keys=True, indent=2) + "\n").encode("utf-8")
-    from core.state_graph import StateConflict
-    from core.state_report_integrity import validate_external_semantics
-    try:
-        validate_external_semantics(report_bytes, "candidate", head)
-    except StateConflict as exc:
-        raise Refusal("report_rejected", str(exc)) from exc
+    rejection = candidate_rejection(report_bytes, "candidate", head)
+    if rejection is not None:
+        raise Refusal("report_rejected", rejection)
     report_path = out_dir / f"{attempt_id}-candidate.json"
     _write_atomic(report_path, report_bytes)
     return {"candidate": True, "artifact": head, "artifact_kind": "git-sha1",
@@ -559,7 +557,7 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument("--now", type=float,
                         help="fix the clock (seconds since epoch). TESTS ONLY: refused unless "
                              "AITELIER_TODO_CLOCK_OVERRIDE=1, since the clock decides when an absence expires")
-    parser = _Parser(prog="python -m core.todo_cli")
+    parser = _Parser(prog="python -m dsh_todo")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
 
     def command(name: str, *flags: tuple[str, dict]) -> None:

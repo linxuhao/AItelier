@@ -54,8 +54,8 @@ import subprocess
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
-from core.gate_deferral import DeferralLedger, read_absence
-from core.security_jail import SecurityException, verify_path_safe
+from dsh_todo.hooks import DeferralLedger, read_absence
+from dsh_todo.security_jail import SecurityException, verify_path_safe
 
 Outcome = Literal["pass", "fail", "absent"]
 
@@ -332,7 +332,7 @@ def _report_path(workspace: Path, report: str | None) -> Path | None:
     detail lets the exit code decide. A `..` in the binding goes quiet the same way:
     `<ws>/../outside/x.json` becomes `<cwd>/ws/outside/x.json`, a different file inside the
     root that the clear is free to remove. Latent rather than live: both callers
-    (`core/todo_plan.py`, the coding-impl evidence tool) require an absolute workspace
+    (`dsh_todo/plan.py`, the coding-impl evidence tool) require an absolute workspace
     today, which is exactly the trap the next caller would walk into.
     """
     if not report:
@@ -391,7 +391,7 @@ def _clear_report(workspace: Path, target: Path | None) -> str:
     What the construction may touch is BOUNDED, and bounded in the right place:
     the binding names a path and a path can leave the workspace (an absolute one,
     `..`, or a parent that is a symlink). The PARENT must resolve inside the
-    resolved workspace - the same containment rule `core.security_jail` applies
+    resolved workspace - the same containment rule `dsh_todo.security_jail` applies
     to every other caller - and then the directory ENTRY at the bound path is
     unlinked, which never follows it. So an escaping binding is a reason, never a
     deletion, and a symlink at the report path is removed as a link while the
@@ -433,7 +433,7 @@ def _report_absence(workspace: Path, target: Path | None) -> tuple[dict | None, 
 
     The mtime is still READ, only to describe the evidence in the detail - the
     verdict never depends on it. The declaration itself is read exactly as the
-    gate pipeline reads it (`core.gate_deferral.read_absence`) - `repo_gate_absent`,
+    gate pipeline reads it (the host's `read_absence`, dsh_todo.hooks) - `repo_gate_absent`,
     or `repo_gate_unmeasured` only from a report that has no `repo_gate_absent`
     key. A flag that is false names a gate that measured nothing beside a failure
     that WAS measured, which is a verdict, not an absence.

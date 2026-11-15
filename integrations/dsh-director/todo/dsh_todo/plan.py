@@ -34,9 +34,9 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Callable, Iterator, Mapping
 
-from core.gate_deferral import DeferralLedger
-from core.todo_runtime import (Binding, Item, ItemReport, Plan, PredicateLibrary,
-                               PredicateResult, TodoRun)
+from dsh_todo.hooks import DeferralLedger
+from dsh_todo.runtime import (Binding, Item, ItemReport, Plan, PredicateLibrary,
+                              PredicateResult, TodoRun)
 
 MAX_ITEMS = 12
 MAX_PREDICATES = 4
@@ -44,7 +44,7 @@ DELIVER = "deliver"
 MAX_NOTES = 20
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 #: A batch sub-plan: `<attempt_id>~<stage>-<key>`. `~` is not in `_ID`, so no State attempt id
-#: can collide with one (core/todo_batch.py derives the key).
+#: can collide with one (dsh_todo/batch.py derives the key).
 _SUB_ID = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]{0,127})~(find|verify)-([a-z0-9][a-z0-9._-]{0,119})\Z")
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _TOP = {"attempt_id", "node_key", "context_hash", "base_sha", "workspace", "scope", "goal", "items"}
@@ -135,7 +135,7 @@ class TodoPlan:
     scope: tuple[str, ...]
     goal: str
     items: tuple[Item, ...]  # the director's items followed by the appended `deliver`
-    # Set only on a batch sub-plan (core/todo_batch.py): the attempt it belongs to. A sub-plan gets
+    # Set only on a batch sub-plan (dsh_todo/batch.py): the attempt it belongs to. A sub-plan gets
     # NO appended `deliver`: its children only write reports, and the batch attempt's own
     # `finish` delivers once. Omitted from `as_json` when unset, so no existing plan_hash moves.
     batch: str | None = None

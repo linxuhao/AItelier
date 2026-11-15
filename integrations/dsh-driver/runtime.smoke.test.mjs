@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { presentedTools, directorPresentedTools } from './tool-discovery.mjs';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
-import { readHistory } from './history.mjs';
+import { readHistory, fullReadHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
@@ -300,6 +300,12 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(archive.entries.some(e => e.type === 'compaction/end'));
     assert.ok(archive.entries.every(e => e.timestamp > 0));
     const older = await readHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq: archive.entries.at(-1).seq, limit: 2 });
+    // The tail reader (frames from the end) answers exactly what the whole-log read answers.
+    assert.deepEqual(archive, await fullReadHistory(join(directory, 'home/sessions'), 'fixture-root', { limit: 100 }));
+    assert.deepEqual(older, await fullReadHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq: archive.entries.at(-1).seq, limit: 2 }));
+    for (const before_seq of [1, 5, archive.entries[0].seq, archive.entries.at(-1).seq + 1])
+      assert.deepEqual(await readHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq, limit: 3 }),
+        await fullReadHistory(join(directory, 'home/sessions'), 'fixture-root', { before_seq, limit: 3 }), 'page before ' + before_seq);
     assert.equal(older.entries.length, 2);
     assert.ok(older.entries.at(-1).seq < archive.entries.at(-1).seq);
     // Migrate this exact persisted workspace-write session, not a fresh root.

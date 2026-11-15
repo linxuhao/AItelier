@@ -1,20 +1,21 @@
-"""Refuse a message body that carries one of this service's own credentials.
+"""Refuse message text that carries one of this service's own credentials.
 
-Both message write paths call ``refuse_credential_values`` before they open a
-transaction: the project mailbox (``core/director_messaging.py``) and the
-driver inbox (``core/driver_inbox.py``). A body is persisted in State and
-delivered to inboxes, so a credential value written into one would be copied
-to every recipient and kept for good. This module is the single definition of
-the check.
+Every State writer that persists free text calls ``refuse_credential_values``
+(or the ``core/message_body_guard.py`` adapter over it) before it opens a
+transaction, passing ALL of the fields that writer stores: a subject and a body,
+a notebook entry's assertion and body. That text is persisted in State and
+delivered to inboxes, so a credential value written into any field of it would
+be copied to every recipient and kept for good. This module is the single
+definition of the check.
 
-What it refuses: a body that contains the exact value of a configured
+What it refuses: text that contains the exact value of a configured
 credential of this service. The set is read at call time from the same module
 attributes the auth modules compare against (``api.authz.ADMIN_TOKEN`` and
 ``api.mcp_router._EXTERNAL_TOKEN``), so it can never drift from them, and a
 configuration change is seen on the next call.
 
 What it deliberately does not do: scan for secret-shaped text, judge prose or
-field names, or block a digest. A body that only NAMES a credential field (for
+field names, or block a digest. Text that only NAMES a credential field (for
 example ``AITELIER_ADMIN_TOKEN``) is ordinary text and is accepted.
 
 The floor: a configured value shorter than ``MIN_SECRET_LEN`` characters is not
@@ -59,18 +60,28 @@ def _configured_values():
                 yield field, value
 
 
-def refuse_credential_values(body: str, refusal) -> None:
-    """Raise ``refusal(detail)`` if ``body`` embeds a configured credential value.
+def refuse_credential_values(texts, refusal) -> None:
+    """Raise ``refusal(detail)`` if any of ``texts`` embeds a configured credential value.
+
+    ``texts`` is the write's whole free text: one string, or a collection of
+    strings - one entry per field the writer persists (a subject and a body, a
+    notebook entry's assertion and body). Every one of those fields is stored and
+    shown to a reader, so the test is the same for each; passing them together is
+    what keeps a writer at one guard call.
 
     ``refusal`` is the caller's own exception factory, so each write path keeps
     its error type and its closed envelope. ``detail`` names the field class and
     the remedy. It never includes the value, a prefix of it, or its length.
     """
-    if not isinstance(body, str) or not body:
+    credentials = list(_configured_values())
+    if not credentials:
         return
-    for field, value in _configured_values():
-        if value in body:
-            raise refusal(
-                f"body: contains the configured value of {field}; a message body is "
-                "stored and delivered, so credentials must not be written into it. "
-                "Remove the value and name the field instead.")
+    for text in (texts if isinstance(texts, (list, tuple, set, frozenset)) else (texts,)):
+        if not isinstance(text, str) or not text:
+            continue
+        for field, value in credentials:
+            if value in text:
+                raise refusal(
+                    f"text: contains the configured value of {field}; message text is "
+                    "stored and delivered, so credentials must not be written into it. "
+                    "Remove the value and name the field instead.")

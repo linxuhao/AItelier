@@ -184,6 +184,19 @@ def test_row_model_never_changes_compaction_and_never_duplicates_a_policy(monkey
         {"provider": "aitelier", "model": "worker", "thresholdRatio": 0.25, "retainTokens": 0}]
 
 
+def test_an_empty_row_model_gets_the_same_director_model_in_route_and_compaction(monkeypatch):
+    """Review R2: the completion route already falls back to the table's director
+    route for an empty row model; the compaction policy must name that same model,
+    never a null one."""
+    monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
+    table = load_roles()
+    for empty in ("", None):
+        row = {"provider": "aitelier", "model": empty, "session_id": "root"}
+        route = completion_route(row, "root", table)
+        policy = compaction_config(row, table)["modelPolicies"][0]
+        assert route == table["director"]["route"] and policy["model"] == route, (route, policy)
+
+
 def test_start_defaults_to_the_tables_director_route(runtime):
     async def go():
         try:

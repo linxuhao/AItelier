@@ -301,9 +301,12 @@ def compaction_config(row, roles=None):
         ratio = min(0.8, max(0.2, float(ratio)))
     except ValueError:
         ratio = director["thresholdRatio"]
-    policies = [{"provider": row["provider"], "model": row["model"], **director, "thresholdRatio": ratio}]
+    # The same model the completion route uses for the director: the row's, or the
+    # table's director route when the row names none (never a null model here).
+    model = row["model"] or table["director"]["route"]
+    policies = [{"provider": row["provider"], "model": model, **director, "thresholdRatio": ratio}]
     worker_target = (SUBAGENT_PROVIDER, table["worker"]["route"])
-    if (row["provider"], row["model"]) != worker_target:
+    if (row["provider"], model) != worker_target:
         policies.append({"provider": worker_target[0], "model": worker_target[1], **worker})
     return {"thresholdRatio": worker["thresholdRatio"], "modelPolicies": policies}
 

@@ -137,8 +137,10 @@ receipt cannot say which platform measured` without reading the receipt's
 platform block. Uncommitted edits in the bound Source are the third shape and
 are not a moved head or tree: `observe_root` counts them, and `compare_source`
 records the field `dirty` (bound 0) on the same `unreviewed` line. All three
-are recorded rather than silent, and none of them is release evidence. A clone
-cannot drift away from the record that names it.
+are recorded rather than silent, and none of them is release evidence.
+A clone is not immune to drift either: its head, tree and dirty count are
+compared against the record exactly like the production checkout's, so a
+commit made inside one is recorded as drift, not refused.
 
 An operator can decide this before dispatch instead of meeting the refusal. The
 mount table is the launcher's own `-v` list, not a guess: repeat every `-v

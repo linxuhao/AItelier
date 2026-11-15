@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(process.env.AITELIER_DSH_ENTRY);
 const { LlmAdapter, LlmError, CONTEXT_WINDOW_EXCEEDED_CODE } = await import(require.resolve('@deepseek-ai/dsh-llm'));
 export const name = 'fixture-provider';
-export const inject = ['llm'];
+export const inject = ['llm', 'tools'];
 export function apply(ctx) {
   let rootCalls = 0, pressure = false, triggered = false, childMessaged = false, childShell = false, childWork = 0, childDiscovery = 0;
   const host = process.env.AITELIER_DSH_EXECUTION === 'host';
@@ -70,6 +70,16 @@ export function apply(ctx) {
     }
   }
   ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
+  // What each caller has REGISTERED (not merely presented): the test asserts it per
+  // mode against an expected list, so a lost MCP handshake or plugin cannot hide.
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const assembly = await next();
+    const caller = context?.agent ?? context?.scope;
+    if (caller?.session?.id) void fetch(process.env.AITELIER_URL + '/test/registered', { method: 'POST', body: JSON.stringify({
+      session: caller.session.id, root: caller.session.id === process.env.AITELIER_DSH_SESSION, host,
+      names: ctx.tools.schemas(caller).map(t => t.name).sort() }) }).catch(() => {});
+    return assembly;
+  });
   ctx.on('tools/result', (exec, result) => {
     if (exec.name === 'mcp__aitelier__list_pipelines') void fetch(process.env.AITELIER_URL + '/test/dispatch', {
       method:'POST',body:JSON.stringify({session_id:exec.agent.session.id,call_id:exec.callId,root_call_id:exec.rootCallId,nested:!!exec.parent,isError:result.isError}),

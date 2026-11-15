@@ -57,8 +57,11 @@ Then pick a repository template with todo_templates, bind its declared params,
 and call todo_plan(template, params, goal, attempt_id, node_key, context_hash,
 base_sha, workspace); the plan is expanded and frozen. Never improvise items:
 when no template fits, add one under todo_templates/ through a reviewed code
-change. Tell the child its attempt_id, workspace and delivery, and to work item by
-item with todo_status, todo_begin and todo_done. Every todo result carries the
+change. The dispatch prompt states this task only: the child's workspace,
+attempt_id, delivery and scope, plus the project rules it must follow. The
+child's own worker prompt already carries the item-by-item protocol
+(todo_status, todo_begin, todo_done), its workspace and State limits and the
+background-job rule; do not repeat them. Every todo result carries the
 plan brief. Children cannot write State beyond an allowlist: any session but
 yours may call state_graph_write only with action report_issue; every other
 action (record_evidence, verify_node,

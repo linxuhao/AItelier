@@ -1,42 +1,29 @@
 /** Keep MCP schemas in the registry, outside ordinary model requests. */
-const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
-/** State writes from a subagent: in the real aitelier MCP server almost every
- *  write is an `action` of ONE tool, state_graph_write. A non-root session may use
- *  only the allowlisted actions; everything else (and a missing/non-string
- *  action) is the director's. Two writes are separate tools and are the
- *  director's too: declare_driver_presence (marking the director offline lets
- *  others take over its claims) and answer_checkpoint (a human decision). The
- *  judging writes are also refused as bare tool names in case a server ever
- *  exposes them. */
-export const childWriteActions = new Set(['report_issue']);
-export const directorOnlyTools = new Set(['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node',
-  'report_external_attempt', 'start_external_attempt', 'claim_node'].map(name => 'mcp__aitelier__' + name));
-const stateWriteTool = 'mcp__aitelier__state_graph_write';
-export const workerJudgeRule = 'workers do not judge their own work; the director records State evidence'
-  + ` (a subagent may only state_graph_write ${[...childWriteActions].join(' or ')})`;
-const directorOnly = exec => directorOnlyTools.has(exec.name)
-  || (exec.name === stateWriteTool && !childWriteActions.has(exec.arguments?.action));
+import { roleOf } from './roles.mjs';
 
-/** The tools every session's requests carry. Everything else stays registered and
- *  callable - through call_tool, or directly by a known name - and is found with
- *  search_tools. Chosen from measured use, 2026-11-07..14 (two directors ~40k tool
- *  calls, 589 native children ~43k): each of these is used daily by the director or
- *  by children (todo_begin/done/report and grep are children's), or the runtime asks
- *  for it (idle_dormant, watch_process, todo_rebind after every host restart). Every
- *  tool this runtime registers is listed; only rarely used DSH built-ins are
- *  deferred. project_work is the workspace-mode child bridge; the todo_batch tools are presented while their pilot is measured. A tool
- *  missing here is deferred, never lost: keep this list short and measured. */
-export const presentedTools = new Set(['bash', 'read', 'write', 'edit', 'grep', 'read_image',
-  'state_read', 'subagent', 'list_agents', 'send_message', 'send_user_message',
-  'job_output', 'job_kill', 'job_list', 'watch_process', 'idle_dormant', 'grep_chat_history',
-  'todo_plan', 'todo_status', 'todo_finish', 'todo_templates', 'todo_begin', 'todo_done', 'todo_report',
-  'todo_rebind', 'todo_batch_plan', 'todo_batch_status', 'project_work', 'search_tools', 'call_tool']);
-/** Presented to the director only: its most-used write (~8.3k calls in that week went
- *  through call_tool, plus ~500 searches to find it). Children may only report_issue. */
-export const directorPresentedTools = new Set([stateWriteTool]);
-/** The request's tool list for one session: presented tools only. */
-export function presentTools(tools, { director }) {
-  return tools.filter(t => presentedTools.has(t.name) || (director && directorPresentedTools.has(t.name)));
+const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
+
+/** The request's tool list for one session: the tools its role presents. Everything
+ *  else stays registered and callable - through call_tool, or directly by a known
+ *  name - and is found with search_tools; only the role's `forbidden` tools are
+ *  refused (see refusal). Which names a role presents is roles.json's business
+ *  (chosen from measured use, 2026-11-07..14), extended by the adapter
+ *  (aitelier-roles.mjs), never a list in this file. A tool missing there is
+ *  deferred, never lost. */
+export function presentTools(tools, role) {
+  const presented = new Set(role.presented);
+  return tools.filter(t => presented.has(t.name));
+}
+
+/** Why `role` may not run this call, or undefined. Refused: every tool the role
+ *  forbids, and - for a tool listed in `allowed_actions` - any call whose `action`
+ *  argument is not on that tool's list (a missing or non-string action included).
+ *  `notes` adds the adapter's reason for one tool. */
+export function refusal(role, exec) {
+  const actions = role.allowed_actions?.[exec.name];
+  if (!role.forbidden.includes(exec.name) && !(actions && !actions.includes(exec.arguments?.action))) return undefined;
+  const note = role.notes?.[exec.name];
+  return `${exec.name}${actions ? `(${String(exec.arguments?.action)})` : ''} is the director's${note ? ': ' + note : ''}`;
 }
 
 export function searchTools(schemas, query, limit = 5) {
@@ -54,18 +41,19 @@ export function searchTools(schemas, query, limit = 5) {
     has_more: ranked.length > limit };
 }
 
-export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession }) {
+/** @param roles - the effective role table (roles.json plus the adapter's additions). */
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, roles }) {
+  const roleFor = sessionId => roles[roleOf(sessionId, rootSession)];
   // Keyed on the caller's session, not on a prompt. A global guard covers both
-  // call_tool targets and a direct call of the (merely unlisted) MCP name.
-  ctx.tools.guard(exec => directorOnly(exec) && exec.agent?.session?.id !== rootSession
-    ? `${exec.name}${exec.name === stateWriteTool ? `(${String(exec.arguments?.action)})` : ''} is refused for a subagent: ${workerJudgeRule}` : undefined);
+  // call_tool targets and a direct call of the (merely unlisted) name.
+  ctx.tools.guard(exec => refusal(roleFor(exec.agent?.session?.id), exec));
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next();
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
-    return { ...assembly, tools: presentTools(assembly.tools, { director: caller?.session?.id === rootSession }) };
+    return { ...assembly, tools: presentTools(assembly.tools, roleFor(caller?.session?.id)) };
   });
   ctx.systemPrompt.section({ name: 'aitelier:tool-discovery', order: 3090, interpolate: false,
     text: 'MCP capabilities are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. For AgentMCP image, OCR, PDF, audio or video work, for example search_tools({query:"agentmcp image",limit:3}), then call_tool({name:"<exact returned tool name>",arguments:{/* fields from its returned schema */}}). Search again after compaction if you need an earlier schema. Known names may be called without searching first. The everyday coding and coordination tools are listed directly; less-used ones (glob, web_fetch, web_search, interrupt_agent, goals, MCP resources and the rest) are not listed but are found with search_tools and called the same way. Discovery does not change your existing permissions.' });

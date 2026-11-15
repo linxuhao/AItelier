@@ -26,7 +26,20 @@ KINDS = frozenset({"test", "review", "human", "artifact", "integration"})
 FACETS = frozenset({"design", "contract", "test", "content", "integration"})
 BUILDABLE = frozenset({"design", "contract"})
 FACET_SUFFIXES = {".contract": "contract", ".test": "test"}
+# The per-project budget is spent by ACTIVE nodes. Closed nodes are history:
+# they stay readable through get_node, findable through search_nodes and
+# drawable in the dashboard, but they must not stop a project from recording
+# new goals. Counting every row made the cap permanent once enough goals had
+# been accepted: on 2026-11-15 project aitelier held 1009 rows (962 VERIFIED,
+# 37 SUPERSEDED, 3 STALE, 6 CANDIDATE, 1 OPEN), so both add_nodes and
+# revise_node refused with the size message — a measured defect could not get
+# a node, and one OPEN goal could not be re-worded. Issue work was the one
+# path the old check never covered (it bypassed _validate_dag entirely), so
+# _check_active_capacity ADDS a refusal there: start_issue_work now spends the
+# same budget instead of inserting rows past it. See CLOSED_STATUSES for what
+# "closed" means here.
 MAX_NODES = 1000
+CLOSED_STATUSES = frozenset({"VERIFIED", "SUPERSEDED"})
 READY_ACTIONS = ("candidate_review", "new_attempt")
 
 
@@ -118,9 +131,12 @@ def dependencies(value: list[str]) -> list[str]:
 
 
 def _validate_dag(graph: dict[str, list[str]]) -> None:
-    """Kahn traversal avoids recursion limits and rejects dangling references."""
-    if len(graph) > MAX_NODES:
-        raise StateGraphError(f"a project supports at most {MAX_NODES} nodes")
+    """Kahn traversal avoids recursion limits and rejects dangling references.
+
+    Capacity is deliberately NOT checked here: MAX_NODES bounds ACTIVE nodes,
+    this function sees only keys and edges, and a revise on a project whose
+    closed rows exceed the budget must still be possible.
+    """
     degree, children = {}, {k: [] for k in graph}
     for node, deps in graph.items():
         if node in deps:
@@ -605,6 +621,7 @@ class StateGraphStore:
             facets[nk] = own
             prepared.append((nk, goal, checks, deps, priority, own))
         _validate_dag(graph)
+        self._check_active_capacity(conn, project_id, len(prepared))
         self._check_facets(facets, graph)
         # All nodes first: forward references in a batch are legitimate.
         for nk, goal, checks, deps, priority, own in prepared:
@@ -619,6 +636,28 @@ class StateGraphStore:
                                                                 "contract_hash": digest(checks), "facet": own})
         return [nk for nk, *_ in prepared]
 
+    def _check_active_capacity(self, conn, project_id, adding: int = 1) -> None:
+        """Refuse creating nodes when the ACTIVE budget would be exceeded.
+
+        The cap is a budget on work in flight and outstanding, so a closed node
+        (CLOSED_STATUSES) costs nothing: otherwise a project that has delivered
+        MAX_NODES goals can never record another one. The refusal names both
+        sides so the reader can tell "the project is genuinely full" from "the
+        history is long".
+        """
+        if adding <= 0:
+            return
+        counts = {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM state_nodes WHERE project_id=? GROUP BY status",
+            (project_id,))}
+        active = sum(n for status, n in counts.items() if status not in CLOSED_STATUSES)
+        closed = sum(n for status, n in counts.items() if status in CLOSED_STATUSES)
+        if active + adding > MAX_NODES:
+            raise StateGraphError(
+                f"a project supports at most {MAX_NODES} active nodes: {active} active now, "
+                f"creating {adding} more would exceed it ({closed} closed nodes are history and do "
+                "not count; they stay readable through get_node and searchable through search_nodes)")
+
     def _add_issue_work(self, conn, project_id, issue_id, node_key, goal, checks, priority):
         """Insert one issue work item: an OPEN node with no edges and no facet,
         marked with the issue it fixes. The caller (StateIssues.start_work)
@@ -627,6 +666,7 @@ class StateGraphStore:
         if conn.execute("SELECT 1 FROM state_nodes WHERE project_id=? AND node_key=?",
                         (project_id, nk)).fetchone():
             raise StateConflict(f"duplicate node key {nk!r}")
+        self._check_active_capacity(conn, project_id, 1)
         checks = contract(checks)
         stamp = now()
         conn.execute("INSERT INTO state_nodes(project_id,node_key,revision,goal,contract_json,contract_hash,status,"
@@ -863,7 +903,7 @@ class StateGraphStore:
             item["dependencies"] = graph[nk]
             item["blocked_by"] = blocked_by
             item["hold"], item["node_hold"] = hold, own_hold
-            item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
+            item["readiness"] = ("closed" if node["status"] in CLOSED_STATUSES
                                  else "in_progress_lease_expired" if nk in lapsed
                                  else "in_progress" if nk in active else "held" if hold
                                  else "blocked" if blocked_by else "ready")
@@ -930,7 +970,7 @@ class StateGraphStore:
             view = self._graph_view(conn, project_id)
         return {**view, "nodes": [n for n in view["nodes"] if not n.get("issue_id")],
                 "issue_work": [issue_work_entry(n) for n in view["nodes"]
-                               if n.get("issue_id") and n["status"] not in ("VERIFIED", "SUPERSEDED")]}
+                               if n.get("issue_id") and n["status"] not in CLOSED_STATUSES]}
 
     def get_node(self, project_id: str, node_key: str) -> dict:
         key(node_key)

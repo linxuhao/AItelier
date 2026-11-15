@@ -29,10 +29,23 @@ from core.dsh_driver import DshDrivers
 # Five seconds: long enough that an ordinary start - the runtime loading itself
 # and its MCP servers - is not mistaken for a death, and well under the 15 s
 # floor of the retry backoff, so a fast death is decided before the retry it has
-# to influence rather than after it. It is a bound on the DIAGNOSIS only: a child
-# that outlives it is not thereby declared good, it is simply restarted the same
-# way it always was.
+# to influence rather than after it.
 STARTUP_WINDOW_SECONDS = 5.0
+
+# Whether a start WORKED is not a question about elapsed time. A driver has served
+# once its row reports one of the phases only the runtime itself writes, and a real
+# boot reaches its first turn in about 25 s - so "alive for 5 s" was never evidence,
+# and the same child that dies 6 s after every spawn was a failed start with the
+# window at 12 s and nothing at all at 5 s (measured 2026-11-15). The ceiling below
+# bounds the QUESTION rather than posing a second window: a spawn that never served
+# and is older than it is no longer a boot problem, and its death is the ordinary
+# restart it looks like.
+STARTUP_DECISION_SECONDS = 120.0
+
+# The row phases only the runtime writes, when it reports in over /activity: a row
+# showing one of them has served. `starting` is what `start()` writes and `failed`
+# is a death, so neither is evidence of a working driver.
+SERVING_PHASES = frozenset({"running", "waiting", "dormant"})
 
 # How much of the driver's own log is read to find its last startup error, and
 # how much of that error the record keeps. Every attempt appends to that log, so
@@ -204,11 +217,15 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
     The failure record is part of that boundary for the same reason: a full disk
     or an unreadable log must cost one project's diagnosis, never the loop.
 
-    A start counts as successful only once its child has stayed up for
-    `startup_window`. A child that is gone before then is a FAILED start: it is
-    counted, backed off from and reported, exactly like a `start()` that raised,
-    because "a process exists" was never the question - "a driver can stay up"
-    was, and a session that cannot be loaded answers no to it in seconds.
+    A FAILED start is a child that dies without ever having SERVED: the runtime
+    writes a row's serving phase only when it reports in over /activity, so that
+    phase - never the child's age - is what says whether a boot worked. Such a
+    death is counted, backed off from and reported, exactly like a `start()` that
+    raised, because "a process exists" was never the question: a session that
+    cannot be loaded answers no to it whether it dies in 2 s or in 6 s.
+    `startup_window` keeps its own, narrower job - a child alive past it has
+    survived its start, which ends a streak - and `STARTUP_DECISION_SECONDS`
+    bounds how long a spawn stays undecided when nothing ever reports in.
     """
     runtime.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (runtime.root / "host-supervisor.lock").open("a") as lock:
@@ -219,9 +236,12 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
         # the row can be re-stamped with the same words it was stamped with.
         last_errors = {}
         # project -> the monotonic instant the child being watched was spawned.
-        # A start is undecided until this entry has aged past `startup_window`;
-        # dropping the entry is what decides it, once.
+        # The entry is dropped once that start is decided: it served, it died, or
+        # it outlived `STARTUP_DECISION_SECONDS` without ever reporting in.
         spawned_at = {}
+        # project -> this spawn has served: the runtime reported one of the serving
+        # phases for it, which is the only evidence that a start worked.
+        served = set()
         try:
             while not stopped.is_set():
                 try:
@@ -237,25 +257,42 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                             failures.pop(project, None)
                             last_errors.pop(project, None)
                             spawned_at.pop(project, None)
+                            served.discard(project)
                             if project in runtime.processes:
                                 await runtime.stop(project)
                         else:
                             now = time.monotonic()
                             alive = runtime.running(project)
                             spawned = spawned_at.get(project)
+                            if spawned is not None and row.get("phase") in SERVING_PHASES:
+                                # The runtime reported in over /activity: this
+                                # spawn served, whatever it does next.
+                                served.add(project)
                             if spawned is not None and alive and now - spawned >= startup_window:
                                 # It outlived the window: this start worked, so the
                                 # counter and any record left by earlier starts go.
-                                spawned_at.pop(project)
                                 failures.pop(project, None)
                                 last_errors.pop(project, None)
                                 # The row needs no clearing here: this spawn's own
                                 # `start()` wrote `phase='starting', last_error=''`
                                 # before the streak could end (see the note above).
                                 clear_startup_failure(runtime, row["driver_id"])
+                                if project in served or now - spawned >= STARTUP_DECISION_SECONDS:
+                                    # Served, or too old to be a start problem any
+                                    # more: nothing is left to judge here.
+                                    spawned_at.pop(project)
+                                    served.discard(project)
                             elif spawned is not None and not alive:
                                 spawned_at.pop(project)
-                                if now - spawned < startup_window:
+                                did_serve = project in served
+                                served.discard(project)
+                                if did_serve:
+                                    # A session that ran and was killed is an
+                                    # ordinary restart: the boot question is not why
+                                    # it is gone, and its delay must not grow.
+                                    failures.pop(project, None)
+                                    last_errors.pop(project, None)
+                                elif now - spawned < STARTUP_DECISION_SECONDS:
                                     failures[project] = failures.get(project, 0) + 1
                                     # One text goes to both sinks, and it passes
                                     # the same bounds: the journal is centralized
@@ -279,8 +316,13 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                         # marker or the rest of the loop.
                                         print(f"DSH host {project}: cannot stamp the failure "
                                               f"on its row: {exc}", flush=True)
-                                # A child that lived past the window and left later is
-                                # not a failed start; the row is simply restarted below.
+                                # Otherwise the death is not a boot problem: no
+                                # record, no line, just the ordinary retry below.
+                            elif spawned is not None and now - spawned >= STARTUP_DECISION_SECONDS:
+                                # Alive far past any boot without ever reporting in:
+                                # a real defect, but not this spawn's start outcome.
+                                spawned_at.pop(project)
+                                served.discard(project)
                             if (failures.get(project) and spawned is None and not alive
                                     and _overwritten_by_runtime_exit(row["last_error"])):
                                 # `DshDrivers._observe` diagnoses the same death
@@ -316,6 +358,7 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 else:
                                     if runtime.processes.get(project) is not None:
                                         spawned_at[project] = time.monotonic()
+                                        served.discard(project)  # a new spawn, nothing served yet
                                     # No child to watch means this runtime did not
                                     # spawn one, so there is nothing to judge here.
                         publish(runtime, row)

@@ -20,6 +20,13 @@ async def eventually(check):
             await asyncio.sleep(0.01)
 
 
+async def for_at_most(seconds, check):
+    """`eventually`, for the waits that are a real backoff rather than one tick."""
+    async with asyncio.timeout(seconds):
+        while not check():
+            await asyncio.sleep(0.05)
+
+
 @pytest.fixture
 def runtimes(tmp_path):
     db = StateDatabase(str(tmp_path / 'state.sqlite'))
@@ -488,3 +495,112 @@ async def test_a_failure_record_that_cannot_be_written_does_not_end_supervision(
         assert (host.root / beta['driver_id'] / 'host-process.json').exists()
     finally:
         stopped.set(); await task
+
+
+@pytest.fixture
+def never_serves(tmp_path):
+    """`alpha`'s child dies 6 s after EVERY spawn; `beta`'s stays up.
+
+    Six seconds is past the 5 s startup window, so an age-keyed rule diagnosed
+    nothing here; the child also never reports a serving phase, because it cannot
+    load its session at all. Each spawn records its own wall-clock instant, so a
+    test can measure the retry spacing the supervisor chose: 15 s for a start that
+    has no counted failure behind it, 30 s after one.
+    """
+    spawns = tmp_path / 'alpha-spawns'
+    script = tmp_path / 'child.py'
+    script.write_text(
+        "import os, sys, time\n"
+        f"spawns = {str(spawns)!r}\n"
+        "if os.environ['AITELIER_DSH_PROJECT'] == 'alpha':\n"
+        "    with open(spawns, 'a') as handle:\n"
+        "        handle.write(str(time.time()) + '\\n')\n"
+        "    time.sleep(6)\n"
+        "    print('Error: session log is corrupt: cannot load the session',"
+        " file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "time.sleep(90)\n")
+    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+    service = StateService(db, actor='fixture', project_read_trusted=True)
+    service.store.create_project('alpha', 'Alpha')
+    service.store.create_project('beta', 'Beta')
+    registry = DriverRegistry(db, 'host-fixture-pepper-' * 3)
+    registry.seed('fixture-owner')
+    root = tmp_path / 'drivers'; root.mkdir()
+    (root / 'runtime.json').write_text('{"mode":"host"}')
+    backend = DshDrivers(db, registry, root)
+    host = DshDrivers(db, registry, root, host_controller=True,
+                      command=[sys.executable, str(script)])
+    return backend, host, spawns
+
+
+def spawn_times(path):
+    if not path.exists():
+        return []
+    return [float(value) for value in path.read_text().split()]
+
+
+async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_serves, capsys):
+    """Alive past the 5 s window is not "served": the age is the wrong question.
+
+    The same child that is a failed start with the window at 12 s produced nothing
+    at the shipped 5 s, because surviving the window was treated as proof that the
+    start worked and the death that followed was judged by nobody.
+    """
+    backend, host, spawns = never_serves
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await for_at_most(20, lambda: record.exists())
+        state = json.loads(record.read_text())
+        assert state['attempts'] == 1, state
+        assert state['driver_id'] == row['driver_id'] and state['project_id'] == 'alpha'
+        assert 'session log is corrupt' in state['last_error'], state
+        await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
+        driver_row = backend.get('alpha')
+        assert driver_row['last_error'].startswith('DSH: failed start 1 in a row: '), driver_row
+        reported = [line for line in capsys.readouterr().out.splitlines()
+                    if 'alpha' in line and 'died' in line]
+        assert len(reported) == 1, reported
+        assert 'failed start 1 in a row' in reported[0]
+        # The retry a counted failure buys is the one after it: a spawn's first
+        # retry is already scheduled when it starts, so the growth has to be read
+        # between the second and the third spawn (30 s instead of 15 s).
+        await for_at_most(90, lambda: len(spawn_times(spawns)) >= 3)
+        second, third = spawn_times(spawns)[1:3]
+        assert third - second > 25, third - second
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_death_after_the_driver_served_is_an_ordinary_restart(never_serves, capsys):
+    """The same child, the same exit: served is what separates a boot failure from a kill.
+
+    The window is longer than the child lives, so the death itself is what the
+    supervisor judges - and the row reported a serving phase before it, which is
+    exactly what the runtime writes when a driver really reports in.
+    """
+    backend, host, spawns = never_serves
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=10))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        # Every spawn reports in before it dies, so every death here is a served
+        # one: none may be counted and the retry stays at the first 15 s.
+        for expected in (1, 2):
+            backend.update('alpha', phase='running')
+            await for_at_most(60, lambda: len(spawn_times(spawns)) > expected)
+    finally:
+        stopped.set(); await task
+    assert not record.exists(), 'a served driver that was killed is not a failed start'
+    out = capsys.readouterr().out
+    assert not [line for line in out.splitlines() if 'alpha' in line and 'died' in line], out
+    current = backend.get('alpha')
+    assert not (current['last_error'] or '').startswith('DSH: failed start '), current
+    second, third = spawn_times(spawns)[1:3]
+    # Unchanged: a served death must not grow the retry past its first 15 s.
+    assert third - second < 25, third - second

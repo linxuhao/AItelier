@@ -397,6 +397,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/, 'the third boot could not load the session the second persisted\n' + output.slice(-2000));
     assert.equal(proc.exitCode, null, output.slice(-2000));
     assert.ok(requests.slice(third).some(r => !r.summary && r.options.tools?.length), 'the third boot never served a turn\n' + output.slice(-2000));
+    // Request-body recording for the dsh-director split (plugin design, D5): every
+    // model request of the three boots, as the provider received it. Off unless asked.
+    if (process.env.DSH_DIRECTOR_RECORD_DIR) await writeFile(join(process.env.DSH_DIRECTOR_RECORD_DIR, 'smoke-requests.json'),
+      JSON.stringify({ scratch, boots: [requests.slice(0, before), requests.slice(before, third), requests.slice(third)] }));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();
@@ -576,6 +580,9 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     await new Promise(resolve=>setTimeout(resolve,100));
     assert.ok(activity.some(a=>a.phase==='running'&&a.error?.includes('fixture completion failure')),'retry was not shown as running with its previous failure');
     assert.equal(activity.at(-1).phase,'waiting');assert.equal(activity.at(-1).error,'');
+    // The bridge bodies (model route, reasoning effort, tools) for the same D5 recording.
+    if (process.env.DSH_DIRECTOR_RECORD_DIR) await writeFile(join(process.env.DSH_DIRECTOR_RECORD_DIR, 'bridge-completions.json'),
+      JSON.stringify({ scratch: directory, completions, activity }));
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

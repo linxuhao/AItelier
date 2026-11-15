@@ -864,8 +864,23 @@ class StateAttempts:
         prior = json.loads(last[0]).get("workflow_observation") if last else None
         attention_changed = status in {"paused", "unknown", "failed"} and prior != observation
         changed = current["status"] != status or artifact != current["artifact_ref"] or attention_changed
+        # For an UNCHANGED quiescent attempt the write path's only possible
+        # effect is settling the claims bound to this exact attempt; an
+        # artifact-pending candidate stays in the wait-recovery selection and
+        # is observed every second. Ask the predicate release_bound_claims
+        # selects on, on this connection, so that settlement is never skipped
+        # and an empty write transaction is never paid for. No claims table
+        # (the subsystem is optional) means no claim can be bound.
+        claims_live = False
+        if quiescent and not changed and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_node_claims'").fetchone() is not None:
+            claims_live = conn.execute(
+                "SELECT 1 FROM state_node_claims WHERE attempt_id=? AND project_id=? "
+                "AND node_key=? AND status='live'",
+                (attempt_id, current["project_id"], current["node_key"])).fetchone() is not None
         return {"current": current, "status": status, "quiescent": quiescent, "fresh": fresh,
-                "artifact": artifact, "observation": observation, "changed": changed}
+                "artifact": artifact, "observation": observation, "changed": changed,
+                "claims_live": claims_live}
 
     def reconcile(self, attempt_id: str, sf, candidate_artifact: str | None = None,
                   actor: str | None = None) -> dict:
@@ -897,12 +912,14 @@ class StateAttempts:
         # second, and most of those observations change nothing. Deciding that
         # needs a read of the stored row, not a committed write on the one shared
         # sqlite, so the decision is taken under a READ transaction and a write
-        # transaction is opened only when something must actually be written:
-        # a changed status/artifact, a changed attention observation, or a
-        # quiescent outcome whose bound claims must be settled.
+        # transaction is opened only when the write would have an effect: a
+        # changed status/artifact, a changed attention observation, or a
+        # quiescent outcome holding at least one live bound claim to settle. An
+        # unchanged quiescent attempt with no live bound claim — the
+        # artifact-pending candidate is the common one — writes nothing.
         with self.store.transaction() as conn:
             decision = self._reconcile_decision(conn, attempt_id, attempt, row, outcome, candidate_artifact)
-        if not decision["changed"] and not decision["quiescent"]:
+        if not decision["changed"] and not decision["claims_live"]:
             return {**_public(decision["current"]), "stale_inputs": not decision["fresh"]}
         with self.store.transaction(write=True) as conn:
             # The decision above is never carried across the gap: re-read the row

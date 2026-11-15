@@ -111,25 +111,36 @@ exit code 71, nothing mounted, no snapshot taken, nothing written to
 `<suffix>.gate.exit` -- so a caller that reads 71 reads "the gate was not run",
 not "measured and failed". The remedy is in the record, not in the launcher:
 `source` must be a SELF-CONTAINED clone of the reviewed tree (`git clone --local
-<checkout> <dir>`, checked out at the reviewed commit). The production checkout
-and any `git worktree` of it are exactly the shapes this check refuses, because
-their `.git` points at a repository outside the directory the gate mounts
-(measured on 2026-11-15 with the `mountable` command below: the record naming a
-linked worktree exited 71, the record naming a `git clone --local` exited 0).
+<checkout> <dir>`, checked out at the reviewed commit). A `git worktree` of the
+checkout does not do: its `.git` is a file pointing at a repository under the
+checkout, outside every directory this gate mounts, and that is the shape the
+check refuses (measured on 2026-11-15 with the `mountable` command below: the
+record naming a linked worktree exited 71, the record naming a `git clone
+--local` exited 0). Naming the production checkout itself is NOT refused -- its
+`.git` is a real directory, so the check answers 0 (measured the same day, same
+command) -- and that measured pass is the reason to leave it out of a record: the
+gate would read a live read-write tree that moves under the run, so the commit a
+record freezes would not be the bytes that were measured. A clone cannot drift
+away from the record that names it.
 
 An operator can decide this before dispatch instead of meeting the refusal. The
 mount table is the launcher's own `-v` list, not a guess: repeat every `-v
-HOST:CONTAINER` of tools/gate_run.sh as `--carries CONTAINER=HOST`, and add a new
-`-v` in both places, or a readable Source becomes a refusal.
+HOST:CONTAINER` of tools/gate_run.sh that the Source's identity can be reached
+through as `--carries CONTAINER=HOST` -- today three of its four, the record's own
+`-v` being a file inside a directory already carried -- and add a new `-v` in
+both places, or a readable Source becomes a refusal.
 
     python3 tools/gate_binding.py mountable <record> --binding-sha256 <sha256 of the record> \
       --carries "/app=<source>" --carries "/home/linxuhao/AItelier=<source>" \
       --carries /home/linxuhao/.AItelier
 
 It exits 0 when that Source's identity is reachable from inside the mount, and
-otherwise prints one reason on stderr and exits non-zero (71 for the pointer
-case above). The launcher turns any failure into its own refusal line and exit
-71, and appends that reason to `<suffix>.gate.log`.
+otherwise prints one reason on stderr and exits 71 -- for every pointer this
+check refuses: a `gitdir:` at a repository no mount carries, a `.git` file with no
+`gitdir:` line, a pointer at a path that does not exist, or a chain longer than 8
+hops. (A malformed `--carries` table is a caller error, exit 2.) The launcher
+turns any failure into its own refusal line and exit 71, and appends that reason
+to `<suffix>.gate.log`.
 
 Three different objects carry the word "harness", and reading one as another has
 already sent two readers to opposite wrong conclusions (2026-11-14), so name

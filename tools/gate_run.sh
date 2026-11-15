@@ -49,9 +49,10 @@ done
 # exit code.
 #
 # Two things are still fatal here, and neither of them is staleness. (1) "There
-# is nothing to dispatch": an unreadable or malformed binding names no Source and
-# no image, and inventing either from whatever is on disk would measure a
-# platform nobody reviewed (exit 69). (2) The record names a Source whose Git
+# is nothing to dispatch": a binding that cannot be read or is not a record, or a
+# well-formed record whose `source` is not an absolute non-symlink directory,
+# names no Source and no image, and inventing either from whatever is on disk
+# would measure a platform nobody reviewed (exit 69). (2) The record names a Source whose Git
 # identity no mount of THIS gate carries (the guard below, exit 71): the gate
 # would run and then record that commit as unobserved, i.e. produce a comparison
 # nobody could make, so it is refused by name before anything is mounted.

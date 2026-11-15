@@ -149,6 +149,29 @@ def _bad(name: str, reason: str) -> Refusal:
     return Refusal("bad_template", f"template {name}: {reason}")
 
 
+def _named_keys(keys: set[str]) -> str:
+    """The offending key(s), sorted so the message is the same for the same document."""
+    return ", ".join(repr(key) for key in sorted(keys))
+
+
+def _key_set_refusal(extra: set[str], missing: set[str], shape: str) -> str:
+    """Name the offending key(s) FIRST, then the set they broke - the style `_validate_batch`'s
+    predicate-shape refusal already uses (`binds only [...], not 'files_changed'`).
+
+    Listing the allowed keys alone leaves the author diffing two key sets by hand to find the one
+    they got wrong, which is the whole defect this wording exists to remove. Both directions are
+    named because a document can be missing one key and carrying a stray one at the same time, and
+    only the pair says which edit is called for. The shape stays in the message: the named key says
+    WHAT is wrong, the shape says what the document should have been.
+    """
+    said = []
+    if extra:
+        said.append(f"unexpected key{'' if len(extra) == 1 else 's'} {_named_keys(extra)}")
+    if missing:
+        said.append(f"missing key{'' if len(missing) == 1 else 's'} {_named_keys(missing)}")
+    return f"{'; '.join(said)} ({shape})"
+
+
 def type_ok(kind: str, value: Any) -> bool:
     if kind == "str":
         return isinstance(value, str)
@@ -195,8 +218,12 @@ def available(directory: Path | None = None) -> list[str]:
 
 
 def _validate(name: str, doc: Any, sha256: str) -> Template:
-    if not isinstance(doc, dict) or set(doc) != _TOP:
-        raise _bad(name, f"keys must be exactly {sorted(_TOP)}")
+    if not isinstance(doc, dict):
+        # No keys to name: say what the document actually is, so the author knows what they wrote.
+        raise _bad(name, f"a template is a mapping, not {type(doc).__name__}")
+    if set(doc) != _TOP:
+        raise _bad(name, _key_set_refusal(set(doc) - _TOP, _TOP - set(doc),
+                                          f"keys must be exactly {sorted(_TOP)}"))
     params = _header_and_params(name, doc)
     _require_scope(name, params)
     items = doc["items"]
@@ -380,7 +407,9 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
     if doc.get("kind") != "batch":
         raise _bad(name, f"kind must be 'batch' when given (an ordinary template has no kind); got {doc.get('kind')!r}")
     if set(doc) - _BATCH_OPTIONAL != _BATCH_TOP:
-        raise _bad(name, f"a batch template's keys are exactly {sorted(_BATCH_TOP)} (and optionally {sorted(_BATCH_OPTIONAL)})")
+        raise _bad(name, _key_set_refusal(set(doc) - _BATCH_OPTIONAL - _BATCH_TOP, _BATCH_TOP - set(doc),
+                                          f"a batch template's keys are exactly {sorted(_BATCH_TOP)} "
+                                          f"and optionally {sorted(_BATCH_OPTIONAL)}"))
     params = _header_and_params(name, doc)
     if "scope" in params and params["scope"].type != "list[str]":
         raise _bad(name, "param `scope`, when declared, is a list[str] of globs")
@@ -395,7 +424,8 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
     for stage in stages:
         sid = stage["id"]
         if set(stage) != _STAGE_KEYS[sid]:
-            raise _bad(name, f"stage {sid}: keys must be exactly {sorted(_STAGE_KEYS[sid])}")
+            raise _bad(name, _key_set_refusal(set(stage) - _STAGE_KEYS[sid], _STAGE_KEYS[sid] - set(stage),
+                                              f"stage {sid}: keys must be exactly {sorted(_STAGE_KEYS[sid])}"))
         report = stage["report"]
         if not isinstance(report, str) or set(_embedded(report)) != {"item"}:
             raise _bad(name, f"stage {sid}: report must be a relative path that embeds ${{item}}")

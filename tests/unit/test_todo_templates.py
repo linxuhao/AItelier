@@ -13,7 +13,9 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
+from core.todo_plan import Refusal
 from core.todo_runtime import builtin_library
 from core.todo_templates import _names_path, check_declared_paths, load_template
 # The CLI harness and fixtures are shared with the free-plan tests.
@@ -279,6 +281,151 @@ def test_a_broken_template_does_not_hide_the_others_from_the_listing(cli, repo, 
     listed = {t["name"]: t for t in cli.ok("templates", store=False)["templates"]}
     assert "error" in listed["broken"] and "scope" in listed["broken"]["error"]
     assert "error" not in listed["fine"] and listed["fine"]["version"] == 1
+
+
+# -- a key-set refusal names the offending key ----------------------------------------------
+#
+# The loader is the only thing standing between a plan author and a silently ignored key, so a
+# refusal that lists the allowed keys alone leaves that author diffing two key sets by hand to find
+# the one they got wrong. Every key-set refusal therefore names the offending key FIRST - as the
+# predicate-shape refusal already does (`binds only [...], not 'files_changed'`) - and keeps the
+# shape it broke in parentheses, so the key says WHAT is wrong and the shape says what the document
+# should have been. Missing keys are named too, in the other direction: "your document has no
+# `report`" is the same kind of fact as "it has a `deliver` it cannot have".
+#
+# FOUR positions, deliberately: the ordinary template's own keys (`_validate`), a batch template's
+# top level, and a batch stage - which has its own key set PER stage, so `find` and `verify` are
+# two cases of one check, not one.
+
+def plain_document(name: str = "t") -> dict:
+    """A minimal valid ordinary template (what GOOD spells out as YAML) as a mutable document."""
+    return {"name": name, "version": 1, "description": "a template under test",
+            "params": {"scope": {"type": "list[str]", "required": True},
+                       "target": {"type": "str", "required": True}},
+            "items": [{"id": "one", "title": "Change ${target}",
+                       "predicates": [{"predicate": "files_present", "args": {"pattern": "$target"}}]}]}
+
+
+def batch_document(name: str = "t") -> dict:
+    """The shipped batch template as a mutable document: each test breaks one of its key sets."""
+    doc = yaml.safe_load((TEMPLATES / "find_verify.yaml").read_text())
+    doc["name"] = name
+    return doc
+
+
+def stage_index(doc: dict, stage: str) -> int:
+    return [s["id"] for s in doc["stages"]].index(stage)
+
+
+def refused_load(doc: dict, custom: Path, cli: Cli) -> Refusal:
+    """Load the defective document: the loader refuses it, so no Template object comes back.
+
+    Also proves nothing was frozen on the way: the refusal is raised by loading/validating, and the
+    plan store (the only thing a template can eventually write through) holds nothing afterwards.
+    """
+    write_template(custom, "t", yaml.safe_dump(doc))
+    with pytest.raises(Refusal) as excinfo:
+        load_template("t", builtin_library(), custom)
+    assert not cli.store.exists() or not list(cli.store.iterdir()), "a refused load freezes no plan"
+    return excinfo.value
+
+
+def test_an_ordinary_template_with_an_extra_key_names_it(cli, repo, base, custom):
+    """Position 1, driven through `create`: the DIRECTOR sees the offending key, not just a Refusal."""
+    doc = plain_document()
+    doc["deliver"] = {"id": "deliver"}
+    write_template(custom, "t", yaml.safe_dump(doc))
+    code, out = create_from(cli, repo, base, "t", {"scope": ["**"], "target": "app.py"})
+    assert code == 2 and out["refused"] == "bad_template", out
+    assert "unexpected key 'deliver'" in out["reason"], out["reason"]
+    assert "keys must be exactly" in out["reason"], "the shape still says what the key set should be"
+    assert not list(cli.store.glob("*.json")), "a refused create freezes no plan"
+
+
+def test_an_ordinary_template_missing_a_key_names_it(custom, cli):
+    doc = plain_document()
+    del doc["description"]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "missing key 'description'" in refusal.reason, refusal.reason
+    assert "keys must be exactly" in refusal.reason
+
+
+def test_an_ordinary_template_that_is_not_a_mapping_is_refused_by_its_type(custom, cli):
+    """A non-dict has no keys to name, so the refusal names what the document actually is."""
+    write_template(custom, "t", "- a list\n- not a mapping\n")
+    with pytest.raises(Refusal) as excinfo:
+        load_template("t", builtin_library(), custom)
+    assert excinfo.value.code == "bad_template"
+    assert "a template is a mapping" in excinfo.value.reason and "list" in excinfo.value.reason
+    assert not cli.store.exists() or not list(cli.store.iterdir())
+
+
+def test_a_batch_template_with_an_extra_key_names_it(custom, cli):
+    """Position 2: the batch top level. `deliver` is the key a plan author brings from ordinary
+    templates, and it is exactly the one the old message left them to guess at."""
+    doc = batch_document()
+    doc["deliver"] = {"id": "deliver"}
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "unexpected key 'deliver'" in refusal.reason, refusal.reason
+    assert "a batch template's keys are exactly" in refusal.reason
+
+
+def test_a_batch_template_missing_a_key_names_it(custom, cli):
+    doc = batch_document()
+    del doc["fan_in"]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "missing key 'fan_in'" in refusal.reason, refusal.reason
+    assert "a batch template's keys are exactly" in refusal.reason
+
+
+@pytest.mark.parametrize("stage", ["find", "verify"])
+def test_a_batch_stage_with_an_extra_key_names_it(custom, cli, stage):
+    """Position 3: one check, two key sets - find and verify each have their own."""
+    doc = batch_document()
+    doc["stages"][stage_index(doc, stage)]["note"] = "not a key a stage has"
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "unexpected key 'note'" in refusal.reason, refusal.reason
+    assert f"stage {stage}: keys must be exactly" in refusal.reason
+
+
+@pytest.mark.parametrize("stage,key", [("find", "prompt"), ("verify", "cap")])
+def test_a_batch_stage_missing_a_key_names_it(custom, cli, stage, key):
+    doc = batch_document()
+    del doc["stages"][stage_index(doc, stage)][key]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert f"missing key '{key}'" in refusal.reason, refusal.reason
+    assert f"stage {stage}: keys must be exactly" in refusal.reason
+
+
+@pytest.mark.parametrize("where", ["template", "batch", "find", "verify"])
+def test_a_stray_key_and_a_missing_key_are_both_named(custom, cli, where):
+    """CONTROL: the two directions are independent findings, so a document wrong in both says both.
+
+    Fixing only the stray key leaves a document the loader still refuses, and vice versa; a message
+    that reported one direction would send the author round the same loop twice.
+    """
+    doc = plain_document() if where == "template" else batch_document()
+    extra, missing = {"template": ("deliver", "version"), "batch": ("deliver", "fan_in"),
+                      "find": ("note", "report"), "verify": ("note", "report")}[where]
+    target = doc if where in ("template", "batch") else doc["stages"][stage_index(doc, where)]
+    target[extra] = "x"
+    del target[missing]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert f"unexpected key '{extra}'" in refusal.reason, refusal.reason
+    assert f"missing key '{missing}'" in refusal.reason, refusal.reason
+
+
+def test_named_keys_are_sorted_so_one_document_reads_the_same_way_every_time(custom, cli):
+    doc = plain_document()
+    doc["zeta"] = doc["alpha"] = 1
+    refusal = refused_load(doc, custom, cli)
+    assert "unexpected keys 'alpha', 'zeta'" in refusal.reason, refusal.reason
 
 
 def test_a_list_argument_may_hold_whole_param_elements(cli, repo, base, custom):

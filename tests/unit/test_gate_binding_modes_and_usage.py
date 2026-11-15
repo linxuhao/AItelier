@@ -475,9 +475,13 @@ def test_the_guard_reads_the_mount_table_the_argv_mounts():
     `-v` hides a real one -- so every mounted HOST except the frozen record itself
     must appear in the guard's table under the same container path.
     """
-    text = GATE_RUN.read_text()
-    dispatch = text.index("docker run --rm --init")
-    guard, argv = text[:dispatch], text[dispatch:]
+    # Comments in this file TALK about `-v` and `--carries` (this test's own
+    # subject), so only lines the shell would execute are read: a grep over the
+    # prose would parse the documentation as a mount.
+    lines = [line for line in GATE_RUN.read_text().splitlines()
+             if not line.lstrip().startswith("#")]
+    guard, marker, argv = "\n".join(lines).partition("docker run --rm --init")
+    argv = marker + argv
 
     mounted = {}
     for spec in re.findall(r'-v\s+"?([^"\s\\]+)"?', argv):

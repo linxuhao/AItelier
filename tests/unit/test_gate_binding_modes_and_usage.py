@@ -25,6 +25,7 @@ replaced at the process boundary and the tool's own writing and comparison logic
 stays under test. No engine, container, sidecar or GPU is involved.
 """
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -249,3 +250,162 @@ def test_platform_still_reads_its_positional_as_the_receipt(tmp_path):
     wrong = _run(["platform", str(binding), "--binding-sha256", digest], env)
     assert wrong.returncode == 0
     assert wrong.stdout.strip() == "unknown terminal receipt cannot say which platform measured"
+
+
+# ── the platform identity the receipt can no longer copy from the record ──────
+#
+# Until 2026-11-15 the observation `capture()` writes carried `binding["image"]`,
+# so `compare_to_binding` compared the reviewed image with itself and `platform`
+# answered `reviewed` for whatever image actually ran. Two halves witness the fix:
+# `capture()` must record what the LAUNCHER attests (in-process, because that is
+# the function that writes the field), and the judgement of such a receipt must
+# spend exactly one difference on it (the real CLI, because that is what a
+# consumer reads).
+
+def _tool_module():
+    """`tools/gate_binding.py` as an importable module, without a launcher."""
+    spec = importlib.util.spec_from_file_location("gate_binding_under_test", TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Health:
+    """The one thing `capture()` reads off the sidecar: one JSON /health body."""
+
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode()
+
+    def read(self, *args):
+        return self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_capture_records_the_attested_image_and_not_the_reviewed_one(tmp_path, monkeypatch):
+    binding, digest, record = _binding(tmp_path)
+    # A Source with a `.git` DIRECTORY: this arm is about the image, so the Git
+    # identity is allowed to be unobservable (it is recorded as None, as before).
+    source = tmp_path / "self-contained-source"
+    (source / ".git").mkdir(parents=True)
+    tool = _tool_module()
+    monkeypatch.setenv("GATE_BINDING_FILE", str(binding))
+    monkeypatch.setattr(tool.urllib.request, "urlopen", lambda *a, **k: _Health(
+        {"ok": True, "source_identity": {"path": "/srv/godot_harness.py",
+                                         "sha256": record["engine_sha256"],
+                                         "loaded_sha256": record["engine_sha256"],
+                                         "pid": 7}}))
+    ran_another = "sha256:" + "d" * 64
+    monkeypatch.setenv("GATE_PLATFORM_IMAGE", ran_another)
+    observed = tool.capture(record, digest, root=str(source), fixture_root=str(source))
+    assert observed["image"] == ran_another
+    image_differences = [item for item in tool.compare_to_binding(record, observed)
+                         if item["field"] == "image"]
+    assert image_differences == [{"field": "image", "bound": record["image"],
+                                  "observed": ran_another}]
+
+    # No attestation is a DIFFERENCE too: "nobody said which image this is" must
+    # never come out as agreement with the record.
+    monkeypatch.delenv("GATE_PLATFORM_IMAGE")
+    unattested = tool.capture(record, digest, root=str(source), fixture_root=str(source))
+    assert unattested["image"] == tool.UNOBSERVED_IMAGE
+    assert [item["observed"] for item in tool.compare_to_binding(record, unattested)
+            if item["field"] == "image"] == [tool.UNOBSERVED_IMAGE]
+
+
+def test_a_receipt_that_ran_another_image_spends_exactly_that_difference(tmp_path):
+    binding, digest, record = _binding(tmp_path)
+    env = {"GATE_BINDING_FILE": str(binding)}
+    ran_another = "sha256:" + "d" * 64
+
+    def receipt_ran(image, name, differences):
+        path = _receipt(tmp_path, record, digest, status="unreviewed", name=name,
+                        differences=differences)
+        written = json.loads(path.read_text())
+        for half in ("before", "after"):
+            written[half]["image"] = image
+        path.write_text(json.dumps(written))
+        return path
+
+    another = receipt_ran(ran_another, "another-image.json",
+                          [{"field": "image", "bound": IMAGE, "observed": ran_another}])
+    judged = _run(["platform", str(another), "--binding-sha256", digest], env)
+    assert judged.returncode == 0, judged.stderr
+    assert judged.stdout.strip() == (
+        f"unreviewed binding={digest[:12]} differs=1 "
+        f"image:{IMAGE[:12]}->{ran_another[:12]}")
+
+    # An unattested image is complete-but-unknown: it SETTLES (the instrument did
+    # not move) and is judged as a difference, rather than making the receipt
+    # unreadable.
+    unattested = receipt_ran("unobserved", "unattested-image.json",
+                             [{"field": "image", "bound": IMAGE, "observed": "unobserved"}])
+    settled = _run(["receipt", str(unattested), "23", "--binding-sha256", digest], env)
+    assert settled.stdout.strip() == "unchanged"
+    unjudged = _run(["platform", str(unattested), "--binding-sha256", digest], env)
+    assert unjudged.stdout.strip() == (
+        f"unreviewed binding={digest[:12]} differs=1 image:{IMAGE[:12]}->unobserved")
+
+    # The already-reported arm must keep its verdict: a receipt whose image IS the
+    # reviewed one is untouched by the new field.
+    assert _run(["platform", str(_receipt(tmp_path, record, digest, name="reviewed.json")),
+                 "--binding-sha256", digest], env).stdout.strip() == "reviewed"
+
+
+# ── a Source whose Git identity no mount of it can reach ──────────────────────
+#
+# The gate mounts the Source and reads its commit from inside that mount. A
+# linked worktree's `.git` is a gitfile pointing at a repository elsewhere, so
+# the gate can run but cannot identify it -- and the resulting None differences
+# read like ordinary staleness. Mode `mountable` names that before dispatch.
+
+def test_mountable_refuses_only_a_pointer_that_leaves_the_source(tmp_path):
+    binding, digest, record = _binding(tmp_path)
+    outside = tmp_path / "outside-source"
+    (tmp_path / "repository" / ".git" / "worktrees" / "x").mkdir(parents=True)
+    outside.mkdir()
+    (outside / ".git").write_text(
+        f"gitdir: {tmp_path / 'repository/.git/worktrees/x'}\n")
+    inside = tmp_path / "inside-source"
+    (inside / ".gitdir").mkdir(parents=True)
+    (inside / ".git").write_text("gitdir: ./.gitdir\n")
+    plain = tmp_path / "plain-source"
+    plain.mkdir()
+
+    def mode(source):
+        record_for = tmp_path / f"mountable-{source.name}.json"
+        record_for.write_text(json.dumps(dict(record, source=str(source))) + "\n")
+        return _run(["mountable", str(record_for)])
+
+    refused = mode(outside)
+    assert refused.returncode == 71, (refused.stdout, refused.stderr)
+    assert refused.stdout == ""  # a refusal is not an answer
+    assert "gitfile pointing at" in refused.stderr, refused.stderr
+    assert "outside the Source" in refused.stderr, refused.stderr
+    # Everything the detector must NOT refuse: a pointer that stays inside, and a
+    # Source with no gitfile at all (its Git identity is unobservable for other
+    # reasons, which is a recorded None, not a refusal).
+    assert mode(inside).returncode == 0, mode(inside).stderr
+    assert mode(plain).returncode == 0, mode(plain).stderr
+    # The binding is still read as a record: a missing Source is a different
+    # refusal, and never a silent pass.
+    missing = mode(tmp_path / "absent-source")
+    assert missing.returncode == 71 and "not a mountable directory" in missing.stderr
+
+
+def test_the_launcher_asks_that_question_before_it_mounts_anything():
+    """The mode is worthless if the launcher never calls it: pin the wiring."""
+    text = GATE_RUN.read_text()
+    asked = text.index('mountable "$BINDING"')
+    assert asked < text.index("docker run --rm --init"), "the check must precede the mount"
+    assert "exit 71" in text[asked:], "a refusal needs its own exit status"
+    # ... and the image is ATTESTED at dispatch time, before the container that
+    # runs in it: an id read afterwards would not be the launched image.
+    attested = text.index("PLATFORM_IMAGE_ID=")
+    assert 'docker image inspect --format' in text[attested:]
+    assert attested < text.index("docker run --rm --init")
+    assert '-e GATE_PLATFORM_IMAGE="$PLATFORM_IMAGE_ID"' in text

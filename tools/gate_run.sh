@@ -53,6 +53,16 @@ BINDING_SHA256="$(python3 "$BINDING_TOOL" sha256 "$BINDING")" || exit 69
 PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 
+# A record can name a real directory whose Git identity is UNREADABLE from inside
+# a mount of it: a linked worktree's `.git` is a gitfile pointing at a repository
+# outside the mount, so the gate runs and then reports the commit as unobserved.
+# That is not a stale literal, and running anyway would record a comparison nobody
+# could make, so it is refused here -- by name, before anything is mounted.
+if ! python3 "$BINDING_TOOL" mountable "$BINDING" --binding-sha256 "$BINDING_SHA256" >> "$LOG" 2>&1; then
+  echo "refusing: the frozen platform Source cannot be identified from inside the gate's mount; see $SUFFIX.gate.log" >&2
+  exit 71
+fi
+
 # NOTE: a linked worktree's `.git` is a FILE ("gitdir: …"), not a directory, so
 # `-d` is wrong here — it refused both real round worktrees. Ask git instead.
 if ! git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -113,11 +123,18 @@ python3 "$BINDING_TOOL" sidecar "$REPORTS/$SUFFIX.sidecar-before.json" >> "$LOG"
   exit 69
 }
 
+# Which image actually runs the gate is ATTESTED here, not copied from the record:
+# `platform` compares the receipt's image against the reviewed one, and a receipt
+# that echoed the record back made that comparison compare it with itself. When
+# the id cannot be read the container records `unobserved` -- a difference.
+PLATFORM_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PLATFORM_IMAGE" 2>/dev/null || true)"
+
 docker run --rm --init --name "$NAME" --network aitelier_default -u 1000:1000 \
   --cpus 2 --memory 2g --memory-swap 2g --pids-limit 512 \
   --cap-drop ALL --security-opt no-new-privileges \
   -e HOME=/home/linxuhao -e GATE_REPORT_DIR="$REPORTS" \
   -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 -e GATE_BINDING_FILE="$BINDING" \
+  -e GATE_PLATFORM_IMAGE="$PLATFORM_IMAGE_ID" \
   -v "$BINDING:$BINDING:ro" \
   -v "$PLATFORM_SOURCE:/app:ro" \
   -v "$PLATFORM_SOURCE:/home/linxuhao/AItelier:ro" \

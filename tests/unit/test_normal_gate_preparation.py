@@ -49,7 +49,11 @@ def bound(tmp_path, monkeypatch, request):
     fixture = tmp_path / "fixture-source"
     subprocess.run(["git", "clone", "--quiet", "--shared", "--no-hardlinks", str(SOURCE), str(fixture)], check=True)
     manifest = tmp_path / "binding.json"
-    binding = {"source": str(SOURCE), "head": gb.git(SOURCE, "rev-parse", "HEAD"),
+    # `fixture` is the frozen platform Source: a self-contained clone, because a
+    # Source whose `.git` points outside itself cannot be identified from inside
+    # the gate's own mount (tools/gate_binding.py `mountable`), while in this
+    # disposable shape the shared checkout at /app is a linked worktree.
+    binding = {"source": str(fixture), "head": gb.git(SOURCE, "rev-parse", "HEAD"),
                "tree": gb.git(SOURCE, "rev-parse", "HEAD^{tree}"), "image": "sha256:" + "a" * 64,
                # `actual-image` compares the repository pin against what the
                # image really installs; every other row declares its own value.
@@ -236,7 +240,10 @@ def test_manifest_path_swap_during_parse_keeps_one_raw_witness(bound, tmp_path, 
     captured = gb.capture(binding, sha256, str(SOURCE), str(fixture))
     assert len(reads) == 1
     assert captured["sdk"] == "1.5.99"
-    assert captured["image"] == binding["image"]
+    # The record's own image is not an observation of the one that ran: with no
+    # launcher attestation this must say so (tools/gate_binding.py `mountable`s
+    # sibling defect, iss-aa4ec84dc0624acd).
+    assert captured["image"] == gb.UNOBSERVED_IMAGE
     assert captured["binding_sha256"] == sha256
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() != sha256
     with pytest.raises(gb.IdentityMismatch, match="frozen binding bytes"):
@@ -269,11 +276,14 @@ def test_receipt_settlement_and_review_are_separate_questions(bound, tmp_path, f
         observation[field] = {"sdk": "1.5.85", "image": "sha256:" + "f" * 64,
                               "binding_sha256": "f" * 64}[field]
     report.write_text(json.dumps(receipt))
-    if field == "sdk":
-        # Settles, but no longer the reviewed SDK: an unreviewed measurement.
+    if field in ("sdk", "image"):
+        # Settles, but no longer the reviewed SDK/image: SETTLEMENT asks whether the
+        # instrument was observed and stayed put; REVIEW asks whether it is the one
+        # a human froze. Running another image used to make the receipt unreadable
+        # (`unknown`), which answered neither question -- iss-aa4ec84dc0624acd.
         assert gb.receipt_identity(report, 23, manifest, sha256) == "unchanged"
         fields = {item["field"] for item in gb.compare_to_binding(frozen, receipt["before"])}
-        assert "sdk" in fields
+        assert field in fields
     else:
         assert gb.receipt_identity(report, 23, manifest, sha256) == "unknown"
 
@@ -337,8 +347,8 @@ else:
  assert args[0]=='run' and '--rm' in args
  assert args[args.index('-w')+1] != {str(game)!r}
  assert {binding['image']!r} in args
- assert {str(SOURCE) + ':/app:ro'!r} in args
- assert {str(SOURCE) + ':/home/linxuhao/AItelier:ro'!r} in args
+ assert {str(fixture) + ':/app:ro'!r} in args
+ assert {str(fixture) + ':/home/linxuhao/AItelier:ro'!r} in args
  assert '/app/tools/gate_binding.py' in args
  assert args[-3:-1]==['run',{str(manifest)!r}]
  # Execute the real helper, imports, Git checks and owned stage. Only image
@@ -348,6 +358,9 @@ else:
  version=observer.metadata.version
  observer.metadata.version=lambda name: {observed_sdk!r} if name=='skillflow-py' else version(name)
  observer.urllib.request.urlopen=lambda *a,**k: io.BytesIO({health_bytes!r})
+ # The real launcher attests the image it dispatched; the record's own `image` is
+ # never an observation of it (tools/gate_binding.py capture()).
+ os.environ['GATE_PLATFORM_IMAGE']={binding['image']!r}
  os.chdir(args[args.index('-w')+1])
  sys.exit(observer.run_bound({str(manifest)!r},args[-1],{str(SOURCE)!r},{str(fixture)!r},
                             expected_sha256=args[args.index('--binding-sha256')+1]))

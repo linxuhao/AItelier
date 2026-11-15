@@ -100,8 +100,8 @@ def _substitution(mode):
     return literal
 
 
-def _record():
-    return dict(source=str(SOURCE), head=HEAD, tree=TREE, image=IMAGE, sdk=SDK,
+def _record(source):
+    return dict(source=str(source), head=HEAD, tree=TREE, image=IMAGE, sdk=SDK,
                 files={name: _sha(name) for name in FILES},
                 engine_sha256=_sha("reviewed-engine"))
 
@@ -145,11 +145,17 @@ def _build(root, *, fail=(), receipt=None, stage=23):
     bins.mkdir(parents=True)
     game.mkdir()
     reports.mkdir()
+    # A frozen platform Source is a clone of its own, never the checkout the test
+    # happens to run in: here that checkout is a linked worktree, whose `.git` a
+    # mount of it cannot read (tools/gate_binding.py `mountable`).
+    platform_source = root / "platform-source"
+    platform_source.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(platform_source)], check=True)
     text = GATE_RUN.read_text()
     assert text.count(SNAP_COORD) == 1
     launcher = bins / "gate_run.sh"
     launcher.write_text(text.replace(SNAP_COORD, f'SNAPROOT="{snaps}"'))
-    record = _record()
+    record = _record(platform_source)
     binding = root / "binding.json"
     binding.write_bytes((json.dumps(record) + "\n").encode())
     digest = _sha(binding.read_bytes())
@@ -158,7 +164,7 @@ def _build(root, *, fail=(), receipt=None, stage=23):
     fails.write_text(json.dumps(list(fail)))
     (bins / "gate_binding.py").write_text(BINDING_STANDIN.format(
         calls=str(calls), fail=str(fails), seen=str(root / "binding-calls-by-mode.json"),
-        source=str(SOURCE), image=IMAGE,
+        source=str(platform_source), image=IMAGE,
         binding_sha256=digest, observer=str(SOURCE / "tools" / "gate_binding.py")))
     fake = bins / "docker"
     fake.write_text(DOCKER_STANDIN.format(python=sys.executable,

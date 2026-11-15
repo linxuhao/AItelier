@@ -35,7 +35,7 @@ elif mode == "image":
     print({image!r})
 elif mode == "sha256":
     print({binding_sha256!r})
-elif mode in ("sidecar", "receipt", "platform"):
+elif mode in ("mountable", "sidecar", "receipt", "platform"):
     sys.exit(subprocess.run([sys.executable, {observer!r}, *args]).returncode)
 else:
     sys.exit(2)
@@ -75,6 +75,16 @@ sys.exit({docker_exit!r})
 '''
 
 JANITOR_STANDIN = "#!/bin/sh\nprintf 'called\\n' >> '{sentinel}'\n"
+
+
+def _runs(fx):
+    """The gate CONTAINERS this fixture started (a run), not docker reads of one.
+
+    `docker image inspect` is the launcher's attestation of which image it is
+    about to run (passed into the container as GATE_PLATFORM_IMAGE); it starts
+    nothing, so the counts below are about containers, not about docker.
+    """
+    return [args for args in _lines(fx["docker_calls"]) if args and args[0] == "run"]
 
 
 def _lines(path):
@@ -118,18 +128,24 @@ def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23
     redirected = redirected.replace(OLD_JANITOR, f"sh {janitor}")
     launcher = bins / "gate_run.sh"
     launcher.write_text(redirected)
+    # A frozen platform Source is a clone of its own, never the checkout the test
+    # happens to run in: here that checkout is a linked worktree, whose `.git` a
+    # mount of it cannot read (tools/gate_binding.py `mountable`).
+    platform_source = tmp_path / "platform-source"
+    platform_source.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(platform_source)], check=True)
     # Source/image process boundaries remain stand-ins; the real receipt reader
     # receives an explicit closed binding and its original raw hash.
     binding = tmp_path / "binding.json"
     binding.write_text(json.dumps(dict(
-        source=str(SOURCE), head="0" * 40, tree="0" * 40, image=IMAGE, sdk=sdk,
+        source=str(platform_source), head="0" * 40, tree="0" * 40, image=IMAGE, sdk=sdk,
         files={p: "a" * 64 for p in ("docker/godot/godot_harness.py",
                                     "aitelier/tools/godot_playtest/impl.py")},
         engine_sha256="b" * 64)))
     binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
     binding_calls, docker_calls = tmp_path / "binding-calls.jsonl", tmp_path / "docker-calls.jsonl"
     (bins / "gate_binding.py").write_text(BINDING_STANDIN.format(
-        calls=str(binding_calls), source=str(SOURCE), image=IMAGE,
+        calls=str(binding_calls), source=str(platform_source), image=IMAGE,
         binding_sha256=binding_sha256,
         observer=str(SOURCE / "tools/gate_binding.py")))
     receipt = dict(identity=identity, raw_exit=stage,
@@ -177,6 +193,7 @@ def _build(tmp_path, monkeypatch, script_text, *, identity="unchanged", stage=23
     monkeypatch.setenv("GATE_BINDING_FILE", str(binding))
     monkeypatch.setenv("PATH", f"{bins}:" + __import__("os").environ["PATH"])
     return dict(launcher=launcher, game=game, reports=reports, snaps=snaps, head=head,
+                platform_source=platform_source,
                 sentinel=sentinel, binding_calls=binding_calls, docker_calls=docker_calls,
                 janitor_log=reports / "owned.janitor.log", raw_receipt=raw,
                 consumer_request=request, consumer_ready=ready)
@@ -233,7 +250,7 @@ def test_baseline_6f_invokes_janitor_even_when_identity_later_refuses(
     assert result.returncode == (23 if useful else 69), result.stderr
     assert _janitor_calls(fx) == ["called"]  # implicit shared sweep at the base
     assert fx["janitor_log"].exists()
-    assert len(_lines(fx["docker_calls"])) == 1
+    assert len(_runs(fx)) == 1
 
 
 def _final_script():
@@ -250,7 +267,7 @@ def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monke
     assert result.returncode == stage, result.stderr
     assert (fx["reports"] / "owned.gate.exit").read_text().strip() == str(stage)
     assert _janitor_calls(fx) == [] and not fx["janitor_log"].exists()
-    docker = _lines(fx["docker_calls"])
+    docker = _runs(fx)
     assert len(docker) == 1
     args = docker[0]
     assert args[0] == "run" and "--rm" in args and "--init" in args
@@ -261,12 +278,12 @@ def test_final_useful_gate_keeps_stage_exit_and_calls_no_janitor(tmp_path, monke
                         ("--security-opt", "no-new-privileges")):
         assert args[args.index(flag) + 1] == value
     assert args[args.index("-w") + 1] != str(fx["game"])
-    assert IMAGE in args and f"{SOURCE}:/app:ro" in args
+    assert IMAGE in args and f"{fx['platform_source']}:/app:ro" in args
     modes = [c[0] for c in _lines(fx["binding_calls"])]
     # sha256/source/image are the dispatch coordinates; the second sha256 is the
     # dispatch-time observation record (owner ruling 2026-11-04); `platform` is
     # the review question asked of the receipt, after the stage ran.
-    assert modes == ["sha256", "source", "image", "sha256", "sidecar", "receipt",
+    assert modes == ["sha256", "source", "image", "mountable", "sha256", "sidecar", "receipt",
                      "sidecar", "platform"]
     _assert_clean_source_and_snapshot(fx)
 
@@ -277,7 +294,7 @@ def test_final_sdk_identity_refusal_exits_69_without_janitor(tmp_path, monkeypat
     assert result.returncode == 69, result.stderr
     assert (fx["reports"] / "owned.gate.exit").read_text().startswith("unknown-platform-identity")
     assert _janitor_calls(fx) == [] and not fx["janitor_log"].exists()
-    assert len(_lines(fx["docker_calls"])) == 1
+    assert len(_runs(fx)) == 1
     # The prior green assertion demanded deletion here. No-janitor evidence
     # remains useful, but identity refusal does not establish consumer settlement.
     _assert_retained_snapshot(fx)
@@ -351,7 +368,7 @@ def test_stale_receipt_refuses_new_invocation_without_altering_old_reports(tmp_p
     result = _run(fx)
     assert result.returncode == 69 and "prior evidence retained" in result.stderr
     assert {p.name: p.read_bytes() for p in fx["reports"].iterdir()} == old
-    assert len(_lines(fx["docker_calls"])) == 1
+    assert len(_runs(fx)) == 1
     assert json.loads(old["owned.platform-identity.json"])["raw_exit"] == 0
     _assert_clean_source_and_snapshot(fx)
 
@@ -473,5 +490,6 @@ def test_final_early_invalid_git_refuses_without_janitor_or_docker(tmp_path, mon
     assert "not inside a git work tree" in result.stderr
     assert _janitor_calls(fx) == [] and not fx["janitor_log"].exists()
     assert _lines(fx["docker_calls"]) == []
-    assert [c[0] for c in _lines(fx["binding_calls"])] == ["sha256", "source", "image"]
+    assert [c[0] for c in _lines(fx["binding_calls"])] == ["sha256", "source", "image",
+                                                          "mountable"]
     assert not fx["snaps"].exists() or list(fx["snaps"].iterdir()) == []

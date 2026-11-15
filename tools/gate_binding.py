@@ -58,6 +58,10 @@ SOURCES = ("root", "fixture")
 REVIEWED = "reviewed"
 UNREVIEWED = "unreviewed"
 UNKNOWN = "unknown"
+# What a receipt says when the gate container cannot attest which image it runs
+# in. It is a difference ("nothing here proves the reviewed image"), never a
+# missing field: see `compare_to_binding` and `receipt_identity`.
+UNOBSERVED_IMAGE = "unobserved"
 
 
 class IdentityMismatch(ValueError):
@@ -138,11 +142,45 @@ def binding_record(raw, expected_sha256=None):
     return binding, sha256
 
 
+def unobservable_gitdir(root):
+    """Why Git cannot be read from INSIDE a mount of this directory, if it cannot.
+
+    A self-contained Source carries its whole `.git` directory, so its identity is
+    observable from either side of a mount of it. A linked worktree -- any clone
+    whose `.git` is a gitfile -- carries a `gitdir:` POINTER at a repository that
+    lives elsewhere. The launcher resolves it because it runs where the pointer
+    was written; the gate mounts the Source alone, so inside the container the
+    pointer names a path that is not there. That is a property of the frozen
+    record, and it is decidable before anything is mounted.
+    """
+    gitfile = Path(root) / ".git"
+    if gitfile.is_symlink() or not gitfile.is_file():
+        return None
+    try:
+        first = read_regular(gitfile).split(b"\n", 1)[0]
+    except (OSError, ValueError):
+        return None
+    prefix = b"gitdir: "
+    if not first.startswith(prefix):
+        return None
+    target = Path(os.fsdecode(first[len(prefix):]).strip())
+    if not target.is_absolute():
+        target = Path(root) / target
+    resolved = Path(os.path.normpath(str(target)))
+    if resolved == Path(root) or Path(root) in resolved.parents:
+        return None
+    return f"its .git is a gitfile pointing at {resolved}, outside the Source"
+
+
 def observe_root(root):
     """What one mounted Source IS, right now.
 
     Only the ability to LOOK is refused (`ValueError`): a coordinate that is not
-    an absolute regular directory cannot be observed at all. A Source that is not
+    an absolute regular directory cannot be observed at all. A Source whose `.git`
+    pointer names a repository outside itself is NOT refused here -- inside the
+    gate container that pointer resolves or it does not, and `None` is the honest
+    record of either; the launcher refuses such a record before dispatch, where
+    the path it names exists (see `mountable`). A Source that is not
     the reviewed clean checkout, a moved commit or a changed/vanished file is an
     OBSERVATION (`None`/value), never a refusal -- `compare_source` reports it as
     data and the caller decides what the verdict is worth.
@@ -156,6 +194,9 @@ def observe_root(root):
         observed["tree"] = git(source, "rev-parse", "HEAD^{tree}")
         observed["dirty"] = len(git(source, "status", "--porcelain").splitlines())
     except (OSError, subprocess.CalledProcessError) as exc:
+        # Named, and recorded as `None`: this coordinate could not be read HERE.
+        # Whether that is because the Source cannot be read in ANY mount of itself
+        # is decided before dispatch, by `mountable`, where the record's path exists.
         print(f"unobserved Source Git identity at {root}: {exc}", file=sys.stderr)
     for relative in FILES:
         observed["files"][relative] = digest_or_none(source / relative)
@@ -199,6 +240,11 @@ def compare_to_binding(binding, observation):
     if (observation or {}).get("sdk") != binding.get("sdk"):
         differences.append({"field": "sdk", "bound": binding.get("sdk"),
                             "observed": (observation or {}).get("sdk")})
+    # Appended LAST so every difference this function found before still appears
+    # in the same order in the same `unreviewed` line.
+    if (observation or {}).get("image") != binding.get("image"):
+        differences.append({"field": "image", "bound": binding.get("image"),
+                            "observed": (observation or {}).get("image")})
     return differences
 
 
@@ -276,9 +322,15 @@ def capture(binding, binding_sha256, root="/app", fixture_root="/home/linxuhao/A
                    for key in ("sha256", "loaded_sha256"))
             or type(engine.get("pid")) is not int or engine["pid"] < 1):
         raise ValueError("actual loaded engine identity unavailable")
+    # Which image this is, is ATTESTED by the launcher (the id of the image it
+    # dispatched) and never copied out of the record: echoing `binding["image"]`
+    # into the observation made `platform` compare the reviewed image with
+    # itself, so it answered `reviewed` for whatever image actually ran. A
+    # container that cannot attest says `unobserved`, which is a difference.
     return {"files": files, "engine": engine, "sdk": sdk,
             "binding_sha256": observed_sha256,
-            "python": sys.executable, "pid": os.getpid(), "image": binding["image"],
+            "python": sys.executable, "pid": os.getpid(),
+            "image": os.environ.get("GATE_PLATFORM_IMAGE") or UNOBSERVED_IMAGE,
             "source": sources}
 
 
@@ -361,7 +413,9 @@ def receipt_identity(path, raw_exit, binding_path, expected_sha256):
             return "unknown"
         # Read only against the hash frozen before dispatch. A newly observed
         # manifest, SDK or image must never become the authorization baseline.
-        binding, _ = read_binding(binding_path, expected_sha256)
+        # Read, not merely hashed: a manifest that is not the frozen record
+        # means nothing below can be attributed to a reviewed binding.
+        read_binding(binding_path, expected_sha256)
         before, after = receipt["before"], receipt["after"]
         engine = before["engine"]
         complete = (
@@ -378,8 +432,12 @@ def receipt_identity(path, raw_exit, binding_path, expected_sha256):
             and type(before["pid"]) is int and before["pid"] > 0
             and re.fullmatch(r"[0-9a-f]{64}", before["binding_sha256"])
             and before["binding_sha256"] == expected_sha256
-            and re.fullmatch(r"sha256:[0-9a-f]{64}", before["image"])
-            and before["image"] == binding["image"]
+            # A COMPLETE image field, not the reviewed one: running a different
+            # image is a measurement whose worth `platform_status` decides, not
+            # an instrument that could not be observed. `unobserved` is
+            # complete-but-unknown and settles (as a difference).
+            and (re.fullmatch(r"sha256:[0-9a-f]{64}", before["image"])
+                 or before["image"] == UNOBSERVED_IMAGE)
             and engine["path"] == "/srv/godot_harness.py"
             and re.fullmatch(r"[0-9a-f]{64}", engine["sha256"])
             and engine["loaded_sha256"] == engine["sha256"]
@@ -545,6 +603,25 @@ def sidecar_identity(output, before=None):
             raise IdentityMismatch("actual sidecar identity changed during normal gate")
 
 
+def mountable(binding):
+    """Would this bound Source's Git identity survive a mount of itself?
+
+    The gate mounts the Source read-only and reads the measured commit from
+    INSIDE that mount, so a Source whose `.git` points outside itself is a record
+    the gate can run but cannot identify -- and the resulting `None` differences
+    read like ordinary staleness. Raises `ValueError` naming the reason; returns
+    None when the identity survives.
+    """
+    root = binding["source"]
+    source = Path(root)
+    if not source.is_absolute() or source.is_symlink() or not source.is_dir():
+        raise ValueError(f"the bound Source is not a mountable directory: {root}")
+    reason = unobservable_gitdir(source)
+    if reason is not None:
+        raise ValueError(f"Source {root} git identity cannot be observed inside "
+                         f"a mount of it: {reason}")
+
+
 def write_observation(binding_path, output, expected_sha256):
     """Record, before dispatch, which fields of the reviewed binding already differ.
 
@@ -583,6 +660,8 @@ The positional arguments mean different things per mode. argparse can only name
 a positional once, so this list is the authority:
   source, image, sha256
                the positional is the binding (the reviewed record itself).
+  mountable    the positional is the binding; exits 0 when the bound Source's Git
+               identity survives a mount of itself, else one reason on stderr.
   run          the positional is the binding; the second is the receipt to write.
   sidecar      the positional is the sidecar record to WRITE; the second is the
                earlier record it is compared against.
@@ -594,7 +673,7 @@ a positional once, so this list is the authority:
                launcher before dispatch), never from the positional.
 """)
     parser.add_argument("mode", choices=("source", "image", "sha256", "run", "sidecar",
-                                         "receipt", "platform"))
+                                         "receipt", "platform", "mountable"))
     parser.add_argument("binding", metavar="RECEIPT_OR_BINDING")
     parser.add_argument("output", nargs="?", metavar="OUTPUT_OR_RAW_EXIT")
     parser.add_argument("--binding-sha256")
@@ -614,6 +693,16 @@ a positional once, so this list is the authority:
             # on stderr, without a verdict token on stdout. 2 stays argparse.
             print(exc.line(), file=sys.stderr)
             return 3
+        return 0
+    if args.mode == "mountable":
+        try:
+            mountable(read_binding(args.binding, args.binding_sha256)[0])
+        except ValueError as exc:
+            # 71, not 69: 69 means "an identity was unknown once the gate had
+            # run", and a caller must be able to tell that apart from "this
+            # record names a Source nothing can identify".
+            print(f"refusing: {exc}", file=sys.stderr)
+            return 71
         return 0
     if args.mode == "sidecar":
         try:

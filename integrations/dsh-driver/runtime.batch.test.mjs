@@ -30,6 +30,7 @@ import { DriverRuntime, TodoCli, batchRedispatchRows, batchesToRedispatch, todoS
 import { watchProgress } from './progress.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const TODO_ROOT = join(REPO_ROOT, 'integrations', 'dsh-director', 'todo');
 /** A python that can run `core.todo_cli` against a template: it needs PyYAML. */
 const PYTHON = [process.env.AITELIER_TODO_TEST_PYTHON, 'python3', '/usr/bin/python3']
   .filter(Boolean).find(python => spawnSync(python, ['-c', 'import yaml'], { stdio: 'ignore' }).status === 0);
@@ -208,7 +209,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '3000',
-      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: REPO_ROOT, AITELIER_TODO_TEMPLATES: await templates(join(directory, 'templates')),
+      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: TODO_ROOT, AITELIER_TODO_TEMPLATES: await templates(join(directory, 'templates')),
       AITELIER_TEST_BATCH: JSON.stringify({ attempt, base: reviewed, input, findings: FINDINGS }) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
@@ -309,7 +310,7 @@ test('after a host restart the snapshot lists the dead finder for re-dispatch an
   try {
     const work = join(directory, 'checkout');
     const reviewed = await checkout(work);
-    const todo = new TodoCli({ python: PYTHON, cwd: REPO_ROOT, stateDir: directory });
+    const todo = new TodoCli({ python: PYTHON, cwd: TODO_ROOT, stateDir: directory });
     const attempt = 'attempt-restart';
     const cli = async args => { const { code, result } = await todo.run(args); assert.equal(code, 0, JSON.stringify(result)); return result; };
     await cli(['batch-create', '--template=find_verify', '--params=' + JSON.stringify({ target: 't', reviewed_sha: reviewed,

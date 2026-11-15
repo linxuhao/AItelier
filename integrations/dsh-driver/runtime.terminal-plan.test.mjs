@@ -34,6 +34,7 @@ import { TodoCli, dormancyRefusal, settledAttempts, attemptSettled, todoSummary,
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const TODO_ROOT = join(REPO_ROOT, 'integrations', 'dsh-director', 'todo');
 const PYTHON = process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3';
 const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
 
@@ -51,7 +52,7 @@ const planJson = (attempt_id, workspace) => ({
 async function realPlans(directory, attempt_ids) {
   const work = join(directory, 'work');
   await mkdir(work, { recursive: true });
-  const todo = new TodoCli({ python: PYTHON, cwd: REPO_ROOT, stateDir: directory });
+  const todo = new TodoCli({ python: PYTHON, cwd: TODO_ROOT, stateDir: directory });
   for (const attempt_id of attempt_ids) {
     const file = join(directory, 'plan-' + attempt_id + '.json');
     await writeFile(file, JSON.stringify(planJson(attempt_id, work)));

@@ -5,9 +5,9 @@
  * dispatches two native children; one walks every item, one stops after the
  * second and must be handed back by the runtime, not by its last message.
  *
- * The CLI is a minimal fake of the `core.todo_cli` contract (JSON files in a
+ * The CLI is a minimal fake of the `dsh_todo` CLI contract (JSON files in a
  * temp store), reached exactly as production reaches it:
- * `$AITELIER_TODO_PYTHON -m core.todo_cli` in `$AITELIER_TODO_CWD`.
+ * `$AITELIER_TODO_PYTHON -m dsh_todo` in `$AITELIER_TODO_CWD`.
  * Set AITELIER_TODO_TEST_PYTHON and AITELIER_TODO_TEST_CWD to run the same
  * scenario against a real checkout instead.
  */
@@ -359,9 +359,9 @@ const toolText = event => event.data.message.content.map(block => block.text ?? 
 const toolJson = event => JSON.parse(toolText(event));
 
 async function fakeCli(directory) {
-  await mkdir(join(directory, 'core'), { recursive: true });
-  await writeFile(join(directory, 'core', '__init__.py'), '');
-  await writeFile(join(directory, 'core', 'todo_cli.py'), FAKE_CLI);
+  await mkdir(join(directory, 'dsh_todo'), { recursive: true });
+  await writeFile(join(directory, 'dsh_todo', '__init__.py'), '');
+  await writeFile(join(directory, 'dsh_todo', '__main__.py'), FAKE_CLI);
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: process.env.AITELIER_TODO_TEST_CWD ?? directory };
 }
 
@@ -372,9 +372,9 @@ async function fakeCli(directory) {
 // DEPLOYED copy and answers a usage refusal (exit 2) instead of crashing. This
 // fixture's module crashes on import, from any cwd.
 async function crashCli(directory) {
-  await mkdir(join(directory, 'core'), { recursive: true });
-  await writeFile(join(directory, 'core', '__init__.py'), '');
-  await writeFile(join(directory, 'core', 'todo_cli.py'), 'raise SystemExit(3)\n');
+  await mkdir(join(directory, 'dsh_todo'), { recursive: true });
+  await writeFile(join(directory, 'dsh_todo', '__init__.py'), '');
+  await writeFile(join(directory, 'dsh_todo', '__main__.py'), 'raise SystemExit(3)\n');
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: directory };
 }
 
@@ -550,7 +550,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       assert.match(toolJson(r.event).brief, /Write a\.txt and b\.txt/, r.id + ' result lacks the brief');
     }
     assert.ok(todoResults.filter(r => r.id.startsWith('full-')).every(r => r.session === full));
-    const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'core.todo_cli', 'status', '--attempt', plans.a.attempt_id],
+    const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'dsh_todo', 'status', '--attempt', plans.a.attempt_id],
       { cwd: cli.cwd, env: { ...process.env, AITELIER_DSH_STATE_DIR: directory }, encoding: 'utf8' }));
     assert.deepEqual(finalA.remaining, []); assert.equal(finalA.child_session, full, 'todo_begin bound the root, not the calling child');
 

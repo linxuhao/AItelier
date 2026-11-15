@@ -35,6 +35,7 @@ import { DriverRuntime, TodoCli, awaitingFinish, dormancyRefusal, settledAttempt
   from './runtime.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const TODO_ROOT = join(REPO_ROOT, 'integrations', 'dsh-director', 'todo');
 const PYTHON = process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3';
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 /** Every fixture commit is made by the fixture, never by the host's git identity. */
@@ -114,7 +115,7 @@ function stateAnswers(statuses) {
  *  through this repository's CLI. */
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-finished-plan-'));
-  const todo = new TodoCli({ python: PYTHON, cwd: REPO_ROOT, stateDir: directory });
+  const todo = new TodoCli({ python: PYTHON, cwd: TODO_ROOT, stateDir: directory });
   const make = async key => {
     const path = join(directory, 'work', key);
     const base_sha = await workspace(path);

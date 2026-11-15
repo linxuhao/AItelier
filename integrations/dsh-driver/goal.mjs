@@ -9,7 +9,7 @@ const git = promisify(execFile);
  *  Tries the repository holding the loaded file, then AITELIER_TODO_CWD. */
 export async function goalMdCommit(goalFile, { cwd, env = process.env } = {}) {
   const attempts = [[dirname(goalFile), basename(goalFile)]];
-  if (cwd) attempts.push([cwd, 'integrations/dsh-driver/goal.md']);
+  if (cwd) attempts.push([cwd, ':/integrations/dsh-driver/goal.md']);
   for (const [dir, file] of attempts) {
     try {
       const { stdout } = await git('git', ['-C', dir, 'log', '-1', '--format=%H', '--', file], { env, timeout: 5000 });

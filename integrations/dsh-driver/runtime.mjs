@@ -302,9 +302,9 @@ export class Continuation extends core.Continuation {
 export const processSession = (pid, procRoot = '/proc') => core.processSession(pid, procRoot, SESSION_ENV);
 export const backgroundProcesses = (session, selfPid = process.pid, procRoot = '/proc') =>
   core.backgroundProcesses(session, selfPid, procRoot, SESSION_ENV);
-/** The todo plan store through `python -m core.todo_cli`, with AItelier's state-dir variable. */
+/** The todo plan store through `python -m dsh_todo` (plugin step 3), with AItelier's state-dir variable. */
 export class TodoCli extends core.TodoCli {
-  constructor({ python, cwd, stateDir, module = 'core.todo_cli', stateDirEnv = 'AITELIER_DSH_STATE_DIR' }) {
+  constructor({ python, cwd, stateDir, module = 'dsh_todo', stateDirEnv = 'AITELIER_DSH_STATE_DIR' }) {
     super({ python, cwd, stateDir, module, stateDirEnv });
   }
 }
@@ -475,7 +475,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
-      todo: { python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, module: 'core.todo_cli', stateDirEnv: 'AITELIER_DSH_STATE_DIR' },
+      todo: { python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, module: 'dsh_todo', stateDirEnv: 'AITELIER_DSH_STATE_DIR' },
       watchIntervalMs: env.AITELIER_DSH_WATCH_INTERVAL_MS, dormantCompactMinTokens: env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS,
       dormantMinuteMs: env.AITELIER_DSH_DORMANT_MINUTE_MS, idleReviewMs: env.AITELIER_DSH_IDLE_REVIEW_MS,
       permissionPreset: hostExecution ? 'danger-full-access' : undefined },

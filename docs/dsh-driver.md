@@ -328,9 +328,10 @@ generated SDK would still contain the complete visible tool catalog.
 
 Dispatch is a frozen todo plan plus a native child. A plan is never authored per
 dispatch: it is expanded from a reviewed repository template. The plan store,
-the templates and every predicate live in Python (`core/todo_cli.py`,
+the templates and every predicate live in Python (the `dsh_todo` package in
+`integrations/dsh-director/todo/`, which imports nothing from AItelier, and
 `todo_templates/`); `runtime.mjs` only shells out to
-`$AITELIER_TODO_PYTHON -m core.todo_cli <command>` in `$AITELIER_TODO_CWD`, with
+`$AITELIER_TODO_PYTHON -m dsh_todo <command>` in `$AITELIER_TODO_CWD`, with
 `AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Values are
 passed as `--flag=value`, so a note or goal starting with `-` stays a value.
 Exit 2 is returned as a refusal (`refused`), not thrown; any other non-zero
@@ -347,7 +348,8 @@ command printed none (`null` only when the plan does not exist).
 | Variable | Set by | Meaning |
 |---|---|---|
 | `AITELIER_TODO_PYTHON` | `core/dsh_driver.py`: `sys.executable` | interpreter that runs the CLI |
-| `AITELIER_TODO_CWD` | `core/dsh_driver.py`: the repository root | checkout containing `core/todo_cli.py` and `todo_templates/` |
+| `AITELIER_TODO_CWD` | `core/dsh_driver.py`: `integrations/dsh-director/todo/` | directory containing the `dsh_todo` package |
+| `DSH_TODO_HOOKS`, `DSH_TODO_HOOKS_PATH` | `core/dsh_driver.py`: `core.dsh_todo_hooks` and the repository root | read by the CLI: the module supplying AItelier's absence ledger, report reader, candidate check and template directory (`todo_templates/`), and where to import it from |
 | `AITELIER_DSH_STATE_DIR` | `core/dsh_driver.py`: the driver's private state directory | plan store `<state dir>/todo/<attempt_id>.json` |
 | `AITELIER_TODO_TEMPLATES` | unset (tests only) | read by the CLI: overrides the template directory `todo_templates/` |
 | `AITELIER_DSH_IDLE_REVIEW_MS` | unset (tests only) | overrides the 15-minute idle review interval |
@@ -571,7 +573,7 @@ DSH process, a local fake model/MCP/State server, native child execution,
 automatic compaction, fresh private-state injection, precompact history grep,
 and automatic idle/busy notifications, issue delivery and idle task reviews.
 `runtime.todo.test.mjs` drives two `code_change` template plans through native
-children against a fake `core.todo_cli` (set `AITELIER_TODO_TEST_PYTHON`/
+children against a fake `dsh_todo` CLI (set `AITELIER_TODO_TEST_PYTHON`/
 `AITELIER_TODO_TEST_CWD` to use a real checkout). It covers:
 
 - the template listing;

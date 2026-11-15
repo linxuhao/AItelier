@@ -15,6 +15,7 @@ import time
 import uuid
 
 from core.driver_credentials import read_token_file
+from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.state_graph import now
 from core.state_schema_migration import add_column_if_missing
 
@@ -581,9 +582,10 @@ class DshDrivers:
                    AITELIER_DSH_MODEL=row["model"], AITELIER_URL=self.base_url,
                    AITELIER_DSH_STATE_DIR=str(directory),
                    AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()),
-                   # The runtime's todo_* tools run `python -m core.todo_cli` from this checkout.
+                   # The runtime's todo_* tools run `python -m dsh_todo` from the package's
+                   # directory, with this checkout's hooks (core/dsh_todo_hooks.py).
                    AITELIER_TODO_PYTHON=sys.executable,
-                   AITELIER_TODO_CWD=str(Path(__file__).resolve().parents[1]))
+                   AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV)
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))

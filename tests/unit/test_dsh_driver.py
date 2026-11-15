@@ -184,6 +184,20 @@ async def test_profile_keeps_owner_credentials_out_and_uses_pinned_runtime(runti
         await runtime.close()
 
 
+async def test_todo_cli_is_dsh_todo_run_from_its_package_directory_with_aitelier_hooks(runtime):
+    """The runtime runs `$AITELIER_TODO_PYTHON -m dsh_todo` in `$AITELIER_TODO_CWD` (runtime.mjs TodoCli)."""
+    from core.dsh_todo_hooks import CLI_ENV, REPO_ROOT, TODO_ROOT
+    try:
+        await runtime.start("alpha", actor="fixture")
+        env = runtime._environment(runtime.get("alpha"))
+        assert env["AITELIER_TODO_PYTHON"] == sys.executable
+        assert env["AITELIER_TODO_CWD"] == str(TODO_ROOT) and (TODO_ROOT / "dsh_todo" / "__main__.py").is_file()
+        assert {name: env[name] for name in CLI_ENV} == {"DSH_TODO_HOOKS": "core.dsh_todo_hooks",
+                                                         "DSH_TODO_HOOKS_PATH": str(REPO_ROOT)}
+    finally:
+        await runtime.close()
+
+
 async def test_real_http_context_is_own_private_scope_and_compact_payload_is_minimal(runtime, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

@@ -150,8 +150,12 @@ def _bad(name: str, reason: str) -> Refusal:
 
 
 def _named_keys(keys: set[str]) -> str:
-    """The offending key(s), sorted so the message is the same for the same document."""
-    return ", ".join(repr(key) for key in sorted(keys))
+    """The offending key(s), sorted so the message is the same for the same document.
+
+    `key=str`: a YAML key may be an int (`1: x`), and sorting an int beside a str raises TypeError
+    instead of refusing the document.
+    """
+    return ", ".join(repr(key) for key in sorted(keys, key=str))
 
 
 def _key_set_refusal(extra: set[str], missing: set[str], shape: str) -> str:
@@ -252,7 +256,13 @@ def _header_and_params(name: str, doc: dict) -> dict[str, "Param"]:
     for pname, spec in doc["params"].items():
         if not isinstance(pname, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pname):
             raise _bad(name, f"param name {pname!r} is not an identifier")
-        if not isinstance(spec, dict) or set(spec) - _PARAM or spec.get("type") not in TYPES:
+        if not isinstance(spec, dict):
+            raise _bad(name, f"param {pname}: a mapping with type in {TYPES} (and required/default/description)")
+        if set(spec) - _PARAM or "type" not in spec:
+            raise _bad(name, f"param {pname}: " + _key_set_refusal(
+                set(spec) - _PARAM, {"type"} - set(spec),
+                f"a param is a mapping with type in {TYPES} and optionally required/default/description"))
+        if spec["type"] not in TYPES:
             raise _bad(name, f"param {pname}: a mapping with type in {TYPES} (and required/default/description)")
         required = spec.get("required", False)
         if type(required) is not bool:
@@ -414,9 +424,15 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
     if "scope" in params and params["scope"].type != "list[str]":
         raise _bad(name, "param `scope`, when declared, is a list[str] of globs")
     budget = doc.get("budget") or {}
-    if not isinstance(budget, dict) or set(budget) - set(BUDGET_DEFAULTS) or not all(
-            type(v) is int and v >= 1 for v in budget.values()):
-        raise _bad(name, f"budget is a mapping of positive integers with keys from {sorted(BUDGET_DEFAULTS)}")
+    budget_shape = f"budget is a mapping of positive integers with keys from {sorted(BUDGET_DEFAULTS)}"
+    if not isinstance(budget, dict):
+        raise _bad(name, budget_shape)
+    if set(budget) - set(BUDGET_DEFAULTS):
+        # No missing-key arm: BUDGET_DEFAULTS fills every key a budget leaves out.
+        raise _bad(name, "budget: " + _key_set_refusal(set(budget) - set(BUDGET_DEFAULTS), set(),
+                                                     f"budget keys must be from {sorted(BUDGET_DEFAULTS)}"))
+    if not all(type(v) is int and v >= 1 for v in budget.values()):
+        raise _bad(name, budget_shape)
     stages = doc["stages"]
     if not isinstance(stages, list) or [s.get("id") if isinstance(s, dict) else None for s in stages] != ["find", "verify"]:
         raise _bad(name, "stages must be exactly two mappings, id find then id verify")
@@ -468,8 +484,12 @@ def _validate_batch(name: str, doc: dict, sha256: str) -> Template:
             and (params[ref.group(1)].required or params[ref.group(1)].default is not None)):
         raise _bad(name, "stage verify: cap is a non-negative integer or $param naming an int param that always has a value")
     fan_in = doc["fan_in"]
-    if not isinstance(fan_in, dict) or set(fan_in) != {"report"} or not isinstance(fan_in["report"], str) \
-            or not fan_in["report"].strip() or _embedded(fan_in["report"]):
+    if not isinstance(fan_in, dict):
+        raise _bad(name, "fan_in must be {report: <relative path>}")
+    if set(fan_in) != {"report"}:
+        raise _bad(name, "fan_in: " + _key_set_refusal(set(fan_in) - {"report"}, {"report"} - set(fan_in),
+                                                      "fan_in must be {report: <relative path>}"))
+    if not isinstance(fan_in["report"], str) or not fan_in["report"].strip() or _embedded(fan_in["report"]):
         raise _bad(name, "fan_in must be {report: <relative path>}")
     if not _inside(fan_in["report"]):
         raise _bad(name, "fan_in.report must be a relative path inside the report directory")

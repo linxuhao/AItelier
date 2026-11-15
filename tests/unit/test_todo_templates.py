@@ -428,6 +428,107 @@ def test_named_keys_are_sorted_so_one_document_reads_the_same_way_every_time(cus
     assert "unexpected keys 'alpha', 'zeta'" in refusal.reason, refusal.reason
 
 
+# -- the remaining key-set refusals name the key too (a param spec, `budget`, `fan_in`) ---
+
+def test_a_param_spec_with_a_stray_key_names_it(custom, cli):
+    """Position 4: a param's spec. The old refusal listed the allowed keys and not the stray one."""
+    doc = plain_document()
+    doc["params"]["scope"]["stray_key"] = 1
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "param scope: unexpected key 'stray_key'" in refusal.reason, refusal.reason
+    assert "optionally required/default/description" in refusal.reason
+
+
+def test_a_param_spec_missing_its_type_names_it(custom, cli):
+    """A param spec without `type` is the missing-key arm of the same position."""
+    doc = plain_document()
+    del doc["params"]["target"]["type"]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "param target: missing key 'type'" in refusal.reason, refusal.reason
+
+
+def test_a_param_spec_that_is_not_a_mapping_keeps_its_shape_sentence(custom, cli):
+    """CONTROL: a spec with no keys to name still refuses with its own shape sentence."""
+    doc = plain_document()
+    doc["params"]["target"] = "str"
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "param target: a mapping with type in" in refusal.reason, refusal.reason
+    assert "unexpected key" not in refusal.reason and "missing key" not in refusal.reason
+
+
+def test_a_param_spec_with_an_unknown_type_keeps_its_value_sentence(custom, cli):
+    """CONTROL: a `type` that is present but not one of TYPES is a value fault, not a key fault."""
+    doc = plain_document()
+    doc["params"]["target"]["type"] = "float"
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "param target: a mapping with type in" in refusal.reason, refusal.reason
+    assert "unexpected key" not in refusal.reason and "missing key" not in refusal.reason
+
+
+def test_a_budget_with_a_stray_key_names_it(custom, cli):
+    """Position 5: `budget`. The old refusal listed the allowed keys and not the stray one."""
+    doc = batch_document()
+    doc["budget"] = {"max_parallel": 2, "stray_budget": 2}
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "budget: unexpected key 'stray_budget'" in refusal.reason, refusal.reason
+    assert "budget keys must be from" in refusal.reason
+    assert "missing key" not in refusal.reason, "budget has no missing-key arm: BUDGET_DEFAULTS fills it"
+
+
+def test_a_budget_that_is_not_a_mapping_keeps_its_shape_sentence(custom, cli):
+    """CONTROL: a budget that is not a mapping refuses with the shape sentence, nothing else."""
+    doc = batch_document()
+    doc["budget"] = [1, 2]
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "budget is a mapping of positive integers" in refusal.reason, refusal.reason
+    assert "unexpected key" not in refusal.reason
+
+
+def test_a_budget_value_of_the_wrong_type_keeps_its_value_sentence(custom, cli):
+    """CONTROL: a string value ("2") is a value fault and keeps the value sentence."""
+    doc = batch_document()
+    doc["budget"] = {"max_parallel": "2"}
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "budget is a mapping of positive integers" in refusal.reason, refusal.reason
+    assert "unexpected key" not in refusal.reason
+
+
+def test_a_fan_in_with_a_stray_key_names_it(custom, cli):
+    """Position 6: `fan_in`. The old refusal said only `must be {report: ...}` with no key named."""
+    doc = batch_document()
+    doc["fan_in"] = {"report": "reports/fan_in.md", "stray_fanin": "x"}
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "fan_in: unexpected key 'stray_fanin'" in refusal.reason, refusal.reason
+    assert "fan_in must be {report: <relative path>}" in refusal.reason
+
+
+def test_a_fan_in_without_report_names_the_missing_key(custom, cli):
+    """The missing-key arm of `fan_in`: a `fan_in` mapping with no `report` names `report`."""
+    doc = batch_document()
+    doc["fan_in"] = {}
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "fan_in: missing key 'report'" in refusal.reason, refusal.reason
+
+
+def test_a_fan_in_that_is_not_a_mapping_keeps_its_shape_sentence(custom, cli):
+    """CONTROL: a `fan_in` that is not a mapping has no keys to name, so it keeps the shape sentence."""
+    doc = batch_document()
+    doc["fan_in"] = "reports/fan_in.md"
+    refusal = refused_load(doc, custom, cli)
+    assert refusal.code == "bad_template"
+    assert "fan_in must be {report: <relative path>}" in refusal.reason, refusal.reason
+    assert "unexpected key" not in refusal.reason and "missing key" not in refusal.reason
+
+
 def test_a_list_argument_may_hold_whole_param_elements(cli, repo, base, custom):
     write_template(custom, "t", GOOD.format(name="t", predicate="files_present", args="{pattern: $target}").replace(
         "predicate: files_present\n        args: {pattern: $target}",

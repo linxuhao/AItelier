@@ -14,6 +14,21 @@ attributes the auth modules compare against (``api.authz.ADMIN_TOKEN`` and
 ``api.mcp_router._EXTERNAL_TOKEN``), so it can never drift from them, and a
 configuration change is seen on the next call.
 
+Coverage, measured (this paragraph states the set; it does not extend it).
+Checked: the two credentials this server holds in plaintext, ``AITELIER_ADMIN_TOKEN``
+(``api.authz.ADMIN_TOKEN``) and ``AITELIER_MCP_EXTERNAL_TOKEN``
+(``api.mcp_router._EXTERNAL_TOKEN``).
+
+NOT checked: each driver's own ``AITELIER_DRIVER_TOKEN``. The server stores only an
+HMAC of it (``drivers.token_hash``), so it holds no plaintext value to compare
+against, and the host token directory ``~/.aitelier-drivers/`` is not visible to
+the backend process, so the guard cannot read the token from there either. A driver
+token is therefore covered by nothing on the server side.
+
+What a writer does instead: name where the token lives (the ``AITELIER_DRIVER_TOKEN``
+setting, held in the host token directory ``~/.aitelier-drivers/``), never its value.
+A hand-off or message that needs a token says where to find it.
+
 What it deliberately does not do: scan for secret-shaped text, judge prose or
 field names, or block a digest. Text that only NAMES a credential field (for
 example ``AITELIER_ADMIN_TOKEN``) is ordinary text and is accepted.

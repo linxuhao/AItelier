@@ -67,3 +67,15 @@ def test_a_question_is_presentation_only_and_grants_nothing():
     assert "A question block asks; it answers no checkpoint" in text
     assert "is not evidence and grants nothing" in text
     assert "This surface is PRESENTATION, never authority" in text
+
+
+def test_the_driver_inbox_says_the_guard_covers_only_the_admin_and_external_tokens():
+    text = _served_text()
+    # Message text is stored and delivered, and the server guard covers the two
+    # plaintext credentials only; a driver's own token is not covered, so a
+    # hand-off names where the token lives, never its value.
+    assert ("Message text (subject, body, segments, answers, a notebook entry's "
+            "assertion) is stored and delivered") in text
+    assert "the server-side credential guard covers the admin and MCP external tokens only" in text
+    assert "a driver's own `AITELIER_DRIVER_TOKEN` is not covered" in text
+    assert "a hand-off names where the token lives, never its value" in text

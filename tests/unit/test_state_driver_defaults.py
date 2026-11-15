@@ -78,6 +78,29 @@ def test_notebook_write_naming_no_scope_is_refused_not_defaulted(world):
     assert _driver_defaults(drv["ada"], "get_driver_note", {})["project_id"] == "alpha"
 
 
+def test_notebook_supersede_naming_no_scope_is_refused_not_defaulted(world):
+    """iss-4cbf348f4e7f4742: the same refusal covers supersede_driver_note_entry.
+
+    One scope rule guards both writers. A default that only the write action lost
+    would leave the supersede path able to publish private text into the project
+    notebook, so the second writer is witnessed here rather than assumed.
+    """
+    _, drv, _, db = world
+    first = execute(drv["ada"], "write_driver_note_entry",
+                    {"project_id": "alpha", "assertion": "a rule", "body": "why",
+                     "director_identity": "ada"}, allow_write=True)
+    before = _entry_rows(db)
+    with pytest.raises(StateGraphError) as refusal:
+        execute(drv["ada"], "supersede_driver_note_entry",
+                {"entry_id": first["entry_id"], "assertion": "successor", "body": "b",
+                 "reason": "replace"}, allow_write=True)
+    message = str(refusal.value)
+    assert "project_id" in message and "driver_id" in message
+    assert _entry_rows(db) == before
+    index = execute(drv["ada"], "driver_note_index", {"project_id": "alpha"})
+    assert "a rule" in str(index) and "successor" not in str(index)
+
+
 def test_driver_scoped_notebook_writes_answer_a_private_address_through_execute(world):
     """iss-4cbf348f-1115: drive the server entry point with the arguments the driver sent.
 

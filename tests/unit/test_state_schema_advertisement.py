@@ -133,10 +133,13 @@ def test_a_project_shaped_write_naming_no_driver_still_lands_in_the_project_note
 def test_two_scopes_at_once_stay_refused(world):
     """Widening the advertisement admits no new input: the model's one-scope rule decides."""
     _, drv = world
-    with pytest.raises(StateGraphError, match="exactly one"):
+    with pytest.raises(StateGraphError) as refusal:
         execute(drv["ada"], WRITE_ACTION,
                 {"project_id": "alpha", "driver_id": "ada",
                  "assertion": "a", "body": "b"}, allow_write=True)
+    # The verdict is the refusal, not its wording: name the two fields it is about.
+    message = str(refusal.value)
+    assert "project_id" in message and "driver_id" in message
 
 
 def test_the_private_variant_keeps_naming_the_driver_scope():

@@ -403,7 +403,7 @@ test('driver guide: external Claude/Codex subagents are for review and hard item
 test('driver guide: independent tool calls share a step, and state_graph_write fills project and identity', async () => {
   const guide = (await readFile(new URL('./driver.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
   for (const phrase of ['Every step re-sends your whole context', 'together in one step rather than one per step',
-    'state_graph_write fills director_identity, and project_id while you belong to exactly one project, when omitted'])
+    'state_graph_write fills director_identity when omitted, and project_id while you belong to exactly one project - except on a notebook write, which must name its notebook (project_id or driver_id) itself'])
     assert.ok(guide.includes(phrase), phrase);
 });
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {

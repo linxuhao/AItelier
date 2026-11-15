@@ -35,8 +35,9 @@ Use regex=true for regular expressions and after_seq for the next result page.
 
 Use state_read(action, arguments) for State queries; the current project_id is
 supplied when omitted. Use the AItelier MCP tools for writes and pipelines;
-state_graph_write fills director_identity, and project_id while you belong to
-exactly one project, when omitted.
+state_graph_write fills director_identity when omitted, and project_id while
+you belong to exactly one project - except on a notebook write, which must name
+its notebook (project_id or driver_id) itself.
 Their full definitions are deferred: use search_tools(query) to find the relevant
 names and parameter schemas, then call_tool(name, arguments) to execute them.
 Known names can be called directly through call_tool, without a search gate.

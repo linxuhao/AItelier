@@ -356,56 +356,138 @@ def test_a_receipt_that_ran_another_image_spends_exactly_that_difference(tmp_pat
                  "--binding-sha256", digest], env).stdout.strip() == "reviewed"
 
 
-# ── a Source whose Git identity no mount of it can reach ──────────────────────
+# ── a Source whose Git identity no mount of the gate carries ──────────────────
 #
-# The gate mounts the Source and reads its commit from inside that mount. A
-# linked worktree's `.git` is a gitfile pointing at a repository elsewhere, so
-# the gate can run but cannot identify it -- and the resulting None differences
-# read like ordinary staleness. Mode `mountable` names that before dispatch.
+# The gate reads the measured commit from INSIDE a container that mounts the
+# Source and whatever else the launcher names. A linked worktree's `.git` is a
+# gitfile pointing at a repository elsewhere; a symlinked `.git` is the same
+# pointer in another shape. When no mount of the gate carries that path the gate
+# can run but cannot identify the Source -- and the resulting None differences
+# read like ordinary staleness. Mode `mountable` names that before dispatch, and
+# asks the LAUNCHER's table (`--carries`) rather than guessing: the first version
+# of this guard refused every pointer that left the Source, including one under a
+# directory the launcher mounts, which the gate measures perfectly well.
 
-def test_mountable_refuses_only_a_pointer_that_leaves_the_source(tmp_path):
+def test_mountable_refuses_only_a_pointer_no_mount_carries(tmp_path):
     binding, digest, record = _binding(tmp_path)
-    outside = tmp_path / "outside-source"
-    (tmp_path / "repository" / ".git" / "worktrees" / "x").mkdir(parents=True)
-    outside.mkdir()
-    (outside / ".git").write_text(
-        f"gitdir: {tmp_path / 'repository/.git/worktrees/x'}\n")
+
+    repository = tmp_path / "repository"
+    (repository / ".git" / "worktrees" / "x").mkdir(parents=True)
+    pointer = repository / ".git" / "worktrees" / "x"
+
+    linked = tmp_path / "linked-source"
+    linked.mkdir()
+    (linked / ".git").write_text(f"gitdir: {pointer}\n")
+    symlinked = tmp_path / "symlinked-source"
+    symlinked.mkdir()
+    (symlinked / ".git").symlink_to(pointer)
+    # Everything the detector must NOT refuse. A relative pointer resolves against
+    # the gitfile's own directory, which is inside the mount; a directory with no
+    # `.git` is not a work tree at all -- the launcher's own exit code, not this
+    # refusal -- and conflating the two would report "nothing to measure" as
+    # "cannot be measured".
     inside = tmp_path / "inside-source"
     (inside / ".gitdir").mkdir(parents=True)
     (inside / ".git").write_text("gitdir: ./.gitdir\n")
     plain = tmp_path / "plain-source"
     plain.mkdir()
 
-    def mode(source):
+    def mode(source, *carried):
         record_for = tmp_path / f"mountable-{source.name}.json"
         record_for.write_text(json.dumps(dict(record, source=str(source))) + "\n")
-        return _run(["mountable", str(record_for)])
+        table = []
+        for carrier in carried:
+            table += ["--carries", str(carrier)]
+        return _run(["mountable", str(record_for), *table])
 
-    refused = mode(outside)
-    assert refused.returncode == 71, (refused.stdout, refused.stderr)
-    assert refused.stdout == ""  # a refusal is not an answer
-    assert "gitfile pointing at" in refused.stderr, refused.stderr
-    assert "outside the Source" in refused.stderr, refused.stderr
-    # Everything the detector must NOT refuse: a pointer that stays inside, and a
-    # Source with no gitfile at all (its Git identity is unobservable for other
-    # reasons, which is a recorded None, not a refusal).
+    for shape in (linked, symlinked):
+        refused = mode(shape)
+        assert refused.returncode == 71, (refused.stdout, refused.stderr)
+        assert refused.stdout == ""  # a refusal is not an answer
+        assert "no mount of this gate carries" in refused.stderr, refused.stderr
+        assert str(pointer) in refused.stderr, refused.stderr
+        # The STATED mount is what carries it -- same bytes, different table --
+        # and only a directory that really contains the target carries it.
+        assert mode(shape, tmp_path).returncode == 0, mode(shape, tmp_path).stderr
+        assert mode(shape, tmp_path / "elsewhere").returncode == 71
+
     assert mode(inside).returncode == 0, mode(inside).stderr
     assert mode(plain).returncode == 0, mode(plain).stderr
-    # The binding is still read as a record: a missing Source is a different
-    # refusal, and never a silent pass.
+    # A binding whose Source is gone is a different refusal, never a silent pass.
     missing = mode(tmp_path / "absent-source")
     assert missing.returncode == 71 and "not a mountable directory" in missing.stderr
+    # A malformed mount table is a caller error (argparse's 2), not a refusal.
+    malformed = _run(["mountable", str(binding), "--carries", "relative/path"])
+    assert malformed.returncode == 2, malformed.stderr
 
 
-def test_the_launcher_asks_that_question_before_it_mounts_anything():
-    """The mode is worthless if the launcher never calls it: pin the wiring."""
+def test_the_launcher_refuses_before_it_dispatches_anything(tmp_path):
+    """A guard the launcher never calls, or calls after dispatch, is no guard.
+
+    Read from the launcher's behaviour rather than from its bytes: a stand-in
+    `docker` records every invocation, and a refused record must leave that
+    record empty and write no `<suffix>.gate.exit`.
+    """
+    _, _, record = _binding(tmp_path)
+    repository = tmp_path / "repository"
+    (repository / ".git" / "worktrees" / "x").mkdir(parents=True)
+    source = tmp_path / "linked-source"
+    source.mkdir()
+    (source / ".git").write_text(f"gitdir: {repository / '.git' / 'worktrees' / 'x'}\n")
+    binding = tmp_path / "refused-binding.json"
+    binding.write_text(json.dumps(dict(record, source=str(source))) + "\n")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "docker-calls"
+    stand_in = bin_dir / "docker"
+    stand_in.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {calls}\nexit 0\n')
+    stand_in.chmod(0o755)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+
+    env = {"PATH": f"{bin_dir}:/usr/local/bin:/usr/bin:/bin",
+           "GATE_BINDING_FILE": str(binding)}
+    ran = subprocess.run(["sh", str(GATE_RUN), str(source), str(reports), "refused"],
+                         capture_output=True, text=True, env=env)
+
+    assert ran.returncode == 71, (ran.stdout, ran.stderr)
+    assert "cannot be identified from inside the gate's mount" in ran.stderr, ran.stderr
+    assert not calls.exists(), calls.read_text()  # nothing was dispatched
+    assert not (reports / "refused.gate.exit").exists()
+    assert sorted(p.name for p in reports.iterdir()) == ["refused.gate.log"]
+    assert "no mount of this gate carries" in (reports / "refused.gate.log").read_text()
+    # ... and the image is still ATTESTED at dispatch time, before the container
+    # that runs in it: an id read afterwards would not be the launched image.
     text = GATE_RUN.read_text()
-    asked = text.index('mountable "$BINDING"')
-    assert asked < text.index("docker run --rm --init"), "the check must precede the mount"
-    assert "exit 71" in text[asked:], "a refusal needs its own exit status"
-    # ... and the image is ATTESTED at dispatch time, before the container that
-    # runs in it: an id read afterwards would not be the launched image.
     attested = text.index("PLATFORM_IMAGE_ID=")
     assert 'docker image inspect --format' in text[attested:]
     assert attested < text.index("docker run --rm --init")
     assert '-e GATE_PLATFORM_IMAGE="$PLATFORM_IMAGE_ID"' in text
+
+
+def test_the_guard_reads_the_mount_table_the_argv_mounts():
+    """The table is stated twice, so pin that the two statements agree.
+
+    The launcher mounts (`-v HOST:CONTAINER`) and, above it, tells the guard what
+    it will mount (`--carries CONTAINER=HOST`). A `-v` added without its matching
+    `--carries` turns a readable Source into a refusal, and a `--carries` with no
+    `-v` hides a real one -- so every mounted HOST except the frozen record itself
+    must appear in the guard's table under the same container path.
+    """
+    text = GATE_RUN.read_text()
+    dispatch = text.index("docker run --rm --init")
+    guard, argv = text[:dispatch], text[dispatch:]
+
+    mounted = {}
+    for spec in re.findall(r'-v\s+"?([^"\s\\]+)"?', argv):
+        host, _, rest = spec.partition(":")
+        container = rest.rsplit(":ro", 1)[0] or host
+        if host != "$BINDING":
+            mounted[container] = host
+    stated = {}
+    for spec in re.findall(r'--carries\s+"?([^"\s\\]+)"?', guard):
+        container, _, host = spec.partition("=")
+        stated[container] = host or container
+    assert mounted == stated, (mounted, stated)
+    assert mounted, "the launcher must state the mounts it dispatches into"

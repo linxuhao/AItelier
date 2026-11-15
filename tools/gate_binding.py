@@ -142,34 +142,115 @@ def binding_record(raw, expected_sha256=None):
     return binding, sha256
 
 
-def unobservable_gitdir(root):
-    """Why Git cannot be read from INSIDE a mount of this directory, if it cannot.
+def git_pointer(root):
+    """The path this directory's `.git` POINTS at, when it is a pointer at all.
 
-    A self-contained Source carries its whole `.git` directory, so its identity is
-    observable from either side of a mount of it. A linked worktree -- any clone
-    whose `.git` is a gitfile -- carries a `gitdir:` POINTER at a repository that
-    lives elsewhere. The launcher resolves it because it runs where the pointer
-    was written; the gate mounts the Source alone, so inside the container the
-    pointer names a path that is not there. That is a property of the frozen
-    record, and it is decidable before anything is mounted.
+    Two shapes make `.git` a pointer rather than a self-contained directory: a
+    linked worktree writes a GITFILE (`gitdir: <path>`), and an unusual checkout
+    can SYMLINK `.git` at a repository elsewhere. Both carry the bytes the gate
+    needs at the other end, so both are the subject here.
+
+    A `.git` DIRECTORY is self-contained and needs no mount at all; a directory
+    with no `.git` is not a work tree, which the launcher already answers with its
+    own exit code -- neither shape is this function's subject, and `None` says so.
     """
-    gitfile = Path(root) / ".git"
-    if gitfile.is_symlink() or not gitfile.is_file():
+    git = Path(root) / ".git"
+    if git.is_symlink():
+        try:
+            return os.readlink(git)
+        except OSError:
+            return None
+    if not git.is_file():
         return None
     try:
-        first = read_regular(gitfile).split(b"\n", 1)[0]
+        first = read_regular(git).split(b"\n", 1)[0]
     except (OSError, ValueError):
         return None
     prefix = b"gitdir: "
     if not first.startswith(prefix):
         return None
-    target = Path(os.fsdecode(first[len(prefix):]).strip())
-    if not target.is_absolute():
-        target = Path(root) / target
-    resolved = Path(os.path.normpath(str(target)))
-    if resolved == Path(root) or Path(root) in resolved.parents:
+    return os.fsdecode(first[len(prefix):]).strip()
+
+
+def unobservable_gitdir(root, carriers=()):
+    """Why Git cannot be read from INSIDE a mount of this directory, if it cannot.
+
+    The launcher mounts the Source (twice) and whatever else it names, and the
+    gate then reads the commit from INSIDE that container. So the question is not
+    "does this pointer leave the Source" -- that was this function's first
+    reading, and it refused records the gate measures perfectly well, because a
+    pointer under a directory the launcher ALSO mounts resolves inside the gate.
+    The question is: does any mount of this gate carry the path the pointer names?
+
+    A RELATIVE pointer is resolved by Git against the gitfile's own directory,
+    which INSIDE the container is a mount point of the Source, not its host path,
+    so it is re-anchored on every mount the launcher states for this Source and
+    then asked the same question. An ABSOLUTE pointer survives only when one of
+    those mounts lands it on a host path that exists. `carriers` is that mount
+    table, as the launcher states it (`--carries CONTAINER=HOST`); the launcher is
+    the only component that knows it, so it is never guessed here.
+    """
+    pointer = git_pointer(root)
+    if pointer is None:
         return None
-    return f"its .git is a gitfile pointing at {resolved}, outside the Source"
+    table = tuple(carriers)
+    target = Path(pointer)
+    if target.is_absolute():
+        # Git reads a written path verbatim, so the container asks for exactly it.
+        candidates = [Path(os.path.normpath(str(target)))]
+    else:
+        anchors = [Path(container) for container, host in table
+                   if Path(os.path.normpath(host)) == os.path.normpath(root)]
+        candidates = [Path(os.path.normpath(str(anchor / target)))
+                      for anchor in (anchors or [Path(root)])]
+    for candidate in candidates:
+        if carried(candidate, table):
+            return None
+        if not target.is_absolute() and candidate != Path(root) \
+                and Path(root) in candidate.parents:
+            # Nothing was stated about the Source's mounts, so answer for a mount
+            # of it by path: a pointer that stays inside the Source is inside it
+            # on both sides.
+            return None
+    mounted = ", ".join(f"{container}->{host}" for container, host in table) or "nothing"
+    return (f"its .git is a pointer at {pointer}, which no mount of this gate "
+            f"carries (the launcher stated: {mounted})")
+
+
+def carried(container_path, table):
+    """Does this mount table carry `container_path` to something that exists?
+
+    A path is carried when some mount is it or contains it, and the host path the
+    mount lands that on is really there. A mount whose host side does not exist
+    carries nothing -- which is the whole point: the container would see a path
+    that GIT cannot open.
+    """
+    path = Path(container_path)
+    for container, host in table:
+        at = Path(container)
+        if path == at or at in path.parents:
+            if (Path(host) / path.relative_to(at)).exists():
+                return True
+    return False
+
+
+def mount_table(specs):
+    """The mount table a launcher states, as (container path, host path) pairs.
+
+    `CONTAINER=HOST` maps a container path onto a host path; a bare `CONTAINER` is
+    mounted from the same path on both sides, which is what a plain `-v /a:/a`
+    does. The launcher states its own table because nothing else can know it: a
+    caller that states nothing gets an empty table, and then only a RELATIVE
+    pointer survives -- an absolute one has nowhere to resolve.
+    """
+    table = []
+    for spec in specs:
+        container, _, host = spec.partition("=")
+        if not container or not (host or container).startswith("/"):
+            raise ValueError(f"--carries needs CONTAINER or CONTAINER=HOST "
+                             f"(absolute paths): {spec!r}")
+        table.append((container, host or container))
+    return tuple(table)
 
 
 def observe_root(root):
@@ -177,10 +258,11 @@ def observe_root(root):
 
     Only the ability to LOOK is refused (`ValueError`): a coordinate that is not
     an absolute regular directory cannot be observed at all. A Source whose `.git`
-    pointer names a repository outside itself is NOT refused here -- inside the
-    gate container that pointer resolves or it does not, and `None` is the honest
-    record of either; the launcher refuses such a record before dispatch, where
-    the path it names exists (see `mountable`). A Source that is not
+    pointer names a repository NO MOUNT of the gate carries is NOT refused here --
+    inside the gate container that pointer resolves or it does not, and `None` is
+    the honest record of either; the launcher refuses such a record before
+    dispatch, where the paths the table names exist (see `mountable`). A Source
+    that is not
     the reviewed clean checkout, a moved commit or a changed/vanished file is an
     OBSERVATION (`None`/value), never a refusal -- `compare_source` reports it as
     data and the caller decides what the verdict is worth.
@@ -603,20 +685,25 @@ def sidecar_identity(output, before=None):
             raise IdentityMismatch("actual sidecar identity changed during normal gate")
 
 
-def mountable(binding):
-    """Would this bound Source's Git identity survive a mount of itself?
+def mountable(binding, carriers=()):
+    """Would this bound Source's Git identity survive the gate's own mounts?
 
-    The gate mounts the Source read-only and reads the measured commit from
-    INSIDE that mount, so a Source whose `.git` points outside itself is a record
-    the gate can run but cannot identify -- and the resulting `None` differences
-    read like ordinary staleness. Raises `ValueError` naming the reason; returns
-    None when the identity survives.
+    The gate reads the measured commit from INSIDE a container that mounts the
+    Source -- and, as `tools/gate_run.sh` states through `--carries`, whatever
+    else it mounts at the same absolute path. A record whose `.git` is a pointer
+    no mount of that table carries is a record the gate can run but cannot
+    identify, and the resulting `None` differences read like ordinary staleness.
+    Raises `ValueError` naming the reason; returns None when a mount carries it.
+
+    A Source that is not a work tree at all is NOT this refusal: the launcher
+    already answers that with its own exit code, and conflating the two would
+    report "nothing to measure" as "cannot be measured".
     """
     root = binding["source"]
     source = Path(root)
     if not source.is_absolute() or source.is_symlink() or not source.is_dir():
         raise ValueError(f"the bound Source is not a mountable directory: {root}")
-    reason = unobservable_gitdir(source)
+    reason = unobservable_gitdir(source, carriers)
     if reason is not None:
         raise ValueError(f"Source {root} git identity cannot be observed inside "
                          f"a mount of it: {reason}")
@@ -660,8 +747,11 @@ The positional arguments mean different things per mode. argparse can only name
 a positional once, so this list is the authority:
   source, image, sha256
                the positional is the binding (the reviewed record itself).
-  mountable    the positional is the binding; exits 0 when the bound Source's Git
-               identity survives a mount of itself, else one reason on stderr.
+  mountable    the positional is the binding; exits 0 when a mount of the gate
+               carries the bound Source's Git identity, else one reason on stderr.
+               The mount table is stated by the caller as `--carries CONTAINER=HOST`
+               (HOST defaults to CONTAINER), because the caller -- the launcher --
+               is the only component that knows what it will mount.
   run          the positional is the binding; the second is the receipt to write.
   sidecar      the positional is the sidecar record to WRITE; the second is the
                earlier record it is compared against.
@@ -678,7 +768,14 @@ a positional once, so this list is the authority:
     parser.add_argument("output", nargs="?", metavar="OUTPUT_OR_RAW_EXIT")
     parser.add_argument("--binding-sha256")
     parser.add_argument("--observe")
+    parser.add_argument("--carries", action="append", metavar="CONTAINER=HOST",
+                        help="one mount of the gate, container path first; repeat per "
+                             "mount. HOST defaults to CONTAINER.")
     args = parser.parse_args()
+    try:
+        mounts = mount_table(args.carries or ())
+    except ValueError as exc:
+        parser.error(str(exc))  # 2: a malformed table is a caller error, not a refusal
     if args.mode == "receipt":
         print(receipt_identity(args.binding, args.output,
                                os.environ.get("GATE_BINDING_FILE"), args.binding_sha256))
@@ -696,7 +793,7 @@ a positional once, so this list is the authority:
         return 0
     if args.mode == "mountable":
         try:
-            mountable(read_binding(args.binding, args.binding_sha256)[0])
+            mountable(read_binding(args.binding, args.binding_sha256)[0], mounts)
         except ValueError as exc:
             # 71, not 69: 69 means "an identity was unknown once the gate had
             # run", and a caller must be able to tell that apart from "this

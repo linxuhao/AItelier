@@ -54,11 +54,21 @@ PLATFORM_SOURCE="$(python3 "$BINDING_TOOL" source "$BINDING" --binding-sha256 "$
 PLATFORM_IMAGE="$(python3 "$BINDING_TOOL" image "$BINDING" --binding-sha256 "$BINDING_SHA256")" || exit 69
 
 # A record can name a real directory whose Git identity is UNREADABLE from inside
-# a mount of it: a linked worktree's `.git` is a gitfile pointing at a repository
-# outside the mount, so the gate runs and then reports the commit as unobserved.
-# That is not a stale literal, and running anyway would record a comparison nobody
-# could make, so it is refused here -- by name, before anything is mounted.
-if ! python3 "$BINDING_TOOL" mountable "$BINDING" --binding-sha256 "$BINDING_SHA256" >> "$LOG" 2>&1; then
+# the gate: its `.git` is a POINTER (a linked worktree's gitfile, or a symlinked
+# `.git`) at a repository no mount of this gate carries, so the gate would run and
+# then report the commit as unobserved. That is not a stale literal, and running
+# anyway would record a comparison nobody could make, so it is refused here -- by
+# name, before anything is mounted.
+#
+# Which pointers are unreadable depends on THIS file's mounts, so the table is
+# stated to the guard instead of being guessed: every `-v HOST:CONTAINER` below
+# that the Source's identity can be reached through is repeated here as a
+# `--carries CONTAINER=HOST` entry, and a new `-v` must be added here too or a
+# readable Source becomes a refusal.
+if ! python3 "$BINDING_TOOL" mountable "$BINDING" --binding-sha256 "$BINDING_SHA256" \
+  --carries "/app=$PLATFORM_SOURCE" \
+  --carries "/home/linxuhao/AItelier=$PLATFORM_SOURCE" \
+  --carries /home/linxuhao/.AItelier >> "$LOG" 2>&1; then
   echo "refusing: the frozen platform Source cannot be identified from inside the gate's mount; see $SUFFIX.gate.log" >&2
   exit 71
 fi

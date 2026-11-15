@@ -520,8 +520,9 @@ class StateDriverNotes:
         if not self.driver_scope and ("dnote://" in assertion or "dnote://" in body):
             raise StateGraphError("private_notebook_reference")
         # The one credential guard for the notebook. write_entry and supersede_entry
-        # both write through here, so one call covers both; it runs before the INSERT.
-        refuse_credential_body(body)
+        # both write through here, so one call covers both, it runs before the
+        # INSERT, and it receives EVERY text field the row keeps: the assertion too.
+        refuse_credential_body(assertion, body)
         entry_id = new_entry_id()
         dangling = self._unresolved(conn, project_id, [("body", body), ("assertion", assertion)])
         if dangling:

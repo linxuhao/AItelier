@@ -413,8 +413,9 @@ class SQLiteDirectorMessaging:
                 raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID)
             _invalid()
         # The one credential guard for the project mailbox. Before any row is
-        # written, so a refused body leaves no message and no delivery behind.
-        refuse_credential_values(body, lambda detail: DirectorMessageError(
+        # written, so a refused write leaves no message and no delivery behind,
+        # and it receives BOTH text fields the row keeps: subject and body.
+        refuse_credential_values((subject, body), lambda detail: DirectorMessageError(
             "invalid_request", self.reply_schema, message=detail))
         payload = {
             "body": body, "broadcast": broadcast, "director_identity": director_identity,

@@ -321,9 +321,10 @@ class DriverInbox:
             raise StateGraphError("invalid_request: subject must be a non-empty string of at most 200 characters")
         if type(body) is not str or len(body)>8000:
             raise StateGraphError("invalid_request: body must be a string of at most 8000 characters")
-        # The one credential guard for the driver inbox. Before the request key is
-        # replayed or any row is written, so a refused body leaves nothing behind.
-        refuse_credential_values(body, lambda detail: StateGraphError("invalid_request: " + detail))
+        # The one credential guard for this writer. Before the request key is
+        # replayed or any row is written, so a refused write leaves nothing behind,
+        # and it receives EVERY text field the row keeps: subject as well as body.
+        refuse_credential_values((subject, body), lambda detail: StateGraphError("invalid_request: " + detail))
         if bool(target_driver_id) and bool(project_members):
             raise StateGraphError("invalid_request: target_driver_id and project_members are mutually exclusive; set exactly one")
         if not target_driver_id and not project_members:
@@ -443,7 +444,9 @@ class DriverInbox:
             raise StateGraphError("invalid_request")
         if type(subject) is not str or not 1 <= len(subject) <= 200 or type(body) is not str or len(body)>8000:
             raise StateGraphError("invalid_request")
-        refuse_credential_body(body)
+        # The one guard call for this writer: subject, body and the segment text
+        # that lands in segments_json, before the INSERT below.
+        refuse_credential_body(subject, body, segments)
         if not self.driver_id:
             raise StateGraphError("driver_identity_required")
         refs = {} if refs is None else refs
@@ -520,7 +523,9 @@ class DriverInbox:
         if (type(subject) is not str or not 1 <= len(subject) <= 200
                 or type(body) is not str or len(body) > 8000):
             raise StateGraphError("invalid_request")
-        refuse_credential_body(body)
+        # The one guard call for this writer: subject, body and the answer refs
+        # that land in answers_json, before the INSERT below.
+        refuse_credential_body(subject, body, answers)
         if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
             raise StateGraphError("user_identity_required")
         answers = self._answers(answers)
@@ -923,7 +928,8 @@ def deliver_notice(conn, message):
         return {"skipped": "unregistered_driver"}
     # The credential guard runs before the INSERT, so a refused notice leaves no
     # row and the caller's ownership write rolls back with it (StateGraphError).
-    refuse_credential_body(message["body"])
+    # One call, every text field the row keeps: the subject as well as the body.
+    refuse_credential_body(message["subject"], message["body"])
     mid, did = str(uuid4()), str(uuid4())
     conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
                  "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at) "

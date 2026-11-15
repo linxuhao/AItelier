@@ -1266,7 +1266,20 @@ def _operation_schema(name, model):
         from copy import deepcopy
         item["arguments"]["required"] = sorted(set(item["arguments"].get("required",[])) | {"project_id"})
         item["arguments"]["properties"]["project_id"] = {"type":"string","minLength":1,"maxLength":128}
-        item["arguments"]["properties"]["driver_id"] = {"type":"null","default":None}
+        # The project variant is not the project SCOPE: `execute` pops driver_id
+        # and a truthy one routes the write to that driver's PRIVATE notebook,
+        # and the request model accepts the string (`NotebookScopeRequest.driver_id`
+        # is `str | None`). Pinning the property to `null` advertised less than
+        # the input reaches, in the one direction that costs a caller its target:
+        # a client validating against this schema can only drop the key, and its
+        # write then lands in the PUBLIC project notebook, silently, instead of
+        # the one it meant. So publish the model's own union. Two scopes at once
+        # stay refused - by the model's one-scope validator, which is where that
+        # rule lives, not by an advertisement that also hides the valid single
+        # private scope from the same variant.
+        item["arguments"]["properties"]["driver_id"] = {
+            "anyOf":[{"type":"string","minLength":1,"maxLength":64},{"type":"null"}],
+            "default":None}
         private = deepcopy(item["arguments"])
         private["required"] = [k for k in private["required"] if k!="project_id"]
         private["required"] = sorted(set(private.get("required",[])) | {"driver_id"})

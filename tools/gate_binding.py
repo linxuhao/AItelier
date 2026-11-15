@@ -142,34 +142,33 @@ def binding_record(raw, expected_sha256=None):
     return binding, sha256
 
 
-def git_pointer(root):
-    """The path this directory's `.git` POINTS at, when it is a pointer at all.
+def pointer_text(entry):
+    """The text one `.git` entry points at, when it is a pointer at all.
 
-    Two shapes make `.git` a pointer rather than a self-contained directory: a
-    linked worktree writes a GITFILE (`gitdir: <path>`), and an unusual checkout
-    can SYMLINK `.git` at a repository elsewhere. Both carry the bytes the gate
-    needs at the other end, so both are the subject here.
-
-    A `.git` DIRECTORY is self-contained and needs no mount at all; a directory
-    with no `.git` is not a work tree, which the launcher already answers with its
-    own exit code -- neither shape is this function's subject, and `None` says so.
+    Two shapes make `.git` (or anything a pointer names) a pointer rather than a
+    repository directory: a GITFILE -- a regular file whose first line is
+    `gitdir: <path>` -- and a SYMLINK. `None` means "not a pointer": either a
+    directory, which is self-contained, or nothing at all, which is not a work
+    tree -- neither is this guard's subject.
     """
-    git = Path(root) / ".git"
-    if git.is_symlink():
+    if entry.is_symlink():
         try:
-            return os.readlink(git)
+            return os.readlink(entry)
         except OSError:
             return None
-    if not git.is_file():
+    if not entry.is_file():
         return None
     try:
-        first = read_regular(git).split(b"\n", 1)[0]
+        first = read_regular(entry).split(b"\n", 1)[0]
     except (OSError, ValueError):
         return None
     prefix = b"gitdir: "
     if not first.startswith(prefix):
         return None
     return os.fsdecode(first[len(prefix):]).strip()
+
+
+LINK_HOPS = 8
 
 
 def unobservable_gitdir(root, carriers=()):
@@ -180,41 +179,61 @@ def unobservable_gitdir(root, carriers=()):
     "does this pointer leave the Source" -- that was this function's first
     reading, and it refused records the gate measures perfectly well, because a
     pointer under a directory the launcher ALSO mounts resolves inside the gate.
-    The question is: does any mount of this gate carry the path the pointer names?
+    The question is: does any mount of this gate carry every path Git will walk?
 
-    A RELATIVE pointer is resolved by Git against the gitfile's own directory,
-    which INSIDE the container is a mount point of the Source, not its host path,
-    so it is re-anchored on every mount the launcher states for this Source and
-    then asked the same question. An ABSOLUTE pointer survives only when one of
-    those mounts lands it on a host path that exists. `carriers` is that mount
-    table, as the launcher states it (`--carries CONTAINER=HOST`); the launcher is
-    the only component that knows it, so it is never guessed here.
+    Git FOLLOWS a CHAIN: `<source>/.git` may be a symlink to a gitfile, whose
+    `gitdir:` line names another path. So one hop is not the answer either -- that
+    was this function's second reading, and it blessed a symlink-to-gitfile whose
+    repository did not exist (host git and the gate both then fail with "not a git
+    repository"). The walk below follows every hop, bounded by `LINK_HOPS`, and
+    asks of each one whether the container can open it:
+
+    * an ABSOLUTE hop is read verbatim by Git, so it must be carried by a mount;
+    * a RELATIVE hop is resolved against the pointer's own directory, which inside
+      the container is a MOUNT POINT of the Source, so it is re-anchored on the
+      Source's mount point and asked the same question.
+
+    `carriers` is that mount table, as the launcher states it
+    (`--carries CONTAINER=HOST`); the launcher is the only component that knows it,
+    so it is never guessed here. A Source with no `.git` is NOT refused: that is
+    "not a work tree", which the launcher answers with its own exit code.
     """
-    pointer = git_pointer(root)
-    if pointer is None:
-        return None
     table = tuple(carriers)
-    target = Path(pointer)
-    if target.is_absolute():
-        # Git reads a written path verbatim, so the container asks for exactly it.
-        candidates = [Path(os.path.normpath(str(target)))]
-    else:
-        anchors = [Path(container) for container, host in table
-                   if Path(os.path.normpath(host)) == os.path.normpath(root)]
-        candidates = [Path(os.path.normpath(str(anchor / target)))
-                      for anchor in (anchors or [Path(root)])]
-    for candidate in candidates:
-        if carried(candidate, table):
-            return None
-        if not target.is_absolute() and candidate != Path(root) \
-                and Path(root) in candidate.parents:
-            # Nothing was stated about the Source's mounts, so answer for a mount
-            # of it by path: a pointer that stays inside the Source is inside it
-            # on both sides.
-            return None
-    mounted = ", ".join(f"{container}->{host}" for container, host in table) or "nothing"
-    return (f"its .git is a pointer at {pointer}, which no mount of this gate "
-            f"carries (the launcher stated: {mounted})")
+    host_root = Path(os.path.normpath(root))
+    anchors = [Path(container) for container, host in table
+               if Path(os.path.normpath(host)) == host_root]
+    container_root = anchors[0] if anchors else host_root
+    host = host_root / ".git"
+    container = container_root / ".git"
+    for hop in range(LINK_HOPS + 1):
+        if hop == LINK_HOPS:
+            return (f"its .git pointer chain from {root} does not end in a "
+                    f"repository within {LINK_HOPS} hops")
+        if host.is_dir() and not host.is_symlink():
+            return None                    # self-contained: nothing to carry
+        if not host.exists() and not host.is_symlink():
+            return None                    # no repository here at all: not a work tree
+        pointer = pointer_text(host)
+        if pointer is None:
+            return (f"its .git entry {container} is a file that is not a gitfile "
+                    f"(no `gitdir: ` line), so Git cannot open a repository there")
+        target = Path(pointer)
+        if target.is_absolute():
+            candidate = Path(os.path.normpath(str(target)))
+        else:
+            candidate = Path(os.path.normpath(str(container.parent / target)))
+        inside = candidate == container_root or container_root in candidate.parents
+        if not inside and not carried(candidate, table):
+            mounted = ", ".join(f"{c}->{h}" for c, h in table) or "nothing"
+            return (f"its .git is a pointer at {pointer}, which no mount of this "
+                    f"gate carries (the launcher stated: {mounted})")
+        container = candidate
+        host = (host_root / candidate.relative_to(container_root)
+                if inside else candidate)
+        if not host.exists():
+            return (f"its .git pointer at {pointer} names {host}, which does not "
+                    f"exist, so no mount of it can carry a repository")
+    return None
 
 
 def carried(container_path, table):

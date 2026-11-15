@@ -400,6 +400,26 @@ def test_mountable_refuses_only_a_pointer_no_mount_carries(tmp_path):
             table += ["--carries", str(carrier)]
         return _run(["mountable", str(record_for), *table])
 
+    # Git follows a CHAIN, so one hop is not the answer: a `.git` symlink may name
+    # a gitfile, and the gitfile names the gitdir. Judging only the link text let a
+    # two-hop chain whose repository did not exist through (host git and the gate
+    # both then answer "not a git repository", rc 128), and judging only the first
+    # hop let a relative gitfile that leaves the Source through as well.
+    chained = tmp_path / "chained-source"
+    chained.mkdir()
+    (chained / "gitfile").write_text(f"gitdir: {pointer}\n")
+    (chained / ".git").symlink_to("gitfile")
+    broken = tmp_path / "broken-source"
+    broken.mkdir()
+    (broken / "gitfile").write_text(f"gitdir: {tmp_path / 'nowhere' / 'gitdir'}\n")
+    (broken / ".git").symlink_to("gitfile")
+    escaping = tmp_path / "escaping-source"
+    escaping.mkdir()
+    (escaping / ".git").write_text("gitdir: ../elsewhere/gitdirs/X\n")
+    garbage = tmp_path / "garbage-source"
+    garbage.mkdir()
+    (garbage / ".git").write_text("this file is not a gitfile\n")
+
     for shape in (linked, symlinked):
         refused = mode(shape)
         assert refused.returncode == 71, (refused.stdout, refused.stderr)
@@ -410,6 +430,15 @@ def test_mountable_refuses_only_a_pointer_no_mount_carries(tmp_path):
         # and only a directory that really contains the target carries it.
         assert mode(shape, tmp_path).returncode == 0, mode(shape, tmp_path).stderr
         assert mode(shape, tmp_path / "elsewhere").returncode == 71
+
+    # every hop is judged: the two-hop chain is refused although its first hop is
+    # inside the Source, accepted when the table really carries the gitdir, and
+    # refused again for a gitdir that no mount can open.
+    assert mode(chained).returncode == 71, mode(chained).stderr
+    assert mode(chained, tmp_path).returncode == 0, mode(chained, tmp_path).stderr
+    assert mode(broken, tmp_path).returncode == 71, mode(broken).stderr
+    assert mode(escaping).returncode == 71, mode(escaping).stderr
+    assert mode(garbage).returncode == 71, mode(garbage).stderr
 
     assert mode(inside).returncode == 0, mode(inside).stderr
     assert mode(plain).returncode == 0, mode(plain).stderr

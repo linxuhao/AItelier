@@ -1,4 +1,5 @@
 """Real SkillFlow + SQLite scenarios; no manufactured completed state nodes."""
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -820,6 +821,105 @@ async def test_recovery_scope_propagates_any_union_and_all_intersection(system, 
     _, ok = recover_page(service, "game", 0, ["a"], [d["attempt_id"]], "any")
     assert ok is True
     assert attempts.get(d["attempt_id"])["status"] == "paused"
+
+
+def _count_transactions(service):
+    """Count the SERVICE's own store transactions, by kind.
+
+    ``StateService`` builds its own ``StateGraphStore``, so patching the
+    fixture's store would count nothing; the counter goes on
+    ``service.store.transaction`` exactly as ``_recover_page`` will use it.
+    """
+    original, counted = service.store.transaction, {"write": 0, "read": 0}
+
+    @contextlib.contextmanager
+    def counting(*args, **kwargs):
+        counted["write" if kwargs.get("write") else "read"] += 1
+        with original(*args, **kwargs) as conn:
+            yield conn
+
+    service.store.transaction = counting
+    return counted
+
+
+def _observed(store):
+    return [event for event in store.events("game") if event["event_type"] == "attempt_observed"]
+
+
+@pytest.mark.parametrize("paused", [True, False], ids=["already-paused", "running"])
+def test_unchanged_observation_opens_no_write_transaction(system, tmp_path, paused):
+    """A recovery page reconciles every in-scope attempt once a second. An
+    observation that changes nothing — an attempt already recorded ``paused``
+    whose engine row still says ``paused``, or a ``running`` attempt with no
+    change — must not cost a committed write on the shared sqlite and must not
+    append another ``attempt_observed`` event."""
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    if paused:
+        sf.pause_run(rid)
+    service = _recovery_service(system, tmp_path)
+    first = service.reconcile_attempt(a["attempt_id"])
+    assert first["status"] == ("paused" if paused else "running"), first
+    before_events = _observed(store)
+    before_seq = store.events("game")[-1]["seq"]
+    engine = sf.get_run
+    engine_reads = []
+
+    def counted_engine_read(run_id, *args, **kwargs):
+        engine_reads.append(run_id)
+        return engine(run_id, *args, **kwargs)
+
+    counted = _count_transactions(service)
+    sf.get_run = counted_engine_read
+    try:
+        again = service.reconcile_attempt(a["attempt_id"])
+    finally:
+        sf.get_run = engine
+        del service.store.transaction
+    print(json.dumps({"arm": "already-paused" if paused else "running",
+                      "status": again["status"], "transactions": counted,
+                      "engine_row_reads": len(engine_reads),
+                      "events_before": len(before_events), "events_after": len(_observed(store))}))
+    # The counter is really installed and really sees the read phase.
+    assert counted["read"] >= 1, counted
+    assert engine_reads == [rid], "the engine row is still read on every call"
+    assert counted["write"] == 0, counted
+    assert _observed(store) == before_events
+    assert store.events("game")[-1]["seq"] == before_seq
+    assert attempts.get(a["attempt_id"])["status"] == first["status"]
+    assert again["status"] == first["status"]
+    assert again["stale_inputs"] == first["stale_inputs"] is False
+
+
+def test_a_real_transition_still_commits_a_write(system, tmp_path):
+    """The saving is only the unchanged observation. A ``running`` attempt whose
+    engine row now reports ``paused`` still writes: at least one write
+    transaction, the recorded status becomes ``paused``, and the transition is
+    durably announced by an ``attempt_observed`` event."""
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    service = _recovery_service(system, tmp_path)
+    assert service.reconcile_attempt(a["attempt_id"])["status"] == "running"
+    sf.pause_run(rid)
+    before_events = _observed(store)
+    counted = _count_transactions(service)
+    try:
+        observed = service.reconcile_attempt(a["attempt_id"])
+    finally:
+        del service.store.transaction
+    after_events = _observed(store)
+    print(json.dumps({"arm": "running-to-paused", "status": observed["status"],
+                      "transactions": counted, "events_before": len(before_events),
+                      "events_after": len(after_events)}))
+    assert counted["write"] >= 1, counted
+    assert observed["status"] == "paused"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    assert len(after_events) == len(before_events) + 1
+    assert after_events[-1]["payload"]["attempt_id"] == a["attempt_id"]
+    assert after_events[-1]["payload"]["status"] == "paused"
+    assert after_events[-1]["payload"]["workflow_observation"]["workflow_status"] == "paused"
 
 
 @pytest.mark.asyncio

@@ -821,6 +821,52 @@ class StateAttempts:
                                "graph_digest": row.get("graph_digest")})
             return _public(self._attempt(conn, attempt_id))
 
+    def _reconcile_decision(self, conn, attempt_id, attempt, row, outcome, candidate_artifact):
+        """Project one engine observation onto the stored attempt, on ``conn``.
+
+        The ONE computation behind both reconcile phases: the read phase asks it
+        whether a write transaction is needed at all, and the write phase calls
+        it again on that transaction's own connection so it re-reads the row it
+        is about to write. It also holds every refusal, so a refusal is raised
+        before — and independently of — whether a write would have followed.
+        """
+        current = self._attempt(conn, attempt_id)
+        if current["run_id"] != row["id"]:
+            raise StateConflict("attempt binding changed")
+        fresh = self._pins_current(conn, current)
+        status = {"pending": "running", "running": "running", "paused": "paused",
+                  "completed": "candidate", "failed": "failed", "cancelled": "failed",
+                  "canceled": "failed", "unknown": "unknown"}[outcome]
+        # Quiescence was proved above (complete zero-alive/lost/unknown audit);
+        # stale inputs change the recorded status, not that proof.
+        quiescent = status in {"candidate", "failed"}
+        if quiescent and not fresh:
+            status = "superseded"
+        if current["status"] in {"candidate", "failed", "superseded", "abandoned"} and status in ACTIVE:
+            raise StateConflict("terminal attempt's run was revived; use a new attempt")
+        if current["status"] == "abandoned":
+            # The controller was declared gone and the slot released; the
+            # engine's later word about the run is recorded as a terminal
+            # observation, never as a resurrection or a candidate.
+            raise StateConflict("attempt was abandoned; its run outcome is historical - use a new attempt")
+        artifact = current["artifact_ref"]
+        if candidate_artifact is not None and status == "candidate":
+            if artifact and artifact != candidate_artifact:
+                raise StateConflict("candidate artifact is immutable; create another attempt")
+            artifact = candidate_artifact
+        observation = {"workflow_status": row["status"],
+                       "current_node": row.get("current_node"),
+                       "error_reason": row.get("error_reason")}
+        last = conn.execute("SELECT payload_json FROM state_events WHERE project_id=? "
+                            "AND node_key=? AND event_type='attempt_observed' "
+                            "AND json_extract(payload_json,'$.attempt_id')=? ORDER BY seq DESC LIMIT 1",
+                            (current["project_id"], current["node_key"], attempt_id)).fetchone()
+        prior = json.loads(last[0]).get("workflow_observation") if last else None
+        attention_changed = status in {"paused", "unknown", "failed"} and prior != observation
+        changed = current["status"] != status or artifact != current["artifact_ref"] or attention_changed
+        return {"current": current, "status": status, "quiescent": quiescent, "fresh": fresh,
+                "artifact": artifact, "observation": observation, "changed": changed}
+
     def reconcile(self, attempt_id: str, sf, candidate_artifact: str | None = None,
                   actor: str | None = None) -> dict:
         """Observe a real run; never modify its graph, checkpoints or status."""
@@ -847,41 +893,26 @@ class StateAttempts:
                 raise StateConflict("operation audit is incomplete; quiescence is unknown")
             if audit["lost"] or audit["unknown"] or audit["alive"]:
                 outcome = "unknown"
-        status = {"pending": "running", "running": "running", "paused": "paused",
-                  "completed": "candidate", "failed": "failed", "cancelled": "failed", "canceled": "failed", "unknown": "unknown"}[outcome]
+        # A State wait's recovery page reconciles every in-scope attempt once a
+        # second, and most of those observations change nothing. Deciding that
+        # needs a read of the stored row, not a committed write on the one shared
+        # sqlite, so the decision is taken under a READ transaction and a write
+        # transaction is opened only when something must actually be written:
+        # a changed status/artifact, a changed attention observation, or a
+        # quiescent outcome whose bound claims must be settled.
+        with self.store.transaction() as conn:
+            decision = self._reconcile_decision(conn, attempt_id, attempt, row, outcome, candidate_artifact)
+        if not decision["changed"] and not decision["quiescent"]:
+            return {**_public(decision["current"]), "stale_inputs": not decision["fresh"]}
         with self.store.transaction(write=True) as conn:
-            current = self._attempt(conn, attempt_id)
-            if current["run_id"] != row["id"]:
-                raise StateConflict("attempt binding changed")
-            fresh = self._pins_current(conn, current)
-            # Quiescence was proved above (complete zero-alive/lost/unknown audit);
-            # stale inputs change the recorded status, not that proof.
-            quiescent = status in {"candidate", "failed"}
-            if quiescent and not fresh:
-                status = "superseded"
-            if current["status"] in {"candidate", "failed", "superseded", "abandoned"} and status in ACTIVE:
-                raise StateConflict("terminal attempt's run was revived; use a new attempt")
-            if current["status"] == "abandoned":
-                # The controller was declared gone and the slot released; the
-                # engine's later word about the run is recorded as a terminal
-                # observation, never as a resurrection or a candidate.
-                raise StateConflict("attempt was abandoned; its run outcome is historical - use a new attempt")
-            artifact = current["artifact_ref"]
-            if candidate_artifact is not None and status == "candidate":
-                if artifact and artifact != candidate_artifact:
-                    raise StateConflict("candidate artifact is immutable; create another attempt")
-                artifact = candidate_artifact
-            observation = {"workflow_status": row["status"],
-                           "current_node": row.get("current_node"),
-                           "error_reason": row.get("error_reason")}
-            last = conn.execute("SELECT payload_json FROM state_events WHERE project_id=? "
-                                "AND node_key=? AND event_type='attempt_observed' "
-                                "AND json_extract(payload_json,'$.attempt_id')=? ORDER BY seq DESC LIMIT 1",
-                                (current["project_id"], current["node_key"], attempt_id)).fetchone()
-            prior = json.loads(last[0]).get("workflow_observation") if last else None
-            attention_changed = status in {"paused", "unknown", "failed"} and prior != observation
-            changed = current["status"] != status or artifact != current["artifact_ref"] or attention_changed
-            if changed:
+            # The decision above is never carried across the gap: re-read the row
+            # inside this transaction exactly as reconcile always has, so the
+            # race window between observing and writing does not widen.
+            decision = self._reconcile_decision(conn, attempt_id, attempt, row, outcome, candidate_artifact)
+            current = decision["current"]
+            status, fresh, artifact = decision["status"], decision["fresh"], decision["artifact"]
+            observation, quiescent = decision["observation"], decision["quiescent"]
+            if decision["changed"]:
                 if status != "candidate":
                     node = self.store._node(conn, current["project_id"], current["node_key"])
                     receipt = conn.execute("SELECT attempt_id FROM state_acceptances WHERE receipt_id=?",

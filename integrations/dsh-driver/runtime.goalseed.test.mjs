@@ -176,7 +176,7 @@ async function driverHarness(t, goalRows = []) {
   for (const [name, mandate] of [['old', 'OLD mandate for {{project_id}}\n'], ['new', 'NEW mandate for {{project_id}}\n']]) {
     const dir = variants[name] = join(directory, 'driver-' + name);
     await mkdir(dir);
-    for (const file of await readdir(here)) if (/\.(mjs|md)$/.test(file) && !/\.test\.mjs$/.test(file) && file !== 'goal.md') await copyFile(join(here, file), join(dir, file));
+    for (const file of await readdir(here)) if ((/\.(mjs|md)$/.test(file) || file === 'roles.json') && !/\.test\.mjs$/.test(file) && file !== 'goal.md') await copyFile(join(here, file), join(dir, file));
     await writeFile(join(dir, 'goal.md'), mandate);
   }
   const activity = [], parked = new Set();

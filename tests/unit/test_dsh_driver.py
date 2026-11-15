@@ -830,9 +830,11 @@ def test_director_compacts_near_clear_and_workers_keep_the_previous_policy(runti
     config = _compaction(runtime, row)
     assert config["modelPolicies"] == [{
         "provider": "fixture-provider", "model": "fixture-model",
-        "thresholdRatio": 0.25, "retainTokens": 0}], (
-        "exactly one policy, for the director's own route: compact at a quarter of "
-        "the window and keep only the last balanced step")
+        "thresholdRatio": 0.25, "retainTokens": 0}, {
+        "provider": "aitelier", "model": "worker", "thresholdRatio": 0.5}], (
+        "the director's own route compacts at a quarter of the window and keeps only "
+        "the last balanced step; the worker route (roles.json) keeps half the window "
+        "and DSH's default tail, now as its own policy")
     assert config["thresholdRatio"] == 0.5, (
         "every other route (the aitelier/worker subagents) compacts at half the window")
     assert "retainTokens" not in config and "retainRatio" not in config, (

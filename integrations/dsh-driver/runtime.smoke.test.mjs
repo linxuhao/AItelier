@@ -8,11 +8,36 @@ import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { presentedTools, directorPresentedTools } from './tool-discovery.mjs';
+import { loadRoles } from './roles.mjs';
+import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { readHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
+
+const effective = aitelierRoles(loadRoles());
+
+/** What each role REGISTERS in this fixture, per execution mode (D1(b)): measured on
+ *  the pinned DSH 2026-11-15 with the production switch-offs. Host mode has no
+ *  project_work; workspace mode adds it for both roles. A lost MCP handshake or plugin
+ *  shrinks these sets and reds here even when the presented lists still match. */
+const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list',
+  'job_output', 'list_agents', 'list_mcp_resource_templates', 'list_mcp_resources', 'mcp__aitelier__list_pipelines',
+  'mcp__aitelier__state_graph_write', 'read', 'read_image', 'read_mcp_resource', 'search_tools', 'send_message', 'skill', 'subagent',
+  'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'web_fetch', 'web_search', 'working_directory', 'write'];
+const hostRegistered = {
+  director: [...shared, 'grep_chat_history', 'idle_dormant', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
+    'todo_finish', 'todo_plan', 'todo_rebind', 'todo_templates', 'watch_process'].sort(),
+  worker: [...shared, 'mcp__aitelier__state_graph_read', 'mcp__aitelier__wait_for_driver_inbox', 'mcp__aitelier__wait_for_run'].sort(),
+};
+const expectedRegistered = (role, host) => host ? hostRegistered[role] : [...hostRegistered[role], 'project_work'].sort();
+function assertRegistered(registered, host) {
+  for (const role of ['director', 'worker']) {
+    const seen = registered.filter(x => x.host === host && x.root === (role === 'director'));
+    assert.ok(seen.length > 0, `no ${role} assembly observed in ${host ? 'host' : 'workspace'} mode`);
+    for (const x of seen) assert.deepEqual(x.names, expectedRegistered(role, host), `${role} registered set (${host ? 'host' : 'workspace'} mode)`);
+  }
+}
 
 function assertInjectionCadence(events) {
   let epoch = 0;
@@ -95,7 +120,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
   await mkdir(childDirectory, {recursive:true});
   await mkdir(outsideDirectory, {recursive:true});
   const here = dirname(fileURLToPath(import.meta.url));
-  const requests = [], activity = [], events = [], workCalls = [], dispatches = [], parked = new Set(), childWaits = new Set();
+  const registered = [], requests = [], activity = [], events = [], workCalls = [], dispatches = [], parked = new Set(), childWaits = new Set();
   let changed = false, overflowChanged = false, contextReads = 0, output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -136,6 +161,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       childWaits.add(res); return;
     }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
+    if (req.url === '/test/registered') { registered.push(body); return send({ ok: true }); }
     if (req.url === '/test/dispatch') { dispatches.push(body); return send({ok:true}); }
     if (req.url === '/test/event') { events.push(body); return send({ ok: true }); }
     if (req.url === '/test/overflow') { overflowChanged = true; return send({ok:true}); }
@@ -279,7 +305,12 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       for (const gone of ['subagent_fork', 'workflow', 'exit_plan_mode', 'todo_write', 'glob', 'web_fetch', 'web_search',
         'interrupt_agent', 'create_goal', 'get_goal', 'update_goal', 'skill', 'working_directory', 'list_mcp_resources'])
         assert.ok(!names.includes(gone), gone + ' is still listed');
-      assert.deepEqual(names.filter(n => !presentedTools.has(n) && !directorPresentedTools.has(n)), [], 'unlisted tool presented');
+      // Equality, not intersection (D1/MF7): a presented name the role never
+      // registered is printed, so a misspelling or a missing plugin reds.
+      const role = r.child ? effective.worker : effective.director;
+      assert.deepEqual(names.filter(n => !role.presented.includes(n)), [], 'unlisted tool presented');
+      assert.deepEqual(role.presented.filter(n => !names.includes(n)), [], (r.child ? 'worker' : 'director') + ' presented names missing from the request');
+      if (r.child) for (const name of ['subagent', 'workflow', 'todo_plan']) assert.ok(!names.includes(name), 'child request lists ' + name);
     }
     assert.ok(listed.some(r => !r.child) && listed.some(r => r.child), 'tiers were not observed for both root and child');
     for (const child of [false,true]) {
@@ -351,6 +382,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     // outside an open turn at boot, which DSH accepted then and refused to load on
     // the next start (both production drivers, 2026-11-15 00:39Z).
     proc.kill('SIGTERM'); await once(proc, 'exit');
+    assertRegistered(registered, false); assertRegistered(registered, true);
     const third = requests.length;
     proc = launch();
     const deadline = Date.now() + 60000;

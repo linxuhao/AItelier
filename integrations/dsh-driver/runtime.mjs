@@ -2,6 +2,8 @@
 import { historyPage } from './history.mjs';
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { installToolDiscovery } from './tool-discovery.mjs';
+import { loadRoles, roleOf } from './roles.mjs';
+import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +19,10 @@ export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery
 
 const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
 const goalTemplate = await readFile(goalFile, 'utf8');
-const runtimeSkill = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+/** The effective role table: roles.json plus AItelier's State additions. */
+const roles = aitelierRoles(loadRoles());
+const runtimeSkill = await readFile(new URL('./' + roles.director.prompt, import.meta.url), 'utf8');
+const workerSkill = await readFile(new URL('./' + roles.worker.prompt, import.meta.url), 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
 export const stateInjectionSource = 'aitelier-driver-state';
 /** Source kind for a State runtime event. Deliberately NOT `user`: a routine
@@ -971,7 +976,13 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
   const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
-  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: env.AITELIER_DSH_SESSION });
+  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: env.AITELIER_DSH_SESSION, roles });
+  // The worker protocol reaches every native child and never the director (whose
+  // driver.md is a root-scope section in setup). A caller-less assembly gets neither.
+  ctx.systemPrompt.section({ name: 'aitelier:worker-protocol', order: 12, interpolate: false, text: context => {
+    const id = (context?.agent ?? context?.scope)?.session?.id;
+    return id !== undefined && roleOf(id, env.AITELIER_DSH_SESSION) === 'worker' ? workerSkill : '';
+  } });
   const { installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent'));
   const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
   const request = suppliedRequest ?? (async (path, body, signal) => {
@@ -990,8 +1001,11 @@ export async function boot(ctx, { env = process.env, request: suppliedRequest } 
     }
     return response.json();
   });
+  // Efforts from roles.json; AITELIER_DSH_ROOT_REASONING_EFFORT still overrides the
+  // director (an invalid value: max, as before the table).
   installHostModel(ctx, llm, { request, project: env.AITELIER_DSH_PROJECT, session: env.AITELIER_DSH_SESSION,
-    rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT),
+    rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles.director.reasoning_effort),
+    workerEffort: roles.worker.reasoning_effort,
     retry: modelRetryOptions(env) });
   // Resolve the existing mounted secret file into DSH's private credential
   // store, never into the environment inherited by test/build subprocesses.

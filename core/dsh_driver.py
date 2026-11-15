@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -122,6 +124,9 @@ def _is_lock_error(error):
 # DSH built-in tool plugins the driver profile switches off (see the patch list in
 # _provision): measured unused, or shadowing the runtime's own tools.
 UNUSED_BUILTIN_TOOL_PLUGINS = ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo")
+# The provider the runtime registers for its completion bridge (model.mjs); native
+# subagents ask it for the worker route.
+SUBAGENT_PROVIDER = "aitelier"
 
 DSH_EXTRA_MCP_DEFAULTS = {
     "devmcp": "http://127.0.0.1:7676/mcp",
@@ -186,6 +191,121 @@ def pwmcp_driver_ports(value=None):
                 "outside 1024..65535")
         ports[driver_id] = port
     return ports
+
+
+# The director/worker role table. integrations/dsh-driver/roles.mjs parses the
+# same file with the same rules (a test compares both parses and both refusals);
+# unknown keys are refused at every level.
+ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "roles.json"
+ROLE_NAMES = ("director", "worker")
+_ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", "forbidden")
+_COMPACTION_KEYS = ("thresholdRatio", "retainTokens")
+_EFFORTS = ("off", "low", "high", "max")
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_]+")
+_PROMPT_NAME = re.compile(r"[A-Za-z0-9_.-]+\.md")
+
+
+def _exact_keys(value, keys, where, required=None):
+    if not isinstance(value, dict):
+        raise ValueError(f"roles: {where} must be an object")
+    for key in value:
+        if key not in keys:
+            raise ValueError(f"roles: unknown key {where}.{key}")
+    for key in keys if required is None else required:
+        if key not in value:
+            raise ValueError(f"roles: missing key {where}.{key}")
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _tool_names(value, where):
+    if not isinstance(value, list) or any(
+            not isinstance(name, str) or not _TOOL_NAME.fullmatch(name) for name in value):
+        raise ValueError(f"roles: {where} must be a list of tool names")
+    if len(set(value)) != len(value):
+        raise ValueError(f"roles: {where} names a tool twice")
+    return value
+
+
+def validate_roles(table):
+    """Validate a parsed role table; returns it unchanged."""
+    _exact_keys(table, ("version",) + ROLE_NAMES, "table")
+    if not _is_number(table["version"]) or table["version"] != 1:
+        raise ValueError("roles: version must be 1")
+    for role in ROLE_NAMES:
+        value = table[role]
+        _exact_keys(value, _ROLE_KEYS, role)
+        if not isinstance(value["route"], str) or not value["route"]:
+            raise ValueError(f"roles: {role}.route must be a non-empty string")
+        if value["reasoning_effort"] not in _EFFORTS:
+            raise ValueError(f"roles: {role}.reasoning_effort must be one of {', '.join(_EFFORTS)}")
+        compaction = value["compaction"]
+        _exact_keys(compaction, _COMPACTION_KEYS, role + ".compaction", ("thresholdRatio",))
+        ratio = compaction["thresholdRatio"]
+        if not _is_number(ratio) or not 0 < ratio <= 1:
+            raise ValueError(f"roles: {role}.compaction.thresholdRatio must be a number in (0, 1]")
+        retain = compaction.get("retainTokens")
+        if retain is not None and not (_is_number(retain) and float(retain).is_integer() and retain >= 0):
+            raise ValueError(f"roles: {role}.compaction.retainTokens must be a non-negative integer")
+        if not isinstance(value["prompt"], str) or not _PROMPT_NAME.fullmatch(value["prompt"]):
+            raise ValueError(f"roles: {role}.prompt must be a .md file name next to roles.json")
+        presented = _tool_names(value["presented"], role + ".presented")
+        forbidden = _tool_names(value["forbidden"], role + ".forbidden")
+        both = [name for name in presented if name in forbidden]
+        if both:
+            raise ValueError(f"roles: {role} both presents and forbids {', '.join(both)}")
+    return table
+
+
+def load_roles(path=None):
+    """Load and validate roles.json (read on every call: it is small, and a host
+    restart must pick up the committed table)."""
+    return validate_roles(json.loads(Path(path or ROLES_FILE).read_text()))
+
+
+@functools.lru_cache(maxsize=1)
+def _serving_roles():
+    """The table the completion endpoint routes by, read once per backend process:
+    the backend sees the live checkout, and a route change takes effect with a
+    backend rebuild/restart, never mid-session through an edited file."""
+    return load_roles()
+
+
+def completion_route(row, session_id, roles=None):
+    """The model route a completion for `session_id` asks for.
+
+    The root session is the director: the project row's model (the owner's
+    per-project choice) overrides the table's director route. Every other
+    session is a worker and gets the table's worker route - never anything the
+    row says."""
+    table = roles or _serving_roles()
+    if session_id == row["session_id"]:
+        return row["model"] or table["director"]["route"]
+    return table["worker"]["route"]
+
+
+def compaction_config(row, roles=None):
+    """compaction-basic config: one policy per role, values from the table.
+
+    AITELIER_DSH_COMPACT_RATIO still overrides the director's ratio (clamped).
+    The worker policy keys on the native subagents' provider/route; the top-level
+    ratio (any other route) is the worker's too. When the director's own route IS
+    the worker route, only the director policy is written: DSH refuses duplicate
+    provider/model policies at load, and the director's applied there before."""
+    table = roles or load_roles()
+    director, worker = table["director"]["compaction"], table["worker"]["compaction"]
+    ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", str(director["thresholdRatio"])).strip()
+    try:
+        ratio = min(0.8, max(0.2, float(ratio)))
+    except ValueError:
+        ratio = director["thresholdRatio"]
+    policies = [{"provider": row["provider"], "model": row["model"], **director, "thresholdRatio": ratio}]
+    worker_target = (SUBAGENT_PROVIDER, table["worker"]["route"])
+    if (row["provider"], row["model"]) != worker_target:
+        policies.append({"provider": worker_target[0], "model": worker_target[1], **worker})
+    return {"thresholdRatio": worker["thresholdRatio"], "modelPolicies": policies}
 
 
 class DshDrivers:
@@ -402,21 +522,18 @@ class DshDrivers:
                 "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
         # Auto-compact fires at `min(W * thresholdRatio, W - O - B)`; the shipped
         # ratio is 0.8. It is a RATIO of the model's own window, not a token
-        # count: 0.25 is 250k on a 1M window and 50k on a 200k one.
+        # count: a quarter is 250k on a 1M window and 50k on a 200k one.
         #
-        # The director's own route compacts near-clear (retainTokens 0 keeps only
-        # the last balanced step): its work survives compaction by design - the
-        # State snapshot is re-injected after every successful compaction - and
-        # the verbatim tail was most of what a compaction left behind (measured
-        # 2026-11-06: 245-316k left at a 500k trigger with the shipped 16% tail,
-        # ~50k after idle compaction, which retains nothing). Workers have no such
-        # snapshot: every other route keeps the previous policy (half the window,
-        # DSH's default 16% verbatim tail).
-        ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", "0.25").strip()
-        try:
-            ratio = min(0.8, max(0.2, float(ratio)))
-        except ValueError:
-            ratio = 0.25
+        # The values are roles.json's (compaction_config). The director's own route
+        # compacts near-clear (retainTokens 0 keeps only the last balanced step):
+        # its work survives compaction by design - the State snapshot is
+        # re-injected after every successful compaction - and the verbatim tail was
+        # most of what a compaction left behind (measured 2026-11-06: 245-316k left
+        # at a 500k trigger with the shipped 16% tail, ~50k after idle compaction,
+        # which retains nothing). Workers have no such snapshot: they keep the
+        # previous policy (half the window, DSH's default 16% verbatim tail), now
+        # written as their own policy rather than left to the default.
+        roles = load_roles()
         # dsh-base's tool-result-pruner runs first at pressure and trims old tool
         # outputs in place. Measured 2026-11-06 (wuxia-myth, 253k): a 21.5k trim
         # brought the context back under the trigger, so the summary never ran,
@@ -426,12 +543,9 @@ class DshDrivers:
         patches = [
             {"id": "hmr", "disabled": True},
             {"id": "tool-result-pruner", "disabled": True},
-            {"id": "compaction-basic", "config": {
-                "thresholdRatio": 0.5,
-                "modelPolicies": [{"provider": row["provider"], "model": row["model"],
-                                   "thresholdRatio": ratio, "retainTokens": 0}]}},
+            {"id": "compaction-basic", "config": compaction_config(row, roles)},
             {"id": "tool-subagent", "config": {"provider": "spawn", "toolName": "subagent",
-                "agentOptions": {"provider": "aitelier", "model": "worker"}}},
+                "agentOptions": {"provider": SUBAGENT_PROVIDER, "model": roles["worker"]["route"]}}},
             # Built-in tools no driver used in a measured week (2026-11-07..14, ~83k
             # tool calls across two directors and 589 children): subagent_fork,
             # workflow, exit_plan_mode, and todo_write, which also shadows the
@@ -468,7 +582,8 @@ class DshDrivers:
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))
         return env
 
-    async def start(self, project_id, *, provider="aitelier", model="driver", actor):
+    async def start(self, project_id, *, provider="aitelier", model=None, actor):
+        model = model or load_roles()["director"]["route"]
         async with self.lock:
             if self.closing:
                 raise ValueError("driver manager is shutting down")

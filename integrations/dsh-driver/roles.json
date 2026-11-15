@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "director": {
+    "route": "driver",
+    "reasoning_effort": "max",
+    "compaction": {"thresholdRatio": 0.25, "retainTokens": 0},
+    "prompt": "driver.md",
+    "presented": ["bash", "read", "write", "edit", "grep", "read_image", "state_read", "subagent",
+                  "list_agents", "send_message", "send_user_message", "job_output", "job_kill", "job_list",
+                  "watch_process", "idle_dormant", "grep_chat_history", "todo_plan", "todo_status",
+                  "todo_finish", "todo_templates", "todo_rebind", "todo_begin", "todo_done", "todo_report",
+                  "todo_batch_plan", "todo_batch_status", "search_tools", "call_tool"],
+    "forbidden": []
+  },
+  "worker": {
+    "route": "worker",
+    "reasoning_effort": "high",
+    "compaction": {"thresholdRatio": 0.5},
+    "prompt": "worker.md",
+    "presented": ["bash", "read", "write", "edit", "grep", "read_image", "todo_begin", "todo_done",
+                  "todo_report", "todo_status", "job_output", "job_list", "job_kill", "send_message",
+                  "search_tools", "call_tool"],
+    "forbidden": ["subagent", "subagent_fork", "workflow", "interrupt_agent", "todo_plan", "todo_finish",
+                  "todo_rebind", "todo_batch_plan", "todo_batch_status", "send_user_message", "idle_dormant",
+                  "watch_process", "create_goal", "update_goal"]
+  }
+}

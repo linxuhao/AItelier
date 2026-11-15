@@ -14,7 +14,7 @@ from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
 from core import ai_router
 from core.datadir import aitelier_home
-from core.dsh_driver import DshDrivers
+from core.dsh_driver import DshDrivers, completion_route
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import StateGraphError, StateNotFound
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
@@ -303,7 +303,7 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     # the root session, the worker route for every native child. Resolved for
     # every turn, not just the binding one, so the record always states the
     # route the call was made under.
-    route = row["model"] if body.session_id == row["session_id"] else "worker"
+    route = completion_route(row, body.session_id)
     if body.session_id not in sessions:
         # Native children (including resumed old children) have their own session.
         # Bind once per child: rotate across workers, keep tool turns sticky.

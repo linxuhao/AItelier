@@ -25,7 +25,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { installToolDiscovery, searchTools, presentTools, presentedTools, directorPresentedTools } from './tool-discovery.mjs';
+import { installToolDiscovery, searchTools, presentTools } from './tool-discovery.mjs';
+import { loadRoles } from './roles.mjs';
+import { roles as aitelierRoles } from './aitelier-roles.mjs';
+
+/** Generic layer: the repository table alone. Adapter layer: plus AItelier's additions (D3). */
+const table = loadRoles();
+const effective = aitelierRoles(table);
 import { DSH_PACKAGE, describeDeclinedToMeasure, resolveDshLibraries } from './dsh-entry.mjs';
 
 /** The install libraries these tests import; each one must come from the measured install. */
@@ -38,15 +44,17 @@ const libraries = await resolveDshLibraries();
 // install, so it must not be answered with a cheerful skip either.
 if (libraries.status === 'refused') throw new Error(libraries.reason);
 
-test('every tool this runtime registers is presented; only the director gets its State write', () => {
+test('the director presents every runtime tool but the workspace-only project_work; the adapter adds its State write', () => {
   const registered = [...readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]);
   assert.ok(registered.length >= 14, 'could not read the registrations: ' + registered.length);
-  assert.deepEqual(registered.filter(name => !presentedTools.has(name)), [], 'a runtime tool would be hidden');
-  const tools = ['bash', 'glob', 'web_fetch', 'workflow', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'mcp__devmcp__x']
+  assert.deepEqual(registered.filter(name => name !== 'project_work' && !effective.director.presented.includes(name)), [], 'a runtime tool would be hidden from the director');
+  const tools = ['bash', 'glob', 'web_fetch', 'workflow', 'subagent', 'todo_plan', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'mcp__devmcp__x']
     .map(name => ({ name }));
-  assert.deepEqual(presentTools(tools, { director: true }).map(t => t.name), ['bash', 'mcp__aitelier__state_graph_write']);
-  assert.deepEqual(presentTools(tools, { director: false }).map(t => t.name), ['bash']);
-  assert.deepEqual([...directorPresentedTools], ['mcp__aitelier__state_graph_write']);
+  assert.deepEqual(presentTools(tools, effective.director).map(t => t.name), ['bash', 'subagent', 'todo_plan', 'mcp__aitelier__state_graph_write']);
+  assert.deepEqual(presentTools(tools, effective.worker).map(t => t.name), ['bash']);
+  // The generic layer alone never names a State tool.
+  assert.deepEqual(presentTools(tools, table.director).map(t => t.name), ['bash', 'subagent', 'todo_plan']);
+  assert.deepEqual(effective.director.presented.filter(n => !table.director.presented.includes(n)), ['mcp__aitelier__state_graph_write']);
 });
 
 test('search ranks exact names and Unicode descriptions, bounds results, and refuses empty queries', () => {
@@ -85,11 +93,11 @@ if (libraries.status === 'unmeasured') {
     if (libraries.mismatches.length) t.diagnostic(describeDeclinedToMeasure(libraries.pinned, libraries.mismatches));
   });
 
-  async function fixture(body) {
+  async function fixture(body, roles = effective) {
     const ctx = new Context();
     const prompt = ctx.plugin(SystemPrompt); await prompt.await();
     const tools = ctx.plugin(Tools); await tools.await();
-    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root' });
+    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles });
     let scopeOwner;
     const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
     const scopes = [];
@@ -236,4 +244,35 @@ if (libraries.status === 'unmeasured') {
     assert.deepEqual(executed.filter(([, session]) => session === 'child').map(([action]) => action), ['tool:run_pipeline', 'report_issue']);
     assert.equal(executed.filter(([, session]) => session === 'root').length, 16 + separate.length);
   }));
+
+  // Generic layer (repository roles.json only): every forbidden name is refused for a
+  // worker through call_tool AND by its direct name, with the table's reason; the
+  // director runs each; presentation follows each role's list exactly.
+  test('roles.json: worker forbidden tools are refused via call_tool and by direct name; each role is presented its own list', () => fixture(async ({ctx, agent, call}) => {
+    const root = agent('root'), child = agent('child'), ran = [];
+    const all = [...new Set([...table.director.presented, ...table.worker.presented, ...table.worker.forbidden, 'glob'])]
+      .filter(name => !['search_tools', 'call_tool'].includes(name));
+    for (const name of all) ctx.tools.register(defineTool({ name, description: name + ' tool', parameters: {}, output,
+      async execute(_a, exec) { ran.push(name + ':' + exec.agent.session.id); return 'ok'; } }));
+    for (const name of table.worker.forbidden) {
+      for (const result of [await call('call_tool', { name, arguments: {} }, child), await call(name, {}, child)]) {
+        assert.equal(result.isError, true, name + ' ran for a worker');
+        assert.ok(JSON.stringify(result.content).includes(name + " is the director's"), name + ': ' + JSON.stringify(result.content));
+      }
+      assert.equal((await call('call_tool', { name, arguments: {} }, root)).isError, false, name + ' for the director');
+    }
+    assert.ok(!ran.some(entry => entry.endsWith(':child')), 'a forbidden tool executed for the worker: ' + ran);
+    assert.equal((await call('call_tool', { name: 'glob', arguments: {} }, child)).value, 'ok', 'a deferred, not forbidden, tool stays callable');
+    const listedFor = async subject => (await ctx.systemPrompt.assemble({ agent: subject, scope: subject })).tools.map(t => t.name).sort();
+    assert.deepEqual(await listedFor(root), [...table.director.presented].sort());
+    assert.deepEqual(await listedFor(child), [...table.worker.presented].sort());
+  }, table));
+
+  test('adapter layer: without aitelier-roles the State tools are not the director\'s, so the guard test above depends on it', () => fixture(async ({ctx, agent, call}) => {
+    const child = agent('child');
+    for (const name of ['mcp__aitelier__state_graph_write', 'mcp__aitelier__record_evidence'])
+      ctx.tools.register(defineTool({ name, description: name, parameters: {}, output, async execute() { return 'ok'; } }));
+    assert.equal((await call('call_tool', { name: 'mcp__aitelier__record_evidence', arguments: {} }, child)).isError, false);
+    assert.equal((await call('mcp__aitelier__state_graph_write', { action: 'verify_node' }, child)).isError, false);
+  }, table));
 }

@@ -250,8 +250,9 @@ async function completionWithRetry(request, path, body, signal, options) {
 export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? value : 'max';
 
 /** Root completions default to rootEffort (the director plans and judges); native
- *  children default to high. An explicit DSH reasoningEffort is passed through. */
-export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', retry = {} }) {
+ *  children default to workerEffort. The runtime passes both from roles.json. An
+ *  explicit DSH reasoningEffort is passed through. */
+export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', workerEffort = 'high', retry = {} }) {
   const retryOptions = { budgetMs: retry.budgetMs ?? modelRetryBudgetMs(), delayMs: retry.delayMs ?? RETRY_DELAY_MS,
     maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? stderrRetryLog,
     ...(retry.now ? { now: retry.now } : {}), ...(retry.sleep ? { sleep: retry.sleep } : {}),
@@ -274,7 +275,7 @@ export function installHostModel(ctx, { LlmAdapter }, { request, project, sessio
         messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id)),
         tools: options.tools?.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
         max_tokens: options.maxTokens ?? 32768,
-        reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : 'high'),
+        reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : workerEffort),
       }, signal, retryOptions);
       const blocks = [];
       if (result.reasoning_content) blocks.push({ type: 'reasoning', text: result.reasoning_content });

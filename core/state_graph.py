@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sqlite3
+import time
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -26,8 +29,41 @@ KINDS = frozenset({"test", "review", "human", "artifact", "integration"})
 FACETS = frozenset({"design", "contract", "test", "content", "integration"})
 BUILDABLE = frozenset({"design", "contract"})
 FACET_SUFFIXES = {".contract": "contract", ".test": "test"}
+# The per-project budget is spent by ACTIVE nodes. Closed nodes are history:
+# they stay readable through get_node, findable through search_nodes and
+# drawable in the dashboard, but they must not stop a project from recording
+# new goals. Counting every row made the cap permanent once enough goals had
+# been accepted: on 2026-11-15 project aitelier held 1009 rows (962 VERIFIED,
+# 37 SUPERSEDED, 3 STALE, 6 CANDIDATE, 1 OPEN), so both add_nodes and
+# revise_node refused with the size message — a measured defect could not get
+# a node, and one OPEN goal could not be re-worded. Issue work was the one
+# path the old check never covered (it bypassed _validate_dag entirely), so
+# _check_active_capacity ADDS a refusal there: start_issue_work now spends the
+# same budget instead of inserting rows past it. See CLOSED_STATUSES for what
+# "closed" means here.
 MAX_NODES = 1000
+CLOSED_STATUSES = frozenset({"VERIFIED", "SUPERSEDED"})
 READY_ACTIONS = ("candidate_review", "new_attempt")
+
+# A State WRITE blocks on SQLite's write lock only for a bounded time, and then
+# refuses with a typed, retryable error instead of letting
+# ``sqlite3.OperationalError('database is locked')`` escape the command path as a
+# 500 the caller cannot act on. ONE constant bounds the whole wait; the
+# environment variable may only SHORTEN it, so no deployment outlives the bound
+# and a test shrinks it instead of really waiting ten seconds.
+STATE_WRITE_LOCK_SECONDS = 10.0
+STATE_WRITE_LOCK_SECONDS_ENV = "AITELIER_STATE_WRITE_LOCK_SECONDS"
+# Patience for ONE ``BEGIN IMMEDIATE``: never above the 5000 ms this transaction
+# always used, and recomputed from the remaining budget on every attempt (the
+# repository's precedent is core/driver_presence.py:296 - a connection that
+# already spent its patience would retry with none left).
+STATE_WRITE_LOCK_ATTEMPT_MS = 5000
+# The pause between two attempts: short on purpose, so the retry is not a spin
+# and not a second budget.
+STATE_WRITE_LOCK_PAUSE_SECONDS = 0.2
+# What a busy write is CALLED on the wire, and how soon a caller may retry.
+STATE_WRITE_BUSY_CODE = "state_write_busy"
+STATE_WRITE_BUSY_RETRY_AFTER = 1
 
 
 def ready_next_action(status: str, readiness: str) -> str | None:
@@ -59,6 +95,91 @@ class StateConflict(StateGraphError):
 
 class StateNotFound(StateGraphError):
     """An exact project/node/attempt identity does not exist."""
+
+
+class StateWriteBusy(StateGraphError):
+    """A State write could not take SQLite's write lock within its budget.
+
+    RETRYABLE, and safe to replay: the bounded wait covers ONLY
+    ``BEGIN IMMEDIATE``, which fails before any statement of the transaction body
+    runs, so a busy write wrote nothing and left nothing half-done. ``retry_after``
+    is the number of whole seconds a transport should advertise before the same
+    request is worth repeating. It subclasses ``StateGraphError`` so every
+    transport that already refuses a graph error refuses this one too, rather
+    than crashing; the HTTP command path names it specifically, as a 503.
+    """
+
+    code = STATE_WRITE_BUSY_CODE
+
+    def __init__(self, message: str, retry_after: int = STATE_WRITE_BUSY_RETRY_AFTER):
+        super().__init__(message)
+        self.retry_after = max(1, int(retry_after))
+
+
+def _write_lock_budget() -> float:
+    """The bound, in seconds, on ONE writer's wait for SQLite's write lock.
+
+    ``STATE_WRITE_LOCK_SECONDS`` unless ``AITELIER_STATE_WRITE_LOCK_SECONDS``
+    names a positive, finite, SMALLER value - an override can shorten the wait
+    (tests do), never lengthen it past the constant. Read per call, not at
+    import, so a test can shrink the budget for one request.
+    """
+    raw = os.getenv(STATE_WRITE_LOCK_SECONDS_ENV)
+    if raw is None or not raw.strip():
+        return STATE_WRITE_LOCK_SECONDS
+    try:
+        shortened = float(raw)
+    except ValueError:
+        return STATE_WRITE_LOCK_SECONDS
+    if shortened != shortened or shortened <= 0:  # NaN, zero, negative
+        return STATE_WRITE_LOCK_SECONDS
+    return min(shortened, STATE_WRITE_LOCK_SECONDS)
+
+
+def _is_write_lock_error(error: Exception) -> bool:
+    """True only for the two texts SQLite uses to mean "somebody else is writing".
+
+    Anything else arriving as ``OperationalError`` - a malformed statement, a
+    missing column - would not become true on a second look, so it is re-raised
+    untouched rather than retried and relabelled as contention.
+    """
+    return isinstance(error, sqlite3.OperationalError) and any(
+        text in str(error) for text in ("database is locked", "database table is locked"))
+
+
+def _begin_write(conn) -> None:
+    """Take SQLite's write lock, retrying ONLY the ``BEGIN IMMEDIATE`` statement.
+
+    ``BEGIN IMMEDIATE`` fails BEFORE any statement of the transaction body runs,
+    so a failed attempt wrote nothing and is safe to repeat; the body itself is
+    never retried (see ``StateGraphStore.transaction``), so a constraint
+    violation inside it fires exactly once. Every attempt recomputes
+    ``PRAGMA busy_timeout`` from the budget that is left. When the budget runs
+    out the caller gets ``StateWriteBusy`` - never a bare
+    ``sqlite3.OperationalError`` escaping the command path.
+    """
+    budget = _write_lock_budget()
+    deadline = time.monotonic() + budget
+    while True:
+        remaining = deadline - time.monotonic()
+        attempt_ms = max(1, int(min(STATE_WRITE_LOCK_ATTEMPT_MS, remaining * 1000)))
+        conn.execute(f"PRAGMA busy_timeout={attempt_ms}")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as error:
+            if not _is_write_lock_error(error):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # The retry hint is IN THE MESSAGE as well as in `retry_after`:
+                # the MCP tool surface has no status codes and no headers, so a
+                # text-only transport still learns the code and the wait.
+                raise StateWriteBusy(
+                    f"{STATE_WRITE_BUSY_CODE}: another writer held the State write lock "
+                    f"for the whole {budget:g} s budget; nothing was written, so retry the "
+                    f"same request after {STATE_WRITE_BUSY_RETRY_AFTER} s") from error
+        time.sleep(min(STATE_WRITE_LOCK_PAUSE_SECONDS, remaining))
 
 
 def now() -> str:
@@ -118,9 +239,12 @@ def dependencies(value: list[str]) -> list[str]:
 
 
 def _validate_dag(graph: dict[str, list[str]]) -> None:
-    """Kahn traversal avoids recursion limits and rejects dangling references."""
-    if len(graph) > MAX_NODES:
-        raise StateGraphError(f"a project supports at most {MAX_NODES} nodes")
+    """Kahn traversal avoids recursion limits and rejects dangling references.
+
+    Capacity is deliberately NOT checked here: MAX_NODES bounds ACTIVE nodes,
+    this function sees only keys and edges, and a revise on a project whose
+    closed rows exceed the budget must still be possible.
+    """
     degree, children = {}, {k: [] for k in graph}
     for node, deps in graph.items():
         if node in deps:
@@ -398,6 +522,13 @@ class StateGraphStore:
         An untrusted store cannot open a write transaction: every transport
         writer-gates writes before a service exists, and an untrusted object
         must carry no write path.
+
+        A WRITE takes its lock through ``_begin_write``, which retries only
+        ``BEGIN IMMEDIATE`` within a bounded budget and raises ``StateWriteBusy``
+        when it expires. The ``try`` that rolls back and the body itself start
+        AFTER that call on purpose: a failure inside the body - a constraint
+        violation, a refusal - propagates untouched and fires exactly once, and
+        the lock wait is never repeated around it.
         """
         untrusted = isinstance(self.db, UntrustedDatabase)
         if write and untrusted:
@@ -406,8 +537,11 @@ class StateGraphStore:
         with (self.db.get_connection(notebook=notebook) if untrusted
               else self.db.get_connection()) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            if write:
+                _begin_write(conn)
+            else:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("BEGIN")
             before_event = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events").fetchone()[0] if write else None
             try:
                 yield conn
@@ -605,6 +739,7 @@ class StateGraphStore:
             facets[nk] = own
             prepared.append((nk, goal, checks, deps, priority, own))
         _validate_dag(graph)
+        self._check_active_capacity(conn, project_id, len(prepared))
         self._check_facets(facets, graph)
         # All nodes first: forward references in a batch are legitimate.
         for nk, goal, checks, deps, priority, own in prepared:
@@ -619,6 +754,28 @@ class StateGraphStore:
                                                                 "contract_hash": digest(checks), "facet": own})
         return [nk for nk, *_ in prepared]
 
+    def _check_active_capacity(self, conn, project_id, adding: int = 1) -> None:
+        """Refuse creating nodes when the ACTIVE budget would be exceeded.
+
+        The cap is a budget on work in flight and outstanding, so a closed node
+        (CLOSED_STATUSES) costs nothing: otherwise a project that has delivered
+        MAX_NODES goals can never record another one. The refusal names both
+        sides so the reader can tell "the project is genuinely full" from "the
+        history is long".
+        """
+        if adding <= 0:
+            return
+        counts = {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM state_nodes WHERE project_id=? GROUP BY status",
+            (project_id,))}
+        active = sum(n for status, n in counts.items() if status not in CLOSED_STATUSES)
+        closed = sum(n for status, n in counts.items() if status in CLOSED_STATUSES)
+        if active + adding > MAX_NODES:
+            raise StateGraphError(
+                f"a project supports at most {MAX_NODES} active nodes: {active} active now, "
+                f"creating {adding} more would exceed it ({closed} closed nodes are history and do "
+                "not count; they stay readable through get_node and searchable through search_nodes)")
+
     def _add_issue_work(self, conn, project_id, issue_id, node_key, goal, checks, priority):
         """Insert one issue work item: an OPEN node with no edges and no facet,
         marked with the issue it fixes. The caller (StateIssues.start_work)
@@ -627,6 +784,7 @@ class StateGraphStore:
         if conn.execute("SELECT 1 FROM state_nodes WHERE project_id=? AND node_key=?",
                         (project_id, nk)).fetchone():
             raise StateConflict(f"duplicate node key {nk!r}")
+        self._check_active_capacity(conn, project_id, 1)
         checks = contract(checks)
         stamp = now()
         conn.execute("INSERT INTO state_nodes(project_id,node_key,revision,goal,contract_json,contract_hash,status,"
@@ -863,7 +1021,7 @@ class StateGraphStore:
             item["dependencies"] = graph[nk]
             item["blocked_by"] = blocked_by
             item["hold"], item["node_hold"] = hold, own_hold
-            item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
+            item["readiness"] = ("closed" if node["status"] in CLOSED_STATUSES
                                  else "in_progress_lease_expired" if nk in lapsed
                                  else "in_progress" if nk in active else "held" if hold
                                  else "blocked" if blocked_by else "ready")
@@ -930,7 +1088,7 @@ class StateGraphStore:
             view = self._graph_view(conn, project_id)
         return {**view, "nodes": [n for n in view["nodes"] if not n.get("issue_id")],
                 "issue_work": [issue_work_entry(n) for n in view["nodes"]
-                               if n.get("issue_id") and n["status"] not in ("VERIFIED", "SUPERSEDED")]}
+                               if n.get("issue_id") and n["status"] not in CLOSED_STATUSES]}
 
     def get_node(self, project_id: str, node_key: str) -> dict:
         key(node_key)

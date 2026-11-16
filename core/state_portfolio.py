@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 from core.state_graph import (
-    StateConflict, StateGraphError, digest, integer, key, now, ready_action_counts, text,
+    CLOSED_STATUSES, StateConflict, StateGraphError, digest, integer, key, now, ready_action_counts, text,
 )
 from core.state_metadata import node_hold, project_policy
 
@@ -365,7 +365,7 @@ class StatePortfolio:
             from core.state_review_independence import self_reviewed_count
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
-                    "issue_work": [w for w in issue_work if w["status"] not in ("VERIFIED", "SUPERSEDED")],
+                    "issue_work": [w for w in issue_work if w["status"] not in CLOSED_STATUSES],
                     "issue_work_counts": dict(Counter(w["status"] for w in issue_work)),
                     "self_reviewed_receipts": self_reviewed_count(conn, project_id),
                     "counts": dict(Counter(n["status"] for n in nodes)),

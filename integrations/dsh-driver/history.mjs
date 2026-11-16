@@ -5,18 +5,11 @@ import { openSync, readSync, closeSync, fstatSync, readdirSync, existsSync } fro
 import { join } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 import { resolveDshEntry } from './dsh-entry.mjs';
+import { historyPage, visibleTypes } from '../dsh-director/lib/core.mjs';
 
-const visibleTypes = new Set(['user/message', 'assistant/message', 'tool/call', 'tool/result', 'compaction/end', 'agent/error']);
-
-export function historyPage(events, { before_seq = Number.MAX_SAFE_INTEGER, limit = 50 } = {}) {
-  const visible = visibleTypes;
-  const selected = events.filter(e => e.seq < before_seq && visible.has(e.type));
-  const page = selected.slice(-limit);
-  return { entries: page.map(e => {
-    const text = JSON.stringify(e.data, null, 2);
-    return { seq: e.seq, type: e.type, name: e.data?.name ?? null, timestamp: e.time ?? null, text: text.slice(0, 16000), truncated: text.length > 16000 };
-  }), has_more: selected.length > page.length, next_before_seq: page[0]?.seq ?? null };
-}
+// historyPage and the visible event types are dsh-director's (lib/core.mjs); this
+// file keeps the backend's readers and re-exports them for its callers.
+export { historyPage, visibleTypes } from '../dsh-director/lib/core.mjs';
 
 /**
  * Which DSH owns the persistence package this reader imports.

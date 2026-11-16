@@ -83,7 +83,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
-      { insert: [{ id: 'fixture', name: provider }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: provider }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -155,7 +155,7 @@ async function driveSendUserMessage(t, toolArgs) {
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
-      { insert: [{ id: 'fixture', name: provider }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: provider }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });

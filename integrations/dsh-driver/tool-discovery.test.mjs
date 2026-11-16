@@ -45,7 +45,8 @@ const libraries = await resolveDshLibraries();
 if (libraries.status === 'refused') throw new Error(libraries.reason);
 
 test('the director presents every runtime tool but the workspace-only project_work; the adapter adds its State write', () => {
-  const registered = [...readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]);
+  // The runtime's tools are registered by the adapter (runtime.mjs) and the director plugin (dsh-director/index.mjs).
+  const registered = ['./runtime.mjs', '../dsh-director/index.mjs'].flatMap(file => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
   assert.ok(registered.length >= 14, 'could not read the registrations: ' + registered.length);
   assert.deepEqual(registered.filter(name => name !== 'project_work' && !effective.director.presented.includes(name)), [], 'a runtime tool would be hidden from the director');
   const tools = ['bash', 'glob', 'web_fetch', 'workflow', 'subagent', 'todo_plan', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'mcp__devmcp__x']

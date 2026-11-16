@@ -491,6 +491,7 @@ class DshDrivers:
         (profile / "package.json").write_text(json.dumps({"private": True, "dsh": {
             "profile": {"bundles": ["@deepseek-ai/dsh-base"]}}}))
         source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "runtime.mjs"
+        director_source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "index.mjs"
         # JSON is YAML too; the runtime installs its own native State/pipeline tools.
         # Local MCP services the driver may use, each switchable independently:
         # the URL is the switch. A blank URL means "do not register it", so an
@@ -556,7 +557,10 @@ class DshDrivers:
             # director nor a child can reach them. Rarely used tools stay loaded and
             # deferred instead (integrations/dsh-driver/tool-discovery.mjs).
             *[{"id": plugin, "disabled": True} for plugin in UNUSED_BUILTIN_TOOL_PLUGINS],
-            {"insert": [{"id": "aitelier-driver", "name": str(source)},
+            # dsh-director (the generic director plugin) first, then this adapter,
+            # which provides its `directorHost` service (plugin design step 2, MF1).
+            {"insert": [{"id": "dsh-director", "name": str(director_source)},
+                {"id": "aitelier-driver", "name": str(source)},
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",
                     "url": self.base_url.rstrip("/") + "/mcp",

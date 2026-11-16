@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,6 +173,8 @@ async function driverHarness(t, goalRows = []) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-goalseed-'));
   // Two copies of the driver that differ only in goal.md stand for "goal.md edited, host service restarted".
   const variants = {};
+  // Both copies import the director plugin as ../dsh-director: one shared sibling copy.
+  await cp(join(here, '..', 'dsh-director'), join(directory, 'dsh-director'), { recursive: true, filter: source => !source.includes('node_modules') });
   for (const [name, mandate] of [['old', 'OLD mandate for {{project_id}}\n'], ['new', 'NEW mandate for {{project_id}}\n']]) {
     const dir = variants[name] = join(directory, 'driver-' + name);
     await mkdir(dir);
@@ -197,7 +199,7 @@ async function driverHarness(t, goalRows = []) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
-  const profile = variant => ['driver-' + variant, JSON.stringify([{ id: 'hmr', disabled: true }, ...goalRows, { insert: [{ id: 'driver', name: join(variants[variant], 'runtime.mjs') }] }])];
+  const profile = variant => ['driver-' + variant, JSON.stringify([{ id: 'hmr', disabled: true }, ...goalRows, { insert: [{ id: 'director', name: join(directory, 'dsh-director', 'index.mjs') }, { id: 'driver', name: join(variants[variant], 'runtime.mjs') }] }])];
   for (const variant of ['old', 'new']) {
     const dir = join(directory, 'home/profiles/driver-' + variant); await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));

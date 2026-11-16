@@ -1,0 +1,19 @@
+{
+  "what": "Every model request of the dsh-driver smoke scenarios (runtime.smoke.test.mjs), recorded with DSH_DIRECTOR_RECORD_DIR before the dsh-director split (commit 9dc85a7886, the unsplit runtime plus the test-only recorder) and after it, on the same host state.",
+  "files": {
+    "smoke-requests.json.gz": "{scratch, boots: [boot1, boot2, boot3]}; each request is {options, summary, child, host} as the fixture provider received it",
+    "bridge-completions.json.gz": "{scratch, completions, activity}: the bodies the default host adapter sent to the backend /completion bridge (route, reasoning_effort, tools, messages)"
+  },
+  "recorded_normalization": {
+    "uuid": "every 8-4-4-4-12 hex UUID (message ids, child session ids, goal ids) is replaced by <UUID> before storing",
+    "scratch": "the run's temporary directory is replaced by <SCRATCH>",
+    "signal": "options.signal (an AbortSignal, serialised as {}) is dropped"
+  },
+  "compare_normalization": {
+    "ignored_keys": ["compaction_seq"],
+    "ignored_keys_why": "the session-log seq of the compaction a snapshot belongs to; it moves by one between two runs of the SAME code (measured: before1 vs before2 and after1 vs after2 both differ there)",
+    "streams": "requests are compared per boot and per kind (R root, C child, S summary) in order; interleaving between kinds is scheduling, not content",
+    "prefix": "each stream is compared over the common prefix; the stream lengths may differ by at most one (the last in-flight request when a boot is stopped)",
+    "boot3": "the third boot is compared on its first root request's provider, model, tools and system message only: its later message order depends on whether a child's settle notice or the goal round arrives first (measured to differ between two runs of the same code)"
+  }
+}

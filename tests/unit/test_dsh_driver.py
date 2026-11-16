@@ -632,6 +632,24 @@ def test_local_mcp_servers_are_registered_by_default(runtime):
         assert entry["config"]["failOnStartupError"] is False
 
 
+def test_profile_inserts_the_director_plugin_first_then_its_adapter(runtime):
+    """Plugin design step 2 (MF1): the profile is rewritten on every start, and the
+    split adds exactly one insert - the generic dsh-director plugin, ahead of the
+    AItelier adapter that provides its directorHost service. Everything else keeps
+    its place, so a revert plus one restart rewrites the old composition."""
+    from pathlib import Path
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    insert = next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)
+    ids = [e["id"] for e in insert]
+    assert ids.count("dsh-director") == 1 and ids[0] == "dsh-director", ids
+    assert ids[1:3] == ["aitelier-driver", "mcp-aitelier"], ids
+    director, adapter = Path(insert[0]["name"]), Path(insert[1]["name"])
+    assert (director.parent.name, director.name) == ("dsh-director", "index.mjs") and director.is_file()
+    assert (adapter.parent.name, adapter.name) == ("dsh-driver", "runtime.mjs") and adapter.is_file()
+    assert director.parent.parent == adapter.parent.parent, "both plugins come from the same checkout"
+
+
 def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch):
     """The autoshot browser server is registered, redirectable and withdrawable.
 

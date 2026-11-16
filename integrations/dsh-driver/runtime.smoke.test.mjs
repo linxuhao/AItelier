@@ -182,7 +182,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
       // The production profile's switch-offs (core/dsh_driver.py UNUSED_BUILTIN_TOOL_PLUGINS).
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
-      { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
+      { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -463,7 +463,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   try {
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
-    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'driver', name: join(here, 'runtime.mjs') }] }]));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] }]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: withoutCallerMode({ ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,

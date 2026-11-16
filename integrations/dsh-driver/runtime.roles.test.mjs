@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,8 +40,10 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
   const directory = await mkdtemp(join(tmpdir(), 'dsh-roles-'));
   // A private copy of the runtime, so this test can change ITS roles.json between
   // boots; production has no knob for that and gets none.
-  const plugin = join(directory, 'plugin');
-  await mkdir(plugin);
+  // The adapter imports the director plugin as ../dsh-director, so the copy keeps that layout.
+  const plugin = join(directory, 'plugin', 'dsh-driver');
+  await mkdir(plugin, { recursive: true });
+  await cp(join(here, '..', 'dsh-director'), join(directory, 'plugin', 'dsh-director'), { recursive: true, filter: source => !source.includes('node_modules') });
   for (const file of await readdir(here))
     if (/\.(mjs|md|json)$/.test(file) && !file.endsWith('.test.mjs') && file !== 'package-lock.json') await copyFile(join(here, file), join(plugin, file));
   const driverSkill = await readFile(join(plugin, 'driver.md'), 'utf8');
@@ -85,7 +87,7 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
       { id: 'hmr', disabled: true },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
-      { insert: [{ id: 'fixture', name: join(here, 'fixture-roles-provider.mjs') }, { id: 'driver', name: join(plugin, 'runtime.mjs') },
+      { insert: [{ id: 'fixture', name: join(here, 'fixture-roles-provider.mjs') }, { id: 'director', name: join(directory, 'plugin', 'dsh-director', 'index.mjs') }, { id: 'driver', name: join(plugin, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });

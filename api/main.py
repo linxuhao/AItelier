@@ -402,6 +402,28 @@ async def invalidate_read_cache(request: Request, call_next):
     return response
 
 
+async def _write_denial_reason(request: Request):
+    """`authz.write_denial_reason`, on a worker thread - it is not free.
+
+    With the driver feature on, the verdict resolves the presented token through
+    `DriverRegistry.lookup_token`: a SELECT plus a throttled `last_seen_at`
+    UPDATE whose COMMIT fsyncs the WAL, every connection opened and closed on
+    whichever thread called us. Every MUTATING request goes through this gate,
+    so on the loop thread that measured as 2.81 s of one request's stall
+    (`iss-ecea53516eb543c4`). The verdict is identical either way - the gate
+    still answers 403 with the same typed code - and the caller still AWAITS it,
+    so no request is let through before the verdict exists.
+
+    FastAPI already runs `require_writer`/`require_reader` - the SAME verdict as
+    a dependency - on the threadpool by its own rules (sync `def` dependencies),
+    and `list_connections` above already hands this exact call to
+    `run_in_threadpool`. This middleware, being `async`, was the one place the
+    same blocking verdict ran on the loop.
+    """
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(authz.write_denial_reason, request)
+
+
 @app.middleware("http")
 async def write_gate(request: Request, call_next):
     """Require write authorization for mutating requests."""
@@ -436,13 +458,13 @@ async def write_gate(request: Request, call_next):
     if request.url.path.startswith("/api/state/") and state_action in {
             "send_director_message", "list_director_messages",
             "acknowledge_director_message", "resolve_director_message"}:
-        if authz.write_denial_reason(request):
+        if await _write_denial_reason(request):
             from core.director_messaging_protocol import DirectorMessageError
             return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
         return await call_next(request)
     if request.url.path == "/api/state" or request.url.path.startswith("/api/state/"):
         return await call_next(request)
-    code = authz.write_denial_reason(request)
+    code = await _write_denial_reason(request)
     if not code:
         return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)

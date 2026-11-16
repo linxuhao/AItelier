@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from '../lib/capacity.mjs';
@@ -33,6 +33,26 @@ test('DSH\'s own capacity refusal is recognised; the guard\'s refusal and other 
   assert.ok(!isDshLimitRefusal({ isError: false, content: [{ type: 'text', text: 'subagent limit reached' }] }));
   assert.ok(!isDshLimitRefusal({ isError: true, content: [{ type: 'text', text: '{"refused":"at_capacity","reason":"subagent limit reached"}' }] }));
   assert.ok(!isDshLimitRefusal({ isError: true, error: { message: 'model failed' } }));
+});
+
+test('an unreadable refusals file is moved aside and named, not read as "no refusals"', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-refused-'));
+  try {
+    await writeFile(join(dir, 'refused-dispatches.json'), '[{"key": "k1", "descr');
+    const logs = [];
+    const refusals = await new RefusedDispatches(dir, line => logs.push(line)).load();
+    assert.equal(refusals.size, 0);
+    const files = await readdir(dir);
+    assert.ok(!files.includes('refused-dispatches.json'));
+    const aside = files.find(name => /^refused-dispatches\.corrupt-.*\.json$/.test(name));
+    assert.ok(aside, files.join(','));
+    assert.equal(await readFile(join(dir, aside), 'utf8'), '[{"key": "k1", "descr', 'the unreadable bytes are kept');
+    assert.ok(logs.some(line => line.includes(aside)), logs.join('\n'));
+    await writeFile(join(dir, 'refused-dispatches.json'), '{"not": "a list"}');
+    await new RefusedDispatches(dir, line => logs.push(line)).load();
+    assert.equal((await readdir(dir)).filter(name => name.includes('corrupt')).length, 2, 'the second corrupt file overwrote the first');
+    assert.ok(!(await readdir(dir)).includes('refused-dispatches.json'), 'a non-list file was read as no refusals');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('refusals persist until removed, and a removal keeps refusals recorded since', async () => {

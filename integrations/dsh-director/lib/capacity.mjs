@@ -31,7 +31,23 @@ export function describeDispatch(args = {}) {
   return out;
 }
 
-/** DSH's own capacity refusal, as the director's `subagent` tool result carries it. */
+/** DSH's own capacity refusal, as the director's `subagent` tool result carries it.
+ *
+ *  What this rests on, read from the pinned DSH (dsh-subagent ActivationPool.reserve):
+ *  the refusal is a thrown SubagentError, code ACTIVATION_LIMIT_REACHED, message
+ *  "subagent limit reached (active child limit: N) ...", which the tool pipeline turns
+ *  into a FAILED result (isError true, the message in `error` / `content`). A result
+ *  that is not an error is never a refusal: a worker that started and printed the
+ *  token is not one.
+ *
+ *  NOT witnessed end to end. The guard counts the dispatches it let through, so in the
+ *  real-DSH shapes measured (sequential, and four parallel calls in one message) DSH's
+ *  own refusal is unreachable from the director's `subagent` calls, and no real run
+ *  has produced a by:'dsh' entry. The witnesses are the unit test of this function
+ *  and the real-DSH proof that the director's tools/result events reach the listener
+ *  that calls it (the in-flight count it also clears: the main run refuses at live 2,
+ *  not 4). If DSH changes the result shape, this returns false and the refusal is not
+ *  recorded - the dispatch itself still answered the director with DSH's error. */
 export function isDshLimitRefusal(result) {
   if (!result?.isError) return false;
   const text = JSON.stringify([result.error ?? null, result.content ?? null]);
@@ -40,11 +56,20 @@ export function isDshLimitRefusal(result) {
 
 /** Refused dispatches waiting for a free slot, persisted (`refused-dispatches.json`). */
 export class RefusedDispatches {
-  constructor(dir) { this.dir = dir; this.file = join(dir, 'refused-dispatches.json'); this.list = []; this.writing = Promise.resolve(); }
+  constructor(dir, log = () => {}) { this.dir = dir; this.log = log; this.file = join(dir, 'refused-dispatches.json'); this.list = []; this.writing = Promise.resolve(); }
+  /** Read the refusals. An unreadable file is not "no refusals": it is moved aside
+   *  (refused-dispatches.corrupt-<time>.json) and named, and the list starts empty. */
   async load() {
     await mkdir(this.dir, { recursive: true });
-    try { const parsed = JSON.parse(await readFile(this.file, 'utf8')); if (Array.isArray(parsed)) this.list = parsed.filter(e => typeof e?.key === 'string'); }
-    catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    let text;
+    try { text = await readFile(this.file, 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') return this; throw error; }
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+    if (Array.isArray(parsed)) { this.list = parsed.filter(e => typeof e?.key === 'string'); return this; }
+    const aside = join(this.dir, `refused-dispatches.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}.json`);
+    await rename(this.file, aside);
+    this.log(`refused dispatches unreadable: moved to ${aside}; refusals recorded there get no slot-free wake`);
     return this;
   }
   get size() { return this.list.length; }

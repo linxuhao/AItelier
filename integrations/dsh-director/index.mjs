@@ -89,7 +89,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // names them was delivered (through the outbox), across a restart too.
   const dshLimit = () => ctx.get('subagents')?.config?.maxActiveSubagents?.get?.();
   const limits = () => capacityLimits({ hostLimit: config.maxActiveSubagents, dshLimit: dshLimit(), reservedSlots: config.reservedSlots });
-  const refusals = await new RefusedDispatches(config.stateDir).load();
+  const refusals = await new RefusedDispatches(config.stateDir, line => ctx.logger.warn(line)).load();
   const warn = error => ctx.logger.warn(String(error));
   // Dispatches the guard let through whose result has not come back yet. Parallel calls
   // in one message are all guarded before any child starts, so live children alone

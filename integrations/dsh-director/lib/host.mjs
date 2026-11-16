@@ -11,6 +11,9 @@
  *  implement. Optional operations that are absent degrade as `optionalDefaults`
  *  documents. */
 
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
 export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels'];
@@ -34,6 +37,18 @@ export function validateHost(host) {
   }
   if (host.config && typeof host.config === 'object') {
     for (const key of REQUIRED_CONFIG) if (host.config[key] === undefined || host.config[key] === '') problems.push(`missing config: ${key}`);
+    // Present is not enough for the role table: it must be a readable file, with the
+    // director's and the worker's prompts next to it (refused here, not as an ENOENT at boot).
+    if (typeof host.config.rolesFile === 'string' && host.config.rolesFile) {
+      let table;
+      try { table = JSON.parse(readFileSync(host.config.rolesFile, 'utf8')); }
+      catch (error) { problems.push(`config: rolesFile ${host.config.rolesFile} is not a readable role table (${error.code ?? error.message})`); }
+      for (const role of ['director', 'worker']) {
+        const prompt = table?.[role]?.prompt;
+        if (table && (typeof prompt !== 'string' || !existsSync(join(dirname(host.config.rolesFile), prompt))))
+          problems.push(`config: rolesFile ${role} prompt ${prompt} is not next to ${host.config.rolesFile}`);
+      }
+    }
     if (host.config.todo && typeof host.config.todo === 'object') {
       for (const key of REQUIRED_TODO) if (!host.config.todo[key]) problems.push(`missing config: todo.${key}`);
       // Optional, but typed: python defaults to python3 and cwd to the process's own

@@ -2,9 +2,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateHost } from '../lib/host.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// A real role table with its two prompts, so the rolesFile check has something to accept.
+const tableDir = mkdtempSync(join(tmpdir(), 'dsh-director-roles-'));
+const role = (route, prompt) => ({ route, reasoning_effort: 'high', compaction: { thresholdRatio: 0.5 }, prompt, presented: ['bash'], forbidden: [] });
+writeFileSync(join(tableDir, 'roles.json'), JSON.stringify({ version: 1, director: role('director', 'director.md'), worker: role('worker', 'worker.md') }));
+writeFileSync(join(tableDir, 'director.md'), 'director'); writeFileSync(join(tableDir, 'worker.md'), 'worker');
 
 const good = () => ({ version: '1.2.0', capabilities: ['progress'], progress: () => {},
-  config: { sessionId: 's', provider: 'p', model: 'm', stateDir: '/tmp/x', dshEntry: '/x/dsh', rolesFile: '/x/roles.json',
+  config: { sessionId: 's', provider: 'p', model: 'm', stateDir: '/tmp/x', dshEntry: '/x/dsh', rolesFile: join(tableDir, 'roles.json'),
     todo: { module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' } },
   context: async () => '', events: async () => ({ stop() {} }) });
 
@@ -37,4 +46,19 @@ test('the effective role table is validated: adapter extras are allowed, anythin
   assert.throws(() => validateEffectiveRoles({ ...table, worker: { ...table.worker, allowed_actions: { write_tool: 'report' } } }), /allowed_actions/);
   assert.throws(() => validateEffectiveRoles({ ...table, director: { ...table.director, presented: 'bash' } }), /presented/);
   assert.throws(() => validateEffectiveRoles(Promise.resolve(table)), /role|object|missing/);
+});
+
+test('a role table that is absent, or whose prompts are not next to it, is refused at load (not an ENOENT at boot)', () => {
+  assert.throws(() => validateHost({ ...good(), config: { ...good().config, rolesFile: join(tableDir, 'missing.json') } }),
+    /rolesFile .*missing\.json is not a readable role table/);
+  const lonely = mkdtempSync(join(tmpdir(), 'dsh-director-roles-'));
+  writeFileSync(join(lonely, 'roles.json'), JSON.stringify({ version: 1, director: role('director', 'director.md'), worker: role('worker', 'worker.md') }));
+  assert.throws(() => validateHost({ ...good(), config: { ...good().config, rolesFile: join(lonely, 'roles.json') } }),
+    /director prompt director\.md is not next to/);
+});
+
+test('the generic held-work refusal names no backend vocabulary', async () => {
+  const { dormancyRefusal } = await import('../lib/core.mjs');
+  assert.deepEqual(dormancyRefusal({ reason: 'quiet', claims: [{ node_key: 'w1' }] }),
+    { refused: 'live_claims', reason: 'you hold work that is not finished', node_keys: ['w1'] });
 });

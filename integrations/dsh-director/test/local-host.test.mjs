@@ -3,14 +3,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
 import { localHost } from '../hosts/local.mjs';
 
 const roots = [];
-// What the local host requires besides its root (step 2 ships no table, prompts or todo package).
-const required = { rolesFile: '/nonexistent/roles.json', todo: { module: 'todo_cli', stateDirEnv: 'TODO_STATE_DIR' } };
+// What the local host requires besides its root (step 2 ships no table, prompts or todo package):
+// a real role table with its prompts (validateHost reads it), and a todo CLI's names.
+const tableDir = mkdtempSync(join(tmpdir(), 'dsh-director-local-roles-'));
+const role = (route, prompt) => ({ route, reasoning_effort: 'high', compaction: { thresholdRatio: 0.5 }, prompt, presented: ['bash'], forbidden: [] });
+writeFileSync(join(tableDir, 'roles.json'), JSON.stringify({ version: 1, director: role('director', 'director.md'), worker: role('worker', 'worker.md') }));
+writeFileSync(join(tableDir, 'director.md'), 'director'); writeFileSync(join(tableDir, 'worker.md'), 'worker');
+const required = { rolesFile: join(tableDir, 'roles.json'), todo: { module: 'todo_cli', stateDirEnv: 'TODO_STATE_DIR' } };
 process.on('exit', () => {});
 async function freshRoot() {
   const root = await mkdtemp(join(tmpdir(), 'dsh-director-local-'));

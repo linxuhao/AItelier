@@ -25,7 +25,7 @@ async function files(dir) {
   return out;
 }
 
-test('no shipped byte of dsh-director names the backend, and no code calls its routes, its state_ tools or the adapter', async () => {
+test('no shipped byte of dsh-director names the backend, and no code string carries its routes, tool names or vocabulary, nor imports the adapter', async () => {
   const found = [];
   const banned = new RegExp(name, 'i');
   const literal = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
@@ -36,7 +36,9 @@ test('no shipped byte of dsh-director names the backend, and no code calls its r
       if (banned.test(line)) { found.push(where); return; }
       if (!/\.(mjs|js|ts)$/.test(file)) return;
       if (/(from\s+|import\(\s*)['"][^'"]*dsh-driver/.test(line)) { found.push(where); return; }
-      for (const [, , value] of line.matchAll(literal)) if (/\/api\/|\bstate_[a-z]/.test(value)) { found.push(where); break; }
+      // The backend's vocabulary in a string the model can see: its routes, its state_ tools,
+      // and State itself (capitalised, as its prompts and refusals write it).
+      for (const [, , value] of line.matchAll(literal)) if (/\/api\/|\bstate_[a-z]|\bState\b/.test(value)) { found.push(where); break; }
     });
   }
   assert.deepEqual(found, []);

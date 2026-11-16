@@ -1,7 +1,9 @@
 /** The directorHost conformance suite (plugin design §8.3, §9 MF3-MF5).
  *
  *  `conformance(name, make)` registers node:test cases against any host. `make()`
- *  returns { host, seed, api? } where `seed` names what the host was prepared with:
+ *  returns { host, seed, api?, reopen? } where `reopen()` (optional) resolves to a new
+ *  host over the same durable state - a restart; without it the same host object is
+ *  reused - and `seed` names what the host was prepared with:
  *    settled:  a work id whose state is settled (completed | failed | cancelled)
  *    active:   a work id that is still working
  *    held:     the node_key of work this director holds
@@ -76,10 +78,45 @@ export function conformance(name, make) {
     } finally {
       // After stop() the delivery ends; `done` must settle (resolve, or reject with the
       // stop's abort - the director ignores it once it disposed) within a bound.
-      events.stop();
-      const settled = await Promise.race([Promise.resolve(events.done).then(() => true, () => true),
-        new Promise(resolve => setTimeout(() => resolve(false), 10000))]);
-      assert.ok(settled, 'events.done did not settle after stop()');
+      assert.ok(await stopped(events), 'events.done did not settle after stop()');
     }
   });
+  test(`${name}: an event whose delivery failed is delivered again, under the same id`, async t => {
+    const { host, seed, api, reopen } = await make();
+    if (!api) { t.skip('no director api: proven by this host\'s real-DSH scenarios'); return; }
+    // The director crashed before it recorded the event: notify threw. The id the host
+    // gives the redelivery must be the one it gave the failed delivery, or the director
+    // cannot recognise the event and every redelivery is a duplicate the model sees.
+    const failedIds = [];
+    const failing = { ...api, notify: async (_text, options) => { failedIds.push(options?.id); throw new Error('director stopped before recording this event'); } };
+    // A host may fail its events() call itself (an event already waiting) or its later
+    // delivery; either way the event must come back.
+    let events;
+    try {
+      events = await host.events(failing);
+      Promise.resolve(events.done).catch(() => {});   // its failure is the expected one
+      await seed.event();
+      const deadline = Date.now() + 10000;
+      while (!failedIds.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    } catch (error) { if (!failedIds.length) throw error; }
+    if (events) assert.ok(await stopped(events), 'events.done did not settle after stop()');
+    assert.ok(failedIds.length >= 1, 'the failing delivery was never attempted');
+    assert.equal(typeof failedIds[0], 'string', 'the failed delivery carried no id');
+    const before = api.notified.length;
+    events = await (reopen ? await reopen() : host).events(api);   // the next process
+    try {
+      const again = Date.now() + 10000;
+      while (api.notified.length === before && Date.now() < again) await new Promise(resolve => setTimeout(resolve, 20));
+      while (!api.notifiedIds.includes(failedIds[0]) && Date.now() < again) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(api.notified.length > before, 'the event whose delivery failed was not delivered again');
+      assert.ok(api.notifiedIds.includes(failedIds[0]), `redelivered under another id: ${failedIds[0]} vs ${JSON.stringify(api.notifiedIds)}`);
+    } finally { assert.ok(await stopped(events), 'events.done did not settle after stop()'); }
+  });
+}
+
+/** Stop a host's delivery and wait (bounded) for `done` to settle either way. */
+async function stopped(events) {
+  events.stop();
+  return Promise.race([Promise.resolve(events.done).then(() => true, () => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 10000))]);
 }

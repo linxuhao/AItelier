@@ -23,7 +23,7 @@
  *    inbox/*.json|txt one wake event per file, id 'inbox:<file>'; delivered, then moved to inbox/done/
  *    progress.jsonl  one phase report per line
  *    state/          the director's own state (todo plans) */
-import { readFile, writeFile, appendFile, readdir, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -124,8 +124,9 @@ export function localHost(options = {}) {
         },
       }));
     },
-    /** Wake events: every file that lands in inbox/ is delivered once, then moved to
-     *  inbox/done/ (the move is the cursor: a restart does not deliver it again). */
+    /** Wake events: every file that lands in inbox/ is delivered, then moved to
+     *  inbox/done/ (the move is the cursor). A crash before the move redelivers it under
+     *  the same id; the director recognises it. */
     async events({ ctx, notify, agent, isDisposed }) {
       await mkdir(files.done, { recursive: true });
       if (options.objective && !ctx.goals.get(agent)) ctx.goals.create(agent, { objective: options.objective });
@@ -134,10 +135,13 @@ export function localHost(options = {}) {
           .map(e => e.name).sort();
         for (const file of names) {
           if (isDisposed()) return;
-          const text = await readFile(join(files.inbox, file), 'utf8');
+          const path = join(files.inbox, file);
+          const [text, { ino, mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
           // Deliver first, then move (plugin step 7): a crash in between redelivers this
           // file under the same id, which the director recognises; moving first lost it.
-          await notify('Director event (' + file + '):\n' + text, { id: 'inbox:' + file });
+          // The id is this file (name, inode, write time; the inode alone tells a later
+          // file of the same name apart while the delivered one sits in done/).
+          await notify('Director event (' + file + '):\n' + text, { id: `inbox:${file}:${ino}:${mtimeMs}` });
           await rename(join(files.inbox, file), join(files.done, file));
         }
       };

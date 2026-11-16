@@ -46,9 +46,13 @@ export interface DirectorApi {
   todoPlans(): Promise<unknown[]>; batchRedispatch(): Promise<unknown[]>;
   /** Steer one wake event into the director (a runtime-event user message). Present from
    *  install() on; it refuses (throws, naming why) until the director session exists.
-   *  v1.1: pass `{ id }` - stable across restarts, derived from the event itself - and the
-   *  director delivers each id once (checked before delivery, recorded after it: a crash
-   *  in between duplicates, never loses). */
+   *  v1.1: pass `{ id }` - stable across restarts, derived from the event itself, never
+   *  from a counter or a random value - and the director delivers each (id, text) once:
+   *  the same id with the same text is a redelivery, the same id with other text is a
+   *  new event. Checked before delivery, recorded after it: a crash in between
+   *  duplicates, never loses. If notify throws, the host must deliver the event again
+   *  later under the same id; the conformance suite checks exactly that (a delivery
+   *  that failed comes back with the same id), and that every event carries an id. */
   notify(text: string, options?: { id?: string }): Promise<void>;
   eventMessage(text: string): unknown;
   report(phase: string, error?: string, event?: unknown): Promise<void>;

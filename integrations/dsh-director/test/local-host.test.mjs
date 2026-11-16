@@ -93,12 +93,21 @@ test('local host: an event whose delivery failed stays in the inbox and is redel
   const root = await freshRoot();
   await mkdir(join(root, 'inbox'), { recursive: true });
   await writeFile(join(root, 'inbox', 'b.json'), '{"x":1}');
-  const failing = { ...fakeApi(), notify: async () => { throw new Error('crash during delivery'); } };
+  const failedIds = [];
+  const failing = { ...fakeApi(), notify: async (_text, options) => { failedIds.push(options?.id); throw new Error('crash during delivery'); } };
   await assert.rejects(localHost({ root, ...required, pollMs: 20 }).events(failing));
   assert.deepEqual(await readdir(join(root, 'inbox', 'done')), [], 'moved although it was never delivered');
   const second = fakeApi();
   const events = await localHost({ root, ...required, pollMs: 20 }).events(second);
   events.stop(); await events.done;
-  assert.deepEqual(second.notifiedIds, ['inbox:b.json']);
+  assert.equal(second.notifiedIds.length, 1);
+  assert.match(second.notifiedIds[0], /^inbox:b\.json:\d/);
+  assert.equal(second.notifiedIds[0], failedIds[0], 'redelivered under another id');
+  // A later file of the same name is a new event, with a new id.
+  await writeFile(join(root, 'inbox', 'b.json'), '{"x":1}');
+  const later = await localHost({ root, ...required, pollMs: 20 }).events(second);
+  later.stop(); await later.done;
+  assert.equal(second.notifiedIds.length, 2);
+  assert.notEqual(second.notifiedIds[1], second.notifiedIds[0], 'a new file of the same name reused the old id');
   assert.deepEqual(await readdir(join(root, 'inbox', 'done')), ['b.json']);
 });

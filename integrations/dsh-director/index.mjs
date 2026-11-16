@@ -559,7 +559,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // The host delivers what is already waiting and everything that arrives later
   // (its own subscription, its goal binding); its failure is the director's failure.
   // Notices a previous process recorded but did not deliver (a restart in between).
-  const replayed = await outbox.replay();
+  // One that fails is kept (or, after repeated boots, set aside) and never stops the boot.
+  const { replayed } = await outbox.replay();
   if (replayed.length) ctx.logger.info(`outbox: replayed ${replayed.length} notice(s): ${replayed.join(', ')}`);
   events = await host.events(api);
   const pump = Promise.resolve(events?.done).catch(async error => {

@@ -21,92 +21,9 @@
 import type { DriverConversation, DriverConversationEntry } from './api';
 import { mergeThread } from './conversationThread';
 
-/** One open question, ready for the rail. `segment_id` plus `message_id` is the
- *  exact pair a reply must cite to close it. */
-export interface OpenQuestion {
-  message_id: string;
-  subject: string;
-  created_at: string;
-  text: string;
-  segment_id: string;
-}
-
-/** One question the rail lists, open or answered. `answered` names the CITING
- *  row - the reply whose `answers` cites this question - and is null while no
- *  row cites it. `text` on `answered` is that row's body, kept as the user wrote
- *  it. */
-export interface RailQuestion {
-  message_id: string;
-  subject: string;
-  created_at: string;
-  text: string;
-  segment_id: string;
-  answered: { message_id: string; created_at: string; text: string } | null;
-}
-
-/** The thread's own order: `(created_at, message_id)`, oldest first. */
-function compareThread(
-  a: { created_at: string; message_id: string },
-  b: { created_at: string; message_id: string },
-): number {
-  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
-  if (a.message_id !== b.message_id) return a.message_id < b.message_id ? -1 : 1;
-  return 0;
-}
-
-/** Every question block that carries a segment id, answered or not, for the
- *  questions rail.
- *
- *  The id is required, not a detail: a citation names one
- *  (message_id, segment_id) pair, so it closes exactly that question and the
- *  other questions of the same message stay open or answered on their own. A
- *  question block written BEFORE segment ids existed therefore cannot be cited,
- *  and this function skips it rather than list a question no reply could name.
- *  (Such rows do not exist in this deployment: every stored conversation row
- *  with segments was written after ids shipped, measured 0 rows on 2026-11-12.)
- *  A reply that only sets `reply_to_message_id` cites nothing, so it answers
- *  nothing. Non-question segments are never listed.
- *
- *  Order: the UNANSWERED questions first, in the thread's `(created_at,
- *  message_id)` order, oldest first; then the answered ones, ordered by the
- *  answering row's `(created_at, message_id)` DESCENDING - the most recently
- *  answered first. If several rows cite the same question, the latest citing
- *  row wins. Input order never changes the output.
- */
-export function railQuestions(rows: readonly DriverConversationEntry[]): RailQuestion[] {
-  const ordered = [...rows].sort(compareThread);
-  // Ascending, so a later citing row overwrites an earlier one: the latest wins.
-  const citedBy = new Map<string, { message_id: string; created_at: string; text: string }>();
-  for (const row of ordered) {
-    for (const answer of row.answers ?? []) {
-      citedBy.set(answer.message_id + '\u0000' + answer.segment_id, {
-        message_id: row.message_id,
-        created_at: row.created_at,
-        text: row.body,
-      });
-    }
-  }
-  const open: RailQuestion[] = [];
-  const answered: RailQuestion[] = [];
-  for (const row of ordered) {
-    for (const segment of row.segments ?? []) {
-      if (segment.kind !== 'question' || !segment.id) continue;
-      const citing = citedBy.get(row.message_id + '\u0000' + segment.id) ?? null;
-      const question: RailQuestion = {
-        message_id: row.message_id,
-        subject: row.subject,
-        created_at: row.created_at,
-        text: segment.text,
-        segment_id: segment.id,
-        answered: citing,
-      };
-      (citing ? answered : open).push(question);
-    }
-  }
-  // Stable sort: questions answered by the same row keep their thread order.
-  answered.sort((a, b) => compareThread(b.answered!, a.answered!));
-  return [...open, ...answered];
-}
+export { railQuestions } from './questionRule';
+export type { OpenQuestion, RailQuestion } from './questionRule';
+import { railQuestions, type OpenQuestion } from './questionRule';
 
 /** The questions the user still owes an answer to: `railQuestions` with the
  *  answered ones taken out, in the thread's `(created_at, message_id)` order,
@@ -116,11 +33,11 @@ export function railQuestions(rows: readonly DriverConversationEntry[]): RailQue
  *  Every guarantee of `railQuestions` holds here too: the id is required, a
  *  reply that only sets `reply_to_message_id` cites nothing, and a non-question
  *  segment is never listed. What it adds is that a question some reply has
- *  already answered is not listed.
+ *  already answered, or its asker withdrew, is not listed.
  */
 export function openQuestions(rows: readonly DriverConversationEntry[]): OpenQuestion[] {
   return railQuestions(rows)
-    .filter(question => question.answered === null)
+    .filter(question => question.answered === null && question.withdrawn === null)
     .map(question => ({
       message_id: question.message_id,
       subject: question.subject,

@@ -63,7 +63,7 @@ def test_open_answered_and_all_with_the_citing_replies(world):
     open_ = questions(world)
     assert [x["segment_id"] for x in open_["questions"]] == ["q-c", "q-b"]  # newest first
     assert all(x["status"] == "open" and x["answers"] == [] for x in open_["questions"])
-    assert open_["counts"] == {"open": 2, "answered": 1}
+    assert open_["counts"] == {"open": 2, "answered": 1, "withdrawn": 0}
     assert open_["matched_total"] == 2 and open_["has_more"] is False
 
     answered = questions(world, status="answered")["questions"]
@@ -95,10 +95,10 @@ def test_limit_keeps_the_newest_and_says_there_is_more(world):
 def test_an_empty_conversation_and_another_projects_questions(world):
     assert questions(world) == {"project_id": "alpha", "status": "open", "questions": [],
                                 "matched_total": 0, "has_more": False,
-                                "counts": {"open": 0, "answered": 0}}
+                                "counts": {"open": 0, "answered": 0, "withdrawn": 0}}
     ask(world, "k1", q("q-a"))
     assert execute(world["user"], "list_user_questions",
-                   {"project_id": "beta"})["counts"] == {"open": 0, "answered": 0}
+                   {"project_id": "beta"})["counts"] == {"open": 0, "answered": 0, "withdrawn": 0}
 
 
 @pytest.mark.parametrize("args", [{"status": "closed"}, {"limit": 0}, {"limit": 201}])

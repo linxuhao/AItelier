@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import io
 import json
 import re
 import sqlite3
 import threading
 import time
+import tokenize
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -480,9 +482,26 @@ ALLOWED_PRESENCE_USERS = {"core/drivers.py", "core/driver_inbox.py", "core/direc
                           "core/driver_presence.py", "core/state_takeover.py", "core/dsh_driver.py"}
 
 
+def _code_only(text: str) -> str:
+    """The module's source with every comment removed.
+
+    These two guards ask what the CODE reads. A comment is prose: core/state_graph.py:58
+    names core/driver_presence.py as a precedent, which is a sentence about the rule, not a
+    presence read, and scanning it turned this suite red for a comment. Nothing executable is
+    dropped here - comments cannot run - and string literals are still scanned, because a
+    docstring is where core/state_driver_guide.py keeps the driver-facing rule and the
+    snippets in the pattern test are strings.
+    """
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        return tokenize.untokenize([tok for tok in tokens if tok.type != tokenize.COMMENT])
+    except (tokenize.TokenError, IndentationError):  # unparseable input is scanned whole
+        return text
+
+
 def test_permission_claim_lease_and_fence_code_never_reads_presence_or_last_seen():
     for rel in PERMISSION_FILES:
-        text = DESCRIBING_HOOKS.sub("", (ROOT / rel).read_text(encoding="utf-8"))
+        text = DESCRIBING_HOOKS.sub("", _code_only((ROOT / rel).read_text(encoding="utf-8")))
         assert not PERMISSION_TOKEN.search(text), rel
         assert "last_seen" not in text, rel
 
@@ -499,13 +518,15 @@ def test_the_authorization_guard_pattern_catches_every_way_of_reading_presence(s
 
 def test_only_the_reporting_modules_use_presence_helpers():
     users = {str(path.relative_to(ROOT)) for folder in ("core", "api") for path in (ROOT / folder).glob("*.py")
-             if PRESENCE_TOKEN.search(DESCRIBING_HOOKS.sub("", path.read_text(encoding="utf-8")))}
+             if PRESENCE_TOKEN.search(DESCRIBING_HOOKS.sub("", _code_only(path.read_text(encoding="utf-8"))))}
     # api/driver_routers.py only reads the already-presence-carrying registry views
     # and offers the self-declaration route; api/state_graph_tools.py offers the
     # self-declaration MCP tool.
     # core/state_driver_guide.py is the driver-facing documentation of the rule.
     # core/dsh_driver.py reports managed-process liveness and declares its own
     # identity offline on shutdown. It does not authorize work from presence.
+    # core/state_graph.py is NOT here although it names core/driver_presence.py: that
+    # name is a comment about a precedent, which _code_only removes.
     assert users - {"api/driver_routers.py", "api/state_graph_tools.py",
                     "core/state_driver_guide.py"} == ALLOWED_PRESENCE_USERS
 

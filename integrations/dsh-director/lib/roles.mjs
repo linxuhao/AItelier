@@ -1,6 +1,6 @@
 /** The director/worker role table (roles.json): the one place the two roles differ.
  *
- * Generic on purpose - no State or AItelier names here (see the dsh-director plugin
+ * Generic on purpose - no State or backend names here (see the dsh-director plugin
  * design): an adapter extends the parsed table, it never edits this file's rules.
  * core/dsh_driver.py `load_roles` parses the same file with the same rules; a
  * test compares both parses and both refusals. Unknown keys are refused at every
@@ -50,6 +50,25 @@ export function validateRoles(table) {
     const both = presented.filter(name => forbidden.includes(name));
     if (both.length) throw new Error(`roles: ${role} both presents and forbids ${both.join(', ')}`);
   }
+  return table;
+}
+
+/** Validate an EFFECTIVE table: a valid roles.json table that a host's roles() may
+ *  have extended with, per role, `allowed_actions` ({tool: [action, ...]}) and
+ *  `notes` ({tool: reason}). Everything else is held to validateRoles. */
+export function validateEffectiveRoles(table) {
+  if (!isObject(table)) throw new Error('roles: the effective table must be an object');
+  const base = { ...table };
+  for (const role of ROLE_NAMES) {
+    if (!isObject(table[role])) continue;
+    const { allowed_actions: actions, notes, ...rest } = table[role];
+    base[role] = rest;
+    if (actions !== undefined && (!isObject(actions) || Object.values(actions).some(list => !Array.isArray(list) || list.some(a => typeof a !== 'string'))))
+      throw new Error(`roles: ${role}.allowed_actions must map tool names to lists of action names`);
+    if (notes !== undefined && (!isObject(notes) || Object.values(notes).some(note => typeof note !== 'string')))
+      throw new Error(`roles: ${role}.notes must map tool names to strings`);
+  }
+  validateRoles(base);
   return table;
 }
 

@@ -5,7 +5,7 @@
  * conformance/index.mjs (behaviour); this file is their documentation.
  *
  * Built-in implementation: hosts/local.mjs (local files). External: e.g. the
- * AItelier State adapter (its aitelierHost in integrations/dsh-driver/runtime.mjs).
+ * the State adapter in integrations/dsh-driver/runtime.mjs.
  */
 
 /** Work item states, aligned with MCP Tasks / A2A task states. */
@@ -22,6 +22,8 @@ export interface HostConfig {
   dshEntry: string;
   /** roles.json (director/worker table); role prompts are read next to it. */
   rolesFile: string;
+  /** The todo CLI: `python -m <module>` in `cwd` (default: the process's directory) with
+   *  python defaulting to python3; the CLI reads its state directory from `stateDirEnv`. */
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
   /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION). */
   sessionEnv?: string;
@@ -67,6 +69,8 @@ export interface DirectorHost {
   /** Deliver what is waiting and everything that arrives later through api.notify.
    *  `done` rejects on a fatal failure (the director then stops); `stop` ends delivery. */
   events(api: DirectorApi): Promise<{ done?: Promise<unknown>; stop(): void }>;
+  // `done` rejects on a fatal failure while running; after stop() it must settle
+  // (resolve, or reject with the stop's abort, which the director ignores).
 
   // ---- optional (absent: the default in brackets) ----
   /** Status report body { phase: running|waiting|dormant|failed, subagents, error, event? } [dropped]. */
@@ -75,7 +79,9 @@ export interface DirectorHost {
   workState?(workId: string, signal?: AbortSignal): Promise<WorkState>;
   /** Work this director holds; idle_dormant refuses while any [none]. */
   heldWork?(signal?: AbortSignal): Promise<Array<{ node_key: string }>>;
-  /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged]. */
+  /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
+   *  Synchronous; the result is validated (roles.json rules plus per-role
+   *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */
   roles?(table: object): object;
   /** Host-scoped tools/sections, before the director's plan tools [none]. */
   install?(api: DirectorApi): Promise<void>;

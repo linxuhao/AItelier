@@ -9,6 +9,8 @@ import { conformance } from '../conformance/index.mjs';
 import { localHost } from '../hosts/local.mjs';
 
 const roots = [];
+// What the local host requires besides its root (step 2 ships no table, prompts or todo package).
+const required = { rolesFile: '/nonexistent/roles.json', todo: { module: 'todo_cli', stateDirEnv: 'TODO_STATE_DIR' } };
 process.on('exit', () => {});
 async function freshRoot() {
   const root = await mkdtemp(join(tmpdir(), 'dsh-director-local-'));
@@ -27,14 +29,16 @@ const fakeApi = () => {
 
 conformance('local host', async () => {
   const root = await freshRoot();
-  const host = localHost({ root, provider: 'fixture', model: 'fixture-model', pollMs: 20 });
+  const host = localHost({ root, ...required, provider: 'fixture', model: 'fixture-model', pollMs: 20 });
   let n = 0;
   return { host, api: fakeApi(), seed: { settled: 'w-done', active: 'w-live', held: 'w-live',
     event: () => writeFile(join(root, 'inbox', `e${++n}.json`), JSON.stringify({ n })) } };
 });
 
-test('local host refuses to start without a root', () => {
-  assert.throws(() => localHost({}), /missing config: root/);
+test('local host refuses to start without a root, a role table or a todo CLI, naming each', () => {
+  assert.throws(() => localHost({}), error => ['missing config: root', 'rolesFile', 'todo.module and todo.stateDirEnv']
+    .every(part => error.message.includes(part)));
+  assert.throws(() => localHost({ root: '/tmp/x', rolesFile: '/x/roles.json' }), /todo\.module and todo\.stateDirEnv/);
 });
 
 test('local host: an inbox file is delivered once, and a restart does not deliver it again', async () => {
@@ -42,20 +46,20 @@ test('local host: an inbox file is delivered once, and a restart does not delive
   await mkdir(join(root, 'inbox'), { recursive: true });
   await writeFile(join(root, 'inbox', 'a.json'), '{"hello":1}');
   const first = fakeApi();
-  let events = await localHost({ root, pollMs: 20 }).events(first);
+  let events = await localHost({ root, ...required, pollMs: 20 }).events(first);
   events.stop(); await events.done;
   assert.equal(first.notified.length, 1);
   assert.match(first.notified[0], /Director event \(a\.json\):\n\{"hello":1\}/);
   assert.deepEqual(await readdir(join(root, 'inbox', 'done')), ['a.json']);
   const second = fakeApi();
-  events = await localHost({ root, pollMs: 20 }).events(second);
+  events = await localHost({ root, ...required, pollMs: 20 }).events(second);
   events.stop(); await events.done;
   assert.equal(second.notified.length, 0, 'delivered again after a restart');
 });
 
 test('local host: work_update and note_write record what the director decides, and the snapshot shows it', async () => {
   const root = await freshRoot();
-  const host = localHost({ root });
+  const host = localHost({ root, ...required });
   const tools = new Map();
   const scope = { tools: { register: tool => tools.set(tool.name, tool) } };
   await host.setup(scope, {}, { defineTool: tool => tool, jsonOutput: {} });

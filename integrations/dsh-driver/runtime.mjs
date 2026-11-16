@@ -456,11 +456,13 @@ export function modelRetryOptions(env = process.env) {
 
 /** This deployment's directorHost (dsh-director host contract v1): the old boot()'s
  *  AItelier half, each piece called by the director at the point it always ran. */
-export function aitelierHost(env = process.env, { request: suppliedRequest } = {}) {
+export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
-  // A supplied request (tests) serves the State reads before install() runs.
-  let request = suppliedRequest, runtime, schema, installModelSelection;
+  // A supplied request (tests) serves the State reads before install() runs; a
+  // supplied, already initialised DriverRuntime (the conformance suite) lets context()
+  // and events() run without the DSH-scoped install().
+  let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
   return {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels'],

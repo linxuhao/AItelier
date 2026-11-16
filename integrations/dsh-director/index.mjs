@@ -5,18 +5,18 @@
  *  chosen wake time, process watches, live-children bookkeeping, child handback and
  *  history grep. What it does NOT own: where work comes from and where it is
  *  recorded. That is the host's, reached only through the `directorHost` cordis
- *  service (lib/host.mjs, host.d.ts) - AItelier's State adapter is one host, the
+ *  service (lib/host.mjs, host.d.ts) - the State adapter is one host, the
  *  local-files reference host another.
  *
  *  Moved from integrations/dsh-driver/runtime.mjs boot() (plugin design step 2):
  *  every line below is the old code, except where it now asks the host for what
- *  used to be an AItelier call. Order of registration is kept, because the order of
+ *  used to be a backend call. Order of registration is kept, because the order of
  *  tools in a request is part of the request (design §9 MF2). */
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
-import { loadRoles, roleOf } from './lib/roles.mjs';
+import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
 import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
   Continuation, processSession, processAlive, backgroundProcesses, watchRefusal, dormancyRefusal, DORMANT_MIN_MINUTES,
@@ -47,7 +47,11 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
   const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
+  // roles() is synchronous and must return a valid table (the loaded one, extended):
+  // a Promise or a broken table is refused here, naming it, not met later as a crash.
   const roles = op('roles')(loadRoles(config.rolesFile));
+  if (roles && typeof roles.then === 'function') throw new Error('directorHost refused: roles(table) must return the table synchronously, not a Promise');
+  validateEffectiveRoles(roles);
   const promptDir = dirname(config.rolesFile);
   const runtimeSkill = readFileSync(join(promptDir, roles.director.prompt), 'utf8');
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
@@ -60,7 +64,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     const id = (context?.agent ?? context?.scope)?.session?.id;
     return id !== undefined && roleOf(id, config.sessionId) === 'worker' ? workerSkill : '';
   } });
-  const todo = new TodoCli({ python: config.todo.python, cwd: config.todo.cwd, stateDir: config.stateDir,
+  const todo = new TodoCli({ python: config.todo.python ?? 'python3', cwd: config.todo.cwd, stateDir: config.stateDir,
     module: config.todo.module, stateDirEnv: config.todo.stateDirEnv });
   // The live native children, and what it takes for the runtime to believe one is
   // gone: the agent registry answers with the agent, or undefined when no live agent
@@ -208,7 +212,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n' });
     // The director prompt section and the snapshot hooks are the director's own; a
     // host that registers sections of its own calls these at the point it wants them
-    // (AItelier: after its goal and protocol sections and its model selection), and
+    // (the State adapter: after its goal and protocol sections and its model selection), and
     // whatever it did not call is installed right after its setup.
     let sectionDone = false, hooksDone = false;
     const runtimeSection = () => { if (sectionDone) return; sectionDone = true;

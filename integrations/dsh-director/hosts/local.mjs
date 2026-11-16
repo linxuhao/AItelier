@@ -1,11 +1,17 @@
 /** dsh-director's built-in host: the smallest directorHost that implements every
  *  operation of the contract, on plain local files. Insert it after dsh-director
- *  in a profile and the director runs with no backend at all:
+ *  in a profile and the director runs with no backend:
  *
  *    - { insert: [{ id: 'dsh-director', name: '<dir>/dsh-director/index.mjs' },
- *                 { id: 'director-local', name: '<dir>/dsh-director/hosts/local.mjs', config: { root, ... } }] }
+ *                 { id: 'director-local', name: '<dir>/dsh-director/hosts/local.mjs',
+ *                   config: { root, rolesFile, todo: { module, stateDirEnv, python?, cwd? }, ... } }] }
  *
- *  An external host (AItelier's State adapter, or anyone's) replaces this plugin;
+ *  `rolesFile` (a roles.json with its two prompts next to it) and `todo` (the todo
+ *  CLI module and its state-directory variable) are required: this plugin ships no
+ *  table, prompts or todo package of its own yet, and the host refuses to start
+ *  without them rather than pointing at files that do not exist.
+ *
+ *  An external host (the State adapter, or anyone's) replaces this plugin;
  *  it is never active next to one. It deliberately stays small: work items with a
  *  state and a holder, one notes file, an inbox directory of wake events and a
  *  progress log. No dependency graph, evidence, review or multi-director
@@ -18,13 +24,11 @@
  *    progress.jsonl  one phase report per line
  *    state/          the director's own state (todo plans) */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { WORK_STATES } from '../lib/host.mjs';
 
 export const name = 'dsh-director-local-host';
 export const inject = [];
-const here = dirname(fileURLToPath(import.meta.url));
 
 async function readJson(file, fallback) {
   try { return JSON.parse(await readFile(file, 'utf8')); }
@@ -39,7 +43,9 @@ async function writeJson(file, value) {
  *  objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv }. */
 export function localHost(options = {}) {
   const root = options.root;
-  if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
+  const missing = [!root && 'root (the local host keeps its files there)', !options.rolesFile && 'rolesFile (a roles.json with its prompts next to it)',
+    !(options.todo?.module && options.todo?.stateDirEnv) && 'todo.module and todo.stateDirEnv (the todo CLI)'].filter(Boolean);
+  if (missing.length) throw new Error('directorHost refused: missing config: ' + missing.join('; '));
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
     done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl') };
@@ -53,9 +59,9 @@ export function localHost(options = {}) {
       provider: options.provider, model: options.model,
       stateDir: options.stateDir ?? join(root, 'state'),
       dshEntry: options.dshEntry ?? process.argv[1],
-      rolesFile: options.rolesFile ?? join(here, '..', 'roles.json'),
+      rolesFile: options.rolesFile,
       sessionEnv: options.sessionEnv,
-      todo: { python: 'python3', cwd: join(here, '..', 'todo'), module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR', ...(options.todo ?? {}) },
+      todo: { ...options.todo },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
       dormantCompactMinTokens: options.dormantCompactMinTokens,
     },

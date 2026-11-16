@@ -27,3 +27,14 @@ test('every problem is named in one refusal, never degraded to an empty host', (
     return true;
   });
 });
+
+test('the effective role table is validated: adapter extras are allowed, anything else is refused', async () => {
+  const { validateEffectiveRoles } = await import('../lib/roles.mjs');
+  const role = (route, prompt) => ({ route, reasoning_effort: 'high', compaction: { thresholdRatio: 0.5 }, prompt, presented: ['bash'], forbidden: [] });
+  const table = { version: 1, director: role('director', 'director.md'), worker: role('worker', 'worker.md') };
+  const extended = { ...table, worker: { ...table.worker, allowed_actions: { write_tool: ['report'] }, notes: { write_tool: 'why' } } };
+  assert.equal(validateEffectiveRoles(extended), extended);
+  assert.throws(() => validateEffectiveRoles({ ...table, worker: { ...table.worker, allowed_actions: { write_tool: 'report' } } }), /allowed_actions/);
+  assert.throws(() => validateEffectiveRoles({ ...table, director: { ...table.director, presented: 'bash' } }), /presented/);
+  assert.throws(() => validateEffectiveRoles(Promise.resolve(table)), /role|object|missing/);
+});

@@ -6,10 +6,9 @@
  *    active:   a work id that is still working
  *    held:     the node_key of work this director holds
  *    event():  (only with `api`) makes the host emit one wake event; resolves when written
- *  `api` (optional) is the director api the host's events() gets; without it the
- *  event assertions are skipped and reported as needing a running director - the
- *  AItelier adapter proves those with its real-DSH scenarios instead (MF5: which
- *  assertions need a backend is written down, not implied).
+ *  `api` is the director api the host's events() gets (`notified` collects what
+ *  api.notify received); supply it - a case without one is SKIPPED, and the
+ *  repository's driver-suite gate counts a skip as a failure.
  *
  *  Every refusal the director makes on load is asserted here too, so a host author
  *  sees the same messages the director prints. */
@@ -58,7 +57,7 @@ export function conformance(name, make) {
     if (!host.progress) return;
     await host.progress({ phase: 'waiting', subagents: [], error: '' });
   });
-  test(`${name}: context and events (needs a running director api)`, async t => {
+  test(`${name}: context is text, and one host event reaches the director exactly once`, async t => {
     const { host, seed, api } = await make();
     if (!api) { t.skip('no director api: proven by this host\'s real-DSH scenarios'); return; }
     assert.equal(typeof await host.context('director'), 'string');
@@ -69,6 +68,13 @@ export function conformance(name, make) {
       const deadline = Date.now() + 10000;
       while (api.notified.length === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
       assert.equal(api.notified.length, before + 1, 'one event, delivered once');
-    } finally { events.stop(); await events.done; }
+    } finally {
+      // After stop() the delivery ends; `done` must settle (resolve, or reject with the
+      // stop's abort - the director ignores it once it disposed) within a bound.
+      events.stop();
+      const settled = await Promise.race([Promise.resolve(events.done).then(() => true, () => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 10000))]);
+      assert.ok(settled, 'events.done did not settle after stop()');
+    }
   });
 }

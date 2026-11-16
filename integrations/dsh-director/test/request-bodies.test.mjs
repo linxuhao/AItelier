@@ -1,10 +1,10 @@
 /** Plugin design step 2, D5: the split changes no request a model receives.
  *
  *  Reads the two recordings in fixtures/request-bodies/step2 (before = the unsplit
- *  runtime, after = dsh-director + the AItelier adapter) and asserts they are equal
- *  under the normalization written next to them (normalize.json). Recomputable by
- *  anyone from the repository alone: re-record with DSH_DIRECTOR_RECORD_DIR on
- *  runtime.smoke.test.mjs and run the same normalization. */
+ *  runtime, after = dsh-director + the State adapter) and asserts they are equal
+ *  under the rules written next to them (normalize.json): equal outside the windows
+ *  in which two runs of the same code already differ. normalize-recording.mjs is the
+ *  substitution the stored files went through; it says how to re-record each side. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

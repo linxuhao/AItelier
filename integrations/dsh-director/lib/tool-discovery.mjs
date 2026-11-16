@@ -8,7 +8,7 @@ const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
  *  name - and is found with search_tools; only the role's `forbidden` tools are
  *  refused (see refusal). Which names a role presents is roles.json's business
  *  (chosen from measured use, 2026-11-07..14), extended by the adapter
- *  (aitelier-roles.mjs), never a list in this file. A tool missing there is
+ *  (the State adapter's role additions), never a list in this file. A tool missing there is
  *  deferred, never lost. */
 export function presentTools(tools, role) {
   const presented = new Set(role.presented);
@@ -42,7 +42,7 @@ export function searchTools(schemas, query, limit = 5) {
 }
 
 /** @param roles - the effective role table (roles.json plus the adapter's additions). */
-/** Generic wording; a host whose tools need naming (AItelier: its MCP servers) passes its own. */
+/** Generic wording; a host whose tools need naming (its MCP servers, say) passes its own. */
 export const defaultDiscoveryTexts = Object.freeze({
   sectionName: 'dsh-director:tool-discovery',
   section: 'More tools are available through search_tools(query) and call_tool(name, arguments). Search names/descriptions to retrieve only the relevant full parameter schemas; then use call_tool with the exact name and arguments. Search again after compaction if you need an earlier schema. Known names may be called without searching first. The everyday coding and coordination tools are listed directly; less-used ones are not listed but are found with search_tools and called the same way. Discovery does not change your existing permissions.',

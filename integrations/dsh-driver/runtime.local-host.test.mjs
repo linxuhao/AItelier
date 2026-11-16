@@ -94,6 +94,8 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'local-root',
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, rolesFile: join(here, 'roles.json'), pollMs: 100,
+          // Step 2 ships no table or todo package of its own: this deployment's (plugin step 4/3 add defaults).
+          todo: { module: 'core.todo_cli', stateDirEnv: 'AITELIER_DSH_STATE_DIR' },
           idleReviewMs: 600000 } }] },
     ]));
     // No AITELIER_* variable reaches this process: the director must not need one.

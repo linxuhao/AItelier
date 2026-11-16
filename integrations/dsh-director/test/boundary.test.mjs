@@ -1,6 +1,10 @@
-/** The generic plugin names no backend (design §4 rule): no file of dsh-director
- *  outside the recorded fixtures and this test may say aitelier, call an /api/
- *  route or use a state_ tool name. */
+/** The generic plugin names no backend (design §4 rule; review criterion
+ *  "boundary-independent"): no byte of any shipped file - code, comments, tests,
+ *  docs - may carry the backend's name in any case. The recorded request bodies
+ *  under test/fixtures are exempt: they are what the backend's driver sent.
+ *  Code must also not call an /api/ route, use a state_ tool name or import the
+ *  adapter directory. The banned name is assembled at run time so this file does
+ *  not contain it either. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
@@ -8,29 +12,31 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const skip = new Set(['node_modules', 'fixtures', 'todo']);
+const skip = new Set(['node_modules', 'fixtures', '__pycache__']);
+const name = ['ait', 'elier'].join('');
 async function files(dir) {
   const out = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (skip.has(entry.name)) continue;
     const path = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...await files(path));
-    else if (/\.(mjs|js|json|md|ts)$/.test(entry.name) && entry.name !== 'boundary.test.mjs') out.push(path);
+    else if (entry.isFile()) out.push(path);
   }
   return out;
 }
 
-test('dsh-director never names AItelier in code: no such string, no AITELIER_ variable, no /api/ route or state_ tool, no adapter import', async () => {
-  // Comments may say where code was moved from (provenance); code may not couple:
-  // every quoted string, every environment variable name and every import is checked.
+test('no shipped byte of dsh-director names the backend, and no code calls its routes, its state_ tools or the adapter', async () => {
   const found = [];
+  const banned = new RegExp(name, 'i');
   const literal = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
   for (const file of await files(root)) {
-    const lines = (await readFile(file, 'utf8')).split('\n');
-    lines.forEach((line, i) => {
+    const text = await readFile(file, 'utf8');
+    text.split('\n').forEach((line, i) => {
       const where = `${relative(root, file)}:${i + 1}: ${line.trim().slice(0, 160)}`;
-      if (/\bAITELIER_[A-Z]/.test(line) || /(from\s+|import\(\s*)['"][^'"]*dsh-driver/.test(line)) found.push(where);
-      for (const [, , text] of line.matchAll(literal)) if (/aitelier|\/api\/|\bstate_[a-z]/i.test(text)) { found.push(where); break; }
+      if (banned.test(line)) { found.push(where); return; }
+      if (!/\.(mjs|js|ts)$/.test(file)) return;
+      if (/(from\s+|import\(\s*)['"][^'"]*dsh-driver/.test(line)) { found.push(where); return; }
+      for (const [, , value] of line.matchAll(literal)) if (/\/api\/|\bstate_[a-z]/.test(value)) { found.push(where); break; }
     });
   }
   assert.deepEqual(found, []);

@@ -10,10 +10,14 @@
     "signal": "options.signal (an AbortSignal, serialised as {}) is dropped"
   },
   "compare_normalization": {
-    "ignored_keys": ["compaction_seq"],
+    "ignored_keys": [
+      "compaction_seq"
+    ],
     "ignored_keys_why": "the session-log seq of the compaction a snapshot belongs to; it moves by one between two runs of the SAME code (measured: before1 vs before2 and after1 vs after2 both differ there)",
     "streams": "requests are compared per boot and per kind (R root, C child, S summary) in order; interleaving between kinds is scheduling, not content",
-    "prefix": "each stream is compared over the common prefix; the stream lengths may differ by at most one (the last in-flight request when a boot is stopped)",
-    "boot3": "the third boot is compared on its first root request's provider, model, tools and system message only: its later message order depends on whether a child's settle notice or the goal round arrives first (measured to differ between two runs of the same code)"
-  }
+    "prefix": "each stream is compared over its common prefix. When the two lengths of a stream are equal, every request of it is compared; when they differ by one (the last request in flight when a boot is stopped), the last request of the longer stream is NOT compared. The committed recording has exactly one such stream: boot 2's child stream, 5 requests before vs 4 after.",
+    "boot3": "the third boot is compared on its first root request's provider, model, tools and system message only: its later message order depends on whether a child's settle notice or the goal round arrives first (measured: messages[1:] differ across all four runs, before1/before2/after1/after2, of the same two commits).",
+    "what_the_test_proves": "the recordings are equal outside the windows in which two runs of the SAME code already differ: compaction_seq, the unmatched tail request of a stream whose lengths differ, and boot 3 beyond its system prompt, tools and model."
+  },
+  "reproduce": "normalize-recording.mjs applies recorded_normalization to a raw recording; re-record 'after' from any commit at or after the split and 'before' from 9dc85a7886 (see that script)."
 }

@@ -1,6 +1,6 @@
-/** The directorHost contract, v1 (see ../host.d.ts and ../host.schema.json).
+/** The directorHost contract, v1 (see ../host.d.ts).
  *
- *  A host is whatever connects dsh-director to a work/memory system: the AItelier
+ *  A host is whatever connects dsh-director to a work/memory system: the
  *  State adapter, the local-files reference host, or anyone else's. It is handed to
  *  the director through the cordis service `directorHost` (in process) - the
  *  interface is the product, the injection is only the wiring.
@@ -34,8 +34,15 @@ export function validateHost(host) {
   }
   if (host.config && typeof host.config === 'object') {
     for (const key of REQUIRED_CONFIG) if (host.config[key] === undefined || host.config[key] === '') problems.push(`missing config: ${key}`);
-    if (host.config.todo && typeof host.config.todo === 'object')
+    if (host.config.todo && typeof host.config.todo === 'object') {
       for (const key of REQUIRED_TODO) if (!host.config.todo[key]) problems.push(`missing config: todo.${key}`);
+      // Optional, but typed: python defaults to python3 and cwd to the process's own
+      // directory; anything else given must be a usable path string.
+      for (const key of ['python', 'cwd']) {
+        const value = host.config.todo[key];
+        if (value !== undefined && (typeof value !== 'string' || !value)) problems.push(`config: todo.${key} must be a non-empty string when given`);
+      }
+    }
   }
   const declared = Array.isArray(host.capabilities) ? host.capabilities : [];
   for (const op of declared) {
@@ -53,7 +60,7 @@ export const optionalDefaults = Object.freeze({
   progress: () => {},                  // status reports are dropped (the runtime still logs)
   workState: async () => 'unknown',    // no work item is known to have settled
   heldWork: async () => [],            // the director holds no external locks
-  roles: table => table,               // the table as loaded
+  roles: table => table,               // the table as loaded (a host's roles() must return its table synchronously)
   install: async () => {},             // no host-scoped tools or sections of its own
   setup: async () => {},               // no director-scope tools, sections or hooks of its own
 });

@@ -1,0 +1,17 @@
+# Daily timer for deploy/aitelier-retention-reaper.service. Install and enable
+# together with the service; the install commands are in that file's header.
+#
+# Persistent=true matters here: if the host is down or the run is skipped at
+# 04:40, the next start runs it once. RandomizedDelaySec spreads the run so it
+# does not land on the same minute as other host maintenance.
+[Unit]
+Description=Daily run of the AItelier retention reaper
+
+[Timer]
+OnCalendar=*-*-* 04:40:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=aitelier-retention-reaper.service
+
+[Install]
+WantedBy=timers.target

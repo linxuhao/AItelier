@@ -42,6 +42,18 @@ describe('DriverStateBadge', () => {
   it('draws a mark for every state, and stops moving when motion is reduced', () => {
     for (const state of STATES) expect(SOURCE).toContain(`[data-phase=${state}] .driver-state-mark::before{`);
     expect(SOURCE).not.toMatch(/\[data-phase=stopped\][^}]*animation/);
+    // The motion is the feature: each live state's rule names its animation, and
+    // every animation named is defined.
+    const ANIMATED: Record<string, string> = {
+      busy: 'ds-work', ready: 'ds-glow', dormant: 'ds-snore', starting: 'ds-spin', stopping: 'ds-shrink', failed: 'ds-blink',
+    };
+    for (const [state, name] of Object.entries(ANIMATED)) {
+      const rules = [...SOURCE.matchAll(new RegExp(`\\[data-phase=${state}\\] \\.driver-state-mark::(?:before|after)\\{([^}]*)\\}`, 'g'))].map(m => m[1]);
+      expect(rules.some(body => new RegExp(`animation:${name} [^;]*infinite;`).test(body)), state).toBe(true);
+    }
+    const used = new Set([...SOURCE.matchAll(/animation:(ds-[a-z]+)/g)].map(m => m[1]));
+    expect([...used].sort()).toEqual(Object.values(ANIMATED).sort());
+    for (const name of used) expect(SOURCE.includes(`@keyframes ${name}{`), name).toBe(true);
     expect(SOURCE).toMatch(/@media \(prefers-reduced-motion: reduce\)\{\.driver-state-mark::before,\.driver-state-mark::after\{animation:none;\}\}/);
   });
 });

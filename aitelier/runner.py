@@ -9,17 +9,12 @@ from __future__ import annotations
 from core.workspace_manager import DPE_GRAPH_NAME
 
 import json
+import logging
 import time as _time
 from pathlib import Path
 
 from skillflow.core import ClaimedStep, StepResult
 from skillflow.workspace import _sanitize_item
-
-# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause
-# is pinned). Shared with core/scheduler.py via core.orphan_dbg so the run_step
-# ENTER/EXIT thread traces ALSO land in the durable ~/.AItelier/orphan_dbg.log
-# (they were previously stdout-only → wiped on container recreation).
-from core.orphan_dbg import odbg as _odbg
 
 
 # Backward-compat alias
@@ -250,47 +245,36 @@ class AgentStepRunner:
             #       ticks on the same run (version-mismatch guard);
             #   (b) step.emit() and step.trace() are synchronous DB appends
             #       protected by skillflow's RLock + WAL mode.
-            import asyncio, threading
+            import asyncio
             loop = asyncio.get_running_loop()
-            # ORPHAN-DBG: log ENTER/EXIT of run_step INSIDE the executor thread.
-            # ENTER with no matching EXIT (or a very late EXIT) = the thread hung
-            # (zombie), distinguishing a real hang from an await-boundary cancel.
-            _cid = f"inst{step.token.step_instance_id}.v{step.token.version}"
 
-            def _run_traced():
-                _tid = threading.get_ident()
-                _odbg(f"{_cid} run_step ENTER thread={_tid} step={step_id}")
-                _rt0 = _time.time()
-                try:
-                    return engine.run_step(
-                        task_id=task_id or 0,
-                        step_id=step_id,
-                        workspace=self._ws,
-                        project_id=project_id,
-                        agent_config_name=agent_name,
-                        resolved_context=resolved_context,
-                        validation_error=validation_error,
-                        tool_schemas=tool_schemas,
-                        output_dir=output_dir,
-                        output_target=step.inputs.get("_output_target", "artifact"),
-                        output_fixed=step.inputs.get("_output_fixed", {}),
-                        config_name=step.inputs.get("_config_name", ""),
-                        artifact_dir=step.inputs.get("_artifact_dir", ""),
-                        write_scope=write_scope,
-                        max_tool_turns=max_tool_turns,
-                        run_id=run_id,
-                        step_instance_id=step.token.step_instance_id,
-                        # Fencing token (skillflow >=1.5.36). getattr so a
-                        # hand-built or older token degrades to 0 = unfenced.
-                        claim_epoch=getattr(step.token, 'claim_epoch', 0),
-                        carry_forward=bool(step.inputs.get('_output_carry_forward',
-                            (step.step_config.get('output') or {}).get('carry_forward', False))),
-                    )
-                finally:
-                    _odbg(f"{_cid} run_step EXIT thread={_tid} step={step_id} "
-                          f"elapsed={_time.time() - _rt0:.1f}s")
+            def _run_in_thread():
+                return engine.run_step(
+                    task_id=task_id or 0,
+                    step_id=step_id,
+                    workspace=self._ws,
+                    project_id=project_id,
+                    agent_config_name=agent_name,
+                    resolved_context=resolved_context,
+                    validation_error=validation_error,
+                    tool_schemas=tool_schemas,
+                    output_dir=output_dir,
+                    output_target=step.inputs.get("_output_target", "artifact"),
+                    output_fixed=step.inputs.get("_output_fixed", {}),
+                    config_name=step.inputs.get("_config_name", ""),
+                    artifact_dir=step.inputs.get("_artifact_dir", ""),
+                    write_scope=write_scope,
+                    max_tool_turns=max_tool_turns,
+                    run_id=run_id,
+                    step_instance_id=step.token.step_instance_id,
+                    # Fencing token (skillflow >=1.5.36). getattr so a
+                    # hand-built or older token degrades to 0 = unfenced.
+                    claim_epoch=getattr(step.token, 'claim_epoch', 0),
+                    carry_forward=bool(step.inputs.get('_output_carry_forward',
+                        (step.step_config.get('output') or {}).get('carry_forward', False))),
+                )
 
-            await loop.run_in_executor(None, _run_traced)
+            await loop.run_in_executor(None, _run_in_thread)
         except Exception:
             raise  # Let skillflow's fail_step handle retries
 
@@ -336,7 +320,8 @@ class AgentStepRunner:
             # A verdict file that exists but can't be parsed (e.g. an invalid
             # \escape) previously vanished into empty flags and the run died
             # on an unmatched transition with no clue — log the real reason.
-            _odbg(f"review_verdict.json unreadable in {output_dir}: {e}")
+            logging.getLogger("aitelier.runner").warning(
+                "review_verdict.json unreadable in %s: %s", output_dir, e)
             return {}, {}
 
     def _make_emit_wrapper(self, step: ClaimedStep):

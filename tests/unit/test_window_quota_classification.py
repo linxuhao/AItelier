@@ -126,7 +126,6 @@ async def test_actual_scheduler_error_path_holds_only_spent_windows(tmp_path, mo
         raise error
 
     _wire_real_tick(monkeypatch, sf, {"quota-control": run}, execute)
-    monkeypatch.setattr(sched, "_odbg", lambda *a: None)
     outcomes = []
     monkeypatch.setattr(sched, "tick_log", lambda pid, outcome, **kw: outcomes.append(outcome))
     await sched._run_skillflow_tick("quota-control", None)

@@ -670,7 +670,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           if (/not_own_question/.test(result.error)) { foreign = true; continue; }
           if (/question_answered/.test(result.error)) { answered = true; continue; }
           // The key names this exact question: a conflict is an earlier close of it
-          // with another reason, which succeeded (State records only successes).
+          // with another reason, which succeeded. That inference rests on
+          // withdraw_user_question's ordering in core/driver_inbox.py: _replay refuses a
+          // differing payload, and _record runs only after the row is written, so a
+          // refused close leaves no key behind. A same-reason retry is replayed by State
+          // and answers {closed: true} again (host.d.ts: `closed` means "a withdrawal
+          // exists").
           if (/idempotency_conflict/.test(result.error)) return { closed: false, already_closed: true, question_id: id, message_id: question.message_id };
           return { refused: 'state_refused', reason: String(result.error).slice(0, 500) };
         }
@@ -680,7 +685,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
       async list(signal) {
         const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
-        return ((listed.result ?? listed).questions ?? []).map(q => ({ id: q.segment_id, text: q.text, message_id: q.message_id }));
+        const page = listed.result ?? listed;
+        const open = (page.questions ?? []).map(q => ({ id: q.segment_id, text: q.text, message_id: q.message_id }));
+        if (page.has_more) open.truncated = true;   // more than the newest 200 are open: said, not hidden
+        return open;
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */

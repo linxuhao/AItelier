@@ -95,8 +95,13 @@ export function conformance(name, make) {
     const closed = await host.attention.close({ id, reason: 'resolved another way' });
     assert.ok(!closed.refused && closed.closed !== false, JSON.stringify(closed));
     assert.equal((await host.attention.list()).filter(q => q.id === id).length, 0, 'a closed question is still open');
+    // Two retry shapes, both leaving it closed once: the same request (a host may replay
+    // it, answering closed: true again) and another reason (closed: false).
+    const same = await host.attention.close({ id, reason: 'resolved another way' });
+    assert.ok(!same.refused, 'a same-reason retry was refused: ' + JSON.stringify(same));
     const twice = await host.attention.close({ id, reason: 'again' });
     assert.ok(!twice.refused && twice.closed === false, 'closing twice: ' + JSON.stringify(twice));
+    assert.equal((await host.attention.list()).filter(q => q.id === id).length, 0, 'a retry reopened it');
   });
   test(`${name}: an event whose delivery failed is delivered again, under the same id`, async t => {
     const { host, seed, api, reopen } = await make();

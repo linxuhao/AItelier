@@ -517,7 +517,11 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
         // open questions are listed, not counted against dormancy.
         let waitingOnOwner;
         if (attention) {
-          try { waitingOnOwner = (await attention.list(AbortSignal.any([exec.signal, AbortSignal.timeout(15000)]))).map(q => ({ id: q.id, text: q.text })); }
+          try {
+            const open = await attention.list(AbortSignal.any([exec.signal, AbortSignal.timeout(15000)]));
+            waitingOnOwner = open.map(q => ({ id: q.id, text: q.text }));
+            if (open.truncated) waitingOnOwner.push({ truncated: true, note: 'more open questions than the host lists' });
+          }
           catch (error) { waitingOnOwner = { unreadable: String(error?.message ?? error).slice(0, 300) }; }
         }
         const dormant = idleReview.enterDormancy(reason, wakeAfter * dormantMinuteMs);

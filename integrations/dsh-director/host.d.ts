@@ -104,8 +104,13 @@ export interface DirectorHost {
    *    refused {refused: 'question_id_reused'}.
    *  - close: take an own, unanswered question back, with the reason, as a record (it
    *    stays visible as withdrawn). An answered one is refused {refused:
-   *    'question_answered'}; closing twice is a no-op {closed: false, already_closed}.
-   *  - list: the open questions (a host may bound it; it states its bound).
+   *    'question_answered'}; closing twice changes nothing. What `closed` reports on a
+   *    retry depends on the host: a retry the host replays (same request) may answer
+   *    {closed: true} again, a retry with another reason {closed: false,
+   *    already_closed: true}. Either way the question is closed once; `closed` says "a
+   *    withdrawal of this question exists", not "this call withdrew it".
+   *  - list: the open questions (a host may bound it; it states its bound, and marks a
+   *    truncated answer with `truncated: true` on the returned array).
    *  The owner's answer reaches the director through events(). The built-in host's
    *  event names the question id; another host may carry the citation on the
    *  answering message instead. */

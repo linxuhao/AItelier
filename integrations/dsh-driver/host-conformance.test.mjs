@@ -172,3 +172,15 @@ test('State adapter: close finds its own question when a peer director asked a n
   assert.deepEqual({ closed: again.closed, already_closed: again.already_closed }, { closed: false, already_closed: true }, JSON.stringify(again));
   assert.deepEqual((await host.attention.list()).map(q => [q.id, q.text]), [['q-deploy-window', 'peer: may I restart?']], 'the peer question was touched');
 });
+
+test('State adapter: list says when State has more open questions than the newest 200 it read', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aitelier-list-'));
+  directories.push(directory);
+  const host = aitelierHost(envFor(directory), { runtime: {}, request: async () => ({ result: {
+    questions: [{ segment_id: 'q1', text: 't', message_id: 'm1' }], has_more: true, matched_total: 201 } }) });
+  const open = await host.attention.list();
+  assert.deepEqual(open.map(q => q.id), ['q1']);
+  assert.equal(open.truncated, true);
+  const complete = await aitelierHost(envFor(directory), { runtime: {}, request: async () => ({ result: { questions: [], has_more: false } }) }).attention.list();
+  assert.equal(complete.truncated, undefined);
+});

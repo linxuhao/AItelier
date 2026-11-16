@@ -39,7 +39,7 @@ for flag in ('--store', '--attempt', '--item', '--session', '--note', '--out', '
     parser.add_argument(flag)
 parser.add_argument('--rebind', action='store_true')
 args = parser.parse_args()
-store = Path(args.store or os.path.join((os.environ.get('DSH_TODO_STATE_DIR') or os.environ['AITELIER_DSH_STATE_DIR']), 'todo'))
+store = Path(args.store or os.path.join(os.environ['DSH_TODO_STATE_DIR'], 'todo'))
 store.mkdir(parents=True, exist_ok=True)
 
 def emit(value, code=0):
@@ -551,7 +551,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     }
     assert.ok(todoResults.filter(r => r.id.startsWith('full-')).every(r => r.session === full));
     const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'dsh_todo', 'status', '--attempt', plans.a.attempt_id],
-      { cwd: cli.cwd, env: { ...process.env, AITELIER_DSH_STATE_DIR: directory }, encoding: 'utf8' }));
+      { cwd: cli.cwd, env: { ...process.env, DSH_TODO_STATE_DIR: directory }, encoding: 'utf8' }));
     assert.deepEqual(finalA.remaining, []); assert.equal(finalA.child_session, full, 'todo_begin bound the root, not the calling child');
 
     // 2. The partial child stopped after item 2: the runtime, not the model, handed it back.

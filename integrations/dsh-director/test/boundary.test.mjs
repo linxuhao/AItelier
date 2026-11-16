@@ -5,8 +5,8 @@
  *  except exactly two paths - `node_modules` at the plugin root (installed, not
  *  shipped) and `test/fixtures/request-bodies` (the recorded request bodies, which
  *  are what the backend's own driver sent) - and compiled `.pyc` files. Symbolic
- *  links are not followed: `todo/todo_templates` points at the repository's
- *  templates, which are the deployment's, not the plugin's. The walk must visit at
+ *  links are not followed, and the walk refuses to find one (the plugin ships real
+ *  files only; its default templates are real files under todo/todo_templates). The walk must visit at
  *  least MIN_FILES files and every file in MUST_VISIT, so an empty or pruned walk
  *  is red, not green.
  *  NAME and VOCABULARY: every byte of every walked file - code, comments,
@@ -38,7 +38,7 @@ export const MIN_FILES = 30;
 export const MUST_VISIT = ['index.mjs', 'host.d.ts', 'roles.json', 'director.md', 'worker.md', join('lib', 'core.mjs'),
   join('lib', 'host.mjs'), join('hosts', 'local.mjs'), join('todo', 'dsh_todo', 'cli.py'), join('todo', 'dsh_todo', 'batch.py'),
   join('standalone', 'scenario.mjs'), join('standalone', 'run-in-container.sh'), join('test', 'boundary.test.mjs'),
-  join('tools', 'vocabulary.mjs')];
+  join('tools', 'vocabulary.mjs'), join('todo', 'todo_templates', 'change_files.yaml')];
 
 /** Whether a plugin-relative path is excluded from the walk (exact paths only). */
 export const excluded = rel => EXCLUDED.includes(rel) || rel.endsWith('.pyc');
@@ -47,6 +47,7 @@ export function walk(dir = root, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name), rel = relative(root, path);
     if (excluded(rel)) continue;
+    if (entry.isSymbolicLink()) throw new Error(`a symbolic link in the plugin: ${rel} (ship real files)`);
     if (entry.isDirectory()) walk(path, out);
     else if (entry.isFile()) out.push(path);
   }

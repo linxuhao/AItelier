@@ -2,8 +2,8 @@
  *  director.md / worker.md and this adapter's state.md / worker-state.md. Content
  *  moved, it was not rewritten: every sentence of the originals (test-fixtures/
  *  *.step2.md) is in exactly one of the halves, verbatim, except the few reworded
- *  ones prompt-split.json lists (each with its original), and the one sentence the
- *  spec keeps in both. Nothing was added that the originals did not say. */
+ *  ones prompt-split.json lists (each with its original), the one sentence the
+ *  spec keeps in both, and the additions it lists (added_to_generic) - nothing else. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -26,7 +26,10 @@ for (const [name, original, generic, local] of [
       return read(original).trim().split(/\n\s*\n/)[p - 1].split(/\s+/).join(' ')
         .split(/(?<=[.!?])\s+(?=[A-Z"(`]|run_pipeline|todo_|watch_|idle_)/)[s - 1];
     });
-    const after = [...sentences(read(generic)).map(s => unreword[s] ?? s), ...sentences(read(local))];
+    const added = spec.added_to_generic?.[name] ?? [];
+    const genericSentences = sentences(read(generic));
+    for (const sentence of added) assert.ok(genericSentences.includes(sentence), 'listed addition missing: ' + sentence);
+    const after = [...genericSentences.filter(s => !added.includes(s)).map(s => unreword[s] ?? s), ...sentences(read(local))];
     assert.deepEqual([...after].sort(), [...before, ...both].sort());
   });
 }

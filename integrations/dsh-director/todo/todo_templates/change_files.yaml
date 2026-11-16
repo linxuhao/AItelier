@@ -1,0 +1,18 @@
+name: change_files
+version: 1
+description: change the named files and nothing outside a scope, then deliver the commit
+params:
+  paths:
+    type: list[str]
+    required: true
+  scope:
+    type: list[str]
+    required: true
+items:
+  - id: write
+    title: "Write ${paths}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths}
+      - predicate: changes_within
+        args: {scope: $scope}

@@ -307,6 +307,10 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
 test('after a host restart the snapshot lists the dead finder for re-dispatch and never re-runs the passed one', { timeout: 120000 }, async () => {
   assert.ok(PYTHON, 'no python with PyYAML (python3, /usr/bin/python3 or AITELIER_TODO_TEST_PYTHON) to run core.todo_cli');
   const directory = await mkdtemp(join(tmpdir(), 'todo-batch-restart-'));
+  // This scenario runs the real CLI in-process (TodoCli inherits this environment): it
+  // reads the deployment's templates (find_verify), which the plugin does not ship.
+  const savedTemplates = process.env.DSH_TODO_TEMPLATES;
+  process.env.DSH_TODO_TEMPLATES = join(REPO_ROOT, 'todo_templates');
   try {
     const work = join(directory, 'checkout');
     const reviewed = await checkout(work);
@@ -347,5 +351,8 @@ test('after a host restart the snapshot lists the dead finder for re-dispatch an
     assert.equal(JSON.parse(await readFile(join(directory, 'todo', attempt + '~find-correctness.json'), 'utf8')).items.find.observed_at, passedAt);
     const rows = await todo.plans();
     assert.deepEqual(rows.filter(r => r.kind === 'batch').map(r => [r.attempt_id, r.remaining]), [[attempt, ['expand']]]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    if (savedTemplates === undefined) delete process.env.DSH_TODO_TEMPLATES; else process.env.DSH_TODO_TEMPLATES = savedTemplates;
+    await rm(directory, { recursive: true, force: true });
+  }
 });

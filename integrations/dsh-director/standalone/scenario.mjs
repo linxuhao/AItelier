@@ -21,25 +21,8 @@ import { leaks } from '../tools/vocabulary.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const plugin = join(here, '..');
 
-const TEMPLATE = `name: mini
-version: 1
-description: change one file inside a scope
-params:
-  paths:
-    type: list[str]
-    required: true
-  scope:
-    type: list[str]
-    required: true
-items:
-  - id: write
-    title: "Write \${paths}"
-    predicates:
-      - predicate: files_changed
-        args: {paths: $paths}
-      - predicate: changes_within
-        args: {scope: $scope}
-`;
+// The template is the plugin's own default (todo/todo_templates/change_files.yaml): no
+// template directory is configured, so the run also proves the zero-config default.
 
 // The scripted model. Root: take two work items, plan both, dispatch two workers,
 // then (once both reported back) finish both, close them and go dormant. Each worker:
@@ -56,7 +39,7 @@ const W = JSON.parse(process.env.STANDALONE_WORK);
 export function apply(ctx) {
   const done = new Set(), steps = new Map();
   const once = (key, make) => done.has(key) ? undefined : (done.add(key), make());
-  const plan = w => tool('plan-' + w.id, 'todo_plan', { template: 'mini', params: { paths: ['work.txt'], scope: ['work.txt'] },
+  const plan = w => tool('plan-' + w.id, 'todo_plan', { template: 'change_files', params: { paths: ['work.txt'], scope: ['work.txt'] },
     goal: 'write work.txt for ' + w.id, attempt_id: w.id, node_key: 'demo.' + w.id, context_hash: 'c'.repeat(64),
     base_sha: w.base, workspace: w.repo });
   const worker = (w, n) => [
@@ -128,9 +111,8 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
   const problems = [];
   const check = (ok, what) => { if (!ok) problems.push(what); };
   try {
-    const root = join(directory, 'director'), templates = join(directory, 'templates');
-    await mkdir(join(root, 'inbox'), { recursive: true }); await mkdir(templates);
-    await writeFile(join(templates, 'mini.yaml'), TEMPLATE);
+    const root = join(directory, 'director');
+    await mkdir(join(root, 'inbox'), { recursive: true });
     const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
     const work = [];
     for (const id of ['w1', 'w2']) {
@@ -157,7 +139,7 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
     const environment = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'USER']
       .filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
-      DSH_HOME: join(directory, 'home'), DSH_PERMISSION_MODE: 'danger-full-access', DSH_TODO_TEMPLATES: templates,
+      DSH_HOME: join(directory, 'home'), DSH_PERMISSION_MODE: 'danger-full-access',
       STANDALONE_DSH_ENTRY: entry, STANDALONE_URL: `http://127.0.0.1:${server.address().port}`, STANDALONE_WORK: JSON.stringify(work) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
     const deadline = Date.now() + timeoutMs;
@@ -172,7 +154,13 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
       const [finished] = results('finish-' + w.id);
       check(finished?.candidate === true, `${w.id}: todo_finish gave no candidate: ${JSON.stringify(finished).slice(0, 300)}`);
       if (finished?.candidate) {
+        // Something was delivered: the candidate is a NEW commit (not the plan's base), it is
+        // the workspace's HEAD, and the file it carries holds what the worker wrote.
+        check(finished.artifact !== w.base, `${w.id}: the candidate is the plan's base - nothing was delivered`);
         check(finished.artifact === git(w.repo, 'rev-parse', 'HEAD'), `${w.id}: candidate artifact is not the worker's commit`);
+        let delivered = '';
+        try { delivered = git(w.repo, 'show', finished.artifact + ':work.txt'); } catch { /* reported below */ }
+        check(delivered === w.id, `${w.id}: the candidate's work.txt is ${JSON.stringify(delivered)}, not what the worker wrote`);
         check((await stat(finished.report).catch(() => null)) !== null, `${w.id}: candidate report missing`);
       }
       // The worker sessions did the item work; the director never ran a worker's item.

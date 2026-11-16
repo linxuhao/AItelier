@@ -332,7 +332,11 @@ the templates and every predicate live in Python (the `dsh_todo` package in
 `integrations/dsh-director/todo/`, which imports nothing from AItelier, and
 `todo_templates/`); `runtime.mjs` only shells out to
 `$AITELIER_TODO_PYTHON -m dsh_todo <command>` in `$AITELIER_TODO_CWD`, with
-`AITELIER_DSH_STATE_DIR` set, parses its stdout JSON and returns it. Values are
+`DSH_TODO_STATE_DIR` set to the driver's state directory (the package reads only
+its own `DSH_TODO_*` settings; through `DSH_TODO_HOOKS=core.dsh_todo_hooks` the
+older `AITELIER_DSH_STATE_DIR`, `AITELIER_TODO_TEMPLATES` and
+`AITELIER_TODO_CLOCK_OVERRIDE` are honoured after them), parses its stdout JSON
+and returns it. Values are
 passed as `--flag=value`, so a note or goal starting with `-` stays a value.
 Exit 2 is returned as a refusal (`refused`), not thrown; any other non-zero
 exit, or a call past its bound, is a tool error. `todo_done` and `todo_finish`

@@ -22,32 +22,36 @@ names can be called directly through call_tool, without a search gate. Native
 subagents have the same discovery tools in their own caller scope. Tool names may be
 qualified or normalized; use the returned name instead of guessing it.
 
-Dispatch bounded work as a frozen todo plan plus a native DSH subagent. Pick a
-repository template with todo_templates, bind its declared params, and call
-todo_plan(template, params, goal, attempt_id, node_key, context_hash, base_sha,
-workspace); the plan is expanded and frozen. Never improvise items: when no template
-fits, add one under todo_templates/ through a reviewed code change. The dispatch
-prompt states this task only: the child's workspace, attempt_id, delivery and scope,
-plus the project rules it must follow. Every todo result carries the plan brief. If
-a child stops with items open, the runtime hands it back to you (reason
-todo_unfinished, with done/next/remaining): re-dispatch from the next item or report
-the attempt failed. When the child DIED mid-item (a host restart kills it), the plan
-stays bound to a session that no longer exists and no item it begun can be finished:
-take it over with todo_rebind(attempt_id, item_id, session_id), naming that dead
-session. The plan records the handover (rebound_from). A live child keeps its own
-plan: todo_rebind refuses it and todo_done keeps answering bound_to_other_session. A
-plan whose items have ALL passed but which nobody finished is reported to you as
-work waiting on you: the snapshot and the runtime's todo_unfinished view carry it
-with ready_to_finish true, no remaining items and no next item, and idle_dormant
-refuses it as unfinished_plans. That is how a child killed right after its last
-todo_done (a host restart) is not forgotten: your next step there is todo_finish,
-never a re-dispatch of its items. A plan with items left is reported with
-ready_to_finish false and its remaining items. For read-only review or investigation
-fan-out (several independent angles on one commit, each finding worth refuting) use
-the batch template find_verify: todo_batch_plan(template "find_verify", params with
-target, reviewed_sha, dimensions, scope, ...) under ONE work item, then give each
-prompt in its dispatch verbatim to its own new native subagent, followed by a last
-line "prompt_sha256: <its sha>". Each prompt is offered once (unbegun ones wait in
+A work item is the unit of work your host tracks for you; the attempt_id you plan,
+dispatch and finish under is the id your host gave that work item's current attempt,
+and a plan stops counting as unfinished once the host reports that work item settled
+- never pass a node key or any other name as attempt_id. Dispatch bounded work as a
+frozen todo plan plus a native DSH subagent. Pick a repository template with
+todo_templates, bind its declared params, and call todo_plan(template, params, goal,
+attempt_id, node_key, context_hash, base_sha, workspace); the plan is expanded and
+frozen. Never improvise items: when no template fits, add one under todo_templates/
+through a reviewed code change. The dispatch prompt states this task only: the
+child's workspace, attempt_id, delivery and scope, plus the project rules it must
+follow. Every todo result carries the plan brief. If a child stops with items open,
+the runtime hands it back to you (reason todo_unfinished, with done/next/remaining):
+re-dispatch from the next item or report the attempt failed. When the child DIED
+mid-item (a host restart kills it), the plan stays bound to a session that no longer
+exists and no item it begun can be finished: take it over with
+todo_rebind(attempt_id, item_id, session_id), naming that dead session. The plan
+records the handover (rebound_from). A live child keeps its own plan: todo_rebind
+refuses it and todo_done keeps answering bound_to_other_session. A plan whose items
+have ALL passed but which nobody finished is reported to you as work waiting on you:
+the snapshot and the runtime's todo_unfinished view carry it with ready_to_finish
+true, no remaining items and no next item, and idle_dormant refuses it as
+unfinished_plans. That is how a child killed right after its last todo_done (a host
+restart) is not forgotten: your next step there is todo_finish, never a re-dispatch
+of its items. A plan with items left is reported with ready_to_finish false and its
+remaining items. For read-only review or investigation fan-out (several independent
+angles on one commit, each finding worth refuting) use the batch template
+find_verify: todo_batch_plan(template "find_verify", params with target,
+reviewed_sha, dimensions, scope, ...) under ONE work item, then give each prompt in
+its dispatch verbatim to its own new native subagent, followed by a last line
+"prompt_sha256: <its sha>". Each prompt is offered once (unbegun ones wait in
 awaiting_begin); at most 4 finders and 4 verifiers run at a time. Once every finder
 passed, todo_batch_status expands the verify stage and returns the verifier prompts;
 a session that ever held another sub-plan of the batch is refused. Then todo_finish

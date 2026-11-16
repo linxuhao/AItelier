@@ -22,6 +22,36 @@ TIMEOUT = 20
 BASE = "8a755972cc1733441c37408689d96fefe9ff28e7"
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = json.loads(Path(__file__).with_name("owned-fixture.json").read_text())
+
+# The interpreter-role probe: what a candidate interpreter must answer to serve a
+# role, and the environment it is asked in. Exit 0 only when the client module
+# resolves to a real file. A bare `import httpx` also succeeds on an empty
+# directory named httpx (a namespace package, whose __file__ is None), so that
+# alone must not be taken as a usable client.
+#
+# These live here, in this uniquely named support module, rather than in
+# conftest.py. This directory is not a package, so pytest imports its conftest
+# under the top-level name `conftest` — a name tests/skillflow/conftest.py and
+# tests/writing_bench/conftest.py also take, so a test module's bare
+# `import conftest` resolves to whichever directory's conftest pytest loaded
+# last. conftest.py and the witness in test_gate_queue.py both import the shared
+# definitions from here instead, which removes the dependence on the ambiguous
+# name without changing pytest's import semantics.
+PROBE = ('import httpx, pathlib, sys; sys.exit(0 if getattr(httpx, "__file__", None) '
+         'and pathlib.Path(httpx.__file__).is_file() else 1)')
+PROBE_TIMEOUT = 20
+
+
+def probe_environment():
+    """This process's environment minus PYTHONPATH: the env every probe runs in.
+
+    ``Harness`` strips PYTHONPATH from every child environment it builds, so a
+    candidate that only imports the client through PYTHONPATH could not serve
+    the role and must not look like it can.
+    """
+    return {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+
+
 SHA = FIXTURE["git_objects"]["source_sha"]
 VENV_REQUIREMENT = "GATE_QUEUE_TEST_VENV_PYTHON must name the existing read-only CLI venv interpreter"
 

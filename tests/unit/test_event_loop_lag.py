@@ -173,6 +173,37 @@ def test_logging_is_rate_limited(caplog):
 
 
 
+def test_log_line_states_only_what_was_measured(caplog):
+    """A rendered warning must carry the measured attribution, not a conclusion.
+
+    The threshold, the cooldown and the label logic are untouched; only the
+    sentence changed. The old format appended the constant clause
+    "…; control-plane work was not being turned on this loop", which asserts a
+    cause the sampler never measured — and flatly contradicts the very same
+    line when `attribution=tick:<project>` names a detached tick that WAS being
+    turned. This drives the real `_record` path with a deliberately non-`unknown`
+    attribution and reads the line a log-only reader would see.
+    """
+    monitor = ell.EventLoopLagMonitor(interval_s=1.0, threshold_s=1.0,
+                                      max_observations=10,
+                                      log_cooldown_s=0.0,
+                                      attribution=lambda: "tick:proj-a")
+    with caplog.at_level(logging.WARNING, logger="aitelier.event_loop_lag"):
+        monitor._record(1.5)
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    print(f"\nrendered lag warning: {warnings}")
+    assert len(warnings) == 1, "the non-unknown attribution emitted no warning"
+    line = warnings[0]
+    # The measurement survives: lag value, threshold in force, attribution label.
+    assert "1.50s" in line and "1.00s" in line
+    assert "attribution=tick:proj-a" in line
+    # The retained record carries the same label the line shows.
+    assert monitor.snapshot()[-1]["attribution"] == "tick:proj-a"
+    # And no unmeasured conclusion rides along.
+    assert "control-plane work was not being turned on this loop" not in line
+
+
 @pytest.mark.asyncio
 async def test_attribution_names_live_context_and_filters_completed(monkeypatch):
     """Live in-flight ticks are named; completed ticks are not; else unknown."""

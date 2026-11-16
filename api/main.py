@@ -309,8 +309,13 @@ app.include_router(novel_router)
 # A project-privacy refusal raised at the `execute` chokepoint answers 403 on every
 # route of the product app — including one a route author forges by reusing the real
 # guard and declaring a public action, because such a handler still reaches `execute`.
-from api.state_http import apply_project_privacy
+from api.state_http import apply_project_privacy, apply_state_write_busy
 apply_project_privacy(app)
+# The same placement for the retryable write refusal: a State write that could not
+# take SQLite's lock inside its budget answers 503 + Retry-After on EVERY route,
+# including the ones (e.g. the driver heartbeat) that call `execute` themselves and
+# never passed through `api.state_http._call`.
+apply_state_write_busy(app)
 
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the

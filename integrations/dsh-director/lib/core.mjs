@@ -48,6 +48,7 @@ export function defaultTexts() {
     todoBatch: 'Todo batch:\n',
     modelCompletion: 'Model completion',
     slotFree: 'Worker slot free:\n',
+    workersResumed: 'Workers resumed after a restart:\n',
     tools: {},
   };
 }

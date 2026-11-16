@@ -110,7 +110,9 @@
   },
   "added_to_generic": {
     "driver": [
-      "A work item is the unit of work your host tracks for you; the attempt_id you plan, dispatch and finish under is the id your host gave that work item's current attempt, and a plan stops counting as unfinished once the host reports that work item settled - never pass a node key or any other name as attempt_id."
+      "A work item is the unit of work your host tracks for you; the attempt_id you plan, dispatch and finish under is the id your host gave that work item's current attempt, and a plan stops counting as unfinished once the host reports that work item settled - never pass a node key or any other name as attempt_id.",
+      "That plan is first given back to its child: the runtime resumes a child a restart cut off in its own session, with a recovery note, at most twice per child, and tells you once which children it resumed and which it could not, and why (workers resumed after a restart).",
+      "A resumed child is live again: leave its plan to it, and take over only a plan whose child could not be resumed."
     ]
   },
   "added_why": "review of 76660e847e: 'work item' was used in the generic half but defined only in state.md; this sentence defines it there (and rules out passing a node key as attempt_id). It is new text, not a moved sentence."

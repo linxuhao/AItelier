@@ -25,6 +25,7 @@ import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, 
   grepHistory, historyPage } from './lib/core.mjs';
 import { Outbox } from './lib/outbox.mjs';
 import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from './lib/capacity.mjs';
+import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
 
 export const name = 'dsh-director';
@@ -40,6 +41,8 @@ export function hostWording(host) {
 }
 
 export async function boot(ctx, { host = ctx.directorHost } = {}) {
+  // Anything a session log wrote from here on, this process wrote (plugin step 6).
+  const startedAt = Date.now();
   validateHost(host);
   const config = host.config;
   const { texts, labels } = hostWording(host);
@@ -218,6 +221,49 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     });
     slotWake.catch(warn);
     return slotWake;
+  };
+  // Workers the restart interrupted (plugin step 6, lib/resume.mjs): each resumed once
+  // in its own session with a recovery note, at most twice over all restarts; one wake
+  // names who was resumed and who was not, and why, through the outbox. A failed one
+  // keeps the existing ways on: todo_rebind, batch_redispatch, a fresh dispatch.
+  const resumeRecords = new ResumeRecords(config.stateDir);
+  const resumeWorkers = async () => {
+    if (config.resumeWorkers === false) return;
+    const subagents = ctx.get('subagents');
+    if (typeof subagents?.sendMessage !== 'function' || typeof subagents.listChildren !== 'function') {
+      ctx.logger.warn('resume: no subagents service with sendMessage/listChildren; interrupted workers are not resumed'); return;
+    }
+    const { plans, settled } = await planWork();
+    pruneChildren();
+    const candidates = resumeCandidates({ plans, settled, director: config.sessionId,
+      isLive: id => children.has(id) || ctx.agents.get(id) !== undefined });
+    if (!candidates.length) return;
+    const catalog = new Map((await subagents.listChildren(config.sessionId)).map(row => [row.id, row]));
+    const resumed = [], failed = [];
+    for (const plan of candidates) {
+      const child = plan.child_session;
+      const row = { attempt_id: plan.attempt_id, child_session: child, ...(plan.node_key ? { node_key: plan.node_key } : {}) };
+      let turn;
+      try { turn = lastTurn((await ctx.sessionQuery.readSession(child)).events); } catch { turn = undefined; }
+      const record = await resumeRecords.stats(child);
+      const reason = refusal({ row: catalog.get(child), turn, startedAt, record, maxResumes: 2 });
+      // Its own stop (the hand-back covered it) or touched since this process started:
+      // not a worker the restart interrupted.
+      if (reason === 'not_interrupted' || reason === 'active_since_this_process_started') continue;
+      if (reason) { failed.push({ ...row, reason, ...(record ? record : {}) }); continue; }
+      const note = recoveryNote(plan);
+      // Recorded before the message, so a crash right after it cannot resume a third time.
+      await resumeRecords.add(child, { at: new Date().toISOString(), note_sha256: createHash('sha256').update(note).digest('hex') });
+      try {
+        await subagents.sendMessage(agent, child, [{ type: 'text', text: note }], { signal: AbortSignal.timeout(60000) });
+        await resumeRecords.delivered(child).catch(error => ctx.logger.warn('resume record: ' + String(error)));
+        resumed.push(row);
+      } catch (error) {
+        failed.push({ ...row, reason: String(error?.code ?? 'send_failed'), detail: String(error?.message ?? error).slice(0, 300) });
+      }
+    }
+    if (resumed.length || failed.length) await outbox.send('resume:' + startedAt, texts.workersResumed + JSON.stringify({ resumed, failed,
+      ...(failed.length ? { failed_next: 'each failed plan is still bound to its dead session: take it over with todo_rebind, or dispatch a fresh worker (batch_redispatch for batch plans)' } : {}) }));
   };
   const notifyEvent = (text, options = {}) => options.id ? outbox.deliverOnce(String(options.id), text).then(() => {}) : notify(text);
   // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
@@ -624,6 +670,9 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   if (replayed.length) ctx.logger.info(`outbox: replayed ${replayed.length} notice(s): ${replayed.join(', ')}`);
   // Dispatches refused before a restart: the restart freed their slots.
   await wakeForSlot();
+  // Workers the restart interrupted: resumed before new events arrive. A failure here
+  // is logged and never stops the boot.
+  await resumeWorkers().catch(error => ctx.logger.warn('resume: ' + String(error?.stack ?? error)));
   events = await host.events(api);
   const pump = Promise.resolve(events?.done).catch(async error => {
     if (!disposed) {

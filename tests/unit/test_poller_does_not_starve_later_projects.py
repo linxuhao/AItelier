@@ -35,6 +35,16 @@ INTERVAL_S = 1          # the smallest interval the settings accept (an int)
 MARGIN_S = 2.0          # explicit slack on top of one interval
 LONG_STEP_S = 8.0       # the "gate": long next to INTERVAL_S + MARGIN_S
 
+# A SETUP wait, not a promise: the window in which the harness itself must reach
+# the state the assertions are ABOUT (the tool step running; every in-flight tick
+# entered).  INTERVAL_S + MARGIN_S is what the PRODUCT owes a project activated
+# later and stays untouched below; these windows only have to be finite, so they
+# are set an order of magnitude above the interval.  At INTERVAL_S + MARGIN_S
+# they redded in the full suite of 2026-11-16 (ae16575a5c) -- "the tool step
+# never started", and 2 of 3 ticks entered -- because a 2-CPU box stalled the
+# loop that starts them.
+SETUP_WAIT_S = 30.0
+
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
@@ -133,7 +143,7 @@ async def test_a_project_activated_during_a_long_step_gets_a_tick(env, monkeypat
     sched = _scheduler()
     sched.start()
     try:
-        await asyncio.wait_for(gate_started.wait(), timeout=INTERVAL_S + MARGIN_S)
+        await asyncio.wait_for(gate_started.wait(), timeout=SETUP_WAIT_S)
         env.active.append(late)                 # dispatched AFTER the tick began
         activated = time.monotonic()
         try:
@@ -259,7 +269,7 @@ async def test_end_to_end_a_real_long_tool_step_does_not_starve_a_later_project(
     sched = _scheduler()
     sched.start()
     try:
-        deadline = time.monotonic() + INTERVAL_S + MARGIN_S
+        deadline = time.monotonic() + SETUP_WAIT_S
         while "start" not in tool_window and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         assert "start" in tool_window, "the tool step never started"
@@ -412,7 +422,7 @@ async def test_shutdown_cancels_every_in_flight_tick_and_releases_its_claim(
     sched = _scheduler()
     sched.start()
     try:
-        await asyncio.wait_for(all_in.wait(), timeout=INTERVAL_S + MARGIN_S)
+        await asyncio.wait_for(all_in.wait(), timeout=SETUP_WAIT_S)
         assert all(r["status"] == "claimed" for r in rows().values()), rows()
         sched.shutdown(wait=True)                # what the lifespan does
         done, pending = await asyncio.wait(entered, timeout=5)

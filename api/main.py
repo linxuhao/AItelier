@@ -11,10 +11,13 @@
 # entries that need it (cli/server.py, cli/client.py). The server container gets
 # its configuration from compose `env_file`, so nothing here needs the file.
 
+import asyncio as _asyncio
 import hashlib as _hashlib
 import os as _os
+import threading as _threading
 import time as _time
 
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 from datetime import datetime as _datetime, timezone as _timezone
@@ -542,9 +545,35 @@ def _process_age() -> dict:
             "uptime_seconds": round(uptime, 3), "reason": None}
 
 
-@app.get("/health")
-def health_check():
-    """系统探针
+# The threads /health's own BLOCKING reads run on: reading and sha256-ing the
+# gate export, and reading /proc/self/stat. Two is plenty for two sub-millisecond
+# reads; a probe that arrives while both are busy waits for one of them to
+# finish, never for a State request. Built lazily under a lock so importing this
+# module (every test does) starts no thread.
+_HEALTH_PROBE_THREADS = 2
+_HEALTH_PROBE: _ThreadPoolExecutor | None = None
+_HEALTH_PROBE_LOCK = _threading.Lock()
+
+
+def _health_probe_pool() -> _ThreadPoolExecutor:
+    """The dedicated executor /health hands its blocking work to.
+
+    A pool of its OWN, deliberately not `run_in_threadpool`: taking a slot of
+    anyio's default limiter is exactly what used to put the probe behind State
+    traffic. The executor is module-level and shared, because a per-request one
+    would make every probe pay a thread creation to do 2 ms of reading.
+    """
+    global _HEALTH_PROBE
+    with _HEALTH_PROBE_LOCK:
+        if _HEALTH_PROBE is None:
+            _HEALTH_PROBE = _ThreadPoolExecutor(
+                max_workers=_HEALTH_PROBE_THREADS,
+                thread_name_prefix="health-probe")
+        return _HEALTH_PROBE
+
+
+def health_check() -> dict:
+    """系统探针 — the /health answer, read fresh on every call.
 
     `gate_harness` reports the harness copy inside the backend container running
     right now (see GATE_EXPORT_HARNESS), read fresh on every request. It is NOT
@@ -557,10 +586,41 @@ def health_check():
     up (see _process_age), read fresh on every request. It is the age of this
     process, not of the container: a restart by Docker's restart policy resets it,
     and /health cannot count the restarts that came before.
+
+    SYNCHRONOUS, and it BLOCKS: reading and sha256-ing the export and reading
+    /proc/self/stat are short but they are still disk and syscall work. That is
+    why the ROUTE (`health_probe`, below) never calls it on the event loop and
+    never on a shared anyio slot - it hands it to the probe pool. This function
+    keeps its name because a caller with no event loop can still ask it directly
+    (tests/unit/test_task_log_stream_is_gated.py does). Nothing here is cached:
+    the digest follows the file's CURRENT bytes and the uptime is THIS process's,
+    so both fields still track their live sources.
     """
     return {"status": "ok", "engine": "DPE SOTA v3.0",
             "gate_harness": _gate_harness_identity(),
             "process": _process_age()}
+
+
+@app.get("/health")
+async def health_probe():
+    """Answer the liveness probe OFF the shared anyio worker pool.
+
+    A plain `def` endpoint is serviced by `run_in_threadpool` on anyio's DEFAULT
+    limiter - the same 40 slots that `POST /api/state/query/{action}` and its
+    per-request `get_service` dependency take a slot from - so the probe queued
+    behind State reads. Measured on the live backend (2026-11-16), one wave of 58
+    concurrent `get_attempt` calls at concurrency 40 gave /health p95 53.1 ms and
+    max 1171.1 ms while State p50 was 1539.8 ms. A liveness probe whose latency
+    is a function of unrelated read traffic cannot answer the question it exists
+    to answer.
+
+    The fix is placement, not behaviour: the loop receives this request, and the
+    blocking payload (`health_check`) runs on a small executor of its own - not
+    on a shared slot and not on the loop (a blocked loop costs every request;
+    see api/repo_routers.py for what that looked like).
+    """
+    return await _asyncio.get_running_loop().run_in_executor(
+        _health_probe_pool(), health_check)
 
 
 @app.get("/api/me")

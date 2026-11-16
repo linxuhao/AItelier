@@ -1,0 +1,57 @@
+# Static systemd user unit (no renderer, no @TOKEN@ substitution): the paths
+# below are this host's real ones. If the checkout moves, edit ExecStart and
+# WorkingDirectory; if HOME differs, edit --home/--json. Install with:
+#
+#   install -Dm644 deploy/aitelier-retention-reaper.service \
+#       ~/.config/systemd/user/aitelier-retention-reaper.service
+#   install -Dm644 deploy/aitelier-retention-reaper.timer \
+#       ~/.config/systemd/user/aitelier-retention-reaper.timer
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now aitelier-retention-reaper.timer
+#   systemctl --user start aitelier-retention-reaper.service   # first run, watched
+#   journalctl --user -u aitelier-retention-reaper.service -n 40
+#
+# WHY THIS UNIT EXISTS. deploy/retention_reaper.py was merged on 2026-11-16
+# together with its unit tests, and nothing ever ran it: there was no timer, no
+# cron entry and no caller anywhere in the tree, so the four classes it manages
+# only shrank when an operator remembered to type the command. That is the
+# "a durable record nobody reads" shape: the retention decision existed, the
+# mechanism existed, and the growth continued. Measured on 2026-11-16 before the
+# first manual run: godot-control/evidence held 3,276 proof directories and
+# 38.37 GB, release-watch/runs 28 directories and 13.19 GB, scratch 4.55 GB,
+# worktrees-scratch 3.3 GB.
+#
+# WHAT IT DOES AND DOES NOT DELETE. The reaper ages each entry by its OWN mtime
+# inside four class roots only:
+#   godot-control/evidence   3 days   (owner ruling 2026-11-16: 保留3天)
+#   release-watch/runs      14 days
+#   scratch                 14 days
+#   worktrees-scratch       14 days
+# Everything else in the home is immune by pattern, and `--delete` is what makes
+# the run destructive: without it the tool only reports. The JSON report of each
+# run is written to ~/.AItelier/logs/retention-reaper.json (last run wins;
+# journald keeps the history). A zero-candidate run is the normal steady state.
+#
+# IT IS NOT A CLEANUP OF director/reports. That tree has its own, much stricter
+# discipline (State-reference protection, then either in-place trimming of
+# rebuildable artefacts or whole-entry zstd archives with manifests) and must
+# never be handed to an age-based reaper.
+[Unit]
+Description=AItelier retention reaper: delete ~/.AItelier entries past their retention (godot evidence 3d; release-watch runs, scratch and worktrees-scratch 14d)
+Documentation=file:///home/linxuhao/AItelier/deploy/retention_reaper.py
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/linxuhao/AItelier
+ExecStart=/usr/bin/python3 -m deploy.retention_reaper --home /home/linxuhao/.AItelier --delete --json /home/linxuhao/.AItelier/logs/retention-reaper.json
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Reclaiming disk is the point, so the walk never competes with real work.
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=536870912
+# A walk over four class roots took 20 s when measured; 30 min is a stuck-run
+# bound, not an expectation.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal

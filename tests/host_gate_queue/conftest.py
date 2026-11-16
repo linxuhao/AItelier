@@ -29,6 +29,17 @@ Loaded by both shapes of this suite: the gate's ``pytest <repo> --rootdir <repo>
 ``pytest -c tests/host_gate_queue/pytest.ini --confcutdir=tests/host_gate_queue``.
 A hook in ``tests/conftest.py`` would not be loaded by the second shape, which is
 why the supply lives in the suite's own directory.
+
+``PROBE``, ``PROBE_TIMEOUT`` and the probe environment are defined in
+``owned_support`` and imported here, not defined in this file. This directory is
+not a package, so pytest imports this module under the top-level name
+``conftest`` — a name that ``tests/skillflow/conftest.py`` and
+``tests/writing_bench/conftest.py`` also take. A test module's bare
+``import conftest`` therefore resolves to whichever of them pytest imported
+last, which is how ``test_gate_queue.py`` used to fail with ``AttributeError``
+when another such directory was collected in the same process. The shared
+definition lives in a uniquely named module so the suite never depends on that
+ambiguous name; pytest's import semantics are unchanged.
 """
 from __future__ import annotations
 
@@ -36,15 +47,10 @@ import os
 import subprocess
 import sys
 
+from owned_support import PROBE, PROBE_TIMEOUT, probe_environment
+
 CLIENT_ROLE = "GATE_QUEUE_TEST_VENV_PYTHON"
 ORDINARY_ROLE = "GATE_QUEUE_TEST_ORDINARY_PYTHON"
-
-# Exit 0 only when the client module resolves to a real file. A bare `import httpx`
-# also succeeds on an empty directory named httpx (a namespace package, whose
-# __file__ is None), so that alone must not be taken as a usable client.
-PROBE = ('import httpx, pathlib, sys; sys.exit(0 if getattr(httpx, "__file__", None) '
-         'and pathlib.Path(httpx.__file__).is_file() else 1)')
-PROBE_TIMEOUT = 20
 
 # Hypotheses only. The running interpreter comes first (the gate's pytest leg runs
 # the image's own python3), then the image's other client-capable interpreters.
@@ -60,10 +66,6 @@ _ORDINARY_CANDIDATES = (sys.executable, "/usr/bin/python3",
 _OBSERVED = {}
 
 
-def _probe_environment():
-    return {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
-
-
 def _observe(candidate):
     """Observe one candidate interpreter. Never raises; returns True/False/None."""
     if not candidate:
@@ -77,7 +79,7 @@ def _observe(candidate):
     try:
         done = subprocess.run([candidate, "-c", PROBE], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=PROBE_TIMEOUT,
-                              env=_probe_environment())
+                              env=probe_environment())
         verdict = done.returncode == 0
     except (OSError, subprocess.SubprocessError):
         verdict = None  # not an executable interpreter: not observable

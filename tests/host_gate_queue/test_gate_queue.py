@@ -17,7 +17,11 @@ import time
 
 import pytest
 
-import conftest
+# From owned_support, not from the sibling conftest.py: this directory is not a
+# package, so pytest imports that file under the top-level name `conftest`, which
+# tests/skillflow/conftest.py and tests/writing_bench/conftest.py also claim — a
+# bare `import conftest` here can name another directory's conftest entirely.
+from owned_support import PROBE, probe_environment
 
 
 SOURCE = Path(os.environ.get(
@@ -376,15 +380,15 @@ def test_client_probe_rejects_a_namespace_package_named_httpx(tmp_path):
     `-c` puts the working directory first on sys.path. The positive control is a
     regular package with __init__.py, run with the same flags, which must pass.
     """
-    env = conftest._probe_environment()
+    env = probe_environment()
     (tmp_path / "httpx").mkdir()
-    negative = subprocess.run([sys.executable, "-S", "-c", conftest.PROBE],
+    negative = subprocess.run([sys.executable, "-S", "-c", PROBE],
                               cwd=tmp_path, env=env, capture_output=True, timeout=TIMEOUT)
     assert negative.returncode != 0, negative
 
     positive_dir = tmp_path / "control"
     (positive_dir / "httpx").mkdir(parents=True)
     (positive_dir / "httpx" / "__init__.py").write_text("")
-    positive = subprocess.run([sys.executable, "-S", "-c", conftest.PROBE],
+    positive = subprocess.run([sys.executable, "-S", "-c", PROBE],
                               cwd=positive_dir, env=env, capture_output=True, timeout=TIMEOUT)
     assert positive.returncode == 0, positive

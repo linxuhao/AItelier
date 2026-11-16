@@ -25,6 +25,16 @@ import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+process.env.PYTHONDONTWRITEBYTECODE = '1';     // a real CLI runs from this checkout: leave no bytecode in it
+// A real-checkout run points this file at the dsh_todo PACKAGE, which ships only its own
+// sample template set. The templates it runs in production are its host's reviewed ones
+// (core/dsh_todo_hooks.py: TEMPLATES_DIR = <repository>/todo_templates), handed to the CLI
+// through the package's TEMPLATES setting; without them the real CLI refuses the scenario's
+// `code_change` plan before anything can be witnessed. The fake CLI resolves its own
+// templates and ignores the setting.
+if (process.env.AITELIER_TODO_TEST_CWD) process.env.DSH_TODO_TEMPLATES ??= join(REPO_ROOT, 'todo_templates');
+
 // The director's runtime instructions since plugin step 4: the generic director.md, then AItelier's state.md
 // (whitespace collapsed: the halves are re-wrapped, so a phrase may span a line break).
 const driverGuide = async () => ((await readFile(new URL('../dsh-director/director.md', import.meta.url), 'utf8')) + '\n' + (await readFile(new URL('./state.md', import.meta.url), 'utf8'))).replace(/\s+/g, ' ');
@@ -355,6 +365,26 @@ const planInput = (attempt_id, node_key, base_sha, path) => ({ template: 'code_c
   goal: 'Write a.txt and b.txt for ' + node_key, attempt_id, node_key, context_hash: 'c'.repeat(64), base_sha, workspace: path });
 const createArgs = plan => ['create', '--template', plan.template, '--params', JSON.stringify(plan.params), '--attempt', plan.attempt_id,
   '--node-key', plan.node_key, '--context-hash', plan.context_hash, '--base-sha', plan.base_sha, '--workspace', plan.workspace, '--goal', plan.goal];
+
+/** The item ids a stored plan document records as PASSED.
+ *
+ * The fake CLI keeps them in a top-level `done` list; the real `dsh_todo` CLI never writes
+ * one - it records every observation under `items[<id>].outcome`, "open" until the item is
+ * measured and then "pass"/"fail"/"absent", with `unmeasurable` marking the one outcome that
+ * is not a completion. Read whichever shape the document has, and name the keys the document
+ * does carry when it has neither: a silent [] would turn "the takeover was never witnessed"
+ * into a green assertion. */
+function completedItems(document, where) {
+  if (Array.isArray(document.done)) return [...document.done];
+  const entries = document.items && typeof document.items === 'object' && !Array.isArray(document.items)
+    ? Object.entries(document.items) : [];
+  if (entries.length && entries.every(([, entry]) => entry && typeof entry === 'object' && 'outcome' in entry)) {
+    return entries.filter(([, entry]) => entry.outcome === 'pass' && entry.unmeasurable !== true).map(([id]) => id);
+  }
+  throw new Error(`${where}: the plan document records completion in neither shape (no top-level \`done\` array, `
+    + `no per-item \`items[*].outcome\`); the keys it carries are ${JSON.stringify(Object.keys(document).sort())}`);
+}
+
 const toolText = event => event.data.message.content.map(block => block.text ?? '').join('');
 const toolJson = event => JSON.parse(toolText(event));
 
@@ -963,7 +993,7 @@ test('todo_rebind: a director takes over an item begun by a session that died, t
   // The plan file records the handover, so a later reader sees it changed hands.
   assert.equal(run.planStates.died.rebound_from, died);
   assert.equal(run.planStates.died.child_session, run.session);
-  assert.deepEqual([...run.planStates.died.done].sort(), ['deliver', 'implement', 'test']);
+  assert.deepEqual(completedItems(run.planStates.died, 'died plan').sort(), ['deliver', 'implement', 'test']);
 });
 
 test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', async (t) => {
@@ -974,6 +1004,9 @@ test('todo_rebind: a live child keeps its plan - the takeover refuses and done s
   assert.equal(refused.refused, 'live_session', 'a live child was taken over: ' + JSON.stringify(refused));
   assert.equal(run.planStates.live.child_session, live, 'a live child lost its plan');
   assert.equal(run.planStates.live.rebound_from, undefined);
+  // The same reader holds the live plan's document to the same shape, and to the fact that
+  // nobody finished it: the takeover and the director's done were both refused.
+  assert.deepEqual(completedItems(run.planStates.live, 'live plan'), [], 'the live child\'s plan recorded a completion');
   assert.equal(run.result('root-todo_done-live-implement').session, run.session);
   const done = run.json('root-todo_done-live-implement');
   assert.equal(done.refused, 'bound_to_other_session', 'the director edited a live child\'s plan: ' + JSON.stringify(done));

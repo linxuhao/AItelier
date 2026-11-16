@@ -15,6 +15,7 @@ import time
 import uuid
 
 from core.driver_credentials import read_token_file
+from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.state_graph import now
 from core.state_schema_migration import add_column_if_missing
 
@@ -196,7 +197,7 @@ def pwmcp_driver_ports(value=None):
 # The director/worker role table. integrations/dsh-driver/roles.mjs parses the
 # same file with the same rules (a test compares both parses and both refusals);
 # unknown keys are refused at every level.
-ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "roles.json"
+ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "roles.json"
 ROLE_NAMES = ("director", "worker")
 _ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", "forbidden")
 _COMPACTION_KEYS = ("thresholdRatio", "retainTokens")
@@ -491,6 +492,7 @@ class DshDrivers:
         (profile / "package.json").write_text(json.dumps({"private": True, "dsh": {
             "profile": {"bundles": ["@deepseek-ai/dsh-base"]}}}))
         source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "runtime.mjs"
+        director_source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "index.mjs"
         # JSON is YAML too; the runtime installs its own native State/pipeline tools.
         # Local MCP services the driver may use, each switchable independently:
         # the URL is the switch. A blank URL means "do not register it", so an
@@ -556,7 +558,10 @@ class DshDrivers:
             # director nor a child can reach them. Rarely used tools stay loaded and
             # deferred instead (integrations/dsh-driver/tool-discovery.mjs).
             *[{"id": plugin, "disabled": True} for plugin in UNUSED_BUILTIN_TOOL_PLUGINS],
-            {"insert": [{"id": "aitelier-driver", "name": str(source)},
+            # dsh-director (the generic director plugin) first, then this adapter,
+            # which provides its `directorHost` service (plugin design step 2, MF1).
+            {"insert": [{"id": "dsh-director", "name": str(director_source)},
+                {"id": "aitelier-driver", "name": str(source)},
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",
                     "url": self.base_url.rstrip("/") + "/mcp",
@@ -577,9 +582,10 @@ class DshDrivers:
                    AITELIER_DSH_MODEL=row["model"], AITELIER_URL=self.base_url,
                    AITELIER_DSH_STATE_DIR=str(directory),
                    AITELIER_DSH_ENTRY=str(Path(self.command[0]).resolve()),
-                   # The runtime's todo_* tools run `python -m core.todo_cli` from this checkout.
+                   # The runtime's todo_* tools run `python -m dsh_todo` from the package's
+                   # directory, with this checkout's hooks (core/dsh_todo_hooks.py).
                    AITELIER_TODO_PYTHON=sys.executable,
-                   AITELIER_TODO_CWD=str(Path(__file__).resolve().parents[1]))
+                   AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV)
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))

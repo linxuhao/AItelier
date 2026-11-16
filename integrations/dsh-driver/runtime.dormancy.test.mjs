@@ -208,15 +208,15 @@ async function scenario(t, floor, { minuteMs } = {}) {
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-dormancy-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: join(directory, 'fixture-dormancy-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
     // A fake todo CLI listing one unfinished, childless plan until the provider deletes it.
-    const cli = join(directory, 'cli'); await mkdir(join(cli, 'core'), { recursive: true }); await mkdir(join(directory, 'todo'));
+    const cli = join(directory, 'cli'); await mkdir(join(cli, 'dsh_todo'), { recursive: true }); await mkdir(join(directory, 'todo'));
     const planFile = join(directory, 'one-plan.json');
     await writeFile(planFile, JSON.stringify([{ attempt_id: 'attempt-open', node_key: 'n', next: 'test', remaining: ['test'], child_session: 'gone' }]));
-    await writeFile(join(cli, 'core', '__init__.py'), '');
-    await writeFile(join(cli, 'core', 'todo_cli.py'), [
+    await writeFile(join(cli, 'dsh_todo', '__init__.py'), '');
+    await writeFile(join(cli, 'dsh_todo', '__main__.py'), [
       'import json, os, sys',
       'path = ' + JSON.stringify(planFile),
       'plans = json.load(open(path)) if os.path.exists(path) else []',

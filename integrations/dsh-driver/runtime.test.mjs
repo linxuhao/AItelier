@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
+// The director's runtime instructions since plugin step 4: the generic director.md, then AItelier's state.md
+// (whitespace collapsed: the halves are re-wrapped, so a phrase may span a line break).
+const driverGuide = async () => ((await readFile(new URL('../dsh-director/director.md', import.meta.url), 'utf8')) + '\n' + (await readFile(new URL('./state.md', import.meta.url), 'utf8'))).replace(/\s+/g, ' ');
 test('an explicitly cleared native goal is not recreated on resident restart', () => {
   const agent={session:{snapshotEvents:()=>[{type:'goal/change',data:{operation:'clear'}}]}};
   assert.equal(bindDriverGoal({get:()=>undefined},agent,'bootstrap template'),undefined);
@@ -386,11 +389,11 @@ test('prompts ask for concrete candidates and a NOTHING_LEFT line, and name the 
   assert.match(reviewInstruction, /idle_dormant/);
   for (const text of [continuationQuestion, reviewInstruction])
     for (const candidate of [/ready/, /open issues/, /next steps you promised yourself/, /results you can collect/]) assert.match(text, candidate);
-  const guide = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+  const guide = await driverGuide();
   for (const word of ['continuation check', 'NOTHING_LEFT:', 'watch_process', 'idle_dormant']) assert.ok(guide.includes(word), word);
 });
 test('driver guide: external Claude/Codex subagents are for review and hard items, through devmcp, never raw bash', async () => {
-  const guide = (await readFile(new URL('./driver.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  const guide = (await driverGuide()).replace(/\s+/g, ' ');
   for (const phrase of ['search_tools(query="devmcp subagent")', 'subagent_start', 'subagent_get', 'subagent_message',
     'subagent_cancel', 'finds no devmcp tools', 'skip this paragraph and keep the work native', 'non-author review', 'it does not need a different model family', 'a native worker that is not the author is just as good', 'Never call a model provider', 'never read keys from ~/.aitelier-secrets', 'mode="read-only"', 'hard item',
     'Everything else stays native', 'record the result in State', 'Never start claude or codex from bash',
@@ -401,7 +404,7 @@ test('driver guide: external Claude/Codex subagents are for review and hard item
   assert.ok(!guide.includes('so the reviewer is a different model family'), 'review no longer demands another model family');
 });
 test('driver guide: independent tool calls share a step, and state_graph_write fills project and identity', async () => {
-  const guide = (await readFile(new URL('./driver.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  const guide = (await driverGuide()).replace(/\s+/g, ' ');
   for (const phrase of ['Every step re-sends your whole context', 'together in one step rather than one per step',
     'state_graph_write fills director_identity when omitted, and project_id while you belong to exactly one project - except on a notebook write, which must name its notebook (project_id or driver_id) itself'])
     assert.ok(guide.includes(phrase), phrase);

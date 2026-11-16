@@ -184,6 +184,20 @@ async def test_profile_keeps_owner_credentials_out_and_uses_pinned_runtime(runti
         await runtime.close()
 
 
+async def test_todo_cli_is_dsh_todo_run_from_its_package_directory_with_aitelier_hooks(runtime):
+    """The runtime runs `$AITELIER_TODO_PYTHON -m dsh_todo` in `$AITELIER_TODO_CWD` (runtime.mjs TodoCli)."""
+    from core.dsh_todo_hooks import CLI_ENV, REPO_ROOT, TODO_ROOT
+    try:
+        await runtime.start("alpha", actor="fixture")
+        env = runtime._environment(runtime.get("alpha"))
+        assert env["AITELIER_TODO_PYTHON"] == sys.executable
+        assert env["AITELIER_TODO_CWD"] == str(TODO_ROOT) and (TODO_ROOT / "dsh_todo" / "__main__.py").is_file()
+        assert {name: env[name] for name in CLI_ENV} == {"DSH_TODO_HOOKS": "core.dsh_todo_hooks",
+                                                         "DSH_TODO_HOOKS_PATH": str(REPO_ROOT)}
+    finally:
+        await runtime.close()
+
+
 async def test_real_http_context_is_own_private_scope_and_compact_payload_is_minimal(runtime, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -630,6 +644,24 @@ def test_local_mcp_servers_are_registered_by_default(runtime):
         assert entry["config"]["transport"] == "streamable-http"
         # A capability that is down must not stop the driver from starting.
         assert entry["config"]["failOnStartupError"] is False
+
+
+def test_profile_inserts_the_director_plugin_first_then_its_adapter(runtime):
+    """Plugin design step 2 (MF1): the profile is rewritten on every start, and the
+    split adds exactly one insert - the generic dsh-director plugin, ahead of the
+    AItelier adapter that provides its directorHost service. Everything else keeps
+    its place, so a revert plus one restart rewrites the old composition."""
+    from pathlib import Path
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    runtime._environment(row)
+    insert = next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)
+    ids = [e["id"] for e in insert]
+    assert ids.count("dsh-director") == 1 and ids[0] == "dsh-director", ids
+    assert ids[1:3] == ["aitelier-driver", "mcp-aitelier"], ids
+    director, adapter = Path(insert[0]["name"]), Path(insert[1]["name"])
+    assert (director.parent.name, director.name) == ("dsh-director", "index.mjs") and director.is_file()
+    assert (adapter.parent.name, adapter.name) == ("dsh-driver", "runtime.mjs") and adapter.is_file()
+    assert director.parent.parent == adapter.parent.parent, "both plugins come from the same checkout"
 
 
 def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch):

@@ -30,6 +30,7 @@ import { DriverRuntime, TodoCli, batchRedispatchRows, batchesToRedispatch, todoS
 import { watchProgress } from './progress.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const TODO_ROOT = join(REPO_ROOT, 'integrations', 'dsh-director', 'todo');
 /** A python that can run `core.todo_cli` against a template: it needs PyYAML. */
 const PYTHON = [process.env.AITELIER_TODO_TEST_PYTHON, 'python3', '/usr/bin/python3']
   .filter(Boolean).find(python => spawnSync(python, ['-c', 'import yaml'], { stdio: 'ignore' }).status === 0);
@@ -199,7 +200,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-batch-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: join(directory, 'fixture-batch-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
@@ -208,7 +209,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '3000',
-      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: REPO_ROOT, AITELIER_TODO_TEMPLATES: await templates(join(directory, 'templates')),
+      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: TODO_ROOT, DSH_TODO_TEMPLATES: await templates(join(directory, 'templates')),
       AITELIER_TEST_BATCH: JSON.stringify({ attempt, base: reviewed, input, findings: FINDINGS }) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
@@ -306,10 +307,14 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
 test('after a host restart the snapshot lists the dead finder for re-dispatch and never re-runs the passed one', { timeout: 120000 }, async () => {
   assert.ok(PYTHON, 'no python with PyYAML (python3, /usr/bin/python3 or AITELIER_TODO_TEST_PYTHON) to run core.todo_cli');
   const directory = await mkdtemp(join(tmpdir(), 'todo-batch-restart-'));
+  // This scenario runs the real CLI in-process (TodoCli inherits this environment): it
+  // reads the deployment's templates (find_verify), which the plugin does not ship.
+  const savedTemplates = process.env.DSH_TODO_TEMPLATES;
+  process.env.DSH_TODO_TEMPLATES = join(REPO_ROOT, 'todo_templates');
   try {
     const work = join(directory, 'checkout');
     const reviewed = await checkout(work);
-    const todo = new TodoCli({ python: PYTHON, cwd: REPO_ROOT, stateDir: directory });
+    const todo = new TodoCli({ python: PYTHON, cwd: TODO_ROOT, stateDir: directory });
     const attempt = 'attempt-restart';
     const cli = async args => { const { code, result } = await todo.run(args); assert.equal(code, 0, JSON.stringify(result)); return result; };
     await cli(['batch-create', '--template=find_verify', '--params=' + JSON.stringify({ target: 't', reviewed_sha: reviewed,
@@ -346,5 +351,8 @@ test('after a host restart the snapshot lists the dead finder for re-dispatch an
     assert.equal(JSON.parse(await readFile(join(directory, 'todo', attempt + '~find-correctness.json'), 'utf8')).items.find.observed_at, passedAt);
     const rows = await todo.plans();
     assert.deepEqual(rows.filter(r => r.kind === 'batch').map(r => [r.attempt_id, r.remaining]), [[attempt, ['expand']]]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    if (savedTemplates === undefined) delete process.env.DSH_TODO_TEMPLATES; else process.env.DSH_TODO_TEMPLATES = savedTemplates;
+    await rm(directory, { recursive: true, force: true });
+  }
 });

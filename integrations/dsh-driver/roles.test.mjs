@@ -8,15 +8,15 @@ import { loadRoles, parseRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles, workerJudgeRule } from './aitelier-roles.mjs';
 import { refusal } from './tool-discovery.mjs';
 
-const text = readFileSync(new URL('./roles.json', import.meta.url), 'utf8');
+const text = readFileSync(new URL('../dsh-director/roles.json', import.meta.url), 'utf8');
 const table = loadRoles();
 const variant = edit => { const copy = JSON.parse(text); edit(copy); return copy; };
 
-test('roles.json loads, and its prompts exist next to it', () => {
+test('roles.json (dsh-director) loads, and its prompts exist next to it', () => {
   assert.equal(table.version, 1);
-  assert.equal(table.director.prompt, 'driver.md');
+  assert.equal(table.director.prompt, 'director.md');
   assert.equal(table.worker.prompt, 'worker.md');
-  for (const role of ['director', 'worker']) assert.ok(readFileSync(new URL('./' + table[role].prompt, import.meta.url), 'utf8').length > 500);
+  for (const role of ['director', 'worker']) assert.ok(readFileSync(new URL('../dsh-director/' + table[role].prompt, import.meta.url), 'utf8').length > 500);
   assert.equal(roleOf('root', 'root'), 'director');
   assert.equal(roleOf('child', 'root'), 'worker');
   assert.equal(roleOf(undefined, 'root'), 'worker');
@@ -45,12 +45,13 @@ test('the loader refuses unknown keys at every level, and malformed values', () 
 
 test('the adapter adds AItelier\'s State rules to the generic table and nothing else (D3)', () => {
   const effective = aitelierRoles(table);
-  assert.deepEqual(effective.director.presented, [...table.director.presented, 'mcp__aitelier__state_graph_write']);
+  // Plugin step 4: the adapter's own director tools left the generic table and are added here.
+  assert.deepEqual(effective.director.presented, [...table.director.presented, 'state_read', 'send_user_message', 'mcp__aitelier__state_graph_write']);
   assert.deepEqual(effective.director.forbidden, []);
   assert.deepEqual(effective.worker.presented, table.worker.presented);
   assert.deepEqual(effective.worker.forbidden.slice(table.worker.forbidden.length),
-    ['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node', 'report_external_attempt',
-      'start_external_attempt', 'claim_node'].map(n => 'mcp__aitelier__' + n));
+    ['send_user_message', ...['declare_driver_presence', 'answer_checkpoint', 'record_evidence', 'verify_node', 'report_external_attempt',
+      'start_external_attempt', 'claim_node'].map(n => 'mcp__aitelier__' + n)]);
   assert.deepEqual(effective.worker.allowed_actions, { mcp__aitelier__state_graph_write: ['report_issue'] });
   assert.deepEqual(JSON.parse(text), table, 'the adapter modified the repository table');
   // Generic refusals keyed on the effective table.

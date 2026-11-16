@@ -5,9 +5,9 @@
  * dispatches two native children; one walks every item, one stops after the
  * second and must be handed back by the runtime, not by its last message.
  *
- * The CLI is a minimal fake of the `core.todo_cli` contract (JSON files in a
+ * The CLI is a minimal fake of the `dsh_todo` CLI contract (JSON files in a
  * temp store), reached exactly as production reaches it:
- * `$AITELIER_TODO_PYTHON -m core.todo_cli` in `$AITELIER_TODO_CWD`.
+ * `$AITELIER_TODO_PYTHON -m dsh_todo` in `$AITELIER_TODO_CWD`.
  * Set AITELIER_TODO_TEST_PYTHON and AITELIER_TODO_TEST_CWD to run the same
  * scenario against a real checkout instead.
  */
@@ -25,6 +25,19 @@ import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+process.env.PYTHONDONTWRITEBYTECODE = '1';     // a real CLI runs from this checkout: leave no bytecode in it
+// A real-checkout run points this file at the dsh_todo PACKAGE, which ships only its own
+// sample template set. The templates it runs in production are its host's reviewed ones
+// (core/dsh_todo_hooks.py: TEMPLATES_DIR = <repository>/todo_templates), handed to the CLI
+// through the package's TEMPLATES setting; without them the real CLI refuses the scenario's
+// `code_change` plan before anything can be witnessed. The fake CLI resolves its own
+// templates and ignores the setting.
+if (process.env.AITELIER_TODO_TEST_CWD) process.env.DSH_TODO_TEMPLATES ??= join(REPO_ROOT, 'todo_templates');
+
+// The director's runtime instructions since plugin step 4: the generic director.md, then AItelier's state.md
+// (whitespace collapsed: the halves are re-wrapped, so a phrase may span a line break).
+const driverGuide = async () => ((await readFile(new URL('../dsh-director/director.md', import.meta.url), 'utf8')) + '\n' + (await readFile(new URL('./state.md', import.meta.url), 'utf8'))).replace(/\s+/g, ' ');
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
 import argparse, hashlib, json, os, signal, subprocess, sys, time
 from pathlib import Path
@@ -36,7 +49,7 @@ for flag in ('--store', '--attempt', '--item', '--session', '--note', '--out', '
     parser.add_argument(flag)
 parser.add_argument('--rebind', action='store_true')
 args = parser.parse_args()
-store = Path(args.store or os.path.join(os.environ['AITELIER_DSH_STATE_DIR'], 'todo'))
+store = Path(args.store or os.path.join(os.environ['DSH_TODO_STATE_DIR'], 'todo'))
 store.mkdir(parents=True, exist_ok=True)
 
 def emit(value, code=0):
@@ -352,13 +365,33 @@ const planInput = (attempt_id, node_key, base_sha, path) => ({ template: 'code_c
   goal: 'Write a.txt and b.txt for ' + node_key, attempt_id, node_key, context_hash: 'c'.repeat(64), base_sha, workspace: path });
 const createArgs = plan => ['create', '--template', plan.template, '--params', JSON.stringify(plan.params), '--attempt', plan.attempt_id,
   '--node-key', plan.node_key, '--context-hash', plan.context_hash, '--base-sha', plan.base_sha, '--workspace', plan.workspace, '--goal', plan.goal];
+
+/** The item ids a stored plan document records as PASSED.
+ *
+ * The fake CLI keeps them in a top-level `done` list; the real `dsh_todo` CLI never writes
+ * one - it records every observation under `items[<id>].outcome`, "open" until the item is
+ * measured and then "pass"/"fail"/"absent", with `unmeasurable` marking the one outcome that
+ * is not a completion. Read whichever shape the document has, and name the keys the document
+ * does carry when it has neither: a silent [] would turn "the takeover was never witnessed"
+ * into a green assertion. */
+function completedItems(document, where) {
+  if (Array.isArray(document.done)) return [...document.done];
+  const entries = document.items && typeof document.items === 'object' && !Array.isArray(document.items)
+    ? Object.entries(document.items) : [];
+  if (entries.length && entries.every(([, entry]) => entry && typeof entry === 'object' && 'outcome' in entry)) {
+    return entries.filter(([, entry]) => entry.outcome === 'pass' && entry.unmeasurable !== true).map(([id]) => id);
+  }
+  throw new Error(`${where}: the plan document records completion in neither shape (no top-level \`done\` array, `
+    + `no per-item \`items[*].outcome\`); the keys it carries are ${JSON.stringify(Object.keys(document).sort())}`);
+}
+
 const toolText = event => event.data.message.content.map(block => block.text ?? '').join('');
 const toolJson = event => JSON.parse(toolText(event));
 
 async function fakeCli(directory) {
-  await mkdir(join(directory, 'core'), { recursive: true });
-  await writeFile(join(directory, 'core', '__init__.py'), '');
-  await writeFile(join(directory, 'core', 'todo_cli.py'), FAKE_CLI);
+  await mkdir(join(directory, 'dsh_todo'), { recursive: true });
+  await writeFile(join(directory, 'dsh_todo', '__init__.py'), '');
+  await writeFile(join(directory, 'dsh_todo', '__main__.py'), FAKE_CLI);
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: process.env.AITELIER_TODO_TEST_CWD ?? directory };
 }
 
@@ -369,9 +402,9 @@ async function fakeCli(directory) {
 // DEPLOYED copy and answers a usage refusal (exit 2) instead of crashing. This
 // fixture's module crashes on import, from any cwd.
 async function crashCli(directory) {
-  await mkdir(join(directory, 'core'), { recursive: true });
-  await writeFile(join(directory, 'core', '__init__.py'), '');
-  await writeFile(join(directory, 'core', 'todo_cli.py'), 'raise SystemExit(3)\n');
+  await mkdir(join(directory, 'dsh_todo'), { recursive: true });
+  await writeFile(join(directory, 'dsh_todo', '__init__.py'), '');
+  await writeFile(join(directory, 'dsh_todo', '__main__.py'), 'raise SystemExit(3)\n');
   return { python: process.env.AITELIER_TODO_TEST_PYTHON ?? 'python3', cwd: directory };
 }
 
@@ -446,7 +479,7 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true }, { id: 'compaction-basic', config: { thresholdRatio: 0.8, retainTokens: 128, headroomTokens: 512 } },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-todo-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
+      { insert: [{ id: 'fixture', name: join(directory, 'fixture-todo-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -547,8 +580,8 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
       assert.match(toolJson(r.event).brief, /Write a\.txt and b\.txt/, r.id + ' result lacks the brief');
     }
     assert.ok(todoResults.filter(r => r.id.startsWith('full-')).every(r => r.session === full));
-    const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'core.todo_cli', 'status', '--attempt', plans.a.attempt_id],
-      { cwd: cli.cwd, env: { ...process.env, AITELIER_DSH_STATE_DIR: directory }, encoding: 'utf8' }));
+    const finalA = JSON.parse(execFileSync(cli.python, ['-m', 'dsh_todo', 'status', '--attempt', plans.a.attempt_id],
+      { cwd: cli.cwd, env: { ...process.env, DSH_TODO_STATE_DIR: directory }, encoding: 'utf8' }));
     assert.deepEqual(finalA.remaining, []); assert.equal(finalA.child_session, full, 'todo_begin bound the root, not the calling child');
 
     // 2. The partial child stopped after item 2: the runtime, not the model, handed it back.
@@ -849,7 +882,7 @@ async function bootRebindScenario(t) {
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-rebind-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: join(directory, 'fixture-rebind-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
@@ -960,7 +993,7 @@ test('todo_rebind: a director takes over an item begun by a session that died, t
   // The plan file records the handover, so a later reader sees it changed hands.
   assert.equal(run.planStates.died.rebound_from, died);
   assert.equal(run.planStates.died.child_session, run.session);
-  assert.deepEqual([...run.planStates.died.done].sort(), ['deliver', 'implement', 'test']);
+  assert.deepEqual(completedItems(run.planStates.died, 'died plan').sort(), ['deliver', 'implement', 'test']);
 });
 
 test('todo_rebind: a live child keeps its plan - the takeover refuses and done still says bound_to_other_session', async (t) => {
@@ -971,6 +1004,9 @@ test('todo_rebind: a live child keeps its plan - the takeover refuses and done s
   assert.equal(refused.refused, 'live_session', 'a live child was taken over: ' + JSON.stringify(refused));
   assert.equal(run.planStates.live.child_session, live, 'a live child lost its plan');
   assert.equal(run.planStates.live.rebound_from, undefined);
+  // The same reader holds the live plan's document to the same shape, and to the fact that
+  // nobody finished it: the takeover and the director's done were both refused.
+  assert.deepEqual(completedItems(run.planStates.live, 'live plan'), [], 'the live child\'s plan recorded a completion');
   assert.equal(run.result('root-todo_done-live-implement').session, run.session);
   const done = run.json('root-todo_done-live-implement');
   assert.equal(done.refused, 'bound_to_other_session', 'the director edited a live child\'s plan: ' + JSON.stringify(done));
@@ -1120,7 +1156,7 @@ test('idle review and snapshot views: unfinished plans without a live child, and
 });
 
 test('prompts: dispatch picks a template and binds params, adds templates by reviewed change, and no longer prefers pipelines', async () => {
-  const goal = driverGoal('alpha'), driver = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+  const goal = driverGoal('alpha'), driver = await driverGuide();
   for (const text of [goal, driver]) {
     assert.match(text, /todo_templates/); assert.match(text, /todo_plan/); assert.match(text, /params/);
     assert.match(text, /todo_templates\//, 'adding a template under todo_templates/ is not named');

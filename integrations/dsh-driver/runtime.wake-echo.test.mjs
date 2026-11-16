@@ -120,7 +120,7 @@ test('real pinned DSH: own State writes do not wake the director; one NOTHING_LE
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-wake-echo-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
+      { insert: [{ id: 'fixture', name: join(directory, 'fixture-wake-echo-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...process.env,

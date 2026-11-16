@@ -182,7 +182,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
       // The production profile's switch-offs (core/dsh_driver.py UNUSED_BUILTIN_TOOL_PLUGINS).
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
-      { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
+      { insert: [{ id: 'fixture', name: join(here, 'fixture-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -397,6 +397,10 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/, 'the third boot could not load the session the second persisted\n' + output.slice(-2000));
     assert.equal(proc.exitCode, null, output.slice(-2000));
     assert.ok(requests.slice(third).some(r => !r.summary && r.options.tools?.length), 'the third boot never served a turn\n' + output.slice(-2000));
+    // Request-body recording for the dsh-director split (plugin design, D5): every
+    // model request of the three boots, as the provider received it. Off unless asked.
+    if (process.env.DSH_DIRECTOR_RECORD_DIR) await writeFile(join(process.env.DSH_DIRECTOR_RECORD_DIR, 'smoke-requests.json'),
+      JSON.stringify({ scratch, boots: [requests.slice(0, before), requests.slice(before, third), requests.slice(third)] }));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const response of [...parked, ...childWaits]) response.destroy();
@@ -459,7 +463,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
   try {
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
-    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'driver', name: join(here, 'runtime.mjs') }] }]));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] }]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
     proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: withoutCallerMode({ ...process.env,
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
@@ -576,6 +580,9 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     await new Promise(resolve=>setTimeout(resolve,100));
     assert.ok(activity.some(a=>a.phase==='running'&&a.error?.includes('fixture completion failure')),'retry was not shown as running with its previous failure');
     assert.equal(activity.at(-1).phase,'waiting');assert.equal(activity.at(-1).error,'');
+    // The bridge bodies (model route, reasoning effort, tools) for the same D5 recording.
+    if (process.env.DSH_DIRECTOR_RECORD_DIR) await writeFile(join(process.env.DSH_DIRECTOR_RECORD_DIR, 'bridge-completions.json'),
+      JSON.stringify({ scratch: directory, completions, activity }));
   } finally {
     if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

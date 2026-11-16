@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, copyFile, rm, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,12 +40,18 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
   const directory = await mkdtemp(join(tmpdir(), 'dsh-roles-'));
   // A private copy of the runtime, so this test can change ITS roles.json between
   // boots; production has no knob for that and gets none.
-  const plugin = join(directory, 'plugin');
-  await mkdir(plugin);
+  // The adapter imports the director plugin as ../dsh-director, so the copy keeps that layout.
+  const plugin = join(directory, 'plugin', 'dsh-driver');
+  await mkdir(plugin, { recursive: true });
+  await cp(join(here, '..', 'dsh-director'), join(directory, 'plugin', 'dsh-director'), { recursive: true, filter: source => !source.includes('node_modules') });
   for (const file of await readdir(here))
     if (/\.(mjs|md|json)$/.test(file) && !file.endsWith('.test.mjs') && file !== 'package-lock.json') await copyFile(join(here, file), join(plugin, file));
-  const driverSkill = await readFile(join(plugin, 'driver.md'), 'utf8');
-  const workerSkill = await readFile(join(plugin, 'worker.md'), 'utf8');
+  // Since plugin step 4 each role prompt has a generic half (dsh-director) and AItelier's half (here).
+  const director = join(directory, 'plugin', 'dsh-director');
+  const driverSkill = await readFile(join(director, 'director.md'), 'utf8');
+  const stateSkill = await readFile(join(plugin, 'state.md'), 'utf8');
+  const workerSkill = await readFile(join(director, 'worker.md'), 'utf8');
+  const workerStateSkill = await readFile(join(plugin, 'worker-state.md'), 'utf8');
   const requests = [], activity = [], parked = new Set();
   let output = '', proc;
   const server = createServer(async (req, res) => {
@@ -85,7 +91,7 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
       { id: 'hmr', disabled: true },
       { id: 'tool-subagent', config: { provider: 'spawn', toolName: 'subagent', agentOptions: { provider: 'fixture', model: 'worker' } } },
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
-      { insert: [{ id: 'fixture', name: join(here, 'fixture-roles-provider.mjs') }, { id: 'driver', name: join(plugin, 'runtime.mjs') },
+      { insert: [{ id: 'fixture', name: join(here, 'fixture-roles-provider.mjs') }, { id: 'director', name: join(directory, 'plugin', 'dsh-director', 'index.mjs') }, { id: 'driver', name: join(plugin, 'runtime.mjs') },
         { id: 'mcp-aitelier', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'aitelier', transport: 'streamable-http', url: base + '/mcp', failOnStartupError: true } }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -131,14 +137,19 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
       }
       for (const r of children()) for (const name of ['subagent', 'workflow', 'todo_plan'])
         assert.ok(!toolNames(r).includes(name), `boot ${boot}: child request lists ${name}`);
-      // Prompts: worker.md only in the child, driver.md only in the director.
+      // Prompts: the worker halves only in the child, the director halves only in the director.
       for (const r of roots()) {
-        assert.ok(systemText(r).includes(driverSkill), `boot ${boot}: director system prompt lacks driver.md`);
+        assert.ok(systemText(r).includes(driverSkill), `boot ${boot}: director system prompt lacks director.md`);
+        assert.ok(systemText(r).includes(stateSkill), `boot ${boot}: director system prompt lacks state.md`);
+        assert.ok(systemText(r).indexOf(driverSkill) < systemText(r).indexOf(stateSkill), `boot ${boot}: state.md must follow director.md`);
         assert.ok(!systemText(r).includes(workerSkill.trim().split('\n')[0]), `boot ${boot}: director system prompt carries worker.md`);
+        assert.ok(!systemText(r).includes(workerStateSkill.trim().split('\n')[0]), `boot ${boot}: director system prompt carries worker-state.md`);
       }
       for (const r of children()) {
         assert.ok(systemText(r).includes(workerSkill), `boot ${boot}: child system prompt lacks worker.md`);
-        assert.ok(!systemText(r).includes(driverSkill.split('\n')[0]), `boot ${boot}: child system prompt carries driver.md`);
+        assert.ok(systemText(r).includes(workerStateSkill), `boot ${boot}: child system prompt lacks worker-state.md`);
+        assert.ok(!systemText(r).includes(driverSkill.split('\n')[0]), `boot ${boot}: child system prompt carries director.md`);
+        assert.ok(!systemText(r).includes(stateSkill.split('\n')[0]), `boot ${boot}: child system prompt carries state.md`);
       }
       // The guard, in the real loop: subagent through call_tool and by its direct name.
       for (const step of [0, 1]) assert.match(resultFor(children(), `roles-child-${boot}-${step}`), /subagent is the director's/,
@@ -149,7 +160,7 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
     };
     const stop = async () => { proc.kill('SIGTERM'); await once(proc, 'exit'); };
 
-    const tableA = await readFile(join(plugin, 'roles.json'), 'utf8');
+    const tableA = await readFile(join(director, 'roles.json'), 'utf8');
     const first = await serveBoot(1, tableA);
     assert.doesNotMatch(first.jobKill, /job_kill is the director's/, 'job_kill is open to workers under the repository table');
     await stop();
@@ -161,7 +172,7 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
     changed.worker.forbidden.push('job_kill');
     changed.director.presented = changed.director.presented.filter(n => n !== 'todo_templates');
     const tableB = JSON.stringify(changed, null, 2);
-    await writeFile(join(plugin, 'roles.json'), tableB);
+    await writeFile(join(director, 'roles.json'), tableB);
     const second = await serveBoot(2, tableB);
     assert.match(second.jobKill, /job_kill is the director's/, 'the changed table did not forbid job_kill on the next boot');
     assert.ok(second.roots.every(r => !toolNames(r).includes('todo_templates')), 'the director still lists todo_templates');

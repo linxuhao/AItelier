@@ -115,6 +115,7 @@ describe('the rail keeps answered questions', () => {
       message_id: 'm1', subject: 'Subject m1', created_at: at(1),
       text: 'may I restart?', segment_id: 'q1',
       answered: { message_id: 'r1', created_at: at(2), text: 'yes, after the sweep' },
+      withdrawn: null,
     }]);
   });
 
@@ -267,5 +268,39 @@ describe('reading the whole conversation for the rail', () => {
     const result = await readConversationRows(readPage, {maxPages: 3});
     expect(result.complete).toBe(false);
     expect(result.rows).toHaveLength(3);
+  });
+});
+
+// A driver may take back its own open question (withdraw_user_question): a row of
+// its own whose `withdraws` cites it. The rail keeps it, as withdrawn, with the
+// reason; it is not open. An answer the user gives anyway wins.
+describe('withdrawn questions', () => {
+  const asked = driverMessage('m1', 1, { segments: [
+    { id: 'q1', kind: 'question', text: 'may I restart?' },
+    { id: 'q2', kind: 'question', text: 'which branch?' },
+  ] });
+  const withdrawal = driverMessage('w1', 2, { subject: 'Question withdrawn', withdraws: [{ message_id: 'm1', segment_id: 'q1', reason: 'restarted in a window' }] });
+
+  it('a withdrawn question is not open; the other question of the same message is', () => {
+    expect(openQuestions([asked, withdrawal]).map(q => q.segment_id)).toEqual(['q2']);
+  });
+
+  it('the rail lists it after the open and answered ones, with the withdrawal and its reason', () => {
+    const rail = railQuestions([asked, withdrawal]);
+    expect(rail.map(q => [q.segment_id, q.answered === null, q.withdrawn?.reason ?? null])).toEqual([
+      ['q2', true, null], ['q1', true, 'restarted in a window']]);
+    expect(rail[1].withdrawn).toEqual({ message_id: 'w1', created_at: at(2), reason: 'restarted in a window' });
+  });
+
+  it('an answer given after the withdrawal wins', () => {
+    const reply = userReply('r1', 3, { answers: [{ message_id: 'm1', segment_id: 'q1' }] });
+    const rail = railQuestions([asked, withdrawal, reply]);
+    const q1 = rail.find(q => q.segment_id === 'q1')!;
+    expect(q1.answered?.message_id).toBe('r1');
+    expect(q1.withdrawn).toBeNull();
+  });
+
+  it('input order never changes the answer', () => {
+    expect(railQuestions([withdrawal, asked])).toEqual(railQuestions([asked, withdrawal]));
   });
 });

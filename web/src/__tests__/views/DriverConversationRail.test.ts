@@ -119,6 +119,29 @@ describe('the questions box', () => {
     expect(rail.querySelector('[data-answer-message-id="m1"][data-answer-segment-id="q1"]')).toBeNull();
   });
 
+  it('lists a question its driver withdrew in the withdrawn group, with the reason, out of the open list and without a reply control', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      driverMsg('w1', 'Question withdrawn', '2026-11-03T10:30:00+00:00', {body: 'restarted in a window',
+        withdraws: [{message_id: 'm1', segment_id: 'q1', reason: 'restarted in a window'}]}),
+      driverMsg('m1', 'Report', '2026-11-03T10:00:00+00:00', {segments: [
+        {id: 'q1', kind: 'question', text: 'may I restart?'},
+        {id: 'q2', kind: 'question', text: 'which node first?'}]}),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha', driverId: 'dsh-alpha'});
+    await waitFor(() => expect(view.container.querySelector('[data-conversation-thread] article.message')).not.toBeNull());
+    const rail = view.container.querySelector('[data-questions-box]') as HTMLElement;
+    const open = rail.querySelectorAll('.questions-list:not(.questions-list-answered):not(.questions-list-withdrawn) [data-question-segment-id]');
+    expect([...open].map(i => i.getAttribute('data-question-segment-id'))).toEqual(['q2']);
+    expect(rail.querySelectorAll('.questions-list-answered [data-question-segment-id]').length).toBe(0);
+    expect(rail.querySelector('[data-questions-withdrawn]')).not.toBeNull();
+    const withdrawn = rail.querySelectorAll('.questions-list-withdrawn [data-question-segment-id]');
+    expect([...withdrawn].map(i => [i.getAttribute('data-question-segment-id'), i.getAttribute('data-question-withdrawn-by')])).toEqual([['q1', 'w1']]);
+    expect(withdrawn[0].textContent).toContain('restarted in a window');
+    expect(withdrawn[0].textContent).toContain('may I restart?');
+    expect(rail.querySelector('[data-answer-message-id="m1"][data-answer-segment-id="q1"]')).toBeNull();
+    expect(rail.querySelector('[data-answer-message-id="m1"][data-answer-segment-id="q2"]')).not.toBeNull();
+  });
+
   it('is a sibling of the thread scroll box, never inside it', async () => {
     api.dshDriverConversation.mockResolvedValue(page([
       driverMsg('m1', 'Report', '2026-11-03T10:00:00+00:00', {segments: [{id: 'q1', kind: 'question', text: 'ok?'}]}),

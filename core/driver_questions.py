@@ -1,8 +1,12 @@
-"""The ONE definition of an open question: a `question` segment no reply cites.
+"""The ONE definition of an open question: a `question` segment no reply cites
+and its asker has not withdrawn.
 
 Both surfaces that show questions read this rule, so the number on the project
 list is the number the conversation's questions box shows. A question is open
-when no row's `answers` carries its `(message_id, segment_id)` pair.
+when no row's `answers` carries its `(message_id, segment_id)` pair and no row's
+`withdraws` does. A withdrawal is a row of its own (the asking driver's, written
+by `withdraw_user_question`), never an edit of the question: the record stays.
+If the user answers a withdrawn question anyway, the answer wins.
 
 Three decisions the rule makes, and neither surface may take them separately:
 
@@ -24,7 +28,7 @@ import json
 # conversation read must agree on which rows are one thread; core/driver_inbox
 # imports it rather than spelling it a second time.
 CONVERSATION = "(audience='user' OR channel='user')"
-_COLUMNS = "message_id,created_at,segments_json,answers_json"
+_COLUMNS = "message_id,created_at,segments_json,answers_json,withdraws_json"
 _ROWS = "SELECT {} FROM driver_inbox_messages WHERE project_id=? AND " + CONVERSATION
 
 
@@ -33,7 +37,9 @@ def _decoded(row):
     return {"message_id": row["message_id"], "created_at": row["created_at"],
             "body": row["body"] if "body" in row.keys() else None,
             "segments": json.loads(row["segments_json"]) if row["segments_json"] else [],
-            "answers": json.loads(row["answers_json"]) if row["answers_json"] else []}
+            "answers": json.loads(row["answers_json"]) if row["answers_json"] else [],
+            "withdraws": (json.loads(row["withdraws_json"])
+                          if "withdraws_json" in row.keys() and row["withdraws_json"] else [])}
 
 
 def conversation_rows(conn, project_id, with_body=False):
@@ -51,18 +57,25 @@ def all_questions(rows):
 
     Each entry is `{message_id, created_at, segment_id, text, status, answers}`:
     `status` is `answered` when at least one row's `answers` cites the exact
-    `(message_id, segment_id)` pair and `open` otherwise, and `answers` lists the
+    `(message_id, segment_id)` pair, else `withdrawn` when a row's `withdraws`
+    cites it (the entry then carries `withdrawn: {message_id, created_at,
+    reason}`, the first withdrawal), and `open` otherwise; `answers` lists the
     citing rows `{message_id, created_at, body}` in thread order (two replies may
     cite the same question). `open_questions` is this list's open part, so the
     badge, the questions box and `list_user_questions` read one rule.
     """
-    citing = {}
+    citing, withdrawn = {}, {}
     for row in rows:
         for ref in row.get("answers") or []:
             if isinstance(ref, dict):
                 citing.setdefault((ref.get("message_id"), ref.get("segment_id")), []).append(
                     {"message_id": row.get("message_id"), "created_at": row.get("created_at"),
                      "body": row.get("body")})
+        for ref in row.get("withdraws") or []:
+            if isinstance(ref, dict):
+                withdrawn.setdefault((ref.get("message_id"), ref.get("segment_id")),
+                                     {"message_id": row.get("message_id"), "created_at": row.get("created_at"),
+                                      "reason": ref.get("reason")})
     found = []
     for row in rows:
         for segment in row.get("segments") or []:
@@ -73,10 +86,13 @@ def all_questions(rows):
                 continue
             answers = sorted(citing.get((row.get("message_id"), segment_id), []),
                              key=lambda a: (a["created_at"] or "", a["message_id"] or ""))
+            withdrawal = withdrawn.get((row.get("message_id"), segment_id))
+            status = "answered" if answers else "withdrawn" if withdrawal else "open"
             found.append({"message_id": row.get("message_id"),
                           "created_at": row.get("created_at"),
                           "segment_id": segment_id, "text": segment.get("text"),
-                          "status": "answered" if answers else "open", "answers": answers})
+                          "status": status, "answers": answers,
+                          **({"withdrawn": withdrawal} if withdrawal else {})})
     found.sort(key=lambda question: (question["created_at"] or "", question["message_id"] or ""))
     return found
 

@@ -374,6 +374,19 @@ class SendUserMessage(Project):
         return refs.model_dump(exclude_none=True)
 
 
+class WithdrawUserQuestion(Project):
+    """Driver -> user: take back one of YOUR open questions, as a record."""
+
+    request_key: str = Field(min_length=1, max_length=320)
+    message_id: str = Field(min_length=1, max_length=200, description=(
+        "The message that asked: your send_user_message's message_id."))
+    segment_id: str = Field(min_length=1, max_length=64, description=(
+        "The question block's id in that message."))
+    reason: str = Field(min_length=1, max_length=2000, description=(
+        "Why it no longer needs an answer (resolved another way, overtaken, asked wrongly). "
+        "The user reads it in the thread; the question itself stays visible as withdrawn."))
+
+
 class ListUserMessages(Project):
     limit: int = Field(default=50, ge=1, le=200)
 
@@ -413,8 +426,9 @@ class ListUserConversation(Project):
 
 
 class ListUserQuestions(Project):
-    status: Literal["open", "answered", "all"] = Field(default="open", description=(
-        "Which question blocks: `open` (no reply cites it), `answered`, or `all`."))
+    status: Literal["open", "answered", "withdrawn", "all"] = Field(default="open", description=(
+        "Which question blocks: `open` (no reply cites it and its asker has not withdrawn it), "
+        "`answered`, `withdrawn`, or `all`."))
     limit: int = Field(default=50, ge=1, le=200)
 
 
@@ -1224,6 +1238,7 @@ def is_public_read(action: str) -> bool:
 WRITE_REQUESTS = {
     "send_driver_message": SendDriverMessage,
     "send_user_message": SendUserMessage,
+    "withdraw_user_question": WithdrawUserQuestion,
     "send_user_conversation_message": SendUserConversationMessage,
     "mark_user_conversation_read": MarkUserConversationRead,
     "acknowledge_driver_message": DriverDeliveryTransition, "resolve_driver_message": DriverDeliveryTransition,
@@ -1531,6 +1546,7 @@ def _handlers(service) -> dict:
         "list_driver_notebooks": service.list_driver_notebooks,
         "send_driver_message": service.driver_inbox.send_driver_message,
         "send_user_message": service.driver_inbox.send_user_message,
+        "withdraw_user_question": service.driver_inbox.withdraw_user_question,
         "send_user_conversation_message": service.driver_inbox.send_user_conversation_message,
         "mark_user_conversation_read": service.driver_inbox.mark_user_conversation_read,
         "list_driver_messages": service.driver_inbox.list_driver_messages,

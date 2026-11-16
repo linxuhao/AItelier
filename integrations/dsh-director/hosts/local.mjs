@@ -22,6 +22,9 @@
  *    notes.md        the director's notes (note_write appends, once per request_key)
  *    inbox/*.json|txt one wake event per file, id 'inbox:<file>'; delivered, then moved to inbox/done/
  *    progress.jsonl  one phase report per line
+ *    questions.json  the director's questions to its owner: { "<id>": { text, context?, status
+ *                    (open | answered | withdrawn), asked_at, answer?, reason? } }; the
+ *                    owner answers by dropping inbox/answer-<id>.json ({ "answer": "..." })
  *    state/          the director's own state (todo plans) */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -48,12 +51,20 @@ export function localHost(options = {}) {
   if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
-    done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json') };
+    done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json'),
+    questions: join(root, 'questions.json') };
+  const questions = async () => readJson(files.questions, {});
+  // questions.json is read-modified-written by ask, close and an arriving answer; one
+  // at a time, so two asks in one director turn cannot lose one. The lock also guards
+  // writeJson's single fixed tmp name (questions.json.tmp): without it two writers race
+  // on that file and one fails with ENOENT, a louder failure than a lost update.
+  let questionsLock = Promise.resolve();
+  const locked = fn => { const run = questionsLock.then(fn); questionsLock = run.catch(() => {}); return run; };
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];
   let timer, finish;
   return {
     version: '1.0.0',
-    capabilities: ['progress', 'workState', 'heldWork', 'setup'],
+    capabilities: ['progress', 'workState', 'heldWork', 'setup', 'attention'],
     config: {
       sessionId: options.sessionId ?? 'director',
       provider: options.provider, model: options.model,
@@ -84,6 +95,31 @@ export function localHost(options = {}) {
     async heldWork() {
       return (await items()).filter(item => item.holder === holder && !['completed', 'failed', 'cancelled'].includes(item.state))
         .map(item => ({ ...item, node_key: item.node_key ?? item.id }));
+    },
+    /** The director's questions to its owner (plugin step 8), in questions.json. */
+    attention: {
+      ask: ({ id, text, context }) => locked(async () => {
+        await mkdir(root, { recursive: true });
+        const all = await questions();
+        if (all[id]) return all[id].text === text ? { asked: false, duplicate: true, question_id: id, status: all[id].status }
+          : { refused: 'question_id_reused', reason: `question ${id} already asks something else; give this question its own id` };
+        all[id] = { text, ...(context ? { context } : {}), status: 'open', asked_at: new Date().toISOString() };
+        await writeJson(files.questions, all);
+        return { asked: true, question_id: id };
+      }),
+      close: ({ id, reason }) => locked(async () => {
+        const all = await questions();
+        const question = all[id];
+        if (!question) return { refused: 'unknown_question', reason: `no question ${id} was asked` };
+        if (question.status === 'answered') return { refused: 'question_answered', reason: `your owner already answered ${id}` };
+        if (question.status === 'withdrawn') return { closed: false, already_closed: true, question_id: id };
+        all[id] = { ...question, status: 'withdrawn', reason, withdrawn_at: new Date().toISOString() };
+        await writeJson(files.questions, all);
+        return { closed: true, question_id: id };
+      }),
+      async list() {
+        return Object.entries(await questions()).filter(([, q]) => q.status === 'open').map(([id, q]) => ({ id, text: q.text }));
+      },
     },
     /** The director records with two small tools: a work item's state, and a note. */
     async setup(scope, _subject, { defineTool, jsonOutput }) {
@@ -138,6 +174,25 @@ export function localHost(options = {}) {
           if (isDisposed()) return;
           const path = join(files.inbox, file);
           const [text, { ino, mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+          const answered = /^answer-([A-Za-z0-9._:-]{1,64})\.json$/.exec(file)?.[1];
+          if (answered) {
+            // The owner's answer: recorded on the question (an answer wins over a
+            // withdrawal), then delivered naming the question, then moved like any event.
+            let answer;
+            try { answer = JSON.parse(text).answer; } catch { answer = undefined; }
+            const all = await locked(async () => {
+              const current = await questions();
+              if (current[answered] && typeof answer === 'string') {
+                current[answered] = { ...current[answered], status: 'answered', answer, answered_at: current[answered].answered_at ?? new Date().toISOString() };
+                await writeJson(files.questions, current);
+              }
+              return current;
+            });
+            await notify('Owner answered (' + file + '):\n' + JSON.stringify({ question_id: answered, question: all[answered]?.text ?? null,
+              answer: answer ?? null, ...(all[answered] ? {} : { unknown_question: true }) }), { id: `inbox:${file}:${ino}:${mtimeMs}` });
+            await rename(path, join(files.done, file));
+            continue;
+          }
           // Deliver first, then move (plugin step 7): a crash in between redelivers this
           // file under the same id, which the director recognises; moving first lost it.
           // The id is this file (name, inode, write time; the inode alone tells a later
@@ -149,7 +204,14 @@ export function localHost(options = {}) {
       await sweep();
       const done = new Promise((resolve, reject) => {
         finish = resolve;
-        timer = setInterval(() => { sweep().catch(error => { clearInterval(timer); reject(error); }); }, Number(options.pollMs) > 0 ? Number(options.pollMs) : 2000);
+        // One sweep at a time: a tick that lands while a sweep still awaits a delivery
+        // is skipped, or two sweeps would deliver the same file and race its move.
+        let sweeping = false;
+        timer = setInterval(() => {
+          if (sweeping) return;
+          sweeping = true;
+          sweep().catch(error => { clearInterval(timer); reject(error); }).finally(() => { sweeping = false; });
+        }, Number(options.pollMs) > 0 ? Number(options.pollMs) : 2000);
         timer.unref?.();
       });
       return { done, stop: () => { clearInterval(timer); finish?.(); } };

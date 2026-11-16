@@ -88,7 +88,7 @@ test('capabilities is required and must be an array of op names; a string is nam
 test('a repeated capability is refused for that alone, and does not blame the ops the host does declare', () => {
   // The host implements every optional op and declares them all, one twice: a duplicate
   // list must not make the "implemented but not declared" check run against no list.
-  const implemented = Object.fromEntries(OPTIONAL_OPS.map(op => [op, op === 'texts' || op === 'labels' ? {} : () => {}]));
+  const implemented = Object.fromEntries(OPTIONAL_OPS.map(op => [op, op === 'attention' ? { ask() {}, close() {}, list() {} } : op === 'texts' || op === 'labels' ? {} : () => {}]));
   const allDeclared = [...OPTIONAL_OPS, 'progress'];
   const refusedProblems = host => {
     try { validateHost(host); }

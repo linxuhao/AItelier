@@ -111,3 +111,48 @@ test('local host: an event whose delivery failed stays in the inbox and is redel
   assert.notEqual(second.notifiedIds[1], second.notifiedIds[0], 'a new file of the same name reused the old id');
   assert.deepEqual(await readdir(join(root, 'inbox', 'done')), ['b.json']);
 });
+
+test('local host: the owner answers by dropping answer-<id>.json; the event names the question, and the question reads answered', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root, ...required, pollMs: 20 });
+  assert.deepEqual(await host.attention.ask({ id: 'q-1', text: 'Restart now?', context: 'two workers idle' }), { asked: true, question_id: 'q-1' });
+  await mkdir(join(root, 'inbox'), { recursive: true });
+  await writeFile(join(root, 'inbox', 'answer-q-1.json'), JSON.stringify({ answer: 'yes, at 14:00Z' }));
+  const api = fakeApi();
+  const events = await host.events(api);
+  events.stop(); await events.done;
+  assert.equal(api.notified.length, 1);
+  const delivered = JSON.parse(api.notified[0].slice(api.notified[0].indexOf('\n') + 1));
+  assert.deepEqual(delivered, { question_id: 'q-1', question: 'Restart now?', answer: 'yes, at 14:00Z' });
+  assert.match(api.notifiedIds[0], /^inbox:answer-q-1\.json:/);
+  const stored = JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'))['q-1'];
+  assert.equal(stored.status, 'answered'); assert.equal(stored.answer, 'yes, at 14:00Z');
+  assert.deepEqual(await host.attention.list(), []);
+  assert.equal((await host.attention.close({ id: 'q-1', reason: 'late' })).refused, 'question_answered', 'an answered question was withdrawn');
+});
+
+test('local host: two asks in one turn, concurrently, both land (questions.json is written one at a time)', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root, ...required });
+  const answers = await Promise.all(['a', 'b', 'c', 'd'].map(id => host.attention.ask({ id: 'q-' + id, text: 'question ' + id })));
+  assert.deepEqual(answers.map(a => a.asked), [true, true, true, true]);
+  assert.deepEqual((await host.attention.list()).map(q => q.id).sort(), ['q-a', 'q-b', 'q-c', 'q-d']);
+});
+
+test('local host: a slow delivery is not overlapped by the next poll (one delivery per file, no move race)', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root, ...required, pollMs: 5 });
+  const api = fakeApi();
+  const slow = { ...api, notify: async (text, options) => { await new Promise(resolve => setTimeout(resolve, 60)); return api.notify(text, options); } };
+  const events = await host.events(slow);
+  let failed;
+  Promise.resolve(events.done).catch(error => { failed = error; });
+  await mkdir(join(root, 'inbox'), { recursive: true });
+  await writeFile(join(root, 'inbox', 'slow.json'), '{"x":1}');
+  const deadline = Date.now() + 3000;
+  while (api.notified.length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  events.stop(); await Promise.resolve(events.done).catch(() => {});
+  assert.equal(failed, undefined, String(failed));
+  assert.equal(api.notified.length, 1, 'the file was delivered twice');
+});

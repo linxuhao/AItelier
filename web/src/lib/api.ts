@@ -774,6 +774,9 @@ export interface DriverConversationEntry {
   segments?: DriverConversationSegment[] | null;
   /** The questions this reply answers. Absent (not empty) when it answers none. */
   answers?: DriverConversationAnswerRef[];
+  /** The sender's own questions this row withdraws (withdraw_user_question),
+   *  each with its reason. Absent when it withdraws none. */
+  withdraws?: { message_id: string; segment_id: string; reason: string }[];
 }
 export interface DriverConversation {
   project_id: string; messages: DriverConversationEntry[]; has_more: boolean;

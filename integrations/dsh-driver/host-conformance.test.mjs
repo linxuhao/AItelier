@@ -20,6 +20,18 @@ const envFor = directory => ({ AITELIER_DSH_SESSION: 'root', AITELIER_DSH_PROVID
  *  `release()` hands it one event (from another actor, so it is not an own echo). */
 function fakeState() {
   const activity = [];
+  // The conversation's question blocks, enough of State's rules for attention: a
+  // request_key replays only the same payload (for every write, as State does); a
+  // withdrawal is own + unanswered; questions are keyed by (message, segment) with a
+  // sender, so two drivers may use one question id.
+  const asked = [], keys = new Map();
+  const write = (body, make) => {
+    const payload = JSON.stringify({ ...body, request_key: undefined });
+    if (keys.has(body.request_key)) return keys.get(body.request_key).payload === payload ? keys.get(body.request_key).result : { error: 'idempotency_conflict' };
+    const result = make();
+    if (!result.error) keys.set(body.request_key, { payload, result });
+    return result;
+  };
   let parked, released = false;
   const routes = {
     '/api/drivers/me': () => ({ driver_id: 'dsh-a' }),
@@ -32,6 +44,23 @@ function fakeState() {
       if (attempt_id === 'att-running') return { attempt_id, status: 'running' };
       const error = new Error('AItelier get_attempt: HTTP 404'); error.status = 404; throw error;
     },
+    '/api/state/commands/send_user_message': body => write(body, () => {
+      const result = { message_id: 'm-' + keys.size, project_id: body.project_id };
+      for (const segment of body.segments ?? []) if (segment.kind === 'question')
+        asked.push({ message_id: result.message_id, segment_id: segment.id, text: segment.text, status: 'open', sender: body.sender ?? 'dsh-a' });
+      return result;
+    }),
+    '/api/state/query/list_user_questions': ({ status }) => ({ result: { questions: [...asked].reverse()
+      .filter(q => status === 'all' || q.status === status).map(({ sender, ...q }) => q) } }),
+    '/api/state/commands/withdraw_user_question': body => write(body, () => {
+      const q = asked.find(x => x.message_id === body.message_id && x.segment_id === body.segment_id);
+      if (!q) return { error: 'unknown_question' };
+      if (q.sender !== 'dsh-a') return { error: 'not_own_question' };
+      if (q.status === 'answered') return { error: 'question_answered' };
+      if (q.status === 'withdrawn') return { withdrawn: false, already_withdrawn: true };
+      q.status = 'withdrawn';
+      return { withdrawn: true };
+    }),
     '/api/state/query/list_claims': () => ({ result: { claims: [
       { node_key: 'n-mine', status: 'live', driver_id: 'dsh-a' },
       { node_key: 'n-other', status: 'live', driver_id: 'dsh-b' },
@@ -50,8 +79,10 @@ function fakeState() {
     if (!routes[path]) throw new Error('unexpected State call ' + path);
     return routes[path](body);
   };
+  // Another driver of the project asks under an id this driver also uses.
+  const peerAsks = (id, text) => asked.push({ message_id: 'peer-' + asked.length, segment_id: id, text, status: 'open', sender: 'dsh-b' });
   const release = () => { released = true; parked?.({ timed_out: true, next_after: 1, next_inbox_after: 0 }); };
-  return { request, release, activity };
+  return { request, release, activity, peerAsks };
 }
 
 /** The director api the adapter's events() reads, with stub DSH services. */
@@ -116,3 +147,40 @@ test('State adapter: a phase report goes to the activity route unchanged', async
 });
 
 test.after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
+
+test('State adapter: ask_owner is exactly one send_user_message with one question block, id = question id (the pinned request)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const fixture = JSON.parse(readFileSync(new URL('./test-fixtures/ask-owner-request.json', import.meta.url), 'utf8'));
+  // tests/unit/test_driver_question_withdraw.py stores this same request through State and
+  // compares the row's bytes with a direct send_user_message of the same block.
+  const sent = [];
+  const directory = await mkdtemp(join(tmpdir(), 'aitelier-ask-'));
+  directories.push(directory);
+  const host = aitelierHost({ ...envFor(directory), AITELIER_DSH_PROJECT: fixture.project }, { request: async (path, body) => { sent.push([path, body]); return { message_id: 'm-1' }; }, runtime: {} });
+  assert.deepEqual(await host.attention.ask(fixture.question), { asked: true, question_id: fixture.question.id, message_id: 'm-1' });
+  assert.deepEqual(sent, [['/api/state/commands/send_user_message', fixture.request]]);
+});
+
+test('State adapter: close finds its own question when a peer director asked a newer one under the same id', async () => {
+  const { host, state } = await make();
+  assert.equal((await host.attention.ask({ id: 'q-deploy-window', text: 'May I deploy at 14:00Z?' })).asked, true);
+  state.peerAsks('q-deploy-window', 'peer: may I restart?');
+  const closed = await host.attention.close({ id: 'q-deploy-window', reason: 'deployed in another window' });
+  assert.equal(closed.closed, true, JSON.stringify(closed));
+  assert.equal(closed.message_id, 'm-0', 'closed the peer question, not its own');
+  const again = await host.attention.close({ id: 'q-deploy-window', reason: 'a second, different reason' });
+  assert.deepEqual({ closed: again.closed, already_closed: again.already_closed }, { closed: false, already_closed: true }, JSON.stringify(again));
+  assert.deepEqual((await host.attention.list()).map(q => [q.id, q.text]), [['q-deploy-window', 'peer: may I restart?']], 'the peer question was touched');
+});
+
+test('State adapter: list says when State has more open questions than the newest 200 it read', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'aitelier-list-'));
+  directories.push(directory);
+  const host = aitelierHost(envFor(directory), { runtime: {}, request: async () => ({ result: {
+    questions: [{ segment_id: 'q1', text: 't', message_id: 'm1' }], has_more: true, matched_total: 201 } }) });
+  const open = await host.attention.list();
+  assert.deepEqual(open.map(q => q.id), ['q1']);
+  assert.equal(open.truncated, true);
+  const complete = await aitelierHost(envFor(directory), { runtime: {}, request: async () => ({ result: { questions: [], has_more: false } }) }).attention.list();
+  assert.equal(complete.truncated, undefined);
+});

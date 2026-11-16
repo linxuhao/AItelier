@@ -74,6 +74,8 @@ def citation_fields(row):
         fields["segments"] = json.loads(row["segments_json"])
     if row["answers_json"]:
         fields["answers"] = json.loads(row["answers_json"])
+    if "withdraws_json" in row.keys() and row["withdraws_json"]:
+        fields["withdraws"] = json.loads(row["withdraws_json"])
     return fields
 
 
@@ -124,6 +126,9 @@ class DriverInbox:
                 # Additive (the questions a reply answers). NULL means the reply
                 # cites none, which is every row written before this column.
                 add_column_if_missing(conn, "driver_inbox_messages", "answers_json", "TEXT")
+                # Additive (the driver's own questions a row withdraws). NULL means
+                # the row withdraws nothing, which is every row before this column.
+                add_column_if_missing(conn, "driver_inbox_messages", "withdraws_json", "TEXT")
                 conn.commit()
 
     @staticmethod
@@ -492,6 +497,74 @@ class DriverInbox:
                                 {"message_id": mid, "project_id": project_id,
                                  "sender_driver_id": self.driver_id, "created_at": created})
 
+    def withdraw_user_question(self, request_key, project_id, message_id, segment_id, reason):
+        """Withdraw one of the calling driver's OWN open questions, as a record.
+
+        Writes one driver row in the conversation (subject "Question withdrawn",
+        the reason and the question as its body) whose `withdraws` cites the
+        question; the question's own row is never touched, so the thread keeps
+        both what was asked and that it was taken back. From then on the one rule
+        (`core/driver_questions.py`) reads the question as `withdrawn`: it leaves
+        the badge count, the questions box's open part and list_user_questions'
+        `open`, everywhere at once.
+
+        Refused, writing nothing: a message or segment that is not a question in
+        this project's conversation (`unknown_question`, `not_a_question`), a
+        question another driver asked (`not_own_question`), one a reply already
+        answers (`question_answered`). Withdrawing a question already withdrawn
+        is a no-op that names the existing withdrawal. Idempotent per (actor,
+        request_key) like every write here. Presentation only: it grants nothing.
+        """
+        if type(request_key) is not str or not request_key or len(request_key) > 320:
+            raise StateGraphError("invalid_request")
+        if (type(message_id) is not str or not 1 <= len(message_id) <= 200
+                or type(segment_id) is not str or not 1 <= len(segment_id) <= 64
+                or type(reason) is not str or not 1 <= len(reason.strip()) or len(reason) > 2000):
+            raise StateGraphError("invalid_request")
+        refuse_credential_body("Question withdrawn", reason, None)
+        if not self.driver_id:
+            raise StateGraphError("driver_identity_required")
+        payload = json.dumps([project_id, message_id, segment_id, reason, self.driver_id], sort_keys=True)
+        with self.store.transaction(write=True) as conn:
+            replay = self._replay(conn, "withdraw_user_question", request_key, payload)
+            if replay is not None:
+                return replay
+            self._driver(conn, self.driver_id)
+            if conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()[0] != "active":
+                raise StateGraphError("inactive_driver")
+            self.store._project(conn, project_id)
+            asked = conn.execute(
+                "SELECT sender_driver_id,thread_id,segments_json FROM driver_inbox_messages "
+                f"WHERE message_id=? AND project_id=? AND {CONVERSATION} AND audience='user'",
+                (message_id, project_id)).fetchone()
+            segments = json.loads(asked["segments_json"]) if asked is not None and asked["segments_json"] else []
+            question = next((s for s in segments if isinstance(s, dict) and s.get("id") == segment_id), None)
+            if question is None:
+                raise StateGraphError("unknown_question: message_id/segment_id must name a question block in this project's conversation")
+            if question.get("kind") != "question":
+                raise StateGraphError("not_a_question: only a question block can be withdrawn")
+            if asked["sender_driver_id"] != self.driver_id:
+                raise StateGraphError("not_own_question: a driver withdraws only the questions it asked")
+            state = next((q for q in all_questions(conversation_rows(conn, project_id))
+                          if q["message_id"] == message_id and q["segment_id"] == segment_id), None)
+            if state is not None and state["status"] == "answered":
+                raise StateGraphError("question_answered: a reply already answers this question; it cannot be withdrawn")
+            if state is not None and state["status"] == "withdrawn":
+                return {"withdrawn": False, "already_withdrawn": True, "project_id": project_id,
+                        "message_id": message_id, "segment_id": segment_id,
+                        "withdrawal_message_id": state["withdrawn"]["message_id"]}
+            mid, created = str(uuid4()), now()
+            body = reason + "\n\nWithdrawn question: " + str(question.get("text") or "")[:2000]
+            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,"
+                         "withdraws_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (mid, asked["thread_id"] or message_id, self.driver_id, project_id, "note", "transient",
+                          "Question withdrawn", body, json.dumps({}), None, created, "user",
+                          json.dumps([{"message_id": message_id, "segment_id": segment_id, "reason": reason}])))
+            return self._record(conn, "withdraw_user_question", request_key, payload,
+                                {"withdrawn": True, "project_id": project_id, "message_id": message_id,
+                                 "segment_id": segment_id, "withdrawal_message_id": mid, "created_at": created})
+
     def send_user_conversation_message(self, request_key, project_id, body, subject=None,
                                        reply_to_message_id=None, target_driver_id=None, answers=None):
         """Record one message from the project's USER to its driver.
@@ -612,7 +685,7 @@ class DriverInbox:
             self.store._project(conn, project_id)
             rows = [dict(r) for r in conn.execute(
                 "SELECT message_id,thread_id,sender_driver_id,project_id,subject,body,refs_json,"
-                "reply_to_message_id,created_at,audience,segments_json,answers_json FROM driver_inbox_messages "
+                "reply_to_message_id,created_at,audience,segments_json,answers_json,withdraws_json FROM driver_inbox_messages "
                 f"WHERE project_id=? AND {CONVERSATION} {bound} "
                 "ORDER BY created_at DESC, message_id DESC LIMIT ?", (*params, limit + 1))]
             total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
@@ -659,16 +732,16 @@ class DriverInbox:
         questions box (`core/driver_questions.py`), read over the whole thread in
         one call, so neither the driver nor the dashboard has to page the
         conversation to learn what is still open. Newest question first;
-        `status` picks `open`, `answered` or `all`; `counts` always covers both.
+        `status` picks `open`, `answered`, `withdrawn` or `all`; `counts` always
+        covers all three.
         Rows only: the driver's presence is never consulted.
         """
-        if status not in ("open", "answered", "all") or type(limit) is not int or not 1 <= limit <= 200:
+        if status not in ("open", "answered", "withdrawn", "all") or type(limit) is not int or not 1 <= limit <= 200:
             raise StateGraphError("invalid_request")
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
             found = all_questions(conversation_rows(conn, project_id, with_body=True))
-        counts = {"open": sum(q["status"] == "open" for q in found),
-                  "answered": sum(q["status"] == "answered" for q in found)}
+        counts = {state: sum(q["status"] == state for q in found) for state in ("open", "answered", "withdrawn")}
         picked = [q for q in reversed(found) if status == "all" or q["status"] == status]
         return {"project_id": project_id, "status": status, "questions": picked[:limit],
                 "matched_total": len(picked), "has_more": len(picked) > limit, "counts": counts}
@@ -837,13 +910,13 @@ class DriverInbox:
         with self.store.transaction() as conn:
             self._driver(conn, driver_id)
             high=conn.execute("SELECT COALESCE(MAX(seq),0) FROM driver_inbox_deliveries WHERE target_driver_id=?", (driver_id,)).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)
             # The storage columns are not payload: the citation part above is the
             # only shape a reader sees them in.
-            del row["segments_json"], row["answers_json"]
+            del row["segments_json"], row["answers_json"], row["withdraws_json"]
             row.update(citation)
         return {"driver_id":driver_id,"messages":page,"next_after":page[-1]["seq"] if len(rows)>limit else max(after,high),"truncated":len(rows)>limit}
 

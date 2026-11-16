@@ -56,8 +56,10 @@
   // Every question of the conversation, answered ones included, in the rule's
   // order: the open ones first, then the answered ones, most recent answer first.
   const railList = $derived(railQuestions(railRows));
-  const questions = $derived(railList.filter((question) => question.answered === null));
+  const questions = $derived(railList.filter((question) => question.answered === null && question.withdrawn === null));
   const answeredQuestions = $derived(railList.filter((question) => question.answered !== null));
+  // Questions their asker took back (withdraw_user_question), kept visible with the reason.
+  const withdrawnQuestions = $derived(railList.filter((question) => question.withdrawn !== null));
   // The questions box is permanent and foldable. Open by default; the user's
   // toggle is kept here, so a new message (which re-renders the thread, not this
   // box) never resets it for the life of the mounted pane.
@@ -464,6 +466,19 @@
                 <span class="question-subject" title={question.subject}>{question.subject}</span>
                 <span class="question-text">{question.text}</span>
                 <span class="question-answered-note">{st('driverQuestionsAnswerPrefix')}</span><span class="question-answer-text">{question.answered?.text}</span>
+              </li>
+            {/each}
+          </ul>
+          </details>
+        {/if}
+        {#if withdrawnQuestions.length}
+          <details class="answered-group withdrawn-group"><summary class="questions-title" data-questions-withdrawn>{st('driverQuestionsWithdrawn')} ({withdrawnQuestions.length})</summary>
+          <ul class="questions-list questions-list-withdrawn">
+            {#each withdrawnQuestions as question (question.message_id + ':' + question.segment_id)}
+              <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-withdrawn-by={question.withdrawn?.message_id}>
+                <span class="question-subject" title={question.subject}>{question.subject}</span>
+                <span class="question-text">{question.text}</span>
+                <span class="question-answered-note">{st('driverQuestionsWithdrawnPrefix')}</span><span class="question-answer-text">{question.withdrawn?.reason}</span>
               </li>
             {/each}
           </ul>

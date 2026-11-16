@@ -55,7 +55,9 @@ export function localHost(options = {}) {
     questions: join(root, 'questions.json') };
   const questions = async () => readJson(files.questions, {});
   // questions.json is read-modified-written by ask, close and an arriving answer; one
-  // at a time, so two asks in one director turn cannot lose one.
+  // at a time, so two asks in one director turn cannot lose one. The lock also guards
+  // writeJson's single fixed tmp name (questions.json.tmp): without it two writers race
+  // on that file and one fails with ENOENT, a louder failure than a lost update.
   let questionsLock = Promise.resolve();
   const locked = fn => { const run = questionsLock.then(fn); questionsLock = run.catch(() => {}); return run; };
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];

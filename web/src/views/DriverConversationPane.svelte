@@ -2,7 +2,7 @@
   import { st } from '../lib/stateI18n.svelte';
   import { readLastProject, rememberProject } from '../lib/navigation.svelte';
   import { startDshDriver, stopDshDriver, type DriverStatusResponse } from '../lib/api';
-  import { driverStateLabelKey } from '../lib/driverList';
+  import DriverStateBadge from './DriverStateBadge.svelte';
   import { stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import type { ConversationDraft } from '../lib/conversationDraft';
   import DriverConversation from './DriverConversation.svelte';
@@ -52,7 +52,7 @@
       <span class="pane-project-id">{st('driverConversation')} · {selected}</span>
     </div>
     <div class="pane-controls">
-      <span class="pane-driver-state" data-phase={driver?.phase}>{st(driverStateLabelKey(driver?.phase))}</span>
+      <span class="pane-driver-state"><DriverStateBadge phase={driver?.phase} /></span>
       <button type="button" class="outline driver-toggle" disabled={busy || !selected}
         aria-label={driver?.enabled ? st('driverStop') : st('driverStart')}
         onclick={() => void toggleDriver()}>
@@ -99,9 +99,7 @@
   .pane-project:hover{color:var(--pico-primary);}
   .pane-project-id{font-size:12px;color:var(--pico-muted-color);overflow-wrap:anywhere;}
   .pane-controls{display:flex;align-items:center;gap:10px;}
-  .pane-driver-state{font-size:12px;color:var(--pico-muted-color);}
-  .pane-driver-state::before{content:'●';margin-right:5px;}
-  .pane-driver-state[data-phase=running]{color:var(--pico-ins-color);}
+  .pane-driver-state{font-size:12px;}
   .driver-toggle{background:transparent;color:var(--pico-primary);font-size:12px;padding:5px 9px;margin:0;width:auto;}
   .pane-navigation{display:flex;align-items:center;gap:20px;padding:0 22px;border-bottom:1px solid var(--pico-muted-border-color);flex:0 0 auto;}
   .pane-modes{display:flex;gap:20px;}

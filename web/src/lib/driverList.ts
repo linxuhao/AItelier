@@ -44,17 +44,6 @@ export function driverStateLabelKey(phase: string | null | undefined): string {
   return LABEL_KEYS[driverState(phase)];
 }
 
-/** One distinct glyph per state, shown before the label (text presentation, so it
- *  takes the state's colour instead of rendering as an emoji). */
-export const DRIVER_STATE_ICONS: Record<DriverState, string> = {
-  running: '\u25B6\uFE0E', idle: '\u23F8\uFE0E', dormant: '\u263E', starting: '\u21BB',
-  stopping: '\u23F9\uFE0E', failed: '\u26A0\uFE0E', stopped: '\u25A0',
-};
-
-export function driverStateIcon(phase: string | null | undefined): string {
-  return DRIVER_STATE_ICONS[driverState(phase)];
-}
-
 export interface DriverTableRow {
   managed?: {phase?: string; updated_at?: string} | null;
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DRIVER_STATE_ICONS, driverPhaseRank, driverState, driverStateIcon, driverStateLabelKey, sortDagRows } from '../../lib/driverList';
+import { driverPhaseRank, driverState, driverStateLabelKey, sortDagRows } from '../../lib/driverList';
 
 const row = (project_id: string, created_at: string) => ({project_id, created_at});
 const managed = (phase: string, updated_at: string) => ({managed: {phase, updated_at}});
@@ -46,14 +46,5 @@ describe('driver ordering shared by the table and the DAG list', () => {
     expect(driverStateLabelKey('dormant')).toBe('driverStateDormant');
     expect(driverPhaseRank('waiting')).toBeLessThan(driverPhaseRank('dormant'));
     expect(driverPhaseRank('dormant')).toBeLessThan(driverPhaseRank('starting'));
-  });
-
-  it('every state has its own icon', () => {
-    const states = ['running', 'idle', 'dormant', 'starting', 'stopping', 'failed', 'stopped'] as const;
-    expect(Object.keys(DRIVER_STATE_ICONS).sort()).toEqual([...states].sort());
-    expect(new Set(states.map(s => DRIVER_STATE_ICONS[s])).size).toBe(states.length);
-    expect(driverStateIcon('waiting')).toBe(DRIVER_STATE_ICONS.idle);
-    expect(driverStateIcon('dormant')).toBe(DRIVER_STATE_ICONS.dormant);
-    expect(driverStateIcon(undefined)).toBe(DRIVER_STATE_ICONS.stopped);
   });
 });

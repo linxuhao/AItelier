@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { authStore } from '../stores/auth';
   import { driverStatus, startDshDriver, stopDshDriver, dshDriverConversationUnread, type DriverStatusResponse } from '../lib/api';
-  import { driverPhaseRank, driverState, driverStateIcon, driverStateLabelKey } from '../lib/driverList';
+  import { driverPhaseRank } from '../lib/driverList';
+  import DriverStateBadge from './DriverStateBadge.svelte';
   import DriverConversation from './DriverConversation.svelte';
   import DriverRunLog from './DriverRunLog.svelte';
   import type { StateProjectRow } from '../lib/stateGraph';
@@ -72,7 +73,7 @@
         <tbody>{#each sortedProjects as p (p.project_id)}
           {@const activity = status.projects[p.project_id]}
           <tr><td>{p.title}</td><td>{activity?.total ?? 0} / {activity?.online ?? 0}</td><td>{activity?.running_subagents ?? 0}</td><td>{activity?.running_pipelines ?? 0}</td>
-            <td>{#if activity?.managed}<span class="driver-state" data-phase={driverState(activity.managed.phase)} data-icon={driverStateIcon(activity.managed.phase)} title={activity.managed.phase}>{st(driverStateLabelKey(activity.managed.phase))}</span>{:else}<span>—</span>{/if}
+            <td>{#if activity?.managed}<DriverStateBadge phase={activity.managed.phase} title={activity.managed.phase} />{:else}<span>—</span>{/if}
               <button class="outline" disabled={!!busy} onclick={() => toggle(p.project_id, !!activity?.managed?.enabled)}>{busy === p.project_id ? '…' : activity?.managed?.enabled ? st('driverStop') : st('driverStart')}</button>
               <button class="outline" aria-label={st('driverConversation')} onclick={() => showConversation(p.project_id)}>{st('driverConversation')}{#if unread[p.project_id]}<span class="unread" title={st('driverConversationUnread')}>{unread[p.project_id]}</span>{/if}</button>
               {#if activity?.managed}<button class="outline" onclick={() => showHistory(p.project_id)}>{st('driverHistory')}</button>{/if}
@@ -105,11 +106,6 @@
   .driver-conversation-host{display:flex;flex-direction:column;container-type:inline-size;height:min(760px,75dvh);min-height:360px;}
   .driver-status{margin:.45rem 0;font-size:.76rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;padding:.5rem .65rem;}
   summary{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem 1rem;margin:0;line-height:1.3;}
-  .driver-state{display:inline-flex;align-items:center;gap:.3rem;}
-  .driver-state::before{content:attr(data-icon);width:1em;text-align:center;color:#94a3b8;}
-  .driver-state[data-phase="running"]::before{color:#15803d;} .driver-state[data-phase="idle"]::before{color:#2563eb;}
-  .driver-state[data-phase="dormant"]::before{color:#7c3aed;} .driver-state[data-phase="failed"]::before{color:#b91c1c;}
-  .driver-state[data-phase="starting"]::before,.driver-state[data-phase="stopping"]::before{color:#b45309;}
   .driver-table{overflow:auto;max-height:240px;}table{font-size:.75rem;margin:.5rem 0 0;}th,td{padding:.35rem .5rem;white-space:nowrap;}
   button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}small{display:block;max-width:400px;white-space:normal;color:var(--pico-del-color,#b91c1c);}
   p{margin:.4rem 0;}

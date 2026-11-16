@@ -4,7 +4,8 @@
   import { driverStatus, dshDriverConversationUnread, stateProjects, type DriverStatusResponse } from '../lib/api';
   import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { rememberProject } from '../lib/navigation.svelte';
-  import { driverState, driverStateIcon, driverStateLabelKey, sortDagRows } from '../lib/driverList';
+  import { sortDagRows } from '../lib/driverList';
+  import DriverStateBadge from './DriverStateBadge.svelte';
   import { st } from '../lib/stateI18n.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
@@ -107,7 +108,7 @@
                  that opens it: phase, drivers online/total, and what is running
                  right now. All four read from the same /api/dsh-drivers row. -->
             <p class="driver-line">
-              <span class="driver-state" data-phase={driverState(phase)} data-icon={driverStateIcon(phase)} title={st(driverStateLabelKey(phase))}>{st(driverStateLabelKey(phase))}</span>
+              <DriverStateBadge {phase} />
               <span class="driver-facts" aria-label={st('driverFacts')}>
                 <span class="fact"><strong data-fact="drivers">{activity?.online ?? 0}/{activity?.total ?? 0}</strong> {st('driverCount')}</span>
                 <span class="fact"><strong data-fact="subagents">{activity?.running_subagents ?? 0}</strong> {st('driverSubagents')}</span>
@@ -157,10 +158,6 @@
   .workbench .card-top{display:none;}
   h2{font-size:14px;line-height:1.5;margin:0 0 6px;}
   .driver-line{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0;font-size:12px;}
-  .driver-state{display:inline-flex;align-items:center;gap:5px;color:var(--pico-muted-color);}
-  .driver-state::before{content:attr(data-icon);color:var(--pico-primary);}
-  .driver-state[data-phase=running]::before{color:var(--pico-ins-color);}
-  .driver-state[data-phase=failed]::before{color:var(--pico-del-color);}
   .driver-facts{display:flex;flex-wrap:wrap;gap:2px 8px;width:100%;font-size:11px;color:var(--pico-muted-color);}
   .fact{display:inline-flex;gap:3px;align-items:baseline;}.fact strong{font-size:inherit;color:inherit;}
   .unread,.questions{display:inline-block;padding:1px 6px;border-radius:5px;font-size:11px;line-height:1.5;}

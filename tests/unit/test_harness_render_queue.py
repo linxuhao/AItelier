@@ -891,7 +891,15 @@ def test_the_heartbeat_stops_once_its_row_is_no_longer_active(tmp_path, monkeypa
 # ~/.AItelier/director/reports/lockq-r2-review-20260924/probes/probe_queue_timeout_test.py
 # ~/.AItelier/director/reports/lockq-r2-review-20260924/probes/probe_readers_test.py
 
-TOOL_TIMEOUT = 2          # stands in for post_playtest's 3600 s
+# The socket that stands in for post_playtest's 3600 s.  It is the WINDOW the
+# refusal under test has to arrive in, so it is an instrument, not a criterion --
+# and it has to sit well above the product's own bound.  At 2 s this redded in
+# the full suite of 2026-11-16 (ae16575a5c): the deployment-fence wait refused at
+# waited_sec=2.0016 (its bound is 1.0 s; the poll overshoot under load supplied
+# the rest), the server's 409 met an expired client socket, and the tool read a
+# broken pipe and reported gate_timeout=True -- exactly the classification this
+# file exists to deny.
+TOOL_TIMEOUT = 10         # stands in for post_playtest's 3600 s
 
 
 def _game_project(tmp_path: Path) -> Path:
@@ -1009,8 +1017,11 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
         # Reader E: godot_playtest_scenario. Reader F: focused_check.
         ret_e = godot_playtest_scenario(scenario="s1", project_root=str(proj),
                                         _timeout_seconds=TOOL_TIMEOUT)
+        # Reader F's own process budget is a window too, not a criterion: 4 s was
+        # twice the measured 2.0 s refusal, the same thin margin that failed for
+        # Reader C above.
         ret_f = focused_check(kind="godot_scenario", scenario="s1",
-                              project_root=str(proj), timeout_seconds=4)
+                              project_root=str(proj), timeout_seconds=10)
     finally:
         if fence is not None:
             _lift(fence)

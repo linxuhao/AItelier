@@ -247,7 +247,12 @@ def test_refused_create_is_reported_not_created_and_removes_nothing(docker):
 def test_removal_that_keeps_failing_is_unconfirmed_within_its_bound(docker, monkeypatch):
     shim, behave, calls, root = docker
     behave(rm_rc=1)
-    monkeypatch.setattr(executor, "REMOVE_DEADLINE", 0.5)
+    # This bound is the test's instrument, not the product value (30 s).  It has
+    # to be long enough for the retry loop to make its SECOND attempt, which is
+    # what the assertion below reads, and each attempt is a shim process: at
+    # 0.5 s a loaded box fitted exactly one in (full-suite red of 2026-11-16 on
+    # ae16575a5c: `assert 1 >= 2`).
+    monkeypatch.setattr(executor, "REMOVE_DEADLINE", 3.0)
     started = time.monotonic()
     with pytest.raises(executor.CleanupUnconfirmed, match="could not be removed"):
         with executor.owned_container(_create(shim, "own-7", "true"), shim, "own-7") as proc:

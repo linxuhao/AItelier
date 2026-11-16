@@ -235,6 +235,13 @@ def test_a_replaced_database_file_does_not_inherit_the_verdict(db, monkeypatch, 
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     os.replace(successor, database.db_path)
 
+    # The wal_checkpoint above moves the sentinel's data_version as well, so this
+    # arm also passes with _file_identity disabled: two witnesses, one verdict.
+    # Neutralise the commit witness here, or the file identity is never what a
+    # reader sees answer. (Director, 2026-11-16: without this line the identity
+    # check survives a mutant that makes it constant.)
+    monkeypatch.setattr(state_attempt_schema, "_meanwhile_committed", lambda *a: False)
+
     assert state_attempt_schema._file_identity(database.db_path) is not None
     assert kept_verdict(database) is None, "the replaced file inherited the old verdict"
     with pytest.raises(sqlite3.IntegrityError, match="foreign-key validation"):

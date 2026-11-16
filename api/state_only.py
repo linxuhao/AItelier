@@ -113,11 +113,23 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
-        if mcp is None:
-            yield
-        else:
-            async with mcp.session_manager.run():
+        # In-process witness for a loop parked in a syscall, same switch and
+        # same default as the full host: AITELIER_LOOP_STACK_DUMP defaults to
+        # OFF, and an opted-in deployment gets its dumps under
+        # <data volume>/logs/loop-stack-dumps/. This deployment serves requests
+        # on an event loop too, so it needs the same witness (and the same GIL
+        # boundary documented in core/loop_stack_watchdog.py).
+        from core.loop_stack_watchdog import shutdown as _disarm
+        from core.loop_stack_watchdog import start_from_env as _arm
+        watchdog = _arm()
+        try:
+            if mcp is None:
                 yield
+            else:
+                async with mcp.session_manager.run():
+                    yield
+        finally:
+            _disarm(watchdog)
 
     app = FastAPI(title='AItelier State DAG', lifespan=lifespan, docs_url=None, redoc_url=None)
     app.add_middleware(_BearerAuth,token=token,registry=registry)

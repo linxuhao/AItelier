@@ -52,6 +52,19 @@ async def lifespan(app: FastAPI):
     import json as _json
     from api.dependencies import get_skillflow
 
+    # In-process witness for a loop parked in a syscall
+    # (core/loop_stack_watchdog.py). Armed from AITELIER_LOOP_STACK_DUMP, whose
+    # DEFAULT IS OFF: a deployment that sets nothing gets no thread and no file,
+    # exactly as before. The heartbeat runs on the loop this lifespan serves, so
+    # a loop that stops being turned is what leaves the dump under
+    # <data volume>/logs/loop-stack-dumps/. Best-effort: startup never depends
+    # on it. A deployment that opts in must also accept the GIL boundary stated
+    # in that module: a block inside a C extension that holds the GIL produces
+    # no dump, because the watchdog thread cannot run either.
+    from core.loop_stack_watchdog import start_from_env as _arm_loop_stack_watchdog
+    from core.loop_stack_watchdog import shutdown as _disarm_loop_stack_watchdog
+    _loop_stack_watchdog = _arm_loop_stack_watchdog()
+
     # Test-composed apps get NO backend: no instance lock, no claim recovery,
     # no scheduler. recover_claims_on_startup() assumes it is the ONLY backend
     # — from a TestClient it would steal a live backend's in-flight claims and
@@ -62,11 +75,14 @@ async def lifespan(app: FastAPI):
         # The MCP session manager still runs: it starts no backend, and a test app
         # that mounts the endpoint but cannot answer a single call would make the
         # suite green on an endpoint nobody could use.
-        async with _mcp_endpoint.open().session_manager.run():
-            try:
-                yield
-            finally:
-                _mcp_endpoint.close()
+        try:
+            async with _mcp_endpoint.open().session_manager.run():
+                try:
+                    yield
+                finally:
+                    _mcp_endpoint.close()
+        finally:
+            _disarm_loop_stack_watchdog(_loop_stack_watchdog)
         return
 
     loop = asyncio.get_running_loop()
@@ -278,6 +294,7 @@ async def lifespan(app: FastAPI):
             import sys
             from core.scheduler import settle_scheduler_maintenance
             await settle_scheduler_maintenance(exit_error=sys.exception())
+            _disarm_loop_stack_watchdog(_loop_stack_watchdog)
 
 
 _mcp_endpoint = MCPEndpoint()

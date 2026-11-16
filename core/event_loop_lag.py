@@ -305,8 +305,7 @@ class EventLoopLagMonitor:
             return
         self._last_log_at = now
         logger.warning(
-            "event-loop lag %.2fs >= threshold %.2fs (attribution=%s); "
-            "control-plane work was not being turned on this loop",
+            "event-loop lag %.2fs >= threshold %.2fs (attribution=%s)",
             lag, self.threshold_s, attribution)
 
 

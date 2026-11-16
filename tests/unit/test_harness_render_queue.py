@@ -538,27 +538,79 @@ def test_a_limit_reached_after_ownership_releases_the_row_unrendered(rig):
 # P2d comes from the r2 review (probe_wait_heartbeat_test.py::test_p2d_...).
 
 def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
+    """A beat that failed once (the owner table was locked) must not make a live
+    render read as stale: the beat retries, and a request made while the stored
+    heartbeat is fresh is told it is queued behind a live render.
+
+    Every fact this waits on is observed, never assumed from a sleep. While the
+    table is locked it checks that the stored heartbeat really stopped advancing
+    (the beats were lost) while the holder is still alive; after the unlock it
+    waits until the heartbeat has crossed `unlocked_at`, which is the product's
+    promise that the beat retried; and it only counts answers asked while the row
+    is demonstrably fresh, because how long a starved beat thread takes to win the
+    table back is the scheduler's business. The unfixed version of this witness
+    reds on a loaded box with every answer `active_stale` (measured: 1 of 8 runs
+    while another container's full suite shared the machine).
+    """
     gh = rig.gh
-    gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = 0.2
-    gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = 8.0
+    interval = 0.2
+    stale_after = 8.0
+    deadline_sec = 30.0
+    gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC = interval
+    gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = stale_after
     holder_id = rig.start_holder()
     blocker = sqlite3.connect(gh.LIFECYCLE_DB, timeout=1)
     blocker.execute("BEGIN EXCLUSIVE")
-    # A request that queues while the table is locked: its first poll loses
-    # sqlite's busy wait, and it must keep waiting rather than fail.
-    during, during_out = rig.post_in_thread(
-        "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8), timeout=20)
-    time.sleep(6.5)            # longer than _lifecycle_connection's timeout=5
-    blocker.rollback()
-    blocker.close()
+    try:
+        # A request that queues while the table is locked: its first poll loses
+        # sqlite's busy wait, and it must keep waiting rather than fail.
+        during, during_out = rig.post_in_thread(
+            "/script", rig.payload("op-during-lock", render_wait_timeout_sec=8),
+            timeout=20)
+        time.sleep(6.5)        # longer than _lifecycle_connection's timeout=5
+        # What the lock must have cost: the stored beat stopped advancing while
+        # the holder kept rendering. Read it through the connection that holds
+        # the lock, so this is an observation and not a restatement of the sleep.
+        held_beat = blocker.execute(
+            "SELECT heartbeat_at FROM render_owners WHERE owner_id=?",
+            (holder_id,)).fetchone()[0]
+        beats_lost = time.time() - float(held_beat)
+        holder_alive_while_locked = rig.holder[0].is_alive()
+    finally:
+        blocker.rollback()
+        blocker.close()
     unlocked_at = time.time()
+    assert holder_alive_while_locked, (
+        "the holder render ended while the table was locked; the probe measured "
+        "nothing")
+    assert beats_lost >= 3 * interval, (
+        f"the lock did not cost the holder a beat: the stored heartbeat was only "
+        f"{beats_lost:.2f}s old after the lock window (interval {interval}s), so "
+        f"the retry this test is about never happened")
+    # The promise: the beat retries once the table is free. Wait for it.
+    begun = time.monotonic()
+    while time.monotonic() - begun < deadline_sec:
+        if float(rig.row("op-holder")["heartbeat_at"]) > unlocked_at:
+            break
+        time.sleep(0.02)
+    waited = time.monotonic() - begun
+    beat_after_unlock = float(rig.row("op-holder")["heartbeat_at"])
+    assert beat_after_unlock > unlocked_at, (
+        f"the heartbeat never resumed after the lock was released within the "
+        f"{deadline_sec:.0f}s deadline (waited {waited:.1f}s; unlocked_at="
+        f"{unlocked_at}, last heartbeat_at={beat_after_unlock}, interval "
+        f"{interval}s, stale threshold {stale_after}s)")
+    # Now ask, but only while the row is demonstrably fresh.
     answers = []
-    deadline = time.monotonic() + gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 1
-    while time.monotonic() < deadline:
+    begun = time.monotonic()
+    while time.monotonic() - begun < deadline_sec and len(answers) < 3:
+        age = time.time() - float(rig.row("op-holder")["heartbeat_at"])
+        if age > stale_after / 2:
+            time.sleep(0.02)
+            continue
         code, body = rig.post("/script", rig.payload(
             f"op-probe-{len(answers)}", render_wait_timeout_sec=0.5), timeout=15)
-        answers.append((code, body.get("error"), body.get("owner_kind")))
-    beat_after_unlock = rig.row("op-holder")["heartbeat_at"]
+        answers.append((code, body.get("error"), body.get("owner_kind"), round(age, 2)))
     still_rendering = rig.holder[0].is_alive()
     during.join(20)
     rig.release.set()
@@ -566,9 +618,8 @@ def test_a_locked_owner_table_does_not_make_a_live_render_stale(rig):
     stops = [a for a in answers if a[2] != "active"]
     assert still_rendering, "the holder render ended early; the probe measured nothing"
     assert answers and not stops, (
-        "a live render was read as needing reconciliation after its heartbeat "
-        "failed once", stops)
-    assert beat_after_unlock > unlocked_at, "the heartbeat never resumed after the lock"
+        "a live render was read as needing reconciliation while its stored "
+        "heartbeat was fresh, after one beat failed on the locked table", stops)
     assert (during_out.get("code"), (during_out.get("body") or {}).get("error")) == (
         409, "render owner wait timed out"), (
         "a request that queued while the owner table was locked did not keep waiting",

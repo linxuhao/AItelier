@@ -47,6 +47,7 @@ export function defaultTexts() {
     todoHandback: 'Todo handback:\n',
     todoBatch: 'Todo batch:\n',
     modelCompletion: 'Model completion',
+    slotFree: 'Worker slot free:\n',
     tools: {},
   };
 }

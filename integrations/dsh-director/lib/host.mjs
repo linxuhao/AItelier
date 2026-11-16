@@ -66,6 +66,11 @@ export function validateHost(host) {
       for (const key of ['python', 'cwd'])
         if (todo[key] !== undefined && !isText(todo[key])) problems.push(`config: todo.${key} must be a non-empty string when given`);
     }
+    if (config.maxActiveSubagents !== undefined && !(Number.isSafeInteger(config.maxActiveSubagents) && config.maxActiveSubagents > 0))
+      problems.push('config: maxActiveSubagents must be a positive integer when given');
+    if (config.reservedSlots !== undefined && !(Number.isSafeInteger(config.reservedSlots) && config.reservedSlots >= 1
+      && config.reservedSlots < (config.maxActiveSubagents ?? 8)))
+      problems.push('config: reservedSlots must be an integer from 1 to maxActiveSubagents - 1 when given (one slot stays reserved for resuming a worker)');
     for (const key of ['sessionEnv', 'projectId', 'permissionPreset'])
       if (config[key] !== undefined && !isText(config[key])) problems.push(`config: ${key} must be a non-empty string when given`);
   } else if (config !== undefined && config !== null && typeof config !== 'function') {

@@ -104,3 +104,14 @@ test('a repeated capability is refused for that alone, and does not blame the op
   assert.deepEqual(refusedProblems({ ...good(), ...implemented, capabilities: allDeclared.filter(op => op !== 'workState') }),
     ['capabilities: duplicate entries (progress)', 'implemented but not declared: workState']);
 });
+
+test('worker capacity config: positive maxActiveSubagents, reservedSlots below it', () => {
+  const base = good();
+  assert.ok(validateHost({ ...base, config: { ...base.config, maxActiveSubagents: 3, reservedSlots: 1 } }));
+  for (const [config, pattern] of [[{ maxActiveSubagents: 0 }, /maxActiveSubagents must be a positive integer/],
+    [{ maxActiveSubagents: 2.5 }, /maxActiveSubagents must be a positive integer/],
+    [{ maxActiveSubagents: 3, reservedSlots: 3 }, /reservedSlots must be an integer from 1 to maxActiveSubagents - 1/],
+    [{ reservedSlots: 0 }, /reservedSlots must be an integer from 1/],
+    [{ reservedSlots: -1 }, /reservedSlots must be an integer/]])
+    assert.throws(() => validateHost({ ...base, config: { ...base.config, ...config } }), pattern, JSON.stringify(config));
+});

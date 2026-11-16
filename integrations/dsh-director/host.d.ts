@@ -31,6 +31,14 @@ export interface HostConfig {
   projectId?: string;
   /** DSH permission preset applied to the director session on start, e.g. 'danger-full-access'. */
   permissionPreset?: string;
+  /** The worker capacity this host expects (default: DSH's own maxActiveSubagents). The guard
+   *  uses the smaller of this and the limit DSH runs with, so it is never above DSH's. */
+  maxActiveSubagents?: number;
+  /** Worker slots kept free for resuming workers and follow-ups (default 1, at least 1); the
+   *  director's subagent call is refused at capacity - reservedSlots, the refusal names the
+   *  dispatch, and one wake naming every refused dispatch comes when a slot frees (kept
+   *  across a restart). A dispatch DSH itself refused counts as refused too. */
+  reservedSlots?: number;
   idleReviewMs?: number | string;
   dormantMinuteMs?: number | string;
   watchIntervalMs?: number | string;

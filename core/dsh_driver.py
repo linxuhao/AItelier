@@ -125,6 +125,11 @@ def _is_lock_error(error):
 # DSH built-in tool plugins the driver profile switches off (see the patch list in
 # _provision): measured unused, or shadowing the runtime's own tools.
 UNUSED_BUILTIN_TOOL_PLUGINS = ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo")
+# Live native children per director (DSH's maxActiveSubagents; its default is 8).
+# Written into the profile for DSH and handed to the runtime as
+# AITELIER_DSH_MAX_ACTIVE_SUBAGENTS, so dsh-director's capacity guard (plugin step 9)
+# and DSH's own admission limit are the same number by construction.
+MAX_ACTIVE_SUBAGENTS = 8
 # The provider the runtime registers for its completion bridge (model.mjs); native
 # subagents ask it for the worker route.
 SUBAGENT_PROVIDER = "aitelier"
@@ -549,6 +554,7 @@ class DshDrivers:
             {"id": "hmr", "disabled": True},
             {"id": "tool-result-pruner", "disabled": True},
             {"id": "compaction-basic", "config": compaction_config(row, roles)},
+            {"id": "subagent", "config": {"maxActiveSubagents": MAX_ACTIVE_SUBAGENTS}},
             {"id": "tool-subagent", "config": {"provider": "spawn", "toolName": "subagent",
                 "agentOptions": {"provider": SUBAGENT_PROVIDER, "model": roles["worker"]["route"]}}},
             # Built-in tools no driver used in a measured week (2026-11-07..14, ~83k
@@ -585,7 +591,8 @@ class DshDrivers:
                    # The runtime's todo_* tools run `python -m dsh_todo` from the package's
                    # directory, with this checkout's hooks (core/dsh_todo_hooks.py).
                    AITELIER_TODO_PYTHON=sys.executable,
-                   AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV)
+                   AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV,
+                   AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS))
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))

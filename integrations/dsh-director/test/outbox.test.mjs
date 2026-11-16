@@ -3,7 +3,7 @@
  *  crash between delivery and the record duplicates, it never loses. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Outbox, wakeKey } from '../lib/outbox.mjs';
@@ -89,6 +89,16 @@ test('one notice that cannot be delivered never stops a boot: the others go, it 
   assert.match(await readFile(join(dir, 'outbox-set-aside.jsonl'), 'utf8'), /POISON/);
   assert.deepEqual(await (await box(dir, got, deliver)).replay(), { replayed: [], failed: [], setAside: [] }, 'set aside means not retried');
   assert.deepEqual(got, ['FINE']);
+});
+
+test('replay finishes even when its bookkeeping cannot be written', async () => {
+  const dir = await fresh(), got = [], logs = [];
+  await writeFile(join(dir, 'outbox.jsonl'), JSON.stringify({ id: 'n1', text: 'ONE' }) + '\n');
+  await mkdir(join(dir, 'outbox-failures.json'));     // a path that cannot be written as a file
+  const result = await (await box(dir, got, undefined, line => logs.push(line))).replay();
+  assert.deepEqual(result.replayed, ['n1']);
+  assert.deepEqual(got, ['ONE']);
+  assert.ok(logs.some(line => line.includes('replay counts not written')), logs.join('\n'));
 });
 
 test.after(async () => { for (const dir of dirs) await rm(dir, { recursive: true, force: true }); });

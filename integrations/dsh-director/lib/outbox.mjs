@@ -61,8 +61,9 @@ export class Outbox {
       try { entry = JSON.parse(line); } catch { this.log(`outbox: unreadable line skipped`); continue; }
       if (typeof entry?.id === 'string' && typeof entry.text === 'string' && !this.delivered.has(entry.id)) this.pending.set(entry.id, entry.text);
     }
+    // Bookkeeping only: unreadable counts restart at zero (named), they never stop a boot.
     try { this.failures = JSON.parse(await readFile(this.failuresFile, 'utf8')) ?? {}; }
-    catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    catch (error) { if (error.code !== 'ENOENT') this.log(`outbox: replay counts unreadable (${this.failuresFile}), starting from zero: ${error}`); }
     return this;
   }
   #remember(key) {
@@ -124,8 +125,14 @@ export class Outbox {
         }
       }
     }
-    await writeFile(this.failuresFile, JSON.stringify(this.failures), { mode: 0o600 });
-    if (replayed.length || setAside.length) await this.compact();
+    // The counts are bookkeeping: failing to write them costs at most a later set-aside,
+    // never the boot.
+    try { await writeFile(this.failuresFile, JSON.stringify(this.failures), { mode: 0o600 }); }
+    catch (error) { this.log(`outbox: replay counts not written (${this.failuresFile}): ${error}`); }
+    if (replayed.length || setAside.length) {
+      try { await this.compact(); }
+      catch (error) { this.log(`outbox: compaction after replay failed, files kept as they are: ${error}`); }
+    }
     return { replayed, failed, setAside };
   }
   /** Rewrite both files to what is still needed. */

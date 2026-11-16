@@ -17,6 +17,13 @@ WHAT IS ASSERTED HERE, against the real watchdog and real files:
     stack, including that thread's own frame (module + function) under its own
     thread id, with a header naming the measured silence; the SAME stall with
     nothing armed writes nothing, so the green is not vacuous;
+  * at >=100 live threads — where faulthandler's own dump stops at 100 blocks
+    and leaves the OLDEST threads out, the watched loop thread among them
+    (`iss-f1667dc30c2d41ee`: a 0.508 s stall wrote 100 blocks, no
+    `Current thread` block, no base_events frame) — the file still contains the
+    watched thread's own chain, written from `sys._current_frames()` BEFORE
+    that dump, and the dump is labelled with the live thread count so a reader
+    can tell a complete section from a capped one;
   * a healthy loop over a run longer than 3x the budget writes no file at all
     (enabling the witness cannot grow data volume when nothing is wrong);
   * one incident is bounded: at most `max_dumps_per_incident` dumps in one file
@@ -72,6 +79,17 @@ _SECTION_RE = re.compile(
 _HEADER_RE = re.compile(
     r"^# aitelier loop-stack-watchdog: watched loop silent for "
     r"([0-9.]+)s \(budget ([0-9.]+)s\); dump (\d+)/(\d+); pid (\d+); (.+)$")
+# The section the watchdog writes from sys._current_frames() before the
+# capped all-threads dump: the ident is `threading.get_ident()` of the thread
+# the heartbeat comes from.
+_LOOP_THREAD_RE = re.compile(
+    r"^# watched loop thread (\d+) \(the thread whose heartbeat went silent; "
+    r"most recent call last\):$")
+# The label that says how large the process was and where the all-threads dump
+# stops; without it a capped dump is indistinguishable from a complete one.
+_ALL_THREADS_RE = re.compile(
+    r"^# all threads below, as faulthandler prints them: (\d+) live threads, "
+    r"and faulthandler stops after (\d+) thread blocks")
 
 
 # ── witnesses that read the REAL thread table ────────────────────────────────
@@ -131,6 +149,8 @@ def _dump_files(root: Path):
 # are both weaker than "the block is written".
 _DUMP_HEADER_MARKER = b"# aitelier loop-stack-watchdog: watched loop silent for"
 _DUMP_FOOTER_MARKER = b"# end of aitelier loop-stack-watchdog dump"
+_DUMP_HEADER_TEXT = _DUMP_HEADER_MARKER.decode()
+_DUMP_FOOTER_TEXT = _DUMP_FOOTER_MARKER.decode()
 
 
 def _complete_blocks(data: bytes) -> int:
@@ -150,6 +170,38 @@ def _wait_for(predicate, timeout=5.0, interval=0.01):
         if value:
             return value
         time.sleep(interval)
+    return None
+
+
+# ── one dump block, split out of its incident file ──────────────────────────
+
+def _dump_blocks(data: str):
+    """Complete blocks (header through footer) of one incident file, in order."""
+    blocks, current = [], None
+    for line in data.splitlines(keepends=True):
+        if line.startswith(_DUMP_HEADER_TEXT):
+            current = [line]
+            blocks.append(current)
+        elif current is not None:
+            current.append(line)
+            if line.startswith(_DUMP_FOOTER_TEXT):
+                current = None
+    return ["".join(lines) for lines in blocks]
+
+
+def _capped_block(dump_dir: Path):
+    """(path, block) for a COMPLETE block whose all-thread dump is capped.
+
+    faulthandler prints `min(live, 100)` thread blocks, so >=100 blocks in one
+    block of the file says the dump was written with >=100 live threads - and
+    says it from the dump itself, so the selection works on the unfixed code
+    too (which has no label to read the count from).
+    """
+    for path in _dump_files(dump_dir):
+        text = path.read_bytes().decode("utf-8", "replace")
+        for block in _dump_blocks(text):
+            if len(_sections(block)) >= 100:
+                return path, block
     return None
 
 
@@ -184,6 +236,7 @@ class _StalledLoop:
         self.watchdog = watchdog
         self.beat_for = beat_for
         self.pthread_id = None
+        self.ident = None
         self.error = None
         self.parked = threading.Event()
         self.exited = threading.Event()
@@ -198,6 +251,7 @@ class _StalledLoop:
     def _run(self) -> None:
         try:
             self.pthread_id = _pthread_self_hex()
+            self.ident = threading.get_ident()
             deadline = time.monotonic() + self.beat_for
             while time.monotonic() < deadline:
                 self.watchdog.beat()
@@ -330,6 +384,116 @@ def test_real_watchdog_dumps_every_thread_while_one_is_parked_in_a_syscall(tmp_p
         stall.release()
         watchdog.stop()
         assert stall.exited.is_set()
+
+
+# ── 1b. the watched thread survives faulthandler's 100-thread cap ───────────
+
+def test_dump_names_the_watched_loop_thread_past_100_live_threads(tmp_path):
+    """The measurement in `iss-f1667dc30c2d41ee`, as a test.
+
+    faulthandler stops at 100 thread blocks and prints nothing to say so. With
+    more threads than that, the blocks it leaves out are the ones furthest down
+    its thread-state list - measurably the OLDEST, which is where the loop
+    thread and the watchdog sit. The live backend therefore wrote a 0.508 s
+    stall as 100 blocks with no `Current thread` block and no stack reaching
+    asyncio/base_events: the one frame the file exists to name was the one the
+    cap removed. A dump taken at >=100 live threads must still contain it.
+    """
+    dump_dir = tmp_path / "dumps"
+    watchdog = LoopStackWatchdog(budget_s=_BUDGET, check_interval_s=_CHECK,
+                                 dump_dir=dump_dir,
+                                 max_dumps_per_incident=3)
+    watchdog.start()
+    spares_stop = threading.Event()
+    spares = []
+    stall = None
+    try:
+        stall = _StalledLoop(watchdog).start()
+        assert stall.parked.wait(timeout=5), "the stand-in loop never parked"
+        # Created AFTER the watched thread, so they are the NEWER threads: a
+        # capped dump is the one that keeps them and drops the watched loop.
+        for index in range(120):
+            spare = threading.Thread(
+                target=spares_stop.wait, name=f"spare-{index}", daemon=True)
+            spare.start()
+            spares.append(spare)
+        live = threading.active_count()
+        assert live >= 100, f"only {live} live threads: the cap is not reached"
+
+        # The dump is written after the budget expires, and the incident allows
+        # three of them, so a block written before all the spares existed is
+        # simply not the one asserted on.
+        ready = _wait_for(lambda: _capped_block(dump_dir), timeout=15.0)
+        assert ready is not None, (
+            f"no completed dump block carried 100 all-thread sections after "
+            f"the loop was silent for {watchdog.silent_seconds()}s; "
+            f"files={_dump_files(dump_dir)}")
+        path, block = ready
+        lines = block.splitlines()
+
+        # 1. This block was written in the defective regime: faulthandler
+        #    printed its full 100 blocks, and the process had at least that
+        #    many live threads.
+        sections = _sections(block)
+        assert len(sections) == 100, (
+            f"{len(sections)} all-thread sections: faulthandler's cap is not "
+            f"in play in this block")
+
+        # 2. The watched thread's own frame chain IS in the file, written
+        #    before the dump that can lose it. On the unfixed code there is no
+        #    such section at all, so this is the assertion that reds there.
+        loop_idx = next((i for i, line in enumerate(lines)
+                         if _LOOP_THREAD_RE.match(line)), None)
+        assert loop_idx is not None, (
+            "the dump does not name the watched loop thread: no "
+            "'# watched loop thread <ident>' section, so the loop thread's own "
+            "blocking frame exists only in the capped all-threads dump "
+            f"({len(sections)} blocks, live threads past the cap). "
+            f"Block:\n{block}")
+        loop_ident = int(_LOOP_THREAD_RE.match(lines[loop_idx]).group(1))
+        assert loop_ident == stall.ident, (
+            f"the section names thread {loop_ident}, but the heartbeat came "
+            f"from {stall.ident}")
+
+        # 3. The capped dump is LABELLED: its own header says how large the
+        #    process was and where faulthandler stops, so a reader can tell a
+        #    capped section from a complete one.
+        notice_idx = next((i for i, line in enumerate(lines)
+                           if _ALL_THREADS_RE.match(line)), None)
+        assert notice_idx is not None, (
+            "the all-threads dump is not labelled with the live thread count, "
+            f"so a reader cannot tell it was capped. Block:\n{block}")
+        named, cap = map(int, _ALL_THREADS_RE.match(lines[notice_idx]).groups())
+        assert cap == 100
+        assert named >= len(sections) >= 100, (
+            f"the label says {named} live threads but faulthandler printed "
+            f"{len(sections)} blocks")
+
+        first_section_idx = next(i for i, line in enumerate(lines)
+                                 if _SECTION_RE.match(line))
+        assert loop_idx < notice_idx < first_section_idx, (
+            "the watched chain must be written BEFORE the capped dump")
+        chain = "\n".join(lines[loop_idx:notice_idx])
+        assert "test_loop_stack_watchdog.py" in chain, chain
+        assert " in _run" in chain and "in _park_in_a_real_syscall" in chain, (
+            f"the watched thread's chain is not its blocking stack:\n{chain}")
+
+        # 4. That section is the only place the frame survives: in this block
+        #    faulthandler left the parked thread out (measured - the older
+        #    threads are the ones it drops).
+        capped = "\n".join(lines[first_section_idx:])
+        assert "_park_in_a_real_syscall" not in capped, (
+            "faulthandler's capped section still named the parked thread, so "
+            "this block does not reproduce the 100-block cap")
+        assert _dump_files(dump_dir) == [path], "one incident must be one file"
+    finally:
+        spares_stop.set()
+        for spare in spares:
+            spare.join(timeout=5)
+        if stall is not None:
+            stall.release()
+        watchdog.stop()
+        assert stall is not None and stall.exited.is_set()
 
 
 # ── 2. silent when healthy, and silent when the switch is off ────────────────

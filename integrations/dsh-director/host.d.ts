@@ -105,9 +105,10 @@ export interface DirectorHost {
    *  - close: take an own, unanswered question back, with the reason, as a record (it
    *    stays visible as withdrawn). An answered one is refused {refused:
    *    'question_answered'}; closing twice is a no-op {closed: false, already_closed}.
-   *  - list: the open questions.
-   *  The owner's answer reaches the director through events(), carrying the
-   *  question's id. */
+   *  - list: the open questions (a host may bound it; it states its bound).
+   *  The owner's answer reaches the director through events(). The built-in host's
+   *  event names the question id; another host may carry the citation on the
+   *  answering message instead. */
   attention?: {
     ask(question: { id: string; text: string; context?: string }, signal?: AbortSignal): Promise<object>;
     close(close: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;

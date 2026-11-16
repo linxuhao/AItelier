@@ -54,6 +54,10 @@ export function localHost(options = {}) {
     done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json'),
     questions: join(root, 'questions.json') };
   const questions = async () => readJson(files.questions, {});
+  // questions.json is read-modified-written by ask, close and an arriving answer; one
+  // at a time, so two asks in one director turn cannot lose one.
+  let questionsLock = Promise.resolve();
+  const locked = fn => { const run = questionsLock.then(fn); questionsLock = run.catch(() => {}); return run; };
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];
   let timer, finish;
   return {
@@ -92,7 +96,7 @@ export function localHost(options = {}) {
     },
     /** The director's questions to its owner (plugin step 8), in questions.json. */
     attention: {
-      async ask({ id, text, context }) {
+      ask: ({ id, text, context }) => locked(async () => {
         await mkdir(root, { recursive: true });
         const all = await questions();
         if (all[id]) return all[id].text === text ? { asked: false, duplicate: true, question_id: id, status: all[id].status }
@@ -100,8 +104,8 @@ export function localHost(options = {}) {
         all[id] = { text, ...(context ? { context } : {}), status: 'open', asked_at: new Date().toISOString() };
         await writeJson(files.questions, all);
         return { asked: true, question_id: id };
-      },
-      async close({ id, reason }) {
+      }),
+      close: ({ id, reason }) => locked(async () => {
         const all = await questions();
         const question = all[id];
         if (!question) return { refused: 'unknown_question', reason: `no question ${id} was asked` };
@@ -110,7 +114,7 @@ export function localHost(options = {}) {
         all[id] = { ...question, status: 'withdrawn', reason, withdrawn_at: new Date().toISOString() };
         await writeJson(files.questions, all);
         return { closed: true, question_id: id };
-      },
+      }),
       async list() {
         return Object.entries(await questions()).filter(([, q]) => q.status === 'open').map(([id, q]) => ({ id, text: q.text }));
       },
@@ -174,11 +178,14 @@ export function localHost(options = {}) {
             // withdrawal), then delivered naming the question, then moved like any event.
             let answer;
             try { answer = JSON.parse(text).answer; } catch { answer = undefined; }
-            const all = await questions();
-            if (all[answered] && typeof answer === 'string') {
-              all[answered] = { ...all[answered], status: 'answered', answer, answered_at: all[answered].answered_at ?? new Date().toISOString() };
-              await writeJson(files.questions, all);
-            }
+            const all = await locked(async () => {
+              const current = await questions();
+              if (current[answered] && typeof answer === 'string') {
+                current[answered] = { ...current[answered], status: 'answered', answer, answered_at: current[answered].answered_at ?? new Date().toISOString() };
+                await writeJson(files.questions, current);
+              }
+              return current;
+            });
             await notify('Owner answered (' + file + '):\n' + JSON.stringify({ question_id: answered, question: all[answered]?.text ?? null,
               answer: answer ?? null, ...(all[answered] ? {} : { unknown_question: true }) }), { id: `inbox:${file}:${ino}:${mtimeMs}` });
             await rename(path, join(files.done, file));
@@ -195,7 +202,14 @@ export function localHost(options = {}) {
       await sweep();
       const done = new Promise((resolve, reject) => {
         finish = resolve;
-        timer = setInterval(() => { sweep().catch(error => { clearInterval(timer); reject(error); }); }, Number(options.pollMs) > 0 ? Number(options.pollMs) : 2000);
+        // One sweep at a time: a tick that lands while a sweep still awaits a delivery
+        // is skipped, or two sweeps would deliver the same file and race its move.
+        let sweeping = false;
+        timer = setInterval(() => {
+          if (sweeping) return;
+          sweeping = true;
+          sweep().catch(error => { clearInterval(timer); reject(error); }).finally(() => { sweeping = false; });
+        }, Number(options.pollMs) > 0 ? Number(options.pollMs) : 2000);
         timer.unref?.();
       });
       return { done, stop: () => { clearInterval(timer); finish?.(); } };

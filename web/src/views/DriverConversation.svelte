@@ -473,7 +473,7 @@
         {/if}
         {#if withdrawnQuestions.length}
           <details class="answered-group withdrawn-group"><summary class="questions-title" data-questions-withdrawn>{st('driverQuestionsWithdrawn')} ({withdrawnQuestions.length})</summary>
-          <ul class="questions-list questions-list-answered">
+          <ul class="questions-list questions-list-withdrawn">
             {#each withdrawnQuestions as question (question.message_id + ':' + question.segment_id)}
               <li class="question-item question-item-answered" data-question-message-id={question.message_id} data-question-segment-id={question.segment_id} data-question-withdrawn-by={question.withdrawn?.message_id}>
                 <span class="question-subject" title={question.subject}>{question.subject}</span>

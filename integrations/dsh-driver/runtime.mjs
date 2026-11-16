@@ -467,7 +467,7 @@ export function modelRetryOptions(env = process.env) {
 /** ask_owner's whole mapping onto State (plugin step 8): one send_user_message with
  *  ONE question block, block id = question id, request_key derived from it. */
 function askOwnerRequest(project, { id, text, context }) {
-  return { request_key: 'ask-owner:' + id, project_id: project, subject: 'Question for you',
+  return { request_key: `ask-owner:${project}:${id}`, project_id: project, subject: 'Question for you',
     body: context ?? '', segments: [{ kind: 'question', id, text }] };
 }
 
@@ -642,7 +642,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
      *  derives from the id, so a retry is State's own idempotent replay and another text
      *  under the same id is State's idempotency_conflict. close is
      *  withdraw_user_question; list is list_user_questions. The owner's answer arrives
-     *  as their message citing {message_id, segment_id = question id} through events(). */
+     *  as their message through events(); the citation {message_id, segment_id =
+     *  question id} is on that message (list_driver_messages / list_user_conversation),
+     *  not projected into the event. Bound, stated: list and close read the newest 200
+     *  questions of the project (list_user_questions has no cursor); an older one is
+     *  missed by list and answers unknown_question to close. */
     attention: {
       async ask({ id, text, context }, signal) {
         const result = await request('/api/state/commands/send_user_message', askOwnerRequest(project, { id, text, context }), signal)
@@ -654,14 +658,25 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
       async close({ id, reason }, signal) {
         const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
-        const mine = ((listed.result ?? listed).questions ?? []).filter(q => q.segment_id === id);
-        if (!mine.length) return { refused: 'unknown_question', reason: `no question ${id} in this project's conversation` };
-        const question = mine[0];   // newest first
-        if (question.status === 'answered') return { refused: 'question_answered', reason: `your owner already answered ${id}` };
-        const result = await request('/api/state/commands/withdraw_user_question', { request_key: 'close-question:' + id,
-          project_id: project, message_id: question.message_id, segment_id: id, reason }, signal).catch(error => ({ error: String(error?.message ?? error) }));
-        if (result.error) return { refused: /not_own_question/.test(result.error) ? 'not_own_question' : 'state_refused', reason: String(result.error).slice(0, 500) };
-        return result.withdrawn ? { closed: true, question_id: id } : { closed: false, already_closed: true, question_id: id };
+        // Another director in the project may use the same id: the list carries no
+        // sender, so try the matches newest first and let State say whose each is.
+        const matches = ((listed.result ?? listed).questions ?? []).filter(q => q.segment_id === id);
+        let answered = false, foreign = false;
+        for (const question of matches) {
+          const result = await request('/api/state/commands/withdraw_user_question', { request_key: `close-question:${project}:${question.message_id}:${id}`,
+            project_id: project, message_id: question.message_id, segment_id: id, reason }, signal).catch(error => ({ error: String(error?.message ?? error) }));
+          if (!result.error) return result.withdrawn ? { closed: true, question_id: id, message_id: question.message_id }
+            : { closed: false, already_closed: true, question_id: id, message_id: question.message_id };
+          if (/not_own_question/.test(result.error)) { foreign = true; continue; }
+          if (/question_answered/.test(result.error)) { answered = true; continue; }
+          // The key names this exact question: a conflict is an earlier close of it
+          // with another reason, which succeeded (State records only successes).
+          if (/idempotency_conflict/.test(result.error)) return { closed: false, already_closed: true, question_id: id, message_id: question.message_id };
+          return { refused: 'state_refused', reason: String(result.error).slice(0, 500) };
+        }
+        if (answered) return { refused: 'question_answered', reason: `your owner already answered ${id}` };
+        return { refused: foreign ? 'not_own_question' : 'unknown_question',
+          reason: foreign ? `question ${id} in this project is another director's` : `no question ${id} among this project's newest 200 questions` };
       },
       async list(signal) {
         const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);

@@ -130,3 +130,29 @@ test('local host: the owner answers by dropping answer-<id>.json; the event name
   assert.deepEqual(await host.attention.list(), []);
   assert.equal((await host.attention.close({ id: 'q-1', reason: 'late' })).refused, 'question_answered', 'an answered question was withdrawn');
 });
+
+test('local host: two asks in one turn, concurrently, both land (questions.json is written one at a time)', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root, ...required });
+  const answers = await Promise.all(['a', 'b', 'c', 'd'].map(id => host.attention.ask({ id: 'q-' + id, text: 'question ' + id })));
+  assert.deepEqual(answers.map(a => a.asked), [true, true, true, true]);
+  assert.deepEqual((await host.attention.list()).map(q => q.id).sort(), ['q-a', 'q-b', 'q-c', 'q-d']);
+});
+
+test('local host: a slow delivery is not overlapped by the next poll (one delivery per file, no move race)', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root, ...required, pollMs: 5 });
+  const api = fakeApi();
+  const slow = { ...api, notify: async (text, options) => { await new Promise(resolve => setTimeout(resolve, 60)); return api.notify(text, options); } };
+  const events = await host.events(slow);
+  let failed;
+  Promise.resolve(events.done).catch(error => { failed = error; });
+  await mkdir(join(root, 'inbox'), { recursive: true });
+  await writeFile(join(root, 'inbox', 'slow.json'), '{"x":1}');
+  const deadline = Date.now() + 3000;
+  while (api.notified.length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  events.stop(); await Promise.resolve(events.done).catch(() => {});
+  assert.equal(failed, undefined, String(failed));
+  assert.equal(api.notified.length, 1, 'the file was delivered twice');
+});

@@ -113,7 +113,7 @@
       "A work item is the unit of work your host tracks for you; the attempt_id you plan, dispatch and finish under is the id your host gave that work item's current attempt, and a plan stops counting as unfinished once the host reports that work item settled - never pass a node key or any other name as attempt_id.",
       "That plan is first given back to its child: the runtime resumes a child a restart cut off in its own session, with a recovery note, at most twice per child, and tells you once which children it resumed and which it could not, and why (workers resumed after a restart).",
       "A resumed child is live again: leave its plan to it, and take over only a plan whose child could not be resumed.",
-      "Anything you wait on from your owner (a ruling, an authorization, a choice only they can make) is asked with ask_owner(question_id, question, context), one concrete question per call under an id of your own; a retry with the same id and text asks nothing new, and the answer comes back as an event naming question_id.",
+      "Anything you wait on from your owner (a ruling, an authorization, a choice only they can make) is asked with ask_owner(question_id, question, context), one concrete question per call under an id of your own; a retry with the same id and text asks nothing new, and the answer comes back to you as an event.",
       "When such a question no longer needs an answer, take it back with close_question(question_id, reason); it stays visible to your owner as withdrawn, and an answered question cannot be closed.",
       "Waiting on an answer never blocks idle_dormant: its result lists the questions still open."
     ]

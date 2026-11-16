@@ -7,11 +7,14 @@ import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from
 
 const turn = (kind, time) => [{ type: 'turn/start', time }, ...(kind ? [{ type: 'turn/end', time: time + 1, data: { reason: { kind } } }] : [])];
 
-test('a cut-off turn reads as interrupted; a turn the worker ended itself does not', () => {
-  assert.deepEqual(lastTurn([...turn('completed', 10), ...turn(undefined, 20)]), { lastEventAt: 20, interrupted: true, everTurned: true });
-  assert.deepEqual(lastTurn([...turn('completed', 10), ...turn('aborted', 20)]), { lastEventAt: 21, interrupted: true, everTurned: true });
-  assert.deepEqual(lastTurn([...turn('aborted', 10), ...turn('completed', 20)]), { lastEventAt: 21, interrupted: false, everTurned: true });
-  assert.deepEqual(lastTurn([{ type: 'user/message', time: 5 }]), { lastEventAt: 5, interrupted: false, everTurned: false });
+test('a turn cut by the process ending reads as interrupted; a turn the worker or the model ended does not', () => {
+  // The kinds measured on the pinned DSH: a self-stop writes `completed`, a model error
+  // `error`; a SIGTERM'd host writes none, and DSH's read closes that turn `interrupted`.
+  assert.deepEqual(lastTurn([...turn('completed', 10), ...turn(undefined, 20)]), { lastEventAt: 20, interrupted: true });
+  assert.deepEqual(lastTurn([...turn('completed', 10), ...turn('interrupted', 20)]), { lastEventAt: 21, interrupted: true });
+  for (const kind of ['completed', 'error', 'aborted', 'cancelled'])
+    assert.deepEqual(lastTurn([...turn(undefined, 10), ...turn(kind, 20)]), { lastEventAt: 21, interrupted: false }, kind);
+  assert.deepEqual(lastTurn([{ type: 'user/message', time: 5 }]), { lastEventAt: 5, interrupted: false });
 });
 
 test('candidates: unfinished, unsettled, no candidate report, bound to a child that is not the director and not live', () => {
@@ -28,15 +31,19 @@ test('candidates: unfinished, unsettled, no candidate report, bound to a child t
 });
 
 test('a worker is resumed only on every positive signal, and at most twice', () => {
-  const row = { mode: 'continuable' }, cut = { lastEventAt: 100, interrupted: true }, base = { row, turn: cut, startedAt: 200, resumes: 0, maxResumes: 2 };
+  const row = { mode: 'continuable' }, cut = { lastEventAt: 100, interrupted: true };
+  const base = { row, turn: cut, startedAt: 200, record: { attempts: 0, delivered: 0 }, maxResumes: 2 };
   assert.equal(refusal(base), undefined);
   assert.equal(refusal({ ...base, row: undefined }), 'not_a_direct_child');
   assert.equal(refusal({ ...base, row: { mode: 'one-shot' } }), 'not_continuable');
   assert.equal(refusal({ ...base, turn: undefined }), 'log_unreadable');
   assert.equal(refusal({ ...base, turn: { lastEventAt: 200, interrupted: true } }), 'active_since_this_process_started');
   assert.equal(refusal({ ...base, turn: { lastEventAt: 100, interrupted: false } }), 'not_interrupted');
-  assert.equal(refusal({ ...base, resumes: 2 }), 'resume_limit_reached');
-  assert.equal(refusal({ ...base, resumes: Infinity }), 'resume_record_unreadable');
+  assert.equal(refusal({ ...base, record: { attempts: 1, delivered: 1 } }), undefined);
+  assert.equal(refusal({ ...base, record: { attempts: 2, delivered: 2 } }), 'resume_limit_reached');
+  assert.equal(refusal({ ...base, record: { attempts: 2, delivered: 1 } }), 'resume_attempts_exhausted');
+  assert.equal(refusal({ ...base, record: { attempts: 2, delivered: 0 } }), 'resume_attempts_exhausted', 'two failed sends: never resumed, and the reason says so');
+  assert.equal(refusal({ ...base, record: undefined }), 'resume_record_unreadable');
 });
 
 test('the recovery note names the plan and says: re-measure, a missing worktree is a failure, not a rebuild', () => {
@@ -48,15 +55,16 @@ test('the recovery note names the plan and says: re-measure, a missing worktree 
   assert.match(note, /Do not repeat items that already passed/);
 });
 
-test('resume records count across instances; an unreadable record never resumes blind', async () => {
+test('resume records count attempts and deliveries across instances; an unreadable record never resumes blind', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-resume-'));
   try {
     const records = new ResumeRecords(dir);
-    assert.equal(await records.count('w/1'), 0);
-    await records.add('w/1', { at: 'a' }); await new ResumeRecords(dir).add('w/1', { at: 'b' });
-    assert.equal(await new ResumeRecords(dir).count('w/1'), 2);
+    assert.deepEqual(await records.stats('w/1'), { attempts: 0, delivered: 0 });
+    await records.add('w/1', { at: 'a' }); await new ResumeRecords(dir).delivered('w/1');
+    await new ResumeRecords(dir).add('w/1', { at: 'b' });           // a send that failed: never marked
+    assert.deepEqual(await new ResumeRecords(dir).stats('w/1'), { attempts: 2, delivered: 1 });
     await mkdir(join(dir, 'resume'), { recursive: true });
     await writeFile(join(dir, 'resume', 'w2.json'), '{broken');
-    assert.equal(await records.count('w2'), Infinity);
+    assert.equal(await records.stats('w2'), undefined);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

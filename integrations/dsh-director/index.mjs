@@ -245,16 +245,18 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       const row = { attempt_id: plan.attempt_id, child_session: child, ...(plan.node_key ? { node_key: plan.node_key } : {}) };
       let turn;
       try { turn = lastTurn((await ctx.sessionQuery.readSession(child)).events); } catch { turn = undefined; }
-      const reason = refusal({ row: catalog.get(child), turn, startedAt, resumes: await resumeRecords.count(child), maxResumes: 2 });
+      const record = await resumeRecords.stats(child);
+      const reason = refusal({ row: catalog.get(child), turn, startedAt, record, maxResumes: 2 });
       // Its own stop (the hand-back covered it) or touched since this process started:
       // not a worker the restart interrupted.
       if (reason === 'not_interrupted' || reason === 'active_since_this_process_started') continue;
-      if (reason) { failed.push({ ...row, reason }); continue; }
+      if (reason) { failed.push({ ...row, reason, ...(record ? record : {}) }); continue; }
       const note = recoveryNote(plan);
       // Recorded before the message, so a crash right after it cannot resume a third time.
       await resumeRecords.add(child, { at: new Date().toISOString(), note_sha256: createHash('sha256').update(note).digest('hex') });
       try {
         await subagents.sendMessage(agent, child, [{ type: 'text', text: note }], { signal: AbortSignal.timeout(60000) });
+        await resumeRecords.delivered(child).catch(error => ctx.logger.warn('resume record: ' + String(error)));
         resumed.push(row);
       } catch (error) {
         failed.push({ ...row, reason: String(error?.code ?? 'send_failed'), detail: String(error?.message ?? error).slice(0, 300) });

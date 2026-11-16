@@ -44,7 +44,8 @@ export function apply(ctx) {
         : { type: 'text', text: text.includes('Workers resumed after a restart') ? 'SAW_RESUME' : 'Director idle.' };
       else if (text.includes('RESUME_CHILD')) {
         if (MODE === 'b1') block = once('begin', () => tool('w-begin', 'todo_begin', { attempt_id: 'att-R', item_id: 'write' }))
-          ?? (await post('/test/hold', { who: options.sessionId }), { type: 'text', text: 'never reached' });
+          ?? (process.env.RES_TEST_MODEL_ERROR ? (() => { throw Object.assign(new Error('fixture model failure'), { status: 400 }); })()
+            : (await post('/test/hold', { who: options.sessionId }), { type: 'text', text: 'never reached' }));
         else if (process.env.RES_TEST_STUBBORN && text.includes('You were interrupted')) block = (await post('/test/hold', { who: options.sessionId }), { type: 'text', text: 'never reached' });
         else if (text.includes('You were interrupted')) block = once('write', () => tool('w-write', 'bash', { description: 'make the change',
             command: 'cd ' + REPO + ' && echo resumed > a.txt && git -c user.name=t -c user.email=t@t add a.txt && git -c user.name=t -c user.email=t@t commit -qm resumed', run_in_background: false }))
@@ -68,7 +69,7 @@ export function apply(ctx) {
 }
 `;
 
-async function world(t, run, { stubborn = false } = {}) {
+async function world(t, run, { stubborn = false, modelError = false } = {}) {
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
   const here = dirname(fileURLToPath(import.meta.url));
@@ -92,10 +93,13 @@ async function world(t, run, { stubborn = false } = {}) {
   };
   const result = id => seen.find(e => e.event.type === 'tool/result' && e.event.data.message.toolCallId === id);
   const textOf = e => JSON.stringify(e.event.data);
+  // A host restart: SIGTERM while the worker's model call is still in flight, as in
+  // production. The held fixture requests are released only after the process is gone,
+  // so the worker's turn is cut by the restart, not ended by a failed model call.
   const stop = async () => {
+    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     for (const res of holds.values()) res.destroy();
     holds.clear();
-    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
   };
   try {
     await mkdir(join(root, 'inbox'), { recursive: true }); await mkdir(repo);
@@ -117,7 +121,7 @@ async function world(t, run, { stubborn = false } = {}) {
     const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
     const launch = mode => {
       output = '';
-      proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment, ...(stubborn ? { RES_TEST_STUBBORN: '1' } : {}),
+      proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment, ...(stubborn ? { RES_TEST_STUBBORN: '1' } : {}), ...(modelError ? { RES_TEST_MODEL_ERROR: '1' } : {}),
         DSH_HOME: join(directory, 'home'), DSH_PERMISSION_MODE: 'danger-full-access', RES_TEST_DSH_ENTRY: entry, RES_TEST_MODE: mode,
         RES_TEST_REPO: repo, RES_TEST_BASE: base, RES_TEST_URL: `http://127.0.0.1:${server.address().port}` } });
       proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
@@ -201,4 +205,19 @@ test('real pinned DSH: a worker interrupted again is resumed at most twice; the 
     assert.equal(JSON.parse(await readFile(join(root, 'state', 'resume', encodeURIComponent(worker) + '.json'), 'utf8')).resumes.length, 2);
     assert.equal(proc().exitCode, null, output().slice(-2000));
   }, { stubborn: true });
+});
+
+test('real pinned DSH: a worker whose turn ENDED (a model error) before the restart is not resumed - its end already handed the plan back', { timeout: 180000 }, async t => {
+  await world(t, async ({ launch, booted, stop, until, result, textOf, seen, output, proc }) => {
+    launch('b1');
+    await until('the worker never began its item', () => result('w-begin'));
+    const worker = result('w-begin').sid;
+    await until('the worker turn did not end with the model error', () => seen.some(e => e.sid === worker && e.event.type === 'turn/end' && e.event.data?.reason?.kind === 'error'));
+    await stop();
+    await booted('b2');
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    assert.equal(seen.filter(e => e.sid === worker && e.event.type === 'user/message' && textOf(e).includes('You were interrupted')).length, 0, 'resumed a worker whose turn had ended');
+    assert.equal(seen.filter(e => e.sid === 'res-root' && e.event.type === 'user/message' && textOf(e).includes('Workers resumed after a restart')).length, 0, 'a resume wake for a worker whose turn had ended');
+    assert.equal(proc().exitCode, null, output().slice(-2000));
+  }, { modelError: true });
 });

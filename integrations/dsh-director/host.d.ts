@@ -45,8 +45,11 @@ export interface DirectorApi {
   liveSessions(): string[]; planWork(signal?: AbortSignal): Promise<unknown>;
   todoPlans(): Promise<unknown[]>; batchRedispatch(): Promise<unknown[]>;
   /** Steer one wake event into the director (a runtime-event user message). Present from
-   *  install() on; it refuses (throws, naming why) until the director session exists. */
-  notify(text: string): Promise<void>;
+   *  install() on; it refuses (throws, naming why) until the director session exists.
+   *  v1.1: pass `{ id }` - stable across restarts, derived from the event itself - and the
+   *  director delivers each id once (checked before delivery, recorded after it: a crash
+   *  in between duplicates, never loses). */
+  notify(text: string, options?: { id?: string }): Promise<void>;
   eventMessage(text: string): unknown;
   report(phase: string, error?: string, event?: unknown): Promise<void>;
   currentPhase(): string;
@@ -68,7 +71,8 @@ export interface DirectorHost {
   // ---- required ----
   /** Startup / post-compaction snapshot text for a role. */
   context(role: 'director'): Promise<string>;
-  /** Deliver what is waiting and everything that arrives later through api.notify.
+  /** Deliver what is waiting and everything that arrives later through api.notify, each
+   *  event with a stable id (v1.1); deliver before moving your own cursor past it.
    *  `done` rejects on a fatal failure (the director then stops); `stop` ends delivery. */
   events(api: DirectorApi): Promise<{ done?: Promise<unknown>; stop(): void }>;
   // `done` rejects on a fatal failure while running; after stop() it must settle

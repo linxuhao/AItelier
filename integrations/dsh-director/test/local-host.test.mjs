@@ -22,8 +22,8 @@ async function freshRoot() {
   return root;
 }
 const fakeApi = () => {
-  const notified = [];
-  return { notified, notify: async text => { notified.push(text); }, isDisposed: () => false,
+  const notified = [], notifiedIds = [];
+  return { notified, notifiedIds, notify: async (text, options = {}) => { notified.push(text); notifiedIds.push(options.id); }, isDisposed: () => false,
     agent: {}, ctx: { goals: { get: () => undefined, create: () => {} } } };
 };
 
@@ -75,8 +75,11 @@ test('local host: work_update and note_write record what the director decides, a
   assert.equal(await host.workState('w-live'), 'completed');
   assert.equal(await host.workState('w-new'), 'working');
   assert.deepEqual((await host.heldWork()).map(item => item.node_key), ['w-new']);
-  assert.deepEqual(await tools.get('note_write').execute({ text: '  ' }), { refused: 'empty_note', reason: 'say something' });
-  await tools.get('note_write').execute({ text: 'remember the release freeze' });
+  assert.deepEqual(await tools.get('note_write').execute({ text: '  ', request_key: 'k' }), { refused: 'empty_note', reason: 'say something' });
+  assert.equal((await tools.get('note_write').execute({ text: 'no key' })).refused, 'request_key_required');
+  assert.deepEqual(await tools.get('note_write').execute({ text: 'remember the release freeze', request_key: 'n1' }), { written: true });
+  assert.deepEqual(await tools.get('note_write').execute({ text: 'remember the release freeze', request_key: 'n1' }), { written: false, duplicate: true });
+  assert.equal((await tools.get('note_write').execute({ text: 'something else', request_key: 'n1' })).refused, 'request_key_reused');
   const snapshot = JSON.parse(await host.context('director'));
   assert.match(snapshot.notes, /remember the release freeze/);
   assert.deepEqual(snapshot.work.map(item => item.id), ['w-done', 'w-live', 'w-new']);
@@ -85,3 +88,17 @@ test('local host: work_update and note_write record what the director decides, a
 });
 
 test.after(async () => { for (const root of roots) await rm(root, { recursive: true, force: true }); });
+
+test('local host: an event whose delivery failed stays in the inbox and is redelivered after a restart with the same id', async () => {
+  const root = await freshRoot();
+  await mkdir(join(root, 'inbox'), { recursive: true });
+  await writeFile(join(root, 'inbox', 'b.json'), '{"x":1}');
+  const failing = { ...fakeApi(), notify: async () => { throw new Error('crash during delivery'); } };
+  await assert.rejects(localHost({ root, ...required, pollMs: 20 }).events(failing));
+  assert.deepEqual(await readdir(join(root, 'inbox', 'done')), [], 'moved although it was never delivered');
+  const second = fakeApi();
+  const events = await localHost({ root, ...required, pollMs: 20 }).events(second);
+  events.stop(); await events.done;
+  assert.deepEqual(second.notifiedIds, ['inbox:b.json']);
+  assert.deepEqual(await readdir(join(root, 'inbox', 'done')), ['b.json']);
+});

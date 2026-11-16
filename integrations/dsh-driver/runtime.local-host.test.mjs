@@ -37,7 +37,7 @@ export function apply(ctx) {
       else block = once('take', () => tool('take', 'work_update', { id: 'w1', title: 'local work', holder: 'local-root' }))
         ?? once('refused', () => tool('dormant-refused', 'idle_dormant', { reason: 'quiet', wake_after_minutes: 15 }))
         ?? once('release', () => tool('release', 'work_update', { id: 'w1', state: 'completed', holder: '' }))
-        ?? once('note', () => tool('note', 'note_write', { text: 'LOCAL_NOTE_MARKER' }))
+        ?? once('note', () => tool('note', 'note_write', { text: 'LOCAL_NOTE_MARKER', request_key: 'note-1' }))
         ?? once('dormant', () => tool('dormant', 'idle_dormant', { reason: 'nothing left', wake_after_minutes: 15 }))
         ?? once('parked', () => ({ type: 'text', text: 'PARKED' }))
         ?? (text.includes('wake.json') ? once('woken', () => ({ type: 'text', text: 'WOKEN' })) : undefined)
@@ -84,6 +84,10 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
   try {
     await mkdir(join(root, 'inbox'), { recursive: true });
     await writeFile(join(root, 'inbox', 'start.json'), JSON.stringify({ task: 'begin' }));
+    // A notice a previous process recorded but never delivered (plugin step 7): the boot
+    // replays it once; the next boot does not replay it again.
+    await mkdir(join(root, 'state'), { recursive: true });
+    await writeFile(join(root, 'state', 'outbox.jsonl'), JSON.stringify({ id: 'test:replay-1', text: 'REPLAYED_NOTICE_MARKER' }) + '\n');
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'fixture-local-provider.mjs'), PROVIDER);
     await writeFile(join(directory, 'probe-host.mjs'), [
@@ -113,9 +117,13 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
     ]));
     // No AITELIER_* variable reaches this process: the director must not need one.
     const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
-      DSH_HOME: join(directory, 'home'), LOCAL_TEST_DSH_ENTRY: entry, LOCAL_TEST_URL: `http://127.0.0.1:${server.address().port}` } });
-    proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
+    const launch = () => {
+      const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
+        DSH_HOME: join(directory, 'home'), LOCAL_TEST_DSH_ENTRY: entry, LOCAL_TEST_URL: `http://127.0.0.1:${server.address().port}` } });
+      child.stdout.on('data', chunk => output += chunk); child.stderr.on('data', chunk => output += chunk);
+      return child;
+    };
+    proc = launch();
 
     await until('the director never parked', () => said('PARKED'));
     // install() receives every DirectorApi member host.d.ts documents; notify refuses (naming
@@ -152,6 +160,18 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
     assert.equal(wake.data.source.kind, 'dsh-director-runtime-event');
     assert.match(await readFile(join(root, 'notes.md'), 'utf8'), /LOCAL_NOTE_MARKER/);
     assert.equal(proc.exitCode, null, output.slice(-2000));
+    const replays = () => events.filter(e => e.type === 'user/message' && JSON.stringify(e.data).includes('REPLAYED_NOTICE_MARKER')).length;
+    assert.equal(replays(), 1, 'the recorded notice was not replayed exactly once');
+    assert.match(await readFile(join(root, 'state', 'delivered.jsonl'), 'utf8'), /test:replay-1/);
+    // A second boot of the same session: the log loads, nothing is replayed again, and an
+    // inbox file still wakes it (two-restart rule for a change on the delivery path).
+    proc.kill('SIGTERM'); await once(proc, 'exit');
+    proc = launch();
+    await writeFile(join(root, 'inbox', 'wake2.json'), JSON.stringify({ wake: 2 }));
+    await until('the second boot did not deliver a new inbox file', () => events.some(e => e.type === 'user/message' && JSON.stringify(e.data).includes('wake2.json')));
+    assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/);
+    assert.equal(replays(), 1, 'the second boot replayed a delivered notice');
+    assert.equal(events.filter(e => e.type === 'user/message' && JSON.stringify(e.data).includes('(wake.json)')).length, 1, 'an inbox file was delivered twice');
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

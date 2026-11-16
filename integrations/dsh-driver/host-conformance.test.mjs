@@ -56,8 +56,8 @@ function fakeState() {
 
 /** The director api the adapter's events() reads, with stub DSH services. */
 function directorApi() {
-  const notified = [];
-  return { notified, notify: async text => { notified.push(text); }, eventMessage: text => text,
+  const notified = [], notifiedIds = [];
+  return { notified, notifiedIds, notify: async (text, options = {}) => { notified.push(text); notifiedIds.push(options.id); }, eventMessage: text => text,
     setHostError: async () => {}, clearHostError: async () => {}, isDisposed: () => false,
     agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
     ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {},

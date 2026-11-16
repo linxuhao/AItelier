@@ -15,6 +15,7 @@ import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../dsh-director/test/host.test.mjs';
 import '../dsh-director/test/local-host.test.mjs';
+import '../dsh-director/test/outbox.test.mjs';
 import '../dsh-director/test/request-bodies.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';

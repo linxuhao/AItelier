@@ -7,7 +7,7 @@
  *    held:     the node_key of work this director holds
  *    event():  (only with `api`) makes the host emit one wake event; resolves when written
  *  `api` is the director api the host's events() gets (`notified` collects what
- *  api.notify received); supply it - a case without one is SKIPPED, and the
+ *  api.notify received and `notifiedIds` the id each event carried); supply it - a case without one is SKIPPED, and the
  *  repository's driver-suite gate counts a skip as a failure.
  *
  *  Every refusal the director makes on load is asserted here too, so a host author
@@ -68,6 +68,11 @@ export function conformance(name, make) {
       const deadline = Date.now() + 10000;
       while (api.notified.length === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
       assert.equal(api.notified.length, before + 1, 'one event, delivered once');
+      // Every host event carries an id (directorHost v1.1, plugin step 7): the director
+      // recognises a redelivery by it, so it must not depend on anything local.
+      const ids = api.notifiedIds ?? [];
+      assert.equal(typeof ids.at(-1), 'string', 'the event carried no id');
+      assert.ok(ids.at(-1).length > 0);
     } finally {
       // After stop() the delivery ends; `done` must settle (resolve, or reject with the
       // stop's abort - the director ignores it once it disposed) within a bound.

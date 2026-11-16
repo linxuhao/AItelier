@@ -23,6 +23,7 @@ import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, 
   DORMANT_MAX_MINUTES, wakeAfterRefusal, LiveChildren, phaseReport, continuationWaitKey, DORMANT_COMPACT_MIN_TOKENS,
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
   grepHistory, historyPage } from './lib/core.mjs';
+import { Outbox } from './lib/outbox.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -121,7 +122,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     for (const [pid, watch] of watches) {
       if (processAlive(pid) && processSession(pid, '/proc', sessionEnv) === config.sessionId) continue;
       watches.delete(pid);
-      void notify(texts.jobFinished + JSON.stringify({ pid, note: watch.note,
+      void outbox.send(`watch:${pid}:${watch.since}`, texts.jobFinished + JSON.stringify({ pid, note: watch.note,
         ran_seconds: Math.round((Date.now() - watch.since) / 1000) })).catch(error => ctx.logger.warn(String(error)));
     }
     if (!watches.size) { clearInterval(watchTimer); watchTimer = undefined; }
@@ -153,10 +154,17 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
     await ctx.sessionPersistence.flush();
   };
+  // The runtime's own notices go through the outbox (recorded before delivery, replayed
+  // after a restart); the host's events are delivered once per id (plugin step 7).
+  // A notice is marked delivered only when it was: during shutdown delivery throws, so the
+  // notice stays recorded and the next process replays it.
+  const deliver = async text => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text); };
+  const outbox = await new Outbox({ dir: config.stateDir, deliver, log: line => ctx.logger.info(line) }).load();
+  const notifyEvent = (text, options = {}) => options.id ? outbox.deliverOnce(String(options.id), text).then(() => {}) : notify(text);
   // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
   // member exists; `agent` reads undefined and notify refuses until the session exists.
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
-    liveSessions, planWork, todoPlans, batchRedispatch, notify, eventMessage, report, currentPhase,
+    liveSessions, planWork, todoPlans, batchRedispatch, notify: notifyEvent, eventMessage, report, currentPhase,
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
     isDisposed: () => disposed };
@@ -468,7 +476,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     try { plans = await todo.plans(); }
     catch (error) {
       // The director must still learn that a child ended while plans were unreadable.
-      return notify(texts.todoHandback + JSON.stringify({ reason: 'todo_handback_failed', child_session: session,
+      return outbox.send(`handback-failed:${session}`, texts.todoHandback + JSON.stringify({ reason: 'todo_handback_failed', child_session: session,
         todo_error: String(error.message ?? error).slice(0, 1000) }));
     }
     for (const plan of plans) {
@@ -482,7 +490,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
         payload = code === 0 ? { done: result.done, next: result.next, remaining: result.remaining, last_observations: result.last_observations }
           : { todo_error: JSON.stringify(result).slice(0, 1000) };
       } catch (error) { payload = { todo_error: String(error.message ?? error).slice(0, 1000) }; }
-      await notify(texts.todoHandback + JSON.stringify({ reason: 'todo_unfinished', attempt_id: plan.attempt_id, ...payload }));
+      await outbox.send(`handback:${plan.attempt_id}:${session}`, texts.todoHandback + JSON.stringify({ reason: 'todo_unfinished', attempt_id: plan.attempt_id, ...payload }));
     }
     // A batch child that ended may leave its batch waiting on the director: every
     // finder passed (expand and dispatch the verifiers) or everything passed (finish).
@@ -490,7 +498,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       try {
         const { code, result } = await todo.run(['batch-status', '--attempt=' + attempt]);
         if (code === 0 && (result.expand_due || result.complete))
-          await notify(texts.todoBatch + JSON.stringify({ reason: result.expand_due ? 'batch_expand_due' : 'batch_complete',
+          await outbox.send(`batch:${attempt}:${result.expand_due ? 'expand' : 'complete'}:${session}`, texts.todoBatch + JSON.stringify({ reason: result.expand_due ? 'batch_expand_due' : 'batch_complete',
             attempt_id: attempt, brief: result.brief }));
       } catch (error) { ctx.logger.warn(String(error)); }
     }
@@ -550,6 +558,9 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   await report('running');
   // The host delivers what is already waiting and everything that arrives later
   // (its own subscription, its goal binding); its failure is the director's failure.
+  // Notices a previous process recorded but did not deliver (a restart in between).
+  const replayed = await outbox.replay();
+  if (replayed.length) ctx.logger.info(`outbox: replayed ${replayed.length} notice(s): ${replayed.join(', ')}`);
   events = await host.events(api);
   const pump = Promise.resolve(events?.done).catch(async error => {
     if (!disposed) {

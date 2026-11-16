@@ -651,7 +651,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         if (!eventCarriesSomething({ ...result, project_inbox: inbox })) return;
         // Its own writes coming back: the director already knows; a turn on them is waste.
         if (ownEchoOnly({ ...result, project_inbox: inbox }, env.AITELIER_DRIVER_ID)) return;
-        await notify('AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox }));
+        // The id is the payload's digest (plugin step 7): a replay from the same cursor that
+        // returns the same batch is recognised and not delivered twice; a batch that grew
+        // has a new id and is delivered. Stable across restarts: it depends on nothing local.
+        const text = 'AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox });
+        await notify(text, { id: 'state:' + createHash('sha256').update(text).digest('hex').slice(0, 40) });
       };
       const inbox = await projectInbox();
       // Native goal rounds start/continue the director; bootstrap is not a human

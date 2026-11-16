@@ -31,17 +31,18 @@ describe('driver ordering shared by the table and the DAG list', () => {
     expect(sortDagRows(rows, null).map(r => r.project_id)).toEqual(['c', 'a', 'b']);
   });
 
-  it('names the user states running / idle / stopped and the transitional ones as they are', () => {
-    expect(driverState('running')).toBe('running');
-    expect(driverState('waiting')).toBe('idle');
+  it('names the user states busy / ready / stopped and the transitional ones as they are', () => {
+    expect(driverState('running')).toBe('busy');
+    expect(driverState('waiting')).toBe('ready');
     expect(driverState('stopped')).toBe('stopped');
     expect(driverState(undefined)).toBe('stopped');
     expect(driverState('starting')).toBe('starting');
-    expect(driverStateLabelKey('waiting')).toBe('driverStateIdle');
+    expect(driverStateLabelKey('waiting')).toBe('driverStateReady');
+    expect(driverStateLabelKey('running')).toBe('driverStateBusy');
     expect(driverStateLabelKey('nonsense')).toBe('driverStateStopped');
   });
 
-  it('a dormant driver is its own state: asleep, ranked after idle and before the transitional ones', () => {
+  it('a dormant driver is its own state: asleep, ranked after ready and before the transitional ones', () => {
     expect(driverState('dormant')).toBe('dormant');
     expect(driverStateLabelKey('dormant')).toBe('driverStateDormant');
     expect(driverPhaseRank('waiting')).toBeLessThan(driverPhaseRank('dormant'));

@@ -101,12 +101,12 @@ describe('driver state on the State DAG list', () => {
     expect(card('stopped-new').querySelector('.driver-state')?.textContent).toBe('Stopped');
     // Each state carries its animated mark beside the label (hidden from screen readers).
     expect(card('running-old').querySelector('.driver-state .driver-state-mark')?.getAttribute('aria-hidden')).toBe('true');
-    expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('idle');
+    expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('ready');
     // The badge is read from the unread endpoint, not counted in the browser.
     expect(card('running-old').querySelector('.unread')?.textContent).toBe('2 unread');
     expect(card('idle-recent').querySelector('.unread')).toBeNull();
     // A DAG with no driver row at all still reads as stopped rather than blank.
-    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('running');
+    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('busy');
   });
 });
 

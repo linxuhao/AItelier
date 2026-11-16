@@ -4,7 +4,7 @@ import { langStore } from '../../stores/i18n';
 import DriverStateBadge from '../../views/DriverStateBadge.svelte';
 import SOURCE from '../../views/DriverStateBadge.svelte?raw';
 
-const STATES = ['running', 'idle', 'dormant', 'starting', 'stopping', 'failed', 'stopped'] as const;
+const STATES = ['busy', 'ready', 'dormant', 'starting', 'stopping', 'failed', 'stopped'] as const;
 
 describe('DriverStateBadge', () => {
   afterEach(() => { cleanup(); langStore.set('en'); });
@@ -12,7 +12,7 @@ describe('DriverStateBadge', () => {
   it('maps the runtime phase to a state, a hidden mark and the label', () => {
     langStore.set('en');
     const cases: [string | undefined, string, string][] = [
-      ['running', 'running', 'Busy'], ['waiting', 'idle', 'Ready'], ['dormant', 'dormant', 'Dormant'],
+      ['running', 'busy', 'Busy'], ['waiting', 'ready', 'Ready'], ['dormant', 'dormant', 'Dormant'],
       ['starting', 'starting', 'Starting'], ['stopping', 'stopping', 'Stopping'],
       ['failed', 'failed', 'Failed'], [undefined, 'stopped', 'Stopped'],
     ];

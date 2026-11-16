@@ -5,8 +5,40 @@ import anyio
 from core.state_driver_guide import (STATE_DRIVER_GUIDE, STATE_DRIVER_GUIDE_INDEX,
                                      guide_index_addresses)
 from core.state_commands import READ_REQUESTS, describe, execute
-from core.state_graph import StateGraphError
+from core.state_graph import StateGraphError, StateWriteBusy
 from core.state_service import StateService
+
+
+class StateWriteBusyRefusal(Exception):
+    """A retryable `StateWriteBusy` carried out of `invoke` as typed values.
+
+    Every other `StateGraphError` becomes an `MCPToolError` whose TEXT is the
+    whole answer, which is what MCP has for a failed call. That shape loses the
+    two values a busy refusal exists to deliver: the machine-readable code and
+    the wait the caller should honour. So the busy refusal is handed to the tool
+    body, which returns MCP's own failed-call result (`isError=True`) with both
+    values in `structuredContent` — the one place over this transport where a
+    client reads them without parsing prose. The message itself is unchanged.
+
+    Deliberately NOT a `StateGraphError`: the generic clause below must not
+    flatten this back into a tool error.
+    """
+
+    def __init__(self, refusal: StateWriteBusy):
+        super().__init__(str(refusal))
+        self.code = refusal.code
+        self.retry_after = refusal.retry_after
+
+
+def _busy_result(refusal: StateWriteBusyRefusal):
+    """The `isError=True` CallToolResult that delivers `refusal` machine-readably."""
+    from mcp.types import CallToolResult, TextContent
+    return CallToolResult(
+        content=[TextContent(type="text", text=str(refusal))],
+        # Taken from the exception, never a constant: the wait belongs to the
+        # refusal that was actually raised.
+        structuredContent={"code": refusal.code, "retry_after": refusal.retry_after},
+        isError=True)
 
 
 # ── state_graph_read advertises the registry, it does not remember it ───────
@@ -97,6 +129,10 @@ def register_state_tools(tool, mcp, service_factory=None):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:
             return execute(service(), action, arguments, allow_write=write)
+        except StateWriteBusy as exc:
+            # BEFORE the StateGraphError clause, because StateWriteBusy IS one:
+            # this refusal is retryable and its code/wait must stay typed.
+            raise StateWriteBusyRefusal(exc) from exc
         except StateGraphError as exc:
             # Unlike a success-shaped {error: ...}, this sets MCP isError=true.
             raise MCPToolError(str(exc)) from exc
@@ -158,7 +194,13 @@ def register_state_tools(tool, mcp, service_factory=None):
 
     @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. A registered driver may omit director_identity (its own id) and, when it is an active member of exactly one project, a required project_id; both are filled from its credential, except that a notebook write (write_driver_note_entry, supersede_driver_note_entry, delist_driver_note_entry) must name its notebook itself with project_id or driver_id. Actions include retire_context_run_protection (authenticated admin only; exact protected contextual run, node revision and original payload hash; preserves history and HOLD), report_issue, link_issue, resolve_issue, start_issue_work (an OPEN issue gets a work item outside the DAG that is claimed, attempted, evidenced and verified like a node; verifying it resolves the issue as fixed), send_director_message, acknowledge_director_message, resolve_director_message, write_driver_note_entry, supersede_driver_note_entry, delist_driver_note_entry, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, disposition_failed_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks, claim_node, heartbeat, release_claim, set_claim_enforcement, set_review_independence, abandon_external_attempt, take_over_attempt, take_over_claim, register_subagent, offer_handoff, accept_handoff, decline_handoff, withdraw_handoff, send_user_message (a durable message to the project's user in the dashboard: idempotent per request_key, presentation only - it grants no permission, answers no checkpoint and is not evidence; reply_to_message_id answers one of the user's messages and is stored on the row), send_user_conversation_message (the user's half of the same conversation: one durable row plus the inbox delivery that shows it to the addressed driver, no driver online required, presentation only), mark_user_conversation_read (advance the user's persisted read marker to a message actually shown; monotonic, idempotent, grants nothing). In a project with claim_enforcement=on, dispatch needs your live implement claim, reports need fence, and structural writes over work another driver holds are refused (design/multi-driver-coop.md section 7.3). The director notebook holds rules only (update_driver_note and force=informational are refused): in-flight state goes to the State DAG instead - attempts, set_node_hold, report_issue, set_node_priority. Retire a rule with supersede_driver_note_entry; delist only an entry that can no longer change a decision. Report observations (defects, gaps, hand-offs, questions) with report_issue, not add_nodes; nodes are acceptance-bearing goals. Fix an issue through start_issue_work rather than a new DAG node. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results. Failed external or bound SkillFlow attempts may retain scoped evidence only after a terminal quiescent observation; they remain failed and unverifiable.")
     def state_graph_write(action: str, arguments: dict) -> dict:
-        return {"result": invoke(action, arguments, True)}
+        # The return annotation stays `dict` (it is the tool's published output
+        # contract); a busy refusal is returned as an MCP CallToolResult instead,
+        # because a tool error's text is the only place MCP would keep it as prose.
+        try:
+            return {"result": invoke(action, arguments, True)}
+        except StateWriteBusyRefusal as refusal:
+            return _busy_result(refusal)
 
     @mcp.prompt(name="state_graph_driver", description="State DAG protocol: register, wait by cursor, inspect evidence and accept across authorized transports")
     def state_graph_driver() -> str:

@@ -37,7 +37,7 @@ the runtime hands it back to you (reason todo_unfinished, with done/next/remaini
 re-dispatch from the next item or report the attempt failed. When the child DIED
 mid-item (a host restart kills it), the plan stays bound to a session that no longer
 exists and no item it begun can be finished: take it over with
-todo_rebind(attempt_id, item_id, session_id), naming that dead session. That plan is first given back to its child: the runtime resumes a child a restart cut off in its own session, with a recovery note, at most twice per child, and tells you once which children it resumed and which it could not, and why (workers resumed after a restart).
+todo_rebind(attempt_id, item_id, session_id), naming that dead session. That plan is first given back to its child: the runtime resumes a child a restart cut off in its own session, with a recovery note, at most twice per child, and tells you once which of those interrupted children it resumed and which it could not, and why (workers resumed after a restart); a child whose turn had ended before the restart is not resumed and not listed there, since its end already handed the plan back to you.
 A resumed child is live again: leave its plan to it, and take over only a plan whose child could not be resumed. The plan
 records the handover (rebound_from). A live child keeps its own plan: todo_rebind
 refuses it and todo_done keeps answering bound_to_other_session. A plan whose items

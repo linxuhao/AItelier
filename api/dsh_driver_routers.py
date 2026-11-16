@@ -160,6 +160,20 @@ def owned(project_id, request, runtime):
     return row
 
 
+async def owned_off_loop(project_id, request, runtime):
+    """`owned` for an ASYNC handler: it is sqlite, so it runs on a worker thread.
+
+    `request_identity` resolves the presented driver token through
+    `DriverRegistry.lookup_token` - a SELECT plus a throttled `last_seen_at`
+    UPDATE that COMMITs - and `runtime.get` reads the driver row. On the loop
+    thread those are three connections opened and closed per request, each close
+    a WAL checkpoint plus fdatasync (one sampled episode of this path was 2.81 s,
+    `iss-ecea53516eb543c4`). The verdict, the row and the 403 are unchanged; only
+    the thread changes.
+    """
+    return await asyncio.to_thread(owned, project_id, request, runtime)
+
+
 @router.get("/{project_id}/context", dependencies=[Depends(authz.require_reader)])
 def context(project_id: str, request: Request, runtime=Depends(manager), service=Depends(get_service)):
     row = owned(project_id, request, runtime)
@@ -200,7 +214,7 @@ def model_sessions(project_id: str, request: Request, runtime=Depends(manager)):
 
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
 async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
-    row = owned(project_id, request, runtime)
+    row = await owned_off_loop(project_id, request, runtime)
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     import json
@@ -266,7 +280,7 @@ async def project_work(project_id: str, body: ProjectWork, request: Request,
     from fastapi.responses import StreamingResponse
     from starlette.concurrency import run_in_threadpool
     from core.dsh_work import project_work as execute_work
-    row = owned(project_id, request, runtime)
+    row = await owned_off_loop(project_id, request, runtime)
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
 
@@ -295,7 +309,7 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     import asyncio
     from core.ai_router import AIGateway
     from starlette.concurrency import run_in_threadpool
-    row = owned(project_id, request, runtime)
+    row = await owned_off_loop(project_id, request, runtime)
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     sessions = runtime.gateways.setdefault(project_id, {})
@@ -342,9 +356,21 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
         # the driver is owed into a 500. `Exception`, not `BaseException`: a
         # cancellation still propagates. The failure is reported, not swallowed
         # - an unrecorded turn has to be visible to an operator.
+        #
+        # OFF THE EVENT LOOP, and still AWAITED. `record_model_call` ends in an
+        # explicit `COMMIT`, which in WAL mode fsyncs: measured holding the loop
+        # thread in uninterruptible disk sleep (wchan `jbd2_log_wait_commit`) for
+        # seconds, 8 of 10 captured loop-blocking stacks and 64 of 70 sampled
+        # episodes (`iss-ecea53516eb543c4`). The write runs in a worker thread,
+        # so what the loop waits for is the write's DURATION, never its disk
+        # sleep - and it is still the same awaited call, so the row is committed
+        # before this response goes out and a failure is still reported below
+        # rather than fired and forgotten. The connection that write closes is
+        # handed to the closer thread by `core/off_loop_sqlite`.
         try:
-            runtime.record_model_call(project_id, body.session_id, route=route,
-                                      served_by=gateway.active_model)
+            await asyncio.to_thread(runtime.record_model_call, project_id,
+                                    body.session_id, route=route,
+                                    served_by=gateway.active_model)
         except Exception as exc:
             logging.getLogger(__name__).warning(
                 "dsh driver: could not record the answering model for project %s "

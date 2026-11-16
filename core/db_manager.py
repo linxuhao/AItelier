@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from models.schemas import TaskStatus
+from core.off_loop_sqlite import close_connection, on_event_loop
 
 class DBManager:
     """
@@ -26,13 +27,34 @@ class DBManager:
 
     @contextmanager
     def get_connection(self):
-        """上下文管理器：提供连接并自动处理连接关闭，设置返回结果为 dict-like"""
-        conn = sqlite3.connect(self.db_path)
+        """上下文管理器：提供连接并自动处理连接关闭，设置返回结果为 dict-like
+
+        One FRESH connection per operation (unchanged), and the close is where it
+        belongs: a caller on the event-loop thread hands it to
+        `core.off_loop_sqlite`, because in WAL mode that close IS a checkpoint
+        plus an fdatasync - measured stalling the whole backend for seconds
+        (wchan `submit_bio_wait`, `iss-ecea53516eb543c4`). Nothing about the
+        operation moves: the transaction is committed (or never opened) before
+        the close runs, so durability and write ordering are untouched and the
+        thread that finishes the file handle is the only thing that changes.
+        """
+        on_loop = on_event_loop()
+        conn = self._connect(on_loop=on_loop)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
-            conn.close()
+            close_connection(conn, on_loop)
+
+    def _connect(self, on_loop: bool = False):
+        """The ONE place a connection is opened.
+
+        `check_same_thread` follows WHO will close it: a connection opened on the
+        event-loop thread may be closed by the closer thread, and pysqlite
+        refuses a cross-thread close unless this is off. Everywhere else keeps
+        pysqlite's own guard.
+        """
+        return sqlite3.connect(self.db_path, check_same_thread=not on_loop)
 
     def _init_db(self):
         """初始化表结构，并强制启用 WAL 日志模式"""

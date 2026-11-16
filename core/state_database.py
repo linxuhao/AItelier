@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import sqlite3
 
+from core.off_loop_sqlite import close_connection, on_event_loop
+
 
 class StateDatabase:
     def __init__(self, db_path: str):
@@ -29,13 +31,19 @@ class StateDatabase:
 
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=10)
+        # Same rule as DBManager (core/off_loop_sqlite): closing a WAL
+        # connection checkpoints and fsyncs, so an event-loop caller must not be
+        # the one to finish the handle. `POST /api/state/query/{action}` is an
+        # async route that reads through here, and a read's close is as much
+        # disk sleep on the loop as a write's.
+        on_loop = on_event_loop()
+        conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=not on_loop)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute('PRAGMA foreign_keys=ON')
             yield conn
         finally:
-            conn.close()
+            close_connection(conn, on_loop)
 
     def get_project(self, project_id):
         # This method denotes legacy execution projects on DBManager, NOT State

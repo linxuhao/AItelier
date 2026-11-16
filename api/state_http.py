@@ -8,7 +8,7 @@ from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execut
                                                                   is_public_read, ProjectPrivate,
                                                                   RETIRED_ACTIONS)
 from starlette.responses import JSONResponse
-from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from core.state_graph import StateConflict, StateGraphError, StateNotFound, StateWriteBusy
 from contextlib import AsyncExitStack
 from fastapi.dependencies.utils import get_dependant, solve_dependencies
 from api.state_verdict import DECLARATION_ATTR, binding_for, record_judged
@@ -142,6 +142,16 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
             # route declaration are all irrelevant to this refusal, which is why
             # a route author cannot bypass it by forging a declaration.
             raise HTTPException(403, str(exc)) from exc
+        except StateWriteBusy as exc:
+            # A State write that could not take SQLite's write lock within its
+            # budget. It is RETRYABLE and it wrote nothing, so it is neither a
+            # 500 (nothing failed) nor a 422 (nothing was malformed): the body
+            # carries the machine-readable code and `Retry-After` says when the
+            # same request is worth repeating. This clause sits BEFORE the
+            # StateGraphError one because StateWriteBusy IS a StateGraphError.
+            return JSONResponse(
+                {"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
+                status_code=503, headers={"Retry-After": str(exc.retry_after)})
         except StateNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except StateConflict as exc:

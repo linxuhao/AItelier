@@ -106,7 +106,7 @@ _STAGE_REPORT_PREDICATE = {"find": "findings_shape", "verify": "verdict_enum"}
 def default_dir() -> Path:
     """AITELIER_TODO_TEMPLATES, like `create --plan-json`, is not gated: both rely on the DSH tool
     that calls `create` being root-only (a child must never choose the template directory)."""
-    return Path(os.environ.get("AITELIER_TODO_TEMPLATES") or TEMPLATES_DIR
+    return Path(os.environ.get("DSH_TODO_TEMPLATES") or os.environ.get("AITELIER_TODO_TEMPLATES") or TEMPLATES_DIR
                 or Path(__file__).resolve().parents[1] / "todo_templates")
 
 

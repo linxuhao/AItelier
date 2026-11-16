@@ -553,7 +553,7 @@ COMMANDS = {"templates": cmd_templates, "create": cmd_create, "status": cmd_stat
 
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--store", help="plan directory (default: $AITELIER_DSH_STATE_DIR/todo)")
+    common.add_argument("--store", help="plan directory (default: $DSH_TODO_STATE_DIR/todo, else $AITELIER_DSH_STATE_DIR/todo)")
     common.add_argument("--now", type=float,
                         help="fix the clock (seconds since epoch). TESTS ONLY: refused unless "
                              "AITELIER_TODO_CLOCK_OVERRIDE=1, since the clock decides when an absence expires")
@@ -604,12 +604,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.now is not None and os.environ.get("AITELIER_TODO_CLOCK_OVERRIDE") != "1":
+        if args.now is not None and (os.environ.get("DSH_TODO_CLOCK_OVERRIDE") or os.environ.get("AITELIER_TODO_CLOCK_OVERRIDE")) != "1":
             raise Refusal("clock_override_disabled", "--now is for tests; set AITELIER_TODO_CLOCK_OVERRIDE=1 to use it")
-        root = args.store or (os.path.join(os.environ["AITELIER_DSH_STATE_DIR"], "todo")
-                              if os.environ.get("AITELIER_DSH_STATE_DIR") else None)
+        # DSH_TODO_STATE_DIR is the package's own name; the legacy driver variable is
+        # read only when the first is absent.
+        state_dir = os.environ.get("DSH_TODO_STATE_DIR") or os.environ.get("AITELIER_DSH_STATE_DIR")
+        root = args.store or (os.path.join(state_dir, "todo") if state_dir else None)
         if root is None and args.command != "templates":
-            raise Refusal("usage", "no --store and AITELIER_DSH_STATE_DIR is not set")
+            raise Refusal("usage", "no --store and neither DSH_TODO_STATE_DIR nor AITELIER_DSH_STATE_DIR is set")
         out = COMMANDS[args.command](args, None if args.command == "templates" else PlanStore(Path(root)),
                                      time.time() if args.now is None else args.now)
         code = 0

@@ -182,3 +182,19 @@ def test_the_driver_environment_runs_the_cli_with_the_same_hooks_and_templates(t
     assert new.returncode == old.returncode == 0, (new.stderr, old.stderr)
     assert json.loads(new.stdout) == json.loads(old.stdout)
     assert json.loads(new.stdout)["directory"] == str(REPO_ROOT / "todo_templates")
+
+
+def test_the_package_finds_its_store_from_its_own_variable_or_the_aitelier_one(tmp_path):
+    """DSH_TODO_STATE_DIR is the package's own name (a host without AItelier sets
+    it); AITELIER_DSH_STATE_DIR, what the AItelier driver has always set, is read
+    only when the first is absent; with neither, the refusal names both."""
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
+    own, legacy = tmp_path / "own", tmp_path / "legacy"
+    for d in (own, legacy):
+        (d / "todo").mkdir(parents=True)
+    code, result = standalone("list", cwd=tmp_path, env={**base, "DSH_TODO_STATE_DIR": str(own), "AITELIER_DSH_STATE_DIR": str(legacy)})
+    assert code == 0 and result.get("store") in (None, str(own / "todo")), result
+    code, result = standalone("list", cwd=tmp_path, env={**base, "AITELIER_DSH_STATE_DIR": str(legacy)})
+    assert code == 0, result
+    code, result = standalone("list", cwd=tmp_path, env=base)
+    assert code == 2 and "DSH_TODO_STATE_DIR" in json.dumps(result) and "AITELIER_DSH_STATE_DIR" in json.dumps(result), result

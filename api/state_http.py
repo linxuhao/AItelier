@@ -28,6 +28,40 @@ _DECLARATION = DECLARATION_ATTR
 SCHEMA_DECLARED_ACTION = "get_state_schema"
 
 
+def state_write_busy_response(exc):
+    """The ONE answer for a State write that could not take SQLite's write lock.
+
+    Retryable and it wrote nothing, so it is neither a 500 (nothing failed) nor a
+    422 (nothing was malformed): the body carries the machine-readable code and
+    `Retry-After` says when the same request is worth repeating. Both the
+    in-router `_call` clause and the app-wide default below return THIS object,
+    so the two routes cannot drift into disagreeing shapes.
+    """
+    return JSONResponse(
+        {"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
+        status_code=503, headers={"Retry-After": str(exc.retry_after)})
+
+
+def apply_state_write_busy(app):
+    """Map a `StateWriteBusy` that escapes ANY route of `app` to a retryable 503.
+
+    The mapping used to exist only inside `_call`, i.e. only on the `/api/state`
+    routers. Every other route that reaches the same write chokepoint directly -
+    `api/dsh_driver_routers.heartbeat` calls `execute(..., allow_write=True)`
+    itself - let the typed refusal out as an opaque HTTP 500, even though nothing
+    failed and the identical request is worth repeating a second later.
+
+    Registered as a DEFAULT on the app (api/main and the second assembly point,
+    api/state_only) rather than as one more per-route clause: a route nobody
+    thought of gets the retryable answer because the handler is on the app, not
+    because its author remembered to catch.
+    """
+
+    @app.exception_handler(StateWriteBusy)
+    async def _state_write_busy(request, exc):
+        return state_write_busy_response(exc)
+
+
 def apply_project_privacy(app):
     """Map a project-privacy refusal raised at the `execute` chokepoint to a 403 on
     EVERY route of `app` — including one a route author forged by reusing the real
@@ -145,13 +179,11 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         except StateWriteBusy as exc:
             # A State write that could not take SQLite's write lock within its
             # budget. It is RETRYABLE and it wrote nothing, so it is neither a
-            # 500 (nothing failed) nor a 422 (nothing was malformed): the body
-            # carries the machine-readable code and `Retry-After` says when the
-            # same request is worth repeating. This clause sits BEFORE the
-            # StateGraphError one because StateWriteBusy IS a StateGraphError.
-            return JSONResponse(
-                {"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
-                status_code=503, headers={"Retry-After": str(exc.retry_after)})
+            # 500 (nothing failed) nor a 422 (nothing was malformed). This clause
+            # sits BEFORE the StateGraphError one because StateWriteBusy IS a
+            # StateGraphError; it returns the same object `apply_state_write_busy`
+            # installs as the app-wide default, so the two cannot disagree.
+            return state_write_busy_response(exc)
         except StateNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except StateConflict as exc:

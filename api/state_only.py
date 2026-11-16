@@ -135,8 +135,9 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
         # and writes alike, so nothing reaches these routes unauthenticated.
         return None
     app.include_router(create_state_router(service,access,access))
-    from api.state_http import apply_project_privacy
+    from api.state_http import apply_project_privacy, apply_state_write_busy
     apply_project_privacy(app)
+    apply_state_write_busy(app)
 
     @app.get('/health')
     def health():

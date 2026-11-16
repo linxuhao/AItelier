@@ -4,12 +4,12 @@
  *
  *    - { insert: [{ id: 'dsh-director', name: '<dir>/dsh-director/index.mjs' },
  *                 { id: 'director-local', name: '<dir>/dsh-director/hosts/local.mjs',
- *                   config: { root, rolesFile, todo: { module, stateDirEnv, python?, cwd? }, ... } }] }
+ *                   config: { root, todo: { module, stateDirEnv, python?, cwd? }, rolesFile?, ... } }] }
  *
- *  `rolesFile` (a roles.json with its two prompts next to it) and `todo` (the todo
- *  CLI module and its state-directory variable) are required: this plugin ships no
- *  table, prompts or todo package of its own yet, and the host refuses to start
- *  without them rather than pointing at files that do not exist.
+ *  `rolesFile` defaults to the plugin's own roles.json (with director.md and
+ *  worker.md next to it). `todo` (the todo CLI module and its state-directory
+ *  variable) is required: this plugin ships no todo package of its own yet, and the
+ *  host refuses to start without it rather than pointing at one that does not exist.
  *
  *  An external host (the State adapter, or anyone's) replaces this plugin;
  *  it is never active next to one. It deliberately stays small: work items with a
@@ -25,6 +25,7 @@
  *    state/          the director's own state (todo plans) */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WORK_STATES } from '../lib/host.mjs';
 
 export const name = 'dsh-director-local-host';
@@ -43,7 +44,7 @@ async function writeJson(file, value) {
  *  objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv }. */
 export function localHost(options = {}) {
   const root = options.root;
-  const missing = [!root && 'root (the local host keeps its files there)', !options.rolesFile && 'rolesFile (a roles.json with its prompts next to it)',
+  const missing = [!root && 'root (the local host keeps its files there)',
     !(options.todo?.module && options.todo?.stateDirEnv) && 'todo.module and todo.stateDirEnv (the todo CLI)'].filter(Boolean);
   if (missing.length) throw new Error('directorHost refused: missing config: ' + missing.join('; '));
   const holder = options.holder ?? options.sessionId ?? 'director';
@@ -59,7 +60,7 @@ export function localHost(options = {}) {
       provider: options.provider, model: options.model,
       stateDir: options.stateDir ?? join(root, 'state'),
       dshEntry: options.dshEntry ?? process.argv[1],
-      rolesFile: options.rolesFile,
+      rolesFile: options.rolesFile ?? fileURLToPath(new URL('../roles.json', import.meta.url)),
       sessionEnv: options.sessionEnv,
       todo: { ...options.todo },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,

@@ -93,8 +93,8 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-local-provider.mjs') },
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'local-root',
-          provider: 'fixture', model: 'fixture-model', dshEntry: entry, rolesFile: join(here, 'roles.json'), pollMs: 100,
-          // Step 2 ships no table or todo package of its own: this deployment's (plugin step 4/3 add defaults).
+          provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100,
+          // The plugin's own roles.json and prompts (step 4); no todo package of its own yet (step 3).
           todo: { module: 'core.todo_cli', stateDirEnv: 'AITELIER_DSH_STATE_DIR' },
           idleReviewMs: 600000 } }] },
     ]));

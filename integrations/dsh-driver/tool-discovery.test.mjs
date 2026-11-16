@@ -55,7 +55,7 @@ test('the director presents every runtime tool but the workspace-only project_wo
   assert.deepEqual(presentTools(tools, effective.worker).map(t => t.name), ['bash']);
   // The generic layer alone never names a State tool.
   assert.deepEqual(presentTools(tools, table.director).map(t => t.name), ['bash', 'subagent', 'todo_plan']);
-  assert.deepEqual(effective.director.presented.filter(n => !table.director.presented.includes(n)), ['mcp__aitelier__state_graph_write']);
+  assert.deepEqual(effective.director.presented.filter(n => !table.director.presented.includes(n)), ['state_read', 'send_user_message', 'mcp__aitelier__state_graph_write']);
 });
 
 test('search ranks exact names and Unicode descriptions, bounds results, and refuses empty queries', () => {

@@ -30,6 +30,10 @@ export const name = 'aitelier-state-driver';
 // The adapter only provides a service; the director plugin injects DSH's.
 export const inject = [];
 
+/** AItelier's halves of the role prompts (plugin step 4): the State protocol after the
+ *  generic director.md, and the worker's State limits after the generic worker.md. */
+const stateSkill = await readFile(new URL('./state.md', import.meta.url), 'utf8');
+const workerStateSkill = await readFile(new URL('./worker-state.md', import.meta.url), 'utf8');
 const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
 const goalTemplate = await readFile(goalFile, 'utf8');
 export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
@@ -533,6 +537,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
       if (hostExecution) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
         text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
+      // A worker's State limits follow the generic worker prompt; the director never gets them.
+      ctx.systemPrompt.section({ name: 'aitelier:worker-state', order: 12.5, interpolate: false, text: context => {
+        const id = (context?.agent ?? context?.scope)?.session?.id;
+        return id !== undefined && id !== env.AITELIER_DSH_SESSION ? workerStateSkill : '';
+      } });
       runtime = new DriverRuntime({ project, driver: env.AITELIER_DRIVER_ID,
         directory: env.AITELIER_DSH_STATE_DIR, request, todoPlans, batchRedispatch });
       await runtime.init();
@@ -546,6 +555,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       scope.systemPrompt.section({ name: 'aitelier:driver-protocol', order: 11, interpolate: false,
         text: () => runtime.snapshot.driver_skill ?? '' });
       runtimeSection();
+      scope.systemPrompt.section({ name: 'aitelier:state-protocol', order: 12.5, interpolate: false, text: stateSkill });
       installModelSelection(scope, { current: { provider: env.AITELIER_DSH_PROVIDER,
         model: env.AITELIER_DSH_MODEL }, assembled: undefined });
       contextHooks();

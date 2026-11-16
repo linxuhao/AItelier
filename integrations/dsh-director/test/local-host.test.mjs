@@ -3,20 +3,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
-import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
 import { localHost } from '../hosts/local.mjs';
 
 const roots = [];
-// What the local host requires besides its root (step 2 ships no table, prompts or todo package):
-// a real role table with its prompts (validateHost reads it), and a todo CLI's names.
-const tableDir = mkdtempSync(join(tmpdir(), 'dsh-director-local-roles-'));
-const role = (route, prompt) => ({ route, reasoning_effort: 'high', compaction: { thresholdRatio: 0.5 }, prompt, presented: ['bash'], forbidden: [] });
-writeFileSync(join(tableDir, 'roles.json'), JSON.stringify({ version: 1, director: role('director', 'director.md'), worker: role('worker', 'worker.md') }));
-writeFileSync(join(tableDir, 'director.md'), 'director'); writeFileSync(join(tableDir, 'worker.md'), 'worker');
-const required = { rolesFile: join(tableDir, 'roles.json'), todo: { module: 'todo_cli', stateDirEnv: 'TODO_STATE_DIR' } };
+// What the local host requires besides its root (the plugin ships no todo package yet).
+const required = { todo: { module: 'todo_cli', stateDirEnv: 'TODO_STATE_DIR' } };
 process.on('exit', () => {});
 async function freshRoot() {
   const root = await mkdtemp(join(tmpdir(), 'dsh-director-local-'));
@@ -41,10 +35,13 @@ conformance('local host', async () => {
     event: () => writeFile(join(root, 'inbox', `e${++n}.json`), JSON.stringify({ n })) } };
 });
 
-test('local host refuses to start without a root, a role table or a todo CLI, naming each', () => {
-  assert.throws(() => localHost({}), error => ['missing config: root', 'rolesFile', 'todo.module and todo.stateDirEnv']
+test('local host refuses to start without a root or a todo CLI, naming each; its role table defaults to the plugin\'s', async () => {
+  assert.throws(() => localHost({}), error => ['missing config: root', 'todo.module and todo.stateDirEnv']
     .every(part => error.message.includes(part)));
-  assert.throws(() => localHost({ root: '/tmp/x', rolesFile: '/x/roles.json' }), /todo\.module and todo\.stateDirEnv/);
+  assert.throws(() => localHost({ root: '/tmp/x' }), /todo\.module and todo\.stateDirEnv/);
+  const { rolesFile } = localHost({ root: '/tmp/x', ...required }).config;
+  const { loadRoles } = await import('../lib/roles.mjs');
+  assert.equal(loadRoles(rolesFile).director.prompt, 'director.md');
 });
 
 test('local host: an inbox file is delivered once, and a restart does not deliver it again', async () => {

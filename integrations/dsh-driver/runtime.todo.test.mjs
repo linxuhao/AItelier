@@ -25,6 +25,9 @@ import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
+// The director's runtime instructions since plugin step 4: the generic director.md, then AItelier's state.md
+// (whitespace collapsed: the halves are re-wrapped, so a phrase may span a line break).
+const driverGuide = async () => ((await readFile(new URL('../dsh-director/director.md', import.meta.url), 'utf8')) + '\n' + (await readFile(new URL('./state.md', import.meta.url), 'utf8'))).replace(/\s+/g, ' ');
 const FAKE_CLI = String.raw`"""Fake core.todo_cli for runtime.todo.test.mjs: the CLI contract, minimally."""
 import argparse, hashlib, json, os, signal, subprocess, sys, time
 from pathlib import Path
@@ -1120,7 +1123,7 @@ test('idle review and snapshot views: unfinished plans without a live child, and
 });
 
 test('prompts: dispatch picks a template and binds params, adds templates by reviewed change, and no longer prefers pipelines', async () => {
-  const goal = driverGoal('alpha'), driver = await readFile(new URL('./driver.md', import.meta.url), 'utf8');
+  const goal = driverGoal('alpha'), driver = await driverGuide();
   for (const text of [goal, driver]) {
     assert.match(text, /todo_templates/); assert.match(text, /todo_plan/); assert.match(text, /params/);
     assert.match(text, /todo_templates\//, 'adding a template under todo_templates/ is not named');

@@ -196,7 +196,7 @@ def pwmcp_driver_ports(value=None):
 # The director/worker role table. integrations/dsh-driver/roles.mjs parses the
 # same file with the same rules (a test compares both parses and both refusals);
 # unknown keys are refused at every level.
-ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "roles.json"
+ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "roles.json"
 ROLE_NAMES = ("director", "worker")
 _ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", "forbidden")
 _COMPACTION_KEYS = ("thresholdRatio", "retainTokens")

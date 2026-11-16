@@ -21,6 +21,13 @@ from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
 
 router = APIRouter(prefix="/api/dsh-drivers", tags=["DSH drivers"])
 
+def _runtime_skill() -> str:
+    """The director's runtime instructions as the driver gets them: the generic
+    director.md (dsh-director) followed by AItelier's state.md (plugin step 4)."""
+    root = Path(__file__).resolve().parents[1] / "integrations"
+    return (root / "dsh-director" / "director.md").read_text() + "\n" + (root / "dsh-driver" / "state.md").read_text()
+
+
 
 def manager(request: Request) -> DshDrivers:
     value = getattr(request.app.state, "dsh_drivers", None)
@@ -181,7 +188,7 @@ def context(project_id: str, request: Request, runtime=Depends(manager), service
                               "statement": f"{verified} VERIFIED node(s) omitted from this snapshot; read them from live State (project_overview)."},
             "project_note": project_note, "private_note": private_note,
             "driver_skill": STATE_DRIVER_GUIDE_INDEX,
-            "runtime_skill": (Path(__file__).resolve().parents[1] / "integrations" / "dsh-driver" / "driver.md").read_text()}
+            "runtime_skill": _runtime_skill()}
 
 
 @router.get("/{project_id}/model-sessions", dependencies=[Depends(authz.require_reader)])

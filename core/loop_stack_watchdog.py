@@ -21,6 +21,22 @@
 # `faulthandler.dump_traceback(all_threads=True)` — every thread's stack,
 # including the parked thread's own frame.
 #
+# WHY THE WATCHED THREAD IS WRITTEN FIRST
+# faulthandler is not a faithful census of a large process: it stops after
+# _PY_FAULTHANDLER_MAX_THREADS (100) thread blocks, and it prints no notice when
+# it does — the dump simply ends. The blocks it leaves out are the ones furthest
+# down its thread-state list, i.e. measurably the OLDEST, which is where the loop
+# thread (and this watchdog) sit once a process has grown a thread pool. So a
+# dump written at >=100 threads could omit the one stack the file exists to
+# name. Measured 2026-11-16 on the live backend (iss-f1667dc30c2d41ee): a 0.508 s
+# stall produced a dump with 100 blocks, no `Current thread` block and no stack
+# reaching asyncio/base_events or uvicorn, while sys._current_frames() still held
+# every thread and the loop thread's whole chain; at 103 and 123 threads the file
+# was byte-identical. The watched thread's chain is therefore read from
+# sys._current_frames() and written BEFORE the capped all-threads dump, and that
+# dump is labelled with the live thread count so a reader can tell a complete
+# section from a truncated one.
+#
 # THE BOUNDARY, STATED SO IT IS NOT OVERCLAIMED
 # The watchdog is Python code and needs the GIL to run. A block held INSIDE a C
 # extension that does not release the GIL (a CPU-bound C loop, a long re/memcpy)
@@ -54,8 +70,10 @@ import faulthandler
 import logging
 import math
 import os
+import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -97,6 +115,12 @@ DUMP_DIR_NAME = "loop-stack-dumps"
 _DUMP_GLOB = "loop-stack-*.log"
 _HEADER_PREFIX = "# aitelier loop-stack-watchdog: watched loop silent for"
 _FOOTER_PREFIX = "# end of aitelier loop-stack-watchdog dump"
+_LOOP_THREAD_PREFIX = "# watched loop thread"
+_ALL_THREADS_PREFIX = "# all threads below, as faulthandler prints them:"
+# CPython's own limit on that dump (Modules/faulthandler.c). It is not exported
+# anywhere, so the number is stated here rather than read from the runtime; the
+# notice written above the dump names it so the reader never has to know it.
+_FAULTHANDLER_MAX_THREADS = 100
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -222,6 +246,7 @@ class LoopStackWatchdog:
         self._clock = clock
         self._lock = threading.Lock()
         self._beat_at: Optional[float] = None
+        self._loop_thread_ident: Optional[int] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._task: Optional["asyncio.Task"] = None
@@ -274,8 +299,13 @@ class LoopStackWatchdog:
     def beat(self) -> None:
         """Record that the loop is being turned. Called ON the loop thread."""
         now = self._clock()
+        # Whichever thread beats IS the watched thread: the dump writes its
+        # chain from sys._current_frames(), so it has to know whose ident that
+        # is, and the loop never has to introduce itself.
+        ident = threading.get_ident()
         with self._lock:
             self._beat_at = now
+            self._loop_thread_ident = ident
 
     def silent_seconds(self) -> Optional[float]:
         """How long the loop has been silent, or None before the first beat."""
@@ -335,7 +365,7 @@ class LoopStackWatchdog:
             self._write_dump(incident, blocked)
 
     def _write_dump(self, incident: _Incident, blocked: float) -> None:
-        """Write one header + all-thread stack dump, then update the bounds."""
+        """Write one header + watched-chain + all-thread dump, then the bounds."""
         try:
             self.dump_dir.mkdir(parents=True, exist_ok=True)
             if incident.path is None:
@@ -350,8 +380,22 @@ class LoopStackWatchdog:
                 f"{self.budget_s:.3f}s); dump {incident.dumps + 1}/"
                 f"{self.max_dumps_per_incident}; pid {os.getpid()}; "
                 f"{datetime.now(timezone.utc).isoformat()}\n").encode("utf-8")
+            live_threads = threading.active_count()
             with open(incident.path, "ab") as handle:
                 handle.write(header)
+                # The watched chain goes in FIRST, before anything that can be
+                # capped, and it is not what faulthandler writes:
+                # sys._current_frames() holds every thread, so this section
+                # exists whether or not the all-threads dump below names the
+                # loop at all.
+                handle.write(self._watched_thread_section().encode("utf-8"))
+                handle.write(
+                    f"{_ALL_THREADS_PREFIX} {live_threads} live threads, and "
+                    f"faulthandler stops after {_FAULTHANDLER_MAX_THREADS} "
+                    f"thread blocks without saying so -- the stacks it leaves "
+                    f"out appear nowhere in this file, which is why the watched "
+                    f"loop thread's chain is the section above\n"
+                    .encode("utf-8"))
                 # faulthandler writes straight to the fd, so the buffered
                 # header must reach the fd before the traceback does.
                 handle.flush()
@@ -366,15 +410,44 @@ class LoopStackWatchdog:
             incident.bytes = incident.path.stat().st_size
             incident.next_due = blocked * 2.0
             logger.warning(
-                "event loop silent for %.3fs; wrote all-thread stack dump %s "
-                "(dump %d/%d, %d bytes)",
+                "event loop silent for %.3fs; wrote stack dump %s "
+                "(dump %d/%d, %d bytes, %d live threads)",
                 blocked, incident.path, incident.dumps,
-                self.max_dumps_per_incident, incident.bytes)
+                self.max_dumps_per_incident, incident.bytes, live_threads)
         except (OSError, ValueError, RuntimeError):
             # A witness that raises into the loop or spins on a bad path would
             # be worse than no witness: declare it once and stop trying.
             logger.exception("loop-stack watchdog could not write a dump")
             self._write_disabled = True
+
+    def _watched_thread_section(self) -> str:
+        """The watched thread's own frame chain, read from sys._current_frames().
+
+        Deliberately NOT faulthandler: that dump caps at 100 blocks and drops
+        the oldest threads, which is where the loop thread sits in a process
+        that has grown a pool. `traceback.format_stack` walks from the thread's
+        entry frame inwards, i.e. the OPPOSITE order to the dump below, so the
+        section header states its own orientation rather than leaving a reader
+        to guess.
+        """
+        with self._lock:
+            ident = self._loop_thread_ident
+        if ident is None:
+            return (f"{_LOOP_THREAD_PREFIX}: none observed yet (no heartbeat "
+                    f"had arrived when this dump was written)\n")
+        frame = sys._current_frames().get(ident)
+        if frame is None:
+            return (f"{_LOOP_THREAD_PREFIX} {ident}: gone (the thread the "
+                    f"heartbeat came from is no longer running)\n")
+        try:
+            chain = "".join(traceback.format_stack(frame))
+        except Exception:                                          # noqa: BLE001
+            # Losing this section would restore the very defect it fixes, so a
+            # failure to format it still leaves a marker a reader can grep.
+            chain = f"  <stack unavailable for thread {ident}>\n"
+        return (
+            f"{_LOOP_THREAD_PREFIX} {ident} (the thread whose heartbeat went "
+            f"silent; most recent call last):\n{chain}")
 
     def _prune(self) -> None:
         """Keep at most `max_files` incident files, oldest removed first."""

@@ -1,7 +1,7 @@
 /** The directorHost contract, v1 (see ../host.d.ts).
  *
  *  A host is whatever connects dsh-director to a work/memory system: the
- *  State adapter, the local-files reference host, or anyone else's. It is handed to
+ *  backend adapter, the local-files reference host, or anyone else's. It is handed to
  *  the director through the cordis service `directorHost` (in process) - the
  *  interface is the product, the injection is only the wiring.
  *
@@ -35,37 +35,54 @@ export function validateHost(host) {
     const value = host[op];
     if (op === 'config' ? (!value || typeof value !== 'object') : typeof value !== 'function') problems.push(`missing required op: ${op}`);
   }
-  if (host.config && typeof host.config === 'object') {
-    for (const key of REQUIRED_CONFIG) if (host.config[key] === undefined || host.config[key] === '') problems.push(`missing config: ${key}`);
-    // Present is not enough for the role table: it must be a readable file, with the
-    // director's and the worker's prompts next to it (refused here, not as an ENOENT at boot).
-    if (typeof host.config.rolesFile === 'string' && host.config.rolesFile) {
+  const config = host.config;
+  const isText = value => typeof value === 'string' && value.length > 0;
+  if (config && typeof config === 'object' && !Array.isArray(config)) {
+    // Every required field must be a non-empty string - present is not enough.
+    for (const key of REQUIRED_CONFIG.filter(k => k !== 'todo'))
+      if (config[key] === undefined || config[key] === null || config[key] === '') problems.push(`missing config: ${key}`);
+      else if (!isText(config[key])) problems.push(`config: ${key} must be a non-empty string, got ${JSON.stringify(config[key])}`);
+    // The role table must be a readable file with the director's and the worker's
+    // prompts next to it (refused here, not as an ENOENT at boot).
+    if (isText(config.rolesFile)) {
       let table;
-      try { table = JSON.parse(readFileSync(host.config.rolesFile, 'utf8')); }
-      catch (error) { problems.push(`config: rolesFile ${host.config.rolesFile} is not a readable role table (${error.code ?? error.message})`); }
+      try { table = JSON.parse(readFileSync(config.rolesFile, 'utf8')); }
+      catch (error) { problems.push(`config: rolesFile ${config.rolesFile} is not a readable role table (${error.code ?? error.message})`); }
       for (const role of ['director', 'worker']) {
         const prompt = table?.[role]?.prompt;
-        if (table && (typeof prompt !== 'string' || !existsSync(join(dirname(host.config.rolesFile), prompt))))
-          problems.push(`config: rolesFile ${role} prompt ${prompt} is not next to ${host.config.rolesFile}`);
+        if (table && (typeof prompt !== 'string' || !existsSync(join(dirname(config.rolesFile), prompt))))
+          problems.push(`config: rolesFile ${role} prompt ${prompt} is not next to ${config.rolesFile}`);
       }
     }
-    if (host.config.todo && typeof host.config.todo === 'object') {
-      for (const key of REQUIRED_TODO) if (!host.config.todo[key]) problems.push(`missing config: todo.${key}`);
+    const todo = config.todo;
+    if (todo === undefined || todo === null) problems.push('missing config: todo');
+    else if (typeof todo !== 'object' || Array.isArray(todo)) problems.push(`config: todo must be an object, got ${JSON.stringify(todo)}`);
+    else {
+      for (const key of REQUIRED_TODO)
+        if (todo[key] === undefined || todo[key] === null || todo[key] === '') problems.push(`missing config: todo.${key}`);
+        else if (!isText(todo[key])) problems.push(`config: todo.${key} must be a non-empty string, got ${JSON.stringify(todo[key])}`);
       // Optional, but typed: python defaults to python3 and cwd to the process's own
       // directory; anything else given must be a usable path string.
-      for (const key of ['python', 'cwd']) {
-        const value = host.config.todo[key];
-        if (value !== undefined && (typeof value !== 'string' || !value)) problems.push(`config: todo.${key} must be a non-empty string when given`);
-      }
+      for (const key of ['python', 'cwd'])
+        if (todo[key] !== undefined && !isText(todo[key])) problems.push(`config: todo.${key} must be a non-empty string when given`);
     }
+    for (const key of ['sessionEnv', 'projectId', 'permissionPreset'])
+      if (config[key] !== undefined && !isText(config[key])) problems.push(`config: ${key} must be a non-empty string when given`);
+  } else if (config !== undefined && config !== null && typeof config !== 'function') {
+    problems.push('config: must be an object');
   }
-  const declared = Array.isArray(host.capabilities) ? host.capabilities : [];
+  // capabilities is required (host.d.ts): an array of the optional op names implemented.
+  let declared = [];
+  if (!Array.isArray(host.capabilities)) problems.push(`missing capabilities: an array of the optional ops this host implements (got ${host.capabilities === undefined ? 'none' : JSON.stringify(host.capabilities)})`);
+  else if (host.capabilities.some(op => typeof op !== 'string')) problems.push('capabilities: every entry must be an op name string');
+  else declared = host.capabilities;
   for (const op of declared) {
     if (!OPTIONAL_OPS.includes(op)) problems.push(`unknown capability: ${op}`);
     else if (op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
       problems.push(`capability declared but not implemented: ${op}`);
   }
-  for (const op of OPTIONAL_OPS) if (host[op] !== undefined && !declared.includes(op)) problems.push(`implemented but not declared: ${op}`);
+  if (Array.isArray(host.capabilities))
+    for (const op of OPTIONAL_OPS) if (host[op] !== undefined && !declared.includes(op)) problems.push(`implemented but not declared: ${op}`);
   if (problems.length) throw new Error('directorHost refused: ' + problems.join('; '));
   return host;
 }

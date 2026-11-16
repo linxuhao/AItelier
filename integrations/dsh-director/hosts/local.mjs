@@ -11,7 +11,7 @@
  *  package (python -m dsh_todo in todo/, state in DSH_TODO_STATE_DIR); any of them
  *  can be overridden.
  *
- *  An external host (the State adapter, or anyone's) replaces this plugin;
+ *  An external host (the backend adapter, or anyone's) replaces this plugin;
  *  it is never active next to one. It deliberately stays small: work items with a
  *  state and a holder, one notes file, an inbox directory of wake events and a
  *  progress log. No dependency graph, evidence, review or multi-director

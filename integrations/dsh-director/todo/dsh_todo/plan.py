@@ -43,7 +43,7 @@ MAX_PREDICATES = 4
 DELIVER = "deliver"
 MAX_NOTES = 20
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-#: A batch sub-plan: `<attempt_id>~<stage>-<key>`. `~` is not in `_ID`, so no State attempt id
+#: A batch sub-plan: `<attempt_id>~<stage>-<key>`. `~` is not in `_ID`, so no work item id
 #: can collide with one (dsh_todo/batch.py derives the key).
 _SUB_ID = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]{0,127})~(find|verify)-([a-z0-9][a-z0-9._-]{0,119})\Z")
 _SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")

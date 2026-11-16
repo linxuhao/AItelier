@@ -1,6 +1,6 @@
-"""A todo batch: K finders in parallel, one verifier per finding, a deterministic fan-in - ONE State attempt.
+"""A todo batch: K finders in parallel, one verifier per finding, a deterministic fan-in - ONE work item.
 
-A batch extends the plan of one State attempt; it adds no State record and no attempt.
+A batch extends the plan of one work item; it adds no backend record and no work item.
 It is expanded from a `kind: batch` repository template (`todo_templates/find_verify.yaml`)
 and reuses the plan machinery for every child: each sub-plan is an ordinary frozen
 `TodoPlan` (`dsh_todo/plan.py`) whose `batch` names the attempt, bound to one child
@@ -555,7 +555,7 @@ def write_fan_in(store: PlanStore, library: PredicateLibrary, record: Mapping[st
                   for f in record["unverified"]]
     counts = {v: sum(f["verdict"] == v for f in findings) for v in VERDICTS}
     summary = {"evidence": False,
-               "note": "Not evidence. Each verify report is: record_evidence from verify_report/artifact_ref yourself.",
+               "note": "Not evidence. Each verify report is: record it as evidence yourself, from verify_report/artifact_ref.",
                "batch": record["attempt_id"], "batch_hash": record["batch_hash"], "node_key": record["node_key"],
                "template": record["template"], "findings": findings, "unverified": unverified,
                "counts": {**counts, "unverified": len(unverified)}}

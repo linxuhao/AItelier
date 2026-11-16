@@ -8,7 +8,7 @@ const metaTools = new Set(['search_tools', 'call_tool', 'run_code']);
  *  name - and is found with search_tools; only the role's `forbidden` tools are
  *  refused (see refusal). Which names a role presents is roles.json's business
  *  (chosen from measured use, 2026-11-07..14), extended by the adapter
- *  (the State adapter's role additions), never a list in this file. A tool missing there is
+ *  (the backend adapter's role additions), never a list in this file. A tool missing there is
  *  deferred, never lost. */
 export function presentTools(tools, role) {
   const presented = new Set(role.presented);

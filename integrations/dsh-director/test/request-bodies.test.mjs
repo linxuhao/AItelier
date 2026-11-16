@@ -1,9 +1,9 @@
 /** Plugin design step 2, D5: the split changes no request a model receives.
  *
  *  Reads the two recordings in fixtures/request-bodies/step2 (before = the unsplit
- *  runtime, after = dsh-director + the State adapter) and asserts they are equal
+ *  runtime, after = dsh-director + the backend adapter) and asserts they are equal
  *  under the rules written next to them (normalize.json): equal outside the windows
- *  in which two runs of the same code already differ. normalize-recording.mjs is the
+ *  in which two runs of the same code already differ. ../tools/normalize-recording.mjs is the
  *  substitution the stored files went through; it says how to re-record each side. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,18 +23,22 @@ const streams = boot => boot.reduce((by, r) => ((by[kind(r)] ??= []).push(strip(
 test('D5: the first two smoke boots send the same requests before and after the split, stream by stream', () => {
   const before = load('before', 'smoke-requests'), after = load('after', 'smoke-requests');
   assert.equal(before.boots.length, 3); assert.equal(after.boots.length, 3);
+  const allowed = rules.compare_normalization.allowed_length_differences;
   let compared = 0;
   for (const boot of [0, 1]) {
     const b = streams(before.boots[boot]), a = streams(after.boots[boot]);
     assert.deepEqual(Object.keys(a).sort(), Object.keys(b).sort(), `boot ${boot + 1}: request kinds`);
     for (const k of Object.keys(b)) {
-      assert.ok(Math.abs(b[k].length - a[k].length) <= 1, `boot ${boot + 1} ${k}: ${b[k].length} vs ${a[k].length} requests`);
+      const exception = allowed.find(x => x.boot === boot + 1 && x.kind === k);
+      // Equal lengths everywhere, except a listed stream with exactly its listed lengths.
+      if (exception) assert.deepEqual([b[k].length, a[k].length], [exception.before, exception.after], `boot ${boot + 1} ${k}: listed lengths`);
+      else assert.equal(a[k].length, b[k].length, `boot ${boot + 1} ${k}: ${b[k].length} vs ${a[k].length} requests`);
       const n = Math.min(b[k].length, a[k].length);
       assert.ok(n > 0, `boot ${boot + 1} ${k}: nothing to compare`);
       for (let i = 0; i < n; i++) { assert.deepEqual(a[k][i], b[k][i], `boot ${boot + 1} ${k}[${i}] differs`); compared++; }
     }
   }
-  assert.ok(compared >= 30, 'too few requests compared: ' + compared);
+  assert.ok(compared >= 42, 'too few requests compared: ' + compared);
 });
 
 test('D5: the third boot (second restart) presents the same system prompt, tools and model', () => {

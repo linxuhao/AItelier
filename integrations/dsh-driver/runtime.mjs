@@ -10,8 +10,10 @@
  *  plugins: dsh-director, then this adapter, which provides `directorHost`.
  *
  *  Every name this file exported before the split is still exported here (the ones
- *  that moved are re-exported with this deployment's labels bound), so callers and
- *  tests did not change. */
+ *  that moved are re-exported with this deployment's labels bound) except one: `boot`.
+ *  Booting is dsh-director's now - its index.mjs exports boot(ctx, { host }), a
+ *  different signature - and nothing imported this file's boot. The added names are
+ *  SESSION_ENV, aitelierHost and attemptWorkState. exports.test.mjs pins both lists. */
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';

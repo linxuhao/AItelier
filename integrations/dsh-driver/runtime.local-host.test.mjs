@@ -86,13 +86,27 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
     await writeFile(join(root, 'inbox', 'start.json'), JSON.stringify({ task: 'begin' }));
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'fixture-local-provider.mjs'), PROVIDER);
+    await writeFile(join(directory, 'probe-host.mjs'), [
+      `import { localHost } from ${JSON.stringify(join(here, '../dsh-director/hosts/local.mjs'))};`,
+      "import { writeFileSync } from 'node:fs';",
+      "export const name = 'probe-host'; export const inject = [];",
+      'export function apply(ctx, { probeFile, ...config }) {',
+      '  const host = localHost(config);',
+      "  host.capabilities = [...host.capabilities, 'install'];",
+      '  host.install = async api => {',
+      "    let refusal = ''; try { await api.notify('too early'); } catch (error) { refusal = String(error.message); }",
+      '    writeFileSync(probeFile, JSON.stringify({ keys: Object.keys(api), refusal, agentUndefined: api.agent === undefined }));',
+      '  };',
+      "  ctx.provide('directorHost', host);",
+      '}'].join('\n'));
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-local-provider.mjs') },
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
-        { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'local-root',
+        // The built-in local host, wrapped by a probe that records what install() receives.
+        { id: 'director-local', name: join(directory, 'probe-host.mjs'), config: { probeFile: join(directory, 'probe.json'), root, sessionId: 'local-root',
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100,
           // Nothing but the root and the fixture model: the plugin's own roles.json, prompts and todo package.
           idleReviewMs: 600000 } }] },
@@ -104,6 +118,17 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 
     await until('the director never parked', () => said('PARKED'));
+    // install() receives every DirectorApi member host.d.ts documents; notify refuses (naming
+    // why) before the session exists, and agent is still undefined there.
+    const probe = JSON.parse(await readFile(join(directory, 'probe.json'), 'utf8'));
+    const doc = await readFile(join(here, '../dsh-director/host.d.ts'), 'utf8');
+    const body = doc.slice(doc.indexOf('export interface DirectorApi'), doc.indexOf('export interface DirectorHost'));
+    // A member name starts a declaration: after '{', ';' or a line break - never a parameter.
+    const documented = [...body.replace(/\/\*\*[\s\S]*?\*\//g, '').matchAll(/(?:^|[{;\n])\s*(?:readonly\s+)?([A-Za-z]+)\s*(?:\(|:)/g)].map(m => m[1]).filter(n => n !== 'export');
+    assert.ok(documented.length >= 23, documented.join(', '));
+    assert.deepEqual(documented.filter(n => !probe.keys.includes(n)), [], 'install() lacks documented members');
+    assert.match(probe.refusal, /notify is not available before the director session exists/);
+    assert.equal(probe.agentUndefined, true);
     assert.equal(json('take').item.holder, 'local-root');
     const refused = json('dormant-refused');
     assert.equal(refused.refused, 'live_claims', JSON.stringify(refused));

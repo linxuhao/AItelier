@@ -16,9 +16,10 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { leaks } from '../tools/vocabulary.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const plugin = join(here, '..', '..');
+const plugin = join(here, '..');
 
 const TEMPLATE = `name: mini
 version: 1
@@ -72,7 +73,9 @@ export function apply(ctx) {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 64000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
       const text = JSON.stringify(options.messages);
-      await post('/test/request', { session: options.sessionId, tools: (options.tools ?? []).map(t => t.name) });
+      // Everything the model receives: system prompt, messages and the tool schemas.
+      await post('/test/request', { session: options.sessionId, tools: (options.tools ?? []).map(t => t.name),
+        text: JSON.stringify({ messages: options.messages, tools: options.tools }) });
       let block;
       const mine = W.find(w => options.sessionId !== 'director' && text.includes('WORKER_FOR ' + w.id));
       if (!options.tools?.length) block = { type: 'text', text: 'Fixture session' };
@@ -186,7 +189,14 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
     check(!workerTools.includes('subagent') && !workerTools.includes('todo_plan') && workerTools.includes('todo_done'),
       'worker tool list is not the worker role: ' + JSON.stringify(workerTools));
     check(proc.exitCode === null, 'DSH exited: ' + output.slice(-1500));
+    // The model-facing text of this backend-free run carries none of the backend's vocabulary.
+    check(requests.length > 0 && requests.every(r => typeof r.text === 'string' && r.text.length > 0), 'request text was not recorded');
+    for (const [i, r] of requests.entries()) {
+      const found = leaks(r.text);
+      if (found.length) problems.push(`request ${i} (${r.session === 'director' ? 'director' : 'worker'}) carries ${found.join(', ')}`);
+    }
     return { ok: problems.length === 0, problems, workers: [...workers], requests: requests.length,
+      texts: requests.map(r => r.text),
       output: problems.length ? output.slice(-3000) : undefined };
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
@@ -199,6 +209,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const entry = process.argv[2];
   if (!entry) { console.error('usage: node scenario.mjs <dsh entry>'); process.exit(2); }
   const result = await runStandalone(entry, { keep: !!process.env.STANDALONE_KEEP });
-  console.log(JSON.stringify(result, null, 2));
+  const { texts, ...summary } = result;
+  console.log(JSON.stringify({ ...summary, request_text_chars: texts.reduce((n, t) => n + t.length, 0) }, null, 2));
   process.exit(result.ok ? 0 : 1);
 }

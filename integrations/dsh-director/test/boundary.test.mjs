@@ -1,42 +1,53 @@
-/** The generic plugin names no backend (design §4 rule; review criterion
- *  "boundary-independent"). What this gate covers, exactly - and what it does not:
+/** The generic plugin carries nothing of its backend (design §4 rule; review
+ *  criterion "boundary-independent"). What this gate covers, exactly:
  *
- *  1. The backend's NAME: every byte of every file under dsh-director (code,
- *     comments, tests, docs, python) except node_modules, __pycache__ and the
- *     recorded request bodies under test/fixtures (what the backend's driver sent),
- *     any case. Not covered: a name assembled at run time from pieces, as this file
- *     assembles it so that it does not contain it itself.
- *  2. The backend's VOCABULARY in string literals of .mjs/.js/.ts files: an /api/
- *     route, a state_<x> tool name, or the word State. Covered literal shapes:
- *     '...' and "..." on one line, and `...` template literals including ones that
- *     span lines. Not covered: text built by concatenation or at run time.
- *  3. IMPORTS of the adapter directory (dsh-driver): `import ... from '<spec>'`,
- *     `export ... from '<spec>'`, `import '<spec>'`, `import('<spec>')` and
- *     `require('<spec>')` with a literal specifier. Not covered: a computed
- *     specifier.
- *  The second test runs the same scanner over one sample of every covered shape,
- *  so the claim above is measured, not only stated. */
+ *  WALK: every regular file under dsh-director, at any depth, any extension,
+ *  except exactly two paths - `node_modules` at the plugin root (installed, not
+ *  shipped) and `test/fixtures/request-bodies` (the recorded request bodies, which
+ *  are what the backend's own driver sent) - and compiled `.pyc` files. Symbolic
+ *  links are not followed: `todo/todo_templates` points at the repository's
+ *  templates, which are the deployment's, not the plugin's. The walk must visit at
+ *  least MIN_FILES files and every file in MUST_VISIT, so an empty or pruned walk
+ *  is red, not green.
+ *  NAME and VOCABULARY: every byte of every walked file - code, comments,
+ *  docstrings, strings of any quoting, docs, data - is searched for the backend's
+ *  name (any case), its capitalised entity word, its route prefix and its tool-name
+ *  shapes (see `vocabulary`). There is no tokenizer, so no quoting, comment or
+ *  extension can hide a match.
+ *  IMPORTS: in .mjs/.js/.ts files, an import-from, export-from, side-effect import,
+ *  import() or require() whose literal specifier names the adapter directory.
+ *  NOT covered: text or specifiers assembled at run time from pieces (this file
+ *  assembles its own tokens that way), and names the backend uses that are not in
+ *  this list - the adapter side checks the plugin against the tool names it really
+ *  registers (integrations/dsh-driver/plugin-boundary.test.mjs).
+ *  The last test feeds the scanner one sample of every covered shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { vocabulary, name, entity, route, toolShape } from '../tools/vocabulary.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const skip = new Set(['node_modules', 'fixtures', '__pycache__']);
-const name = ['ait', 'elier'].join('');
-const banned = new RegExp(name, 'i');
-// (?<![a-z]) rather than \b: an MCP name such as mcp__x__state_graph_write puts an underscore,
-// a word character, right before the tool name, where \b never matches.
-const vocabulary = /\/api\/|(?<![a-z])state_[a-z]|\bState\b/;
-const adapterImport = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"`])[^'"`]*dsh-driver[^'"`]*\1/;
+// The tokens come from tools/vocabulary.mjs, assembled there from pieces.
+const word = (...parts) => parts.join('');
+export { vocabulary };
+const adapterImport = new RegExp('(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)([\'"`])[^\'"`]*' + word('dsh-', 'driver') + '[^\'"`]*\\1');
+export const EXCLUDED = [`node_modules`, join('test', 'fixtures', 'request-bodies')];
+export const MIN_FILES = 30;
+export const MUST_VISIT = ['index.mjs', 'host.d.ts', 'roles.json', 'director.md', 'worker.md', join('lib', 'core.mjs'),
+  join('lib', 'host.mjs'), join('hosts', 'local.mjs'), join('todo', 'dsh_todo', 'cli.py'), join('todo', 'dsh_todo', 'batch.py'),
+  join('standalone', 'scenario.mjs'), join('standalone', 'run-in-container.sh'), join('test', 'boundary.test.mjs'),
+  join('tools', 'vocabulary.mjs')];
 
-async function files(dir) {
-  const out = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (skip.has(entry.name)) continue;
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...await files(path));
+/** Whether a plugin-relative path is excluded from the walk (exact paths only). */
+export const excluded = rel => EXCLUDED.includes(rel) || rel.endsWith('.pyc');
+
+export function walk(dir = root, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name), rel = relative(root, path);
+    if (excluded(rel)) continue;
+    if (entry.isDirectory()) walk(path, out);
     else if (entry.isFile()) out.push(path);
   }
   return out;
@@ -45,37 +56,39 @@ async function files(dir) {
 /** Every violation in one file's text, as "<line>: <reason>". */
 export function scan(text, path) {
   const found = [];
-  text.split('\n').forEach((line, i) => { if (banned.test(line)) found.push(`${i + 1}: backend name`); });
-  if (!/\.(mjs|js|ts)$/.test(path)) return found;
-  const lineOf = index => text.slice(0, index).split('\n').length;
-  for (const match of text.matchAll(/`(?:\\[\s\S]|[^`\\])*`/g))
-    if (vocabulary.test(match[0])) found.push(`${lineOf(match.index)}: backend vocabulary in a template literal`);
   text.split('\n').forEach((line, i) => {
-    for (const [literal] of line.matchAll(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g))
-      if (vocabulary.test(literal)) { found.push(`${i + 1}: backend vocabulary in a string`); break; }
-    if (adapterImport.test(line)) found.push(`${i + 1}: adapter import`);
+    for (const [pattern, reason] of vocabulary) if (pattern.test(line)) found.push(`${i + 1}: ${reason}`);
+    if (/\.(mjs|js|ts)$/.test(path) && adapterImport.test(line)) found.push(`${i + 1}: adapter import`);
   });
   return found;
 }
 
-test('no shipped file of dsh-director names the backend, carries its vocabulary in a string, or imports the adapter', async () => {
+test('the walk visits the plugin, not an empty or pruned tree', () => {
+  const visited = walk().map(path => relative(root, path));
+  assert.ok(visited.length >= MIN_FILES, `visited only ${visited.length} files: ${visited.join(', ')}`);
+  for (const file of MUST_VISIT) assert.ok(visited.includes(file), `not visited: ${file}`);
+  assert.ok(!visited.some(file => file.startsWith(EXCLUDED[1] + sep)), 'the recorded request bodies were walked');
+});
+
+test('no byte of any shipped plugin file carries the backend, and no code imports the adapter', () => {
   const found = [];
-  for (const file of await files(root))
-    for (const hit of scan(await readFile(file, 'utf8'), file)) found.push(`${relative(root, file)}:${hit}`);
+  for (const file of walk()) for (const hit of scan(readFileSync(file, 'utf8'), file)) found.push(`${relative(root, file)}:${hit}`);
   assert.deepEqual(found, []);
 });
 
 test('the gate refuses one sample of every shape its header says it covers', () => {
-  // The samples are assembled from pieces, like the name, so this file passes its own gate.
-  const api = '/' + 'api/', st = 'Sta' + 'te', tool = 'sta' + 'te_graph_write', bt = String.fromCharCode(96), adapter = '../dsh-' + 'driver/runtime.mjs';
+  const bt = String.fromCharCode(96), q3 = '"'.repeat(3), adapter = '../' + word('dsh-', 'driver') + '/runtime.mjs';
+  const tool = 'mcp__x__' + toolShape + 'graph_write';
   const cases = [
     ['notes.md', 'a doc line that says ' + name.toUpperCase()],
     ['x.py', '# comment naming ' + name],
-    ['x.mjs', '// comment naming ' + name],
-    ['x.mjs', "const route = '" + api + "x/query/y';"],
-    ['x.mjs', 'const tool = "mcp__x__' + tool + '";'],
-    ['x.mjs', "const reason = 'you hold live " + st + " claims';"],
-    ['x.mjs', 'const t = ' + bt + 'line one\n and the ' + st + ' on line two' + bt + ';'],
+    ['x.py', q3 + 'One ' + entity + ' record per item.' + q3],
+    ['x.json', '{"note": "the ' + entity + ' attempt"}'],
+    ['x.sh', '# calls ' + route + 'x'],
+    ['x.mjs', '// comment naming ' + entity],
+    ['x.mjs', "if (/don't/.test(s)) throw new Error('" + tool + " is refused');"],
+    ['x.mjs', "const route = '" + route + "x/query/y';"],
+    ['x.mjs', 'const t = ' + bt + 'line one\n and the ' + entity + ' on line two' + bt + ';'],
     ['x.mjs', "import { a } from '" + adapter + "';"],
     ['x.mjs', "export { a } from '" + adapter + "';"],
     ['x.mjs', "import '" + adapter + "';"],
@@ -84,7 +97,11 @@ test('the gate refuses one sample of every shape its header says it covers', () 
     ['x.mjs', "const m = require('" + adapter + "');"],
   ];
   for (const [path, text] of cases) assert.notDeepEqual(scan(text, path), [], 'not refused: ' + path + ': ' + text);
-  // And it does not cry wolf on the plugin's ordinary wording.
-  for (const text of ["const reason = 'you hold work that is not finished';", "import { x } from './lib/core.mjs';", '// a work item'])
-    assert.deepEqual(scan(text, 'x.mjs'), [], text);
+  for (const text of ["const reason = 'you hold work that is not finished';", "import { x } from './lib/core.mjs';",
+    'state_dir = setting("STATE_DIR")', '// a work state, lower case'])
+    assert.deepEqual(scan(text, 'x.mjs'), [], 'false alarm: ' + text);
+  // The walk excludes exact paths only: a fixtures directory anywhere else is walked.
+  assert.equal(excluded(join('lib', 'fixtures', 'notes.mjs')), false);
+  assert.equal(excluded(join('lib', 'node_modules', 'x.mjs')), false);
+  assert.equal(excluded(EXCLUDED[1]), true);
 });

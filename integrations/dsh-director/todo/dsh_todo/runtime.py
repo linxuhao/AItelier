@@ -188,7 +188,7 @@ def _digest(path: Path) -> str | None:
 
 
 def capture_pre_state(workspace: Path, bindings: Iterable[Binding]) -> dict[str, Any]:
-    """State the write predicates will be compared against.
+    """The snapshot the write predicates will be compared against.
 
     Captured when the item BEGINS, so `file_changed` can be a delta without ever
     demanding that the file be absent or wrong beforehand.

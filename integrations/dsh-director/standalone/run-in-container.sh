@@ -7,7 +7,7 @@
 set -eu
 modules=${1:?usage: run-in-container.sh <dsh node_modules dir> <image>}
 image=${2:?usage: run-in-container.sh <dsh node_modules dir> <image>}
-plugin=$(cd "$(dirname "$0")/../.." && pwd)
+plugin=$(cd "$(dirname "$0")/.." && pwd)
 exec docker run --rm --network none --cpus 2 --memory 2g -u "$(id -u):$(id -g)" --init \
   --mount type=tmpfs,destination=/app \
   -v "$modules:/opt/dsh/node_modules:ro" \
@@ -15,4 +15,4 @@ exec docker run --rm --network none --cpus 2 --memory 2g -u "$(id -u):$(id -g)" 
   -w /tmp "$image" \
   sh -c 'if [ -n "$(ls -A /app)" ]; then echo "precondition: /app is not empty" >&2; exit 3; fi
     exec env -i PATH="$PATH" HOME=/tmp PYTHONDONTWRITEBYTECODE=1 STANDALONE_PYTHON=python3 \
-      node /opt/dsh-director/test/standalone/scenario.mjs /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js'
+      node /opt/dsh-director/standalone/scenario.mjs /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js'

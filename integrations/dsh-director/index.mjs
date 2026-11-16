@@ -5,7 +5,7 @@
  *  chosen wake time, process watches, live-children bookkeeping, child handback and
  *  history grep. What it does NOT own: where work comes from and where it is
  *  recorded. That is the host's, reached only through the `directorHost` cordis
- *  service (lib/host.mjs, host.d.ts) - the State adapter is one host, the
+ *  service (lib/host.mjs, host.d.ts) - the backend adapter is one host, the
  *  local-files reference host another.
  *
  *  Moved from integrations/dsh-driver/runtime.mjs boot() (plugin design step 2):
@@ -99,51 +99,6 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   };
   const todoPlans = async () => { const { plans, settled } = await planWork();
     return todoSummary(plans, children.sessionSet(), settled); };
-  // Host-scoped additions of the host first (they precede the plan tools in every
-  // request, as they always did), then the worker-facing plan tools.
-  const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
-    liveSessions, planWork, todoPlans, batchRedispatch };
-  await op('install')(api);
-  const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
-  // Worker-facing plan tools are host-scoped: the caller is exec.agent, so a child's
-  // todo_begin binds the CHILD session to the plan.
-  ctx.tools.register(defineTool({ name: 'todo_status',
-    description: texts.tools.todo_status ?? 'Read the frozen todo plan of a work item: brief, goal, next item, done and remaining items. Call it first, and again whenever you lost track (for example after compaction).',
-    parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
-    execute: (args, exec) => todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal),
-  }));
-  ctx.tools.register(defineTool({ name: 'todo_begin',
-    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session. prompt_sha256 (batch sub-plans, optional): the sha256 your prompt named; it is recorded with the binding.',
-    parameters: { ...planRef, prompt_sha256: { type: 'string' } }, output: jsonOutput,
-    async execute(args, exec) {
-      // The CLI refuses, under the plan lock, to take a plan bound to another
-      // session. Rebind only when that session is verified dead: not the root
-      // and not a live child of this process.
-      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id,
-        ...(args.prompt_sha256 ? ['--prompt-sha256=' + args.prompt_sha256] : [])];
-      const result = await todo.call(args.attempt_id, begin, exec.signal);
-      if (result.refused !== 'bound_to_other_session') return result;
-      const bound = result.bound_session;
-      // A plan stays bound only to a session that is still a live child: `has` reads
-      // the reconciled set, so a child that ended without its end edge no longer makes
-      // a stranded plan look attended.
-      if (!bound || bound === config.sessionId || children.has(bound)) return result;
-      return todo.call(args.attempt_id, [...begin, '--rebind'], exec.signal);
-    },
-  }));
-  ctx.tools.register(defineTool({ name: 'todo_done',
-    description: 'Say you finished one plan item. The harness evaluates its bound predicates now and returns outcome pass|fail|absent with each result; your own claim is not an input. A fail keeps the item open: fix it and call again.',
-    parameters: planRef, output: jsonOutput,
-    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
-      '--session=' + exec.agent.session.id], exec.signal,
-      await todo.bound(args.attempt_id, status => status.timeout_budget_seconds?.[args.item_id], exec.signal)),
-  }));
-  ctx.tools.register(defineTool({ name: 'todo_report',
-    description: 'Attach one free-text note to a plan item. It changes no item state.',
-    parameters: { ...planRef, note: { type: 'string', required: true } }, output: jsonOutput,
-    execute: (args, exec) => todo.call(args.attempt_id, ['report', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
-      '--session=' + exec.agent.session.id, '--note=' + args.note], exec.signal),
-  }));
   const watchIntervalMs = Number(config.watchIntervalMs) > 0 ? Number(config.watchIntervalMs) : 15000;
   const floorValue = config.dormantCompactMinTokens;
   const floorNumber = Number(floorValue);
@@ -192,15 +147,64 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: labels.runtimeEvent } });
   const notify = async text => {
     if (disposed) return;
+    // A host may hold notify from install() on; it can deliver only once the director
+    // session exists (events() is called after that).
+    if (!agent) throw new Error('directorHost api: notify is not available before the director session exists (events() is where delivery starts)');
     ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
     await ctx.sessionPersistence.flush();
   };
-  Object.assign(api, { notify, eventMessage, report, currentPhase,
+  // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
+  // member exists; `agent` reads undefined and notify refuses until the session exists.
+  const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
+    liveSessions, planWork, todoPlans, batchRedispatch, notify, eventMessage, report, currentPhase,
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
-    isDisposed: () => disposed });
+    isDisposed: () => disposed };
   // A getter, not a copy: the agent exists only after create/resume below.
   Object.defineProperty(api, 'agent', { get: () => agent, enumerable: true });
+  // Host-scoped additions of the host first (they precede the plan tools in every
+  // request, as they always did), then the worker-facing plan tools.
+  await op('install')(api);
+  const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
+  // Worker-facing plan tools are host-scoped: the caller is exec.agent, so a child's
+  // todo_begin binds the CHILD session to the plan.
+  ctx.tools.register(defineTool({ name: 'todo_status',
+    description: texts.tools.todo_status ?? 'Read the frozen todo plan of a work item: brief, goal, next item, done and remaining items. Call it first, and again whenever you lost track (for example after compaction).',
+    parameters: { attempt_id: { type: 'string', required: true } }, output: jsonOutput,
+    execute: (args, exec) => todo.call(args.attempt_id, ['status', '--attempt=' + args.attempt_id], exec.signal),
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_begin',
+    description: 'Start one plan item before working on it. Refuses unmet needs, captures the state its predicates compare against, and binds the plan to your session. prompt_sha256 (batch sub-plans, optional): the sha256 your prompt named; it is recorded with the binding.',
+    parameters: { ...planRef, prompt_sha256: { type: 'string' } }, output: jsonOutput,
+    async execute(args, exec) {
+      // The CLI refuses, under the plan lock, to take a plan bound to another
+      // session. Rebind only when that session is verified dead: not the root
+      // and not a live child of this process.
+      const begin = ['begin', '--attempt=' + args.attempt_id, '--item=' + args.item_id, '--session=' + exec.agent.session.id,
+        ...(args.prompt_sha256 ? ['--prompt-sha256=' + args.prompt_sha256] : [])];
+      const result = await todo.call(args.attempt_id, begin, exec.signal);
+      if (result.refused !== 'bound_to_other_session') return result;
+      const bound = result.bound_session;
+      // A plan stays bound only to a session that is still a live child: `has` reads
+      // the reconciled set, so a child that ended without its end edge no longer makes
+      // a stranded plan look attended.
+      if (!bound || bound === config.sessionId || children.has(bound)) return result;
+      return todo.call(args.attempt_id, [...begin, '--rebind'], exec.signal);
+    },
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_done',
+    description: 'Say you finished one plan item. The harness evaluates its bound predicates now and returns outcome pass|fail|absent with each result; your own claim is not an input. A fail keeps the item open: fix it and call again.',
+    parameters: planRef, output: jsonOutput,
+    execute: async (args, exec) => todo.call(args.attempt_id, ['done', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+      '--session=' + exec.agent.session.id], exec.signal,
+      await todo.bound(args.attempt_id, status => status.timeout_budget_seconds?.[args.item_id], exec.signal)),
+  }));
+  ctx.tools.register(defineTool({ name: 'todo_report',
+    description: 'Attach one free-text note to a plan item. It changes no item state.',
+    parameters: { ...planRef, note: { type: 'string', required: true } }, output: jsonOutput,
+    execute: (args, exec) => todo.call(args.attempt_id, ['report', '--attempt=' + args.attempt_id, '--item=' + args.item_id,
+      '--session=' + exec.agent.session.id, '--note=' + args.note], exec.signal),
+  }));
   // The host's context source, read for every startup / post-compaction snapshot.
   let contextText = '';
   const contextSource = { refresh: async () => { contextText = await host.context('director'); }, render: () => contextText };
@@ -212,7 +216,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n' });
     // The director prompt section and the snapshot hooks are the director's own; a
     // host that registers sections of its own calls these at the point it wants them
-    // (the State adapter: after its goal and protocol sections and its model selection), and
+    // (the backend adapter: after its goal and protocol sections and its model selection), and
     // whatever it did not call is installed right after its setup.
     let sectionDone = false, hooksDone = false;
     const runtimeSection = () => { if (sectionDone) return; sectionDone = true;

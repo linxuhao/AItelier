@@ -4,7 +4,7 @@
  *  Moved verbatim from integrations/dsh-driver/runtime.mjs (plugin design step 2,
  *  "pure move"). The only changes are the parameters below, each of which used to
  *  be a backend constant baked into the code and is now supplied by the host
- *  (the State adapter passes exactly the old values, so its behaviour and its
+ *  (the backend adapter passes exactly the old values, so its behaviour and its
  *  request bodies do not change):
  *    - message source kinds and section names (`labels`);
  *    - texts that name the host's tools (`texts`);
@@ -300,7 +300,7 @@ export class LiveChildren {
 /** The phase report body: what this driver is doing. `subagents` names the live
  *  native child SESSIONS - the identity the agent registry can answer for - never
  *  runIds (iss-de1b4e7f644f4f0e). Its consumer counts the array (`running_subagents`
- *  in the State backend), and a runId cannot be looked up anywhere. */
+ *  in the backend), and a runId cannot be looked up anywhere. */
 export function phaseReport({ phase, children, error = '', event }) {
   return { phase, subagents: children.ids(), error, ...(event ? { event } : {}) };
 }

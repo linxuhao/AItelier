@@ -5,7 +5,7 @@
  * conformance/index.mjs (behaviour); this file is their documentation.
  *
  * Built-in implementation: hosts/local.mjs (local files). External: e.g. the
- * the State adapter in integrations/dsh-driver/runtime.mjs.
+ * the backend adapter in integrations/dsh-driver/runtime.mjs.
  */
 
 /** Work item states, aligned with MCP Tasks / A2A task states. */
@@ -44,7 +44,8 @@ export interface DirectorApi {
   todo: unknown; children: unknown; jsonOutput: unknown;
   liveSessions(): string[]; planWork(signal?: AbortSignal): Promise<unknown>;
   todoPlans(): Promise<unknown[]>; batchRedispatch(): Promise<unknown[]>;
-  /** Steer one wake event into the director (a runtime-event user message). */
+  /** Steer one wake event into the director (a runtime-event user message). Present from
+   *  install() on; it refuses (throws, naming why) until the director session exists. */
   notify(text: string): Promise<void>;
   eventMessage(text: string): unknown;
   report(phase: string, error?: string, event?: unknown): Promise<void>;
@@ -53,6 +54,7 @@ export interface DirectorApi {
   setHostError(message: string): Promise<void>;
   clearHostError(): Promise<void>;
   isDisposed(): boolean;
+  /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
 

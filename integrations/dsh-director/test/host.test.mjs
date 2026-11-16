@@ -62,3 +62,25 @@ test('the generic held-work refusal names no backend vocabulary', async () => {
   assert.deepEqual(dormancyRefusal({ reason: 'quiet', claims: [{ node_key: 'w1' }] }),
     { refused: 'live_claims', reason: 'you hold work that is not finished', node_keys: ['w1'] });
 });
+
+test('every config field is type-checked, not only checked for presence (review FAIL 2)', () => {
+  const base = good();
+  const refused = (config, pattern) => assert.throws(() => validateHost({ ...base, config: { ...base.config, ...config } }), pattern, JSON.stringify(config));
+  refused({ todo: null }, /missing config: todo/);
+  refused({ todo: 'core.todo_cli' }, /config: todo must be an object/);
+  refused({ todo: [] }, /config: todo must be an object/);
+  refused({ todo: { module: 42, stateDirEnv: 'X' } }, /config: todo\.module must be a non-empty string/);
+  for (const key of ['sessionId', 'provider', 'model', 'stateDir', 'dshEntry', 'rolesFile']) {
+    refused({ [key]: null }, new RegExp(`missing config: ${key}`));
+    for (const bad of [42, {}, [], true]) refused({ [key]: bad }, new RegExp(`config: ${key} must be a non-empty string`));
+  }
+  for (const key of ['sessionEnv', 'projectId', 'permissionPreset']) refused({ [key]: 7 }, new RegExp(`config: ${key} must be a non-empty string when given`));
+});
+
+test('capabilities is required and must be an array of op names; a string is named as such', () => {
+  const { capabilities, ...withoutCapabilities } = good();
+  assert.throws(() => validateHost(withoutCapabilities), /missing capabilities/);
+  assert.throws(() => validateHost({ ...good(), capabilities: 'progress' }), error =>
+    /missing capabilities: an array/.test(error.message) && !/implemented but not declared/.test(error.message));
+  assert.throws(() => validateHost({ ...good(), capabilities: [42] }), /every entry must be an op name string/);
+});

@@ -1,6 +1,6 @@
 /** The director/worker role table (roles.json): the one place the two roles differ.
  *
- * Generic on purpose - no State or backend names here (see the dsh-director plugin
+ * Generic on purpose - no backend names or vocabulary here (see the dsh-director plugin
  * design): an adapter extends the parsed table, it never edits this file's rules.
  * core/dsh_driver.py `load_roles` parses the same file with the same rules; a
  * test compares both parses and both refusals. Unknown keys are refused at every

@@ -1,6 +1,7 @@
 """Real host supervision against the backend's shared desired-state storage."""
 import asyncio
 import json
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -25,6 +26,30 @@ async def for_at_most(seconds, check):
     async with asyncio.timeout(seconds):
         while not check():
             await asyncio.sleep(0.05)
+
+
+async def journal(capsys, condition, seconds=20):
+    """What the supervisor printed so far, drained until `condition` holds.
+
+    `capsys.readouterr()` CLEARS the buffer, so one read at the end misses every
+    line printed before it - and the line under test is printed exactly once, by
+    the loop, never by anything the test calls.
+    """
+    seen = []
+
+    def drain():
+        chunk = capsys.readouterr().out
+        if chunk:
+            seen.append(chunk)
+        return condition(''.join(seen))
+
+    try:
+        async with asyncio.timeout(seconds):
+            while not drain():
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        pass  # the assertion that follows reports what was actually printed
+    return ''.join(seen)
 
 
 @pytest.fixture
@@ -604,3 +629,117 @@ async def test_a_death_after_the_driver_served_is_an_ordinary_restart(never_serv
     second, third = spawn_times(spawns)[1:3]
     # Unchanged: a served death must not grow the retry past its first 15 s.
     assert third - second < 25, third - second
+
+
+@pytest.fixture
+def serves_then_exits(tmp_path):
+    """`alpha`'s child serves, then exits on its own with code 7.
+
+    The row's serving phase is written by the runtime, never by the child, so the
+    test stamps it the way /activity would. Two seconds is long enough for the
+    supervisor to read that phase - and, with the window this test passes, long
+    enough for the start to be DECIDED, which is the state a driver that had been
+    serving for hours is in when it dies: nothing about its start is pending any
+    more, so nothing was watching it.
+    """
+    script = tmp_path / 'child.py'
+    script.write_text("import sys, time\ntime.sleep(2)\nsys.exit(7)\n")
+    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+    StateService(db, actor='fixture', project_read_trusted=True).store.create_project(
+        'alpha', 'Alpha')
+    registry = DriverRegistry(db, 'host-fixture-pepper-' * 3)
+    registry.seed('fixture-owner')
+    root = tmp_path / 'drivers'; root.mkdir()
+    (root / 'runtime.json').write_text('{"mode":"host"}')
+    backend = DshDrivers(db, registry, root)
+    host = DshDrivers(db, registry, root, host_controller=True,
+                      command=[sys.executable, str(script)])
+    return backend, host
+
+
+def exit_lines(text, driver_id):
+    """The lines about this driver's exit, as a reader of the journal finds them."""
+    return [line for line in text.splitlines()
+            if driver_id in line and 'supervisor_stopped=' in line]
+
+
+async def test_a_serving_driver_that_exits_on_its_own_is_recorded(serves_then_exits, capsys):
+    """A crash, an operator restart and a watchdog kill used to look identical later.
+
+    The line in the journal is the artifact: it names the driver, the pid it had,
+    how the child ended, how long it had been up and whether this supervisor is
+    why it is gone. Here nobody asked, so it must say false - and the failed-start
+    machinery must stay exactly where it was: no record file, no streak text.
+    """
+    backend, host = serves_then_exits
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        proc = host.processes['alpha']
+        backend.update('alpha', phase='running')  # what the runtime reports when it serves
+        text = await journal(capsys, lambda out: f'pid {proc.pid}' in out)
+        lines = exit_lines(text, row['driver_id'])
+        assert len(lines) == 1, text  # ONE line, once, for one exit
+        line = lines[0]
+        assert f'pid {proc.pid}' in line, line
+        assert 'exited with exit code 7' in line, line
+        assert 'supervisor_stopped=false' in line, line
+        assert 'supervisor_stopped=true' not in line, line
+        assert len(line) < 1000, line  # one bounded physical line for the journal
+        uptime = re.search(r'after ([0-9.]+)s uptime', line)
+        assert uptime and 1.0 <= float(uptime.group(1)) < 60, line
+        assert proc.returncode == 7, proc.returncode
+        # Nothing about a failed start moved: the same death is still an ordinary
+        # restart, with no record, no streak and no supervisor text on the row.
+        assert not record.exists()
+        current = backend.get('alpha')
+        assert not (current['last_error'] or '').startswith('DSH: failed start '), current
+    finally:
+        stopped.set(); await task
+    # The shutdown of the loop itself adds no second line for this exit.
+    text += capsys.readouterr().out
+    assert len(exit_lines(text, row['driver_id'])) == 1, text
+
+
+async def test_a_driver_this_supervisor_stopped_is_recorded_as_stopped(runtimes, capsys):
+    """`stop()` for a disabled row is the one exit this loop can call its own.
+
+    Same sink, same line, opposite flag: without it a shutdown the operator asked
+    for would be indistinguishable from a crash in the journal, which is the whole
+    reason the line exists.
+    """
+    backend, host = runtimes
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        proc = host.processes['alpha']
+        backend.update('alpha', phase='running')  # it had served before the stop
+        await asyncio.sleep(0.2)  # the loop reads that phase on its next pass
+        backend.update('alpha', enabled=0)  # the dashboard's Stop
+        text = await journal(capsys, lambda out: 'supervisor_stopped=true' in out)
+        lines = exit_lines(text, row['driver_id'])
+        assert len(lines) == 1, text
+        line = lines[0]
+        assert f'pid {proc.pid}' in line, line
+        assert 'exited with signal 15' in line, line
+        assert 'supervisor_stopped=true' in line, line
+        assert 'supervisor_stopped=false' not in line, line
+        assert len(line) < 1000, line
+        uptime = re.search(r'after ([0-9.]+)s uptime', line)
+        assert uptime and 0 <= float(uptime.group(1)) < 60, line
+        await eventually(lambda: not host.running('alpha'))
+        assert proc.returncode == -15, proc.returncode  # SIGTERM, not a crash
+        stopped_row = backend.get('alpha')
+        assert stopped_row['enabled'] == 0, stopped_row
+        assert not (stopped_row['last_error'] or '').startswith('DSH: failed start '), stopped_row
+        assert not record.exists()
+    finally:
+        stopped.set(); await task
+    text += capsys.readouterr().out
+    assert len(exit_lines(text, row['driver_id'])) == 1, text

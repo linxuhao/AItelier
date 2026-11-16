@@ -49,6 +49,7 @@ class _Rig:
         self.release = threading.Event()
         self.entered: dict[str, threading.Event] = {}
         self.rendered: list[tuple[str, str | None]] = []
+        self.rendered_ts: list[float] = []
         self.queued = threading.Event()
         self.waits: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -59,6 +60,7 @@ class _Rig:
                 op = active[0]["operation_id"] if len(active) == 1 else None
                 with self._lock:
                     self.rendered.append((route, op))
+                    self.rendered_ts.append(time.monotonic())
                     self.entered.setdefault(op, threading.Event()).set()
                 if op in self.blocking or self.block_all:
                     self.release.wait(30)
@@ -931,7 +933,7 @@ def _compile_step_route(ret: dict) -> str:
     return "<none>"
 
 
-def _tools_on(rig, monkeypatch):
+def _tools_on(rig, monkeypatch, *, tool_timeout=TOOL_TIMEOUT):
     from aitelier.tools.godot_compile import impl as compile_impl
     from aitelier.tools.godot_playtest import impl as pt_impl
 
@@ -953,7 +955,7 @@ def _tools_on(rig, monkeypatch):
     real_post = pt_impl.post_playtest
     monkeypatch.setattr(pt_impl, "post_playtest",
                         lambda payload, timeout=3600: real_post(payload,
-                                                                timeout=TOOL_TIMEOUT))
+                                                                timeout=tool_timeout))
     return compile_impl, pt_impl, skips
 
 
@@ -1046,18 +1048,64 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
     assert skips and set(skips) == {"render_owner_wait_timed_out"}, skips
 
 
+# The socket this witness substitutes for post_playtest's 4200 s.  It has to be
+# long enough for the request's PRE-render path (thread start, owner row, process
+# lock, effect lock) to finish, because the promise below is about a timeout that
+# arrived AFTER the render started: a sidecar still admitting the request when the
+# socket expires is entitled to see a hung-up caller and stop -- the queue wait
+# aborts on that same predicate, and once the request owns the render do_POST
+# declines to start it (docker/godot/godot_harness.py:8206-8213) -- which makes
+# the premise false rather than the promise broken.
+#
+# Measured 2026-11-16, 2 CPU/no-network container on a loaded box (loadavg
+# 3.7-9.7), 14 instrumented runs of this witness that stamp the render body's
+# entry: the body entered 26-106 ms into its window in 10 of them, 1.42 s into a
+# 2.0 s window in one, 1.80 s into another, and never in 2 (the socket expired
+# first).  At the 2 s value this test shipped with, 2 of 6 runs were inside the
+# last 0.6 s of their window.  10 s gives the measured path two orders of
+# magnitude of room and still sits inside the rig's own 30 s render block, and the
+# assertions below name the ordering they depend on.
+WITNESS_SOCKET_SEC = 10.0
+
+
 def test_a_timeout_after_the_render_started_stays_a_measured_timeout(
         rig, tmp_path, monkeypatch):
     from aitelier.gate_evidence import release_disposition, report_state
 
-    compile_impl, _pt_impl, _skips = _tools_on(rig, monkeypatch)
+    compile_impl, pt_impl, _skips = _tools_on(rig, monkeypatch,
+                                              tool_timeout=WITNESS_SOCKET_SEC)
+    inner_post = pt_impl.post_playtest
+    window: dict = {}
+
+    def timed_post(payload, timeout=3600):
+        window["start"] = time.monotonic()
+        try:
+            return inner_post(payload)
+        finally:
+            window["end"] = time.monotonic()
+
+    monkeypatch.setattr(pt_impl, "post_playtest", timed_post)
     proj = _game_project(tmp_path)
     rig.block_all = True           # every render runs longer than the tool timeout
     try:
         _graph, ret_c, rep_c = _run_compile_step(compile_impl, tmp_path, proj)
     finally:
         rig.release.set()
-    assert len(rig.rendered) == 1 and rig.rendered[0][0] == "/playtest", rig.rendered
+    assert window.get("end", 0) - window.get("start", 0) >= WITNESS_SOCKET_SEC * 0.9, (
+        "the request never reached its socket deadline, so this run does not "
+        "measure a timeout at all", window, rep_c.get("summary"),
+        rep_c.get("skipped_because"))
+    assert len(rig.rendered) == 1 and rig.rendered[0][0] == "/playtest", (
+        "the render never started, so this run does not measure a timeout that "
+        "arrived after it: the pre-render path outlasted the substituted "
+        f"{WITNESS_SOCKET_SEC}s socket and the sidecar refused a hung-up caller",
+        rig.rendered, rig.rendered_ts, window, rep_c.get("summary"))
+    started_in = rig.rendered_ts[0] - window["start"]
+    assert 0.0 <= started_in <= WITNESS_SOCKET_SEC, (
+        f"the render body entered {started_in:.3f}s into the "
+        f"{WITNESS_SOCKET_SEC}s client window: past the deadline, so this run "
+        "measures scheduler latency, not what a late timeout is reported as",
+        rig.rendered, rig.rendered_ts, window)
     assert rep_c.get("gate_timeout") is True and rep_c.get("passed") is False, rep_c
     assert (report_state(dict(rep_c)), release_disposition(dict(rep_c))) == (
         "failed", "known_failure"), rep_c

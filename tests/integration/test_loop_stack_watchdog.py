@@ -125,6 +125,24 @@ def _dump_files(root: Path):
     return sorted(root.glob("loop-stack-*.log")) if root.exists() else []
 
 
+# One block of a dump is a header line plus its all-thread stacks plus a footer
+# line. The watchdog OPENS the incident file with its first block and APPENDS
+# later blocks to the SAME file, so "the file exists" and "the header is there"
+# are both weaker than "the block is written".
+_DUMP_HEADER_MARKER = b"# aitelier loop-stack-watchdog: watched loop silent for"
+_DUMP_FOOTER_MARKER = b"# end of aitelier loop-stack-watchdog dump"
+
+
+def _complete_blocks(data: bytes) -> int:
+    """Dump blocks in `data` that are COMPLETE: header AND footer on disk.
+
+    A read that lands mid-append sees a header without its footer (the stacks
+    are written between them), so `min(headers, footers)` counts only blocks a
+    reader may assert on.
+    """
+    return min(data.count(_DUMP_HEADER_MARKER), data.count(_DUMP_FOOTER_MARKER))
+
+
 def _wait_for(predicate, timeout=5.0, interval=0.01):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -133,6 +151,23 @@ def _wait_for(predicate, timeout=5.0, interval=0.01):
             return value
         time.sleep(interval)
     return None
+
+
+def _wait_for_dump_content(dump_dir: Path, blocks: int, timeout: float = 10.0):
+    """Bounded wait for a dump file whose CONTENT holds `blocks` complete blocks.
+
+    Returns `(path, data)` or None if the timeout expires. Reading only after
+    the content is complete is what removes the race against a later append to
+    the same incident file.
+    """
+    def _ready():
+        for path in _dump_files(dump_dir):
+            data = path.read_bytes()
+            if _complete_blocks(data) >= blocks:
+                return path, data
+        return None
+
+    return _wait_for(_ready, timeout=timeout)
 
 
 # ── a thread that stands in for the event loop ───────────────────────────────
@@ -352,11 +387,20 @@ def test_one_incident_is_bounded_in_dumps_and_bytes(tmp_path):
         # the stall past four due times and require the cap to stop it.
         time.sleep(1.2)
         assert watchdog.silent_seconds() >= 1.0
-        path = _wait_for(lambda: _dump_files(dump_dir), timeout=5)
-        assert path, f"no dump file in {dump_dir}"
-        path = path[0]
-        data = path.read_bytes()
-        assert data.count(b"# aitelier loop-stack-watchdog: watched loop silent for") == max_dumps
+        # The incident file APPEARS when the watchdog opens it for the first
+        # block, then the capped, later block is APPENDED to the same file
+        # after a geometric interval. Waiting for the path and reading once
+        # races that append (one block, or half of one, lands in the read).
+        # Wait (bounded) for the CONTENT to hold `max_dumps` COMPLETE blocks;
+        # the cap then makes the bytes final, so the assertions are stable and
+        # the wait reds instead of hanging if the content never arrives.
+        ready = _wait_for_dump_content(dump_dir, max_dumps, timeout=10.0)
+        assert ready is not None, (
+            f"no dump file with {max_dumps} complete blocks after the loop was "
+            f"silent for {watchdog.silent_seconds()}s; "
+            f"files={_dump_files(dump_dir)}")
+        path, data = ready
+        assert _complete_blocks(data) == max_dumps
         assert len(data) <= max_bytes
         assert len(_dump_files(dump_dir)) == 1, "one incident must be one file"
     finally:

@@ -664,6 +664,18 @@ def test_profile_inserts_the_director_plugin_first_then_its_adapter(runtime):
     assert director.parent.parent == adapter.parent.parent, "both plugins come from the same checkout"
 
 
+def test_worker_capacity_is_one_number_for_dsh_and_for_the_director(runtime):
+    """Plugin step 9: DSH's maxActiveSubagents (profile, `subagent` plugin) and the
+    capacity dsh-director guards (AITELIER_DSH_MAX_ACTIVE_SUBAGENTS) are the same value,
+    written from core.dsh_driver.MAX_ACTIVE_SUBAGENTS in one place."""
+    from core.dsh_driver import MAX_ACTIVE_SUBAGENTS
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    env = runtime._environment(row)
+    patch = {p.get("id"): p for p in _patch_document(runtime, row)}
+    assert patch["subagent"]["config"]["maxActiveSubagents"] == MAX_ACTIVE_SUBAGENTS
+    assert env["AITELIER_DSH_MAX_ACTIVE_SUBAGENTS"] == str(MAX_ACTIVE_SUBAGENTS)
+
+
 def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch):
     """The autoshot browser server is registered, redirectable and withdrawable.
 

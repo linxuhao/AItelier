@@ -479,6 +479,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       sessionEnv: SESSION_ENV,
       todo: { python: env.AITELIER_TODO_PYTHON, cwd: env.AITELIER_TODO_CWD, module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' },
       watchIntervalMs: env.AITELIER_DSH_WATCH_INTERVAL_MS, dormantCompactMinTokens: env.AITELIER_DSH_DORMANT_COMPACT_MIN_TOKENS,
+      // The same number core/dsh_driver.py writes into the profile for DSH (plugin step 9).
+      ...(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS ? { maxActiveSubagents: Number(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS) } : {}),
       dormantMinuteMs: env.AITELIER_DSH_DORMANT_MINUTE_MS, idleReviewMs: env.AITELIER_DSH_IDLE_REVIEW_MS,
       permissionPreset: hostExecution ? 'danger-full-access' : undefined },
     labels,

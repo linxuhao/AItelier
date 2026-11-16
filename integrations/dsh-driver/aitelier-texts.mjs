@@ -45,6 +45,7 @@ export const texts = Object.freeze({
   contextHeader: 'AItelier driver state — startup / post-compaction snapshot:\n',
   toolDiscoverySection: discoveryTexts.section,
   heldWork: 'you hold live State claims',
+  slotFree: 'AItelier worker slot free:\n',
   wakesOn: ['State event', 'inbox message', 'owner message', 'child message', 'wake_after_minutes running out'],
   tools: {
     search_tools: discoveryTexts.searchDescription,

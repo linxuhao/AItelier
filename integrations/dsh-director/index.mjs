@@ -24,6 +24,8 @@ import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, 
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
   grepHistory, historyPage } from './lib/core.mjs';
 import { Outbox } from './lib/outbox.mjs';
+import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from './lib/capacity.mjs';
+import { createHash } from 'node:crypto';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -79,6 +81,44 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     if (departed.length) ctx.logger.info(`dropped departed child sessions ${departed.join(', ')}: no live agent holds them`);
     return departed;
   };
+  // Worker capacity (plugin step 9, lib/capacity.mjs): DSH refuses a new child at its
+  // maxActiveSubagents without queueing. The director is refused one step earlier -
+  // `reserved` (>= 1) slots stay free for resuming workers and follow-up messages - with
+  // a structured answer naming what was refused, and never above DSH's own limit (read
+  // live: it is a volatile setting). Refusals are kept until the slot-free wake that
+  // names them was delivered (through the outbox), across a restart too.
+  const dshLimit = () => ctx.get('subagents')?.config?.maxActiveSubagents?.get?.();
+  const limits = () => capacityLimits({ hostLimit: config.maxActiveSubagents, dshLimit: dshLimit(), reservedSlots: config.reservedSlots });
+  const refusals = await new RefusedDispatches(config.stateDir).load();
+  const warn = error => ctx.logger.warn(String(error));
+  // Dispatches the guard let through whose result has not come back yet. Parallel calls
+  // in one message are all guarded before any child starts, so live children alone
+  // would let a batch run past the reserve (measured: 4 parallel calls at cap 3 started
+  // 3). Counting them too may over-count a child for the moment between its start and
+  // its result; it never under-counts. A spawn answers within seconds, so an entry
+  // older than two minutes is a result that never came, and stops counting.
+  const admitted = new Map();
+  const inFlight = () => {
+    for (const [callId, since] of admitted) if (Date.now() - since > 120000) admitted.delete(callId);
+    return admitted.size;
+  };
+  ctx.tools.guard(exec => {
+    if (exec.name !== 'subagent' || exec.agent?.session?.id !== config.sessionId) return undefined;
+    pruneChildren();
+    const live = children.size() + inFlight(), { threshold, ...limit } = limits();
+    if (live < threshold) { admitted.set(exec.callId ?? Symbol('call'), Date.now()); return undefined; }
+    const dispatch = describeDispatch(exec.arguments);
+    void refusals.add(dispatch, 'plugin').catch(warn);
+    return JSON.stringify({ refused: 'at_capacity', live, ...limit, dispatch,
+      reason: texts.atCapacity ?? `every worker slot but the ${limit.reserved} reserved one(s) is in use (${live} of ${limit.capacity}); this worker was not started. You get one runtime event naming it when a slot frees: dispatch it then, and meanwhile continue other work or wait.` });
+  });
+  // DSH refused the dispatch itself (a race the guard could not see): the same refusal.
+  ctx.on('tools/result', (exec, result) => {
+    if (exec?.name !== 'subagent' || exec.agent?.session?.id !== config.sessionId) return;
+    admitted.delete(exec.callId);
+    if (!isDshLimitRefusal(result)) return;
+    void refusals.add(describeDispatch(exec.arguments), 'dsh').catch(warn);
+  });
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
   // The plans, and what the host says about the work item each one is named after.
   // The two are read together because every view of "unfinished work" needs both: a
@@ -160,6 +200,25 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // notice stays recorded and the next process replays it.
   const deliver = async text => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text); };
   const outbox = await new Outbox({ dir: config.stateDir, deliver, log: line => ctx.logger.info(line) }).load();
+  // A slot is free and dispatches were refused: one wake naming them, through the
+  // outbox (recorded first; its id is derived from the refusals, so a restart that
+  // finds them still on disk re-sends the same id and is not delivered twice). The
+  // refusals are dropped only after delivery. Serialized: two ends, one wake.
+  let slotWake = Promise.resolve();
+  const wakeForSlot = () => {
+    slotWake = slotWake.catch(() => {}).then(async () => {
+      if (!refusals.size) return;
+      const live = children.size(), { threshold, ...limit } = limits();
+      if (live >= threshold) return;
+      const refused = refusals.entries();
+      const id = 'slot-free:' + createHash('sha256').update(refused.map(entry => entry.key).join(',')).digest('hex').slice(0, 40);
+      await outbox.send(id, texts.slotFree + JSON.stringify({ live, ...limit,
+        refused: refused.map(({ key, ...entry }) => entry) }));
+      await refusals.remove(refused);
+    });
+    slotWake.catch(warn);
+    return slotWake;
+  };
   const notifyEvent = (text, options = {}) => options.id ? outbox.deliverOnce(String(options.id), text).then(() => {}) : notify(text);
   // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
   // member exists; `agent` reads undefined and notify refuses until the session exists.
@@ -512,6 +571,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   ctx.on('subagent/end', info => {
     children.end(info); void report(currentPhase());
     void handback(info.id).catch(error => ctx.logger.warn(String(error)));
+    wakeForSlot();
   });
   // After a child's successful compaction, its next step gets one line of its
   // bound plan's brief. Host-scoped hooks see native children; the root has
@@ -562,6 +622,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // One that fails is kept (or, after repeated boots, set aside) and never stops the boot.
   const { replayed } = await outbox.replay();
   if (replayed.length) ctx.logger.info(`outbox: replayed ${replayed.length} notice(s): ${replayed.join(', ')}`);
+  // Dispatches refused before a restart: the restart freed their slots.
+  await wakeForSlot();
   events = await host.events(api);
   const pump = Promise.resolve(events?.done).catch(async error => {
     if (!disposed) {

@@ -65,6 +65,7 @@ export function localHost(options = {}) {
         stateDirEnv: 'DSH_TODO_STATE_DIR', ...(options.todo ?? {}) },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
       dormantCompactMinTokens: options.dormantCompactMinTokens,
+      maxActiveSubagents: options.maxActiveSubagents, reservedSlots: options.reservedSlots,
     },
     /** The startup / post-compaction snapshot: the work items and the notes. */
     async context() {

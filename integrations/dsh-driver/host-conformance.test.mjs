@@ -20,6 +20,9 @@ const envFor = directory => ({ AITELIER_DSH_SESSION: 'root', AITELIER_DSH_PROVID
  *  `release()` hands it one event (from another actor, so it is not an own echo). */
 function fakeState() {
   const activity = [];
+  // The conversation's question blocks, enough of State's rules for attention: a
+  // request_key replays only the same payload; a withdrawal is own + unanswered.
+  const asked = new Map(), keys = new Map();
   let parked, released = false;
   const routes = {
     '/api/drivers/me': () => ({ driver_id: 'dsh-a' }),
@@ -31,6 +34,24 @@ function fakeState() {
       if (attempt_id === 'att-candidate') return { attempt_id, status: 'candidate' };
       if (attempt_id === 'att-running') return { attempt_id, status: 'running' };
       const error = new Error('AItelier get_attempt: HTTP 404'); error.status = 404; throw error;
+    },
+    '/api/state/commands/send_user_message': body => {
+      const payload = JSON.stringify(body);
+      if (keys.has(body.request_key)) return keys.get(body.request_key).payload === payload ? keys.get(body.request_key).result : { error: 'idempotency_conflict' };
+      const result = { message_id: 'm-' + keys.size, project_id: body.project_id };
+      keys.set(body.request_key, { payload, result });
+      for (const segment of body.segments ?? []) if (segment.kind === 'question')
+        asked.set(segment.id, { message_id: result.message_id, segment_id: segment.id, text: segment.text, status: 'open' });
+      return result;
+    },
+    '/api/state/query/list_user_questions': ({ status }) => ({ result: { questions: [...asked.values()].reverse()
+      .filter(q => status === 'all' || q.status === status) } }),
+    '/api/state/commands/withdraw_user_question': ({ message_id, segment_id }) => {
+      const q = asked.get(segment_id);
+      if (!q || q.message_id !== message_id) return { error: 'unknown_question' };
+      if (q.status === 'withdrawn') return { withdrawn: false, already_withdrawn: true };
+      q.status = 'withdrawn';
+      return { withdrawn: true };
     },
     '/api/state/query/list_claims': () => ({ result: { claims: [
       { node_key: 'n-mine', status: 'live', driver_id: 'dsh-a' },
@@ -116,3 +137,16 @@ test('State adapter: a phase report goes to the activity route unchanged', async
 });
 
 test.after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
+
+test('State adapter: ask_owner is exactly one send_user_message with one question block, id = question id (the pinned request)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const fixture = JSON.parse(readFileSync(new URL('./test-fixtures/ask-owner-request.json', import.meta.url), 'utf8'));
+  // tests/unit/test_driver_question_withdraw.py stores this same request through State and
+  // compares the row's bytes with a direct send_user_message of the same block.
+  const sent = [];
+  const directory = await mkdtemp(join(tmpdir(), 'aitelier-ask-'));
+  directories.push(directory);
+  const host = aitelierHost({ ...envFor(directory), AITELIER_DSH_PROJECT: fixture.project }, { request: async (path, body) => { sent.push([path, body]); return { message_id: 'm-1' }; }, runtime: {} });
+  assert.deepEqual(await host.attention.ask(fixture.question), { asked: true, question_id: fixture.question.id, message_id: 'm-1' });
+  assert.deepEqual(sent, [['/api/state/commands/send_user_message', fixture.request]]);
+});

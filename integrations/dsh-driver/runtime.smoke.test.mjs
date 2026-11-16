@@ -26,7 +26,7 @@ const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 
   'mcp__aitelier__state_graph_write', 'read', 'read_image', 'read_mcp_resource', 'search_tools', 'send_message', 'skill', 'subagent',
   'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'web_fetch', 'web_search', 'working_directory', 'write'];
 const hostRegistered = {
-  director: [...shared, 'grep_chat_history', 'idle_dormant', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
+  director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
     'todo_finish', 'todo_plan', 'todo_rebind', 'todo_templates', 'watch_process'].sort(),
   worker: [...shared, 'mcp__aitelier__state_graph_read', 'mcp__aitelier__wait_for_driver_inbox', 'mcp__aitelier__wait_for_run'].sort(),
 };

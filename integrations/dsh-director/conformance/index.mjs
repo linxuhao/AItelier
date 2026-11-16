@@ -81,6 +81,23 @@ export function conformance(name, make) {
       assert.ok(await stopped(events), 'events.done did not settle after stop()');
     }
   });
+  test(`${name}: attention - one question per id: a retry asks nothing new, another text is refused, close is a record and closing twice changes nothing`, async () => {
+    const { host } = await make();
+    if (!host.attention) return;
+    const id = 'conformance-q-' + Date.now();
+    const first = await host.attention.ask({ id, text: 'May I restart the host?' });
+    assert.ok(!first.refused, JSON.stringify(first));
+    const again = await host.attention.ask({ id, text: 'May I restart the host?' });
+    assert.ok(!again.refused, 'a retry of the same question was refused: ' + JSON.stringify(again));
+    assert.equal((await host.attention.list()).filter(q => q.id === id).length, 1, 'a retry asked a second question');
+    const other = await host.attention.ask({ id, text: 'Something else?' });
+    assert.equal(other.refused, 'question_id_reused', JSON.stringify(other));
+    const closed = await host.attention.close({ id, reason: 'resolved another way' });
+    assert.ok(!closed.refused && closed.closed !== false, JSON.stringify(closed));
+    assert.equal((await host.attention.list()).filter(q => q.id === id).length, 0, 'a closed question is still open');
+    const twice = await host.attention.close({ id, reason: 'again' });
+    assert.ok(!twice.refused && twice.closed === false, 'closing twice: ' + JSON.stringify(twice));
+  });
   test(`${name}: an event whose delivery failed is delivered again, under the same id`, async t => {
     const { host, seed, api, reopen } = await make();
     if (!api) { t.skip('no director api: proven by this host\'s real-DSH scenarios'); return; }

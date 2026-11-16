@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
-export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels'];
+export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention'];
 /** The states a work item can be in (aligned with MCP Tasks / A2A task states). */
 export const WORK_STATES = ['working', 'input_required', 'completed', 'failed', 'cancelled', 'unknown'];
 /** States after which nothing of the work item may run again. */
@@ -89,8 +89,9 @@ export function validateHost(host) {
   } else declared = host.capabilities;
   for (const op of declared) {
     if (!OPTIONAL_OPS.includes(op)) problems.push(`unknown capability: ${op}`);
-    else if (op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
-      problems.push(`capability declared but not implemented: ${op}`);
+    else if (op === 'attention' ? !['ask', 'close', 'list'].every(name => typeof host.attention?.[name] === 'function')
+      : op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
+      problems.push(`capability declared but not implemented: ${op}${op === 'attention' ? ' (ask, close and list must all be functions)' : ''}`);
   }
   if (Array.isArray(host.capabilities))
     for (const op of OPTIONAL_OPS) if (host[op] !== undefined && !declared.includes(op)) problems.push(`implemented but not declared: ${op}`);
@@ -106,6 +107,7 @@ export const optionalDefaults = Object.freeze({
   roles: table => table,               // the table as loaded (a host's roles() must return its table synchronously)
   install: async () => {},             // no host-scoped tools or sections of its own
   setup: async () => {},               // no director-scope tools, sections or hooks of its own
+  attention: undefined,                // no question channel: ask_owner / close_question refuse
 });
 
 /** Whether a work state means nothing of that work may run again. */

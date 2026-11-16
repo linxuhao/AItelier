@@ -194,3 +194,27 @@ def test_an_answer_after_a_withdrawal_wins(world):
     assert [q["status"] for q in listed] == ["answered"]
     with world["ada"].store.transaction() as conn:
         assert open_question_count(conversation_rows(conn, "alpha")) == 0
+
+
+def test_ask_owner_is_a_thin_wrapper_the_stored_bytes_equal_a_direct_question_block(world):
+    """The adapter's ask_owner request (pinned in a fixture its node test asserts it
+    produces) stores the same row bytes as a direct send_user_message carrying the same
+    question block: segment id = question id, nothing added, nothing renamed."""
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "integrations" / "dsh-driver" / "test-fixtures"
+                          / "ask-owner-request.json").read_text())
+    request = dict(fixture["request"])
+    via_wrapper = execute(world["ada"], "send_user_message", request, allow_write=True)["message_id"]
+    direct = execute(world["bob"], "send_user_message", {
+        "request_key": "direct", "project_id": "alpha", "subject": "Question for you",
+        "body": fixture["question"]["context"],
+        "segments": [{"kind": "question", "id": fixture["question"]["id"], "text": fixture["question"]["text"]}]},
+        allow_write=True)["message_id"]
+    with world["ada"].store.transaction() as conn:
+        rows = {r["message_id"]: r for r in conn.execute(
+            "SELECT message_id,subject,body,segments_json,answers_json,withdraws_json,refs_json,audience,kind "
+            "FROM driver_inbox_messages WHERE message_id IN (?,?)", (via_wrapper, direct))}
+    stored = lambda mid: {k: rows[mid][k] for k in ("subject", "body", "segments_json", "answers_json", "withdraws_json",
+                                                   "refs_json", "audience", "kind")}
+    assert stored(via_wrapper) == stored(direct)
+    assert json.loads(rows[via_wrapper]["segments_json"]) == [
+        {"id": fixture["question"]["id"], "kind": "question", "text": fixture["question"]["text"]}]

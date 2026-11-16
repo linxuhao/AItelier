@@ -1,0 +1,4 @@
+{"project": "alpha", "question": {"id": "restart-window-1116", "text": "May I restart the host at 14:00Z?", "context": "Steps 7, 9 and 6 are merged and need one restart."},
+ "request": {"request_key": "ask-owner:restart-window-1116", "project_id": "alpha", "subject": "Question for you",
+   "body": "Steps 7, 9 and 6 are merged and need one restart.",
+   "segments": [{"kind": "question", "id": "restart-window-1116", "text": "May I restart the host at 14:00Z?"}]}}

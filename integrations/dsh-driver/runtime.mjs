@@ -464,6 +464,13 @@ export function modelRetryOptions(env = process.env) {
 
 /** This deployment's directorHost (dsh-director host contract v1): the old boot()'s
  *  AItelier half, each piece called by the director at the point it always ran. */
+/** ask_owner's whole mapping onto State (plugin step 8): one send_user_message with
+ *  ONE question block, block id = question id, request_key derived from it. */
+function askOwnerRequest(project, { id, text, context }) {
+  return { request_key: 'ask-owner:' + id, project_id: project, subject: 'Question for you',
+    body: context ?? '', segments: [{ kind: 'question', id, text }] };
+}
+
 export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
@@ -473,7 +480,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
   return {
     version: '1.0.0',
-    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels'],
+    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention'],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -627,6 +634,39 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       const listed = await request('/api/state/query/list_claims', { project_id: project, driver_id: env.AITELIER_DRIVER_ID, limit: 100 },
         signal);
       return ((listed.result ?? listed).claims ?? []).filter(c => c.status === 'live' && c.driver_id === env.AITELIER_DRIVER_ID);
+    },
+    /** The director's questions to its owner (plugin step 8) on State's conversation:
+     *  ask is send_user_message with ONE question block whose id is the question id
+     *  (a thin wrapper: askOwnerRequest is the whole mapping, and the bytes it stores
+     *  are pinned against a direct send_user_message by tests/unit); its request_key
+     *  derives from the id, so a retry is State's own idempotent replay and another text
+     *  under the same id is State's idempotency_conflict. close is
+     *  withdraw_user_question; list is list_user_questions. The owner's answer arrives
+     *  as their message citing {message_id, segment_id = question id} through events(). */
+    attention: {
+      async ask({ id, text, context }, signal) {
+        const result = await request('/api/state/commands/send_user_message', askOwnerRequest(project, { id, text, context }), signal)
+          .catch(error => ({ error: String(error?.message ?? error) }));
+        if (result.error) return /idempotency_conflict/.test(result.error)
+          ? { refused: 'question_id_reused', reason: `question ${id} already asks something else; give this question its own id` }
+          : { refused: 'state_refused', reason: String(result.error).slice(0, 500) };
+        return { asked: true, question_id: id, message_id: result.message_id };
+      },
+      async close({ id, reason }, signal) {
+        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
+        const mine = ((listed.result ?? listed).questions ?? []).filter(q => q.segment_id === id);
+        if (!mine.length) return { refused: 'unknown_question', reason: `no question ${id} in this project's conversation` };
+        const question = mine[0];   // newest first
+        if (question.status === 'answered') return { refused: 'question_answered', reason: `your owner already answered ${id}` };
+        const result = await request('/api/state/commands/withdraw_user_question', { request_key: 'close-question:' + id,
+          project_id: project, message_id: question.message_id, segment_id: id, reason }, signal).catch(error => ({ error: String(error?.message ?? error) }));
+        if (result.error) return { refused: /not_own_question/.test(result.error) ? 'not_own_question' : 'state_refused', reason: String(result.error).slice(0, 500) };
+        return result.withdrawn ? { closed: true, question_id: id } : { closed: false, already_closed: true, question_id: id };
+      },
+      async list(signal) {
+        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
+        return ((listed.result ?? listed).questions ?? []).map(q => ({ id: q.segment_id, text: q.text, message_id: q.message_id }));
+      },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
     async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed }) {

@@ -77,7 +77,7 @@ export interface DirectorHost {
   /** semver; the director accepts ^1. */
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
-  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels'>;
+  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention'>;
   config: HostConfig;
 
   // ---- required ----
@@ -97,6 +97,22 @@ export interface DirectorHost {
   workState?(workId: string, signal?: AbortSignal): Promise<WorkState>;
   /** Work this director holds; idle_dormant refuses while any [none]. */
   heldWork?(signal?: AbortSignal): Promise<Array<{ node_key: string }>>;
+  /** v1.1, plugin step 8: the director's questions to its owner, behind ask_owner /
+   *  close_question [none: both tools refuse, naming that the host has no channel].
+   *  - ask: one concrete question under the director's own id. The same id with the
+   *    same text asks nothing new (a safe retry); the same id with other text is
+   *    refused {refused: 'question_id_reused'}.
+   *  - close: take an own, unanswered question back, with the reason, as a record (it
+   *    stays visible as withdrawn). An answered one is refused {refused:
+   *    'question_answered'}; closing twice is a no-op {closed: false, already_closed}.
+   *  - list: the open questions.
+   *  The owner's answer reaches the director through events(), carrying the
+   *  question's id. */
+  attention?: {
+    ask(question: { id: string; text: string; context?: string }, signal?: AbortSignal): Promise<object>;
+    close(close: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
+    list(signal?: AbortSignal): Promise<Array<{ id: string; text: string }>>;
+  };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */

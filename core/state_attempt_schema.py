@@ -10,10 +10,22 @@ index and trigger that hung off the table, verifies counts and foreign keys,
 and runs inside one write transaction; corrupt or partial input fails without
 touching the original rows. Referenced evidence and immutable receipts stay
 byte-for-byte intact. No production path is resolved.
+
+The upgrade gate is on the REQUEST path: every StateService - one per MCP/REST
+request, reads included - asks ``initialize`` whether anything is pending, and
+``_current`` answers from one read transaction. Everything in that answer is a
+handful of catalog reads except the attempt foreign-key pass, so that pass -
+and only that pass - may be reused for a bounded window (iss-5de9f15b64f54027);
+``_ForeignKeyScanMemo`` below says what identifies the file, what ends the
+window early, and within what bound corruption still reaches the loud path.
 """
 from __future__ import annotations
+import os
 import re
 import sqlite3
+import threading
+import time
+from core.off_loop_sqlite import close_connection
 from core.state_schema_migration import add_column_if_missing
 
 ATTEMPT_TABLE = """
@@ -287,7 +299,227 @@ def _foreign_key_violation(conn, table: str) -> bool:
     return False
 
 
-def _current(conn, existing_schema: str) -> bool:
+# --- the one pass a request may reuse (iss-5de9f15b64f54027) ----------------
+#
+# WHY: ``_current`` runs for every State request, so what it costs is paid per
+# request. All of it but one step is a few catalog reads; that step is the seven
+# anti-joins above, over state_attempts and its dependents, measured at 20.2 ms
+# of a 19.7 ms median call. Under a burst - this project's own driver runtimes
+# polling /api/state/query/get_attempt 58 times in ten seconds - every request
+# re-ran it, 40 threads were caught inside it at once, they filled every anyio
+# worker slot, and a sync endpoint queued behind them measured 1927.6 ms while
+# the event loop itself was provably healthy.
+#
+# WHAT may be reused is that ONE answer, at most once per bounded window per
+# database file per process. Nothing cheap is covered: a dropped column, a
+# missing CREATE, a widened CHECK, a stale store cap or an external attempt
+# without its owner is still judged on every call, so a schema mutation is seen
+# by the very next one.
+#
+# WHY the reuse is still honest:
+#  * The answer is filed under the FILE - its st_dev/st_ino, not the path
+#    string - so a database replaced or recreated at that path cannot inherit
+#    the previous file's answer.
+#  * It carries the ``PRAGMA data_version`` of one sentinel reader this module
+#    keeps open on that file, and SQLite advances that number whenever ANY other
+#    connection commits. An FK-OFF insert, a dropped table or a repair therefore
+#    ends the window at the next gate call, well inside it: corruption still
+#    reaches the loud not-current path on the next call. The window is only the
+#    outer bound, for a database nobody else is writing - which is exactly the
+#    burst this fixes.
+#  * The one writer the sentinel cannot see is the gate ITSELF: initialize's
+#    locked path writes through its own connection, so that path forgets the
+#    answer instead of re-deriving it.
+#  * Cost: one connection per database file, bounded by _MEMO_FILES (oldest
+#    dropped first, so a long-lived process cannot accumulate handles), and one
+#    stat per gate call. The sentinel never starts a transaction, so it holds no
+#    lock and blocks no checkpoint; being open, it does keep SQLite from
+#    deleting the -wal file between requests.
+#
+# A window of zero (AITELIER_STATE_ATTEMPT_FK_SCAN_WINDOW) turns the reuse off
+# entirely - no sentinel is opened and every call runs the pass - which is the
+# behaviour a test asks for when it plants corruption.
+_WINDOW_ENV = 'AITELIER_STATE_ATTEMPT_FK_SCAN_WINDOW'
+_WINDOW_SECONDS = 1.0
+_MEMO_FILES = 4
+
+# A test counts the one expensive pass through here; production leaves it None.
+_FOREIGN_KEY_SCAN_HOOK = None
+
+
+def _attempt_foreign_key_violation(conn, objects) -> bool:
+    """The expensive half of ``_current``: every anti-join over the attempt tables.
+
+    Split out so exactly this - and nothing cheap around it - is what the memo
+    reuses, and so a test can count the passes through ``_FOREIGN_KEY_SCAN_HOOK``.
+    """
+    if _FOREIGN_KEY_SCAN_HOOK is not None:
+        _FOREIGN_KEY_SCAN_HOOK()
+    return any((('table', table) in objects) and _foreign_key_violation(conn, table)
+               for table in ('state_attempts', *_ATTEMPT_DEPENDENTS))
+
+
+class _ForeignKeyScanMemo:
+    """One reused verdict per database file, and what invalidates it.
+
+    An entry holds the sentinel reader whose ``data_version`` says the file has
+    not moved on, the baseline that verdict was taken at, and a per-file gate so
+    N simultaneous callers run the pass once rather than N times: the first runs
+    it, the rest wait for it and read its answer. The answer is only ever a
+    CURRENT schema - a violation is never kept, because the locked path below is
+    what reports it.
+    """
+
+    def __init__(self):
+        # Re-entrant, and it is also the sentinel's THREAD rule: a sqlite3
+        # connection may not be used by two threads at once, so every read of a
+        # sentinel happens under this lock and the helpers below may re-enter it.
+        self._state = threading.RLock()
+        self._entries = {}
+        self._gates = {}
+
+    # -- reading -----------------------------------------------------------
+    def verdict(self, path, identity):
+        """The kept answer for the file at ``path``, or None to run the pass."""
+        with self._state:
+            entry = self._entries.get(path)
+            if entry is None or entry['identity'] != identity:
+                return None
+            if entry['expires'] <= time.monotonic() or _meanwhile_committed(entry['baseline'],
+                                                                           entry['sentinel']):
+                return None
+            return entry['verdict']
+
+    def scan(self, path, identity, window, run):
+        """Run ``run()`` at most once for this file and window."""
+        with self._state:
+            gate = self._gates.setdefault(path, threading.Lock())
+        with gate:
+            kept = self.verdict(path, identity)
+            if kept is not None:
+                return kept
+            entry = self._entry(path, identity)
+            if entry is None:
+                return run()
+            with self._state:
+                baseline = _data_version(entry['sentinel'])
+            verdict = run()
+            with self._state:
+                # Only a CURRENT answer is filed, and only if the pass answered
+                # about THIS file and nothing else committed while it read: a
+                # violation is the locked path's to report, not a verdict to
+                # hand to the next call.
+                if verdict is False or entry['identity'] != _file_identity(path) \
+                        or _meanwhile_committed(baseline, entry['sentinel']):
+                    self._drop_locked(path)
+                else:
+                    entry.update(baseline=baseline, verdict=verdict,
+                                 expires=time.monotonic() + window)
+                    self._trim()
+            return verdict
+
+    def forget(self, path=None):
+        """Drop a kept answer, e.g. before the gate writes through its own handle."""
+        with self._state:
+            for key in list(self._entries) if path is None else [path]:
+                self._drop_locked(key)
+
+    # -- internals ---------------------------------------------------------
+    def _entry(self, path, identity):
+        """The entry for ``path``, opening its sentinel reader when needed."""
+        with self._state:
+            entry = self._entries.get(path)
+            if entry is not None:
+                if entry['identity'] == identity:
+                    return entry
+                self._drop_locked(path)   # a different file lives at this path now
+        # Stat either side of the open: a verdict is filed under a FILE identity,
+        # so the sentinel must be reading that file. If the name moved, this pass
+        # is simply not kept rather than filed under the wrong inode.
+        if _file_identity(path) != identity:
+            return None
+        try:
+            sentinel = sqlite3.connect(path, timeout=10, check_same_thread=False)
+            sentinel.row_factory = sqlite3.Row
+        except sqlite3.Error:
+            return None
+        if _file_identity(path) != identity:
+            close_connection(sentinel)
+            return None
+        entry = {'identity': identity, 'sentinel': sentinel, 'baseline': None,
+                 'verdict': None, 'expires': 0.0}
+        with self._state:
+            self._entries[path] = entry
+            self._trim()
+        return entry
+
+    def _trim(self):
+        while len(self._entries) > _MEMO_FILES:
+            self._drop_locked(next(iter(self._entries)))
+
+    def _drop_locked(self, path):
+        entry = self._entries.pop(path, None)
+        if entry is not None:
+            close_connection(entry['sentinel'])
+
+
+_SCAN_MEMO = _ForeignKeyScanMemo()
+
+
+def _window_seconds() -> float:
+    """How long one pass may be reused (0 disables the reuse); read per call.
+
+    Read per call rather than at import so a test or an operator can set it
+    without a restart, and an unparseable value keeps the default instead of
+    silently turning the reuse (or the check) off.
+    """
+    raw = os.environ.get(_WINDOW_ENV)
+    if raw is None:
+        return _WINDOW_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _WINDOW_SECONDS
+
+
+def _database_path(db):
+    """The plain file ``db`` reads, or None when its name is not one.
+
+    ``:memory:`` and URI names have no file identity to file a verdict under, so
+    they keep the plain per-call pass.
+    """
+    path = getattr(db, 'db_path', None)
+    if not isinstance(path, str) or not path or path == ':memory:' or path.startswith('file:'):
+        return None
+    return path
+
+
+def _file_identity(path):
+    """What identifies the FILE behind ``path``: the device and inode, not the name."""
+    try:
+        found = os.stat(path) if path else None
+    except OSError:
+        return None
+    return None if found is None else (found.st_dev, found.st_ino)
+
+
+def _data_version(conn):
+    """SQLite's change count for this file, or None when it cannot be asked."""
+    if conn is None:
+        return None
+    try:
+        return conn.execute('PRAGMA data_version').fetchone()[0]
+    except sqlite3.Error:
+        return None
+
+
+def _meanwhile_committed(baseline, sentinel) -> bool:
+    """Whether any other connection committed since ``baseline`` was read."""
+    version = _data_version(sentinel)
+    return version is None or version != baseline
+
+
+def _current(conn, existing_schema: str, db_path=None, identity=None) -> bool:
     """Whether ``initialize`` would change nothing, judged in one READ transaction.
 
     Every StateService - one per MCP/REST request, reads included - builds the
@@ -296,6 +528,10 @@ def _current(conn, existing_schema: str) -> bool:
     long write such as a candidate's Git-bundle BLOB, until a plain read failed
     with "database is locked" after this function's 10 s busy timeout. Any
     doubt answers False, and the locked path below re-checks everything itself.
+
+    ``db_path``/``identity`` are how ``initialize`` lets the foreign-key pass be
+    reused for a bounded window; without them (a caller passing a bare
+    connection) every call runs it, exactly as before.
     """
     conn.execute('BEGIN')
     try:
@@ -318,18 +554,34 @@ def _current(conn, existing_schema: str) -> bool:
         if conn.execute("SELECT 1 FROM state_attempts a WHERE execution_kind='external' AND NOT EXISTS "
                         "(SELECT 1 FROM state_external_owners o WHERE o.attempt_id=a.attempt_id) LIMIT 1").fetchone():
             return False
-        # A violation is reported by the locked path, exactly as before.
-        return not any((('table', table) in objects) and _foreign_key_violation(conn, table)
-                       for table in ('state_attempts', *_ATTEMPT_DEPENDENTS))
+        # A violation is reported by the locked path, exactly as before. The
+        # answer may be one this process already found, for at most one window
+        # (_ForeignKeyScanMemo): the structural checks above are never reused.
+        window = _window_seconds()
+        if window <= 0 or db_path is None or identity is None:
+            return not _attempt_foreign_key_violation(conn, objects)
+        kept = _SCAN_MEMO.verdict(db_path, identity)
+        if kept is not None:
+            return kept
+        return _SCAN_MEMO.scan(db_path, identity, window,
+                               lambda: not _attempt_foreign_key_violation(conn, objects))
     finally:
         conn.rollback()
 
 
 def initialize(db, existing_schema: str) -> None:
+    path = _database_path(db)
+    # Measured BEFORE the handle is opened, so a kept verdict can only ever be
+    # filed under the file this pass could have read.
+    identity = _file_identity(path)
     with db.get_connection() as conn:
         conn.execute('PRAGMA busy_timeout=10000')
-        if _current(conn, existing_schema):
+        if _current(conn, existing_schema, path, identity):
             return
+        # Everything below writes through THIS connection, and a kept verdict's
+        # baseline follows OTHER connections - so it is dropped here rather than
+        # re-derived, and the next call runs the pass again.
+        _SCAN_MEMO.forget(path)
         conn.execute('PRAGMA foreign_keys=OFF')
         conn.execute('BEGIN IMMEDIATE')
         try:

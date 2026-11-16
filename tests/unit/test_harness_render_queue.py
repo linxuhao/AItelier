@@ -593,25 +593,66 @@ time.sleep(600)
 
 def test_a_holder_whose_process_died_goes_stale_and_blocks(rig):
     """The control: a real process owns the render and heartbeats; it is killed.
-    Its row must go stale past the threshold and block until reconciled."""
+    Its row must go stale past the threshold and block until reconciled.
+
+    Each arm waits for the state it is about, never a fixed multiple of the
+    threshold, and the live arm asks only while the row is demonstrably fresh.
+    When a 0.1 s ticker gets CPU and how long a request takes to be answered are
+    the scheduler's business, not the product's: sleeping past the shrunken
+    threshold and asking once turns one starved tick or one slow answer into "the
+    product called a live holder stale" (measured: this reds under `--cpus 1` plus
+    three busy loops, on the tree that was green before). So the live arm keeps
+    asking while the child beats, and fails only if no answer inside the deadline
+    came back active with the row still fresh. After the kill the arm waits until
+    the row is actually stale past the threshold. A child that never beats still
+    fails the live arm, at the deadline. Which owner_kind a given heartbeat age
+    produces is pinned deterministically by
+    test_a_stale_active_owner_blocks_and_a_fresh_one_is_queued.
+    """
     gh = rig.gh
-    gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = 2.0
+    stale_after = 2.0
+    deadline_sec = 10.0
+    gh.RENDER_OWNER_HEARTBEAT_STALE_SEC = stale_after
     child = subprocess.Popen([sys.executable, "-c", _CHILD, str(HARNESS)],
                              stdout=subprocess.PIPE, text=True)
+    fresh_within = stale_after / 2
+    asks: list[tuple[int, str | None, float]] = []
     try:
         child_owner = child.stdout.readline().strip()
         assert child_owner, "the child process never took ownership"
-        time.sleep(gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 0.5)
-        live_code, live = rig.post("/script", rig.payload(
-            "op-live", render_wait_timeout_sec=0.3), timeout=10)
+        taken = rig.row("op-child")["heartbeat_at"]
+        begun = time.monotonic()
+        while time.monotonic() - begun < deadline_sec:
+            beat = rig.row("op-child")["heartbeat_at"]
+            age = time.time() - float(beat)
+            if beat <= taken or age > fresh_within:
+                time.sleep(0.02)
+                continue
+            code_live, body_live = rig.post("/script", rig.payload(
+                "op-live", render_wait_timeout_sec=0.3), timeout=10)
+            asks.append((code_live, body_live.get("owner_kind"), round(age, 2)))
+            if (code_live, body_live.get("owner_kind")) == (409, "active"):
+                break
+        waited = time.monotonic() - begun
+        assert asks and asks[-1][:2] == (409, "active"), (
+            f"no answer within the {deadline_sec:.0f}s deadline read the child's "
+            f"beating render as live (waited {waited:.1f}s; took ownership at "
+            f"{taken}, last beat {rig.row('op-child')['heartbeat_at']}, asks "
+            f"(code, owner_kind, heartbeat_age_at_ask) {asks}, interval "
+            f"{gh.RENDER_OWNER_HEARTBEAT_INTERVAL_SEC}s)")
     finally:
         child.kill()
         child.wait(10)
-    time.sleep(gh.RENDER_OWNER_HEARTBEAT_STALE_SEC + 0.5)
+    row, begun = rig.row("op-child"), time.monotonic()
+    while time.time() - float(row["heartbeat_at"]) <= stale_after:
+        assert time.monotonic() - begun < deadline_sec, (
+            f"the dead holder's row never went stale past the {stale_after:.0f}s "
+            f"threshold within the {deadline_sec:.0f}s deadline (last "
+            f"heartbeat_at={row['heartbeat_at']})")
+        time.sleep(0.02)
+        row = rig.row("op-child")
     code, body = rig.post("/script", rig.payload("op-after", render_wait_timeout_sec=5),
                           timeout=10)
-    assert (live_code, live.get("owner_kind")) == (409, "active"), (
-        "while the child heartbeat, it was a live render to queue behind", live)
     assert (code, body.get("owner_kind"), body.get("owner_id")) == (
         409, "active_stale", child_owner), body
     assert body.get("needs_reconciliation") is True

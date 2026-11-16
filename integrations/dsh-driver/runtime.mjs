@@ -273,10 +273,12 @@ export function projectInboxDigest(page, {
 // ---- The director's pieces, re-exported with this deployment's labels bound ----
 /** The environment variable core/dsh_driver.py sets on every driver process. */
 export const SESSION_ENV = 'AITELIER_DSH_SESSION';
-export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, dormancyRefusal, DORMANT_MIN_MINUTES,
+export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, pruneDepartedChildren, LiveChildren, phaseReport, continuationWaitKey,
   DORMANT_COMPACT_MIN_TOKENS, IdleReview, awaitingFinish, batchesToRedispatch, batchRedispatchRows, todoSummary,
   unfinishedWithoutChild, rebindRefusal, grepHistory } = core;
+/** Why idle_dormant must refuse, with this deployment's wording for held work (State claims). */
+export const dormancyRefusal = options => core.dormancyRefusal({ heldReason: texts.heldWork, ...options });
 /** One durable snapshot per session bootstrap / successful compaction epoch. */
 export class StateInjection extends core.ContextInjection {
   constructor(session, runtime, createMessage) {

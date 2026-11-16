@@ -179,7 +179,7 @@ export function watchRefusal({ pid, note, alive, session, mySession, watched = f
 }
 
 /** Why idle_dormant must refuse, or null. Dormancy must never strand work: a live
- *  native child, a live State claim of this driver, or an unfinished todo plan
+ *  native child, work this driver holds (the host's heldWork), or an unfinished todo plan
  *  without a live child each refuse. claims/plans are omitted for the early check.
  *  `liveChildren` is the count the reason states; `childSessions` names them, so the
  *  refusal is actionable: a director can find the child and tell a live worker from
@@ -188,7 +188,8 @@ export function watchRefusal({ pid, note, alive, session, mySession, watched = f
  *  `isLive` rejects an id that is no longer a child at all; with sessions supplied
  *  the count is the number of ids that survive it, so a departed id neither
  *  refuses nor inflates the number. */
-export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], claims = [], plans = [], background = [], isLive = () => true }) {
+export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], claims = [], plans = [], background = [], isLive = () => true,
+  heldReason = 'you hold work that is not finished' }) {
   if (!reason) return { refused: 'reason_required', reason: 'say why no work is available' };
   const given = childSessions ? [...childSessions] : [];
   const named = given.filter(isLive).sort();
@@ -198,7 +199,7 @@ export function dormancyRefusal({ reason, liveChildren = 0, childSessions = [], 
     return { refused: 'live_children', reason: `${count} native child(ren) still running`,
       ...(named.length ? { live_children: named } : {}) };
   }
-  if (claims.length) return { refused: 'live_claims', reason: 'you hold live State claims', node_keys: claims.map(c => c.node_key) };
+  if (claims.length) return { refused: 'live_claims', reason: heldReason, node_keys: claims.map(c => c.node_key) };
   if (plans.length) return { refused: 'unfinished_plans', reason: 'finish, report or hand back these plans first', attempts: plans.map(p => p.attempt_id),
     // Which of them have nothing left to run: the director's next step there is
     // todo_finish, not another dispatch.

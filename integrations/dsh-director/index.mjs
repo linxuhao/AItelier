@@ -365,7 +365,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
         const plans = unfinishedWithoutChild(work.plans, new Set(liveAfter), work.settled);
         const background = backgroundProcesses(config.sessionId, process.pid, '/proc', sessionEnv).filter(pid => !watches.has(pid));
         const refusal = dormancyRefusal({ reason, liveChildren: liveAfter.length, childSessions: liveAfter,
-          claims, plans, background });
+          claims, plans, background, ...(texts.heldWork ? { heldReason: texts.heldWork } : {}) });
         if (refusal) return refusal;
         if (!idleReview) return { refused: 'starting', reason: 'the runtime is still starting' };
         const dormant = idleReview.enterDormancy(reason, wakeAfter * dormantMinuteMs);

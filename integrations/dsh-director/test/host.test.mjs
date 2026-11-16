@@ -83,4 +83,5 @@ test('capabilities is required and must be an array of op names; a string is nam
   assert.throws(() => validateHost({ ...good(), capabilities: 'progress' }), error =>
     /missing capabilities: an array/.test(error.message) && !/implemented but not declared/.test(error.message));
   assert.throws(() => validateHost({ ...good(), capabilities: [42] }), /every entry must be an op name string/);
+  assert.throws(() => validateHost({ ...good(), capabilities: ['progress', 'progress'] }), /capabilities: duplicate entries \(progress\)/);
 });

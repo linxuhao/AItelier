@@ -5,10 +5,10 @@
  *
  *    node normalize-recording.mjs <raw .json> <out .json.gz>
  *
- *  Re-recording: "after" from any commit at or after the split, with
- *  DSH_DIRECTOR_RECORD_DIR=<dir> node --test runtime.smoke.test.mjs in integrations/dsh-driver;
- *  "before" from commit 9dc85a7886 (the unsplit runtime plus the recorder), whose smoke
- *  test still inserts only the old runtime. */
+ *  Provenance of the stored pair (and why the current head does not reproduce 'after')
+ *  is in test/fixtures/request-bodies/step2/normalize.json. To recompute a side, record
+ *  at its commit with DSH_DIRECTOR_RECORD_DIR=<dir> node --test runtime.smoke.test.mjs in
+ *  integrations/dsh-driver, then run this script on the raw file. */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 

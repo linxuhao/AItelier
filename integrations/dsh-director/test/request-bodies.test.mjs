@@ -1,10 +1,10 @@
 /** Plugin design step 2, D5: the split changes no request a model receives.
  *
- *  Reads the two recordings in fixtures/request-bodies/step2 (before = the unsplit
- *  runtime, after = dsh-director + the backend adapter) and asserts they are equal
- *  under the rules written next to them (normalize.json): equal outside the windows
- *  in which two runs of the same code already differ. ../tools/normalize-recording.mjs is the
- *  substitution the stored files went through; it says how to re-record each side. */
+ *  Reads a FROZEN pair of recordings (fixtures/request-bodies/step2): before = the
+ *  unsplit runtime at 9dc85a7886, after = dsh-director + the backend adapter at
+ *  f2bc31f9f5 (provenance, including the re-record check, in normalize.json) and
+ *  asserts they are equal under the rules written next to them. The delivered head
+ *  does not reproduce 'after': later steps change the prompts on purpose. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

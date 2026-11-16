@@ -1,5 +1,5 @@
 {
-  "what": "Every model request of the dsh-driver smoke scenarios (runtime.smoke.test.mjs), recorded with DSH_DIRECTOR_RECORD_DIR before the dsh-director split (commit 9dc85a7886, the unsplit runtime plus the test-only recorder) and after it, on the same host state.",
+  "what": "Every model request of the dsh-driver smoke scenarios (runtime.smoke.test.mjs), recorded with DSH_DIRECTOR_RECORD_DIR. This is a FROZEN pair with a stated provenance, not something the current head reproduces.",
   "files": {
     "smoke-requests.json.gz": "{scratch, boots: [boot1, boot2, boot3]}; each request is {options, summary, child, host} as the fixture provider received it",
     "bridge-completions.json.gz": "{scratch, completions, activity}: the bodies the default host adapter sent to the backend /completion bridge (route, reasoning_effort, tools, messages)"
@@ -26,5 +26,10 @@
       }
     ]
   },
-  "reproduce": "dsh-director/tools/normalize-recording.mjs applies recorded_normalization to a raw recording; re-record 'after' from any commit at or after the split and 'before' from 9dc85a7886 (see that script)."
+  "provenance": {
+    "before": "recorded 2026-11-15 ~23:22Z at commit 9dc85a7886 (main 8f3febf6da plus the test-only recorder; the unsplit runtime).",
+    "after": "recorded 2026-11-15 ~23:50Z from the working tree that was committed as f2bc31f9f5 (the split). Re-recorded at f2bc31f9f5 on 2026-11-16 ~03:00Z: equal to this stored file on all 42 requests of boots 1-2 (same stream lengths), on boot 3's provider/model/tools/system message and on every bridge body, except compaction_seq on one request (59 vs 60, the run-to-run timing value that also differs between two runs of the same commit).",
+    "not_reproducible_at_head": "later commits change what the model receives on purpose (step 4 splits the role prompts into director.md + state.md and reorders sections; the review folds add a sentence to director.md), so a recording made at the delivered head differs from 'after' by design. The equality this pair proves is the step-2 split's alone."
+  },
+  "tooling": "dsh-director/tools/normalize-recording.mjs is the substitution the stored files went through (recorded_normalization); it reproduces all four stored files from the raw recordings of the runs above."
 }

@@ -75,6 +75,8 @@ export function validateHost(host) {
   let declared = [];
   if (!Array.isArray(host.capabilities)) problems.push(`missing capabilities: an array of the optional ops this host implements (got ${host.capabilities === undefined ? 'none' : JSON.stringify(host.capabilities)})`);
   else if (host.capabilities.some(op => typeof op !== 'string')) problems.push('capabilities: every entry must be an op name string');
+  else if (new Set(host.capabilities).size !== host.capabilities.length)
+    problems.push(`capabilities: duplicate entries (${[...new Set(host.capabilities.filter((op, i) => host.capabilities.indexOf(op) !== i))].join(', ')})`);
   else declared = host.capabilities;
   for (const op of declared) {
     if (!OPTIONAL_OPS.includes(op)) problems.push(`unknown capability: ${op}`);

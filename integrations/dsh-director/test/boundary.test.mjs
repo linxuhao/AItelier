@@ -6,16 +6,17 @@
  *  shipped) and `test/fixtures/request-bodies` (the recorded request bodies, which
  *  are what the backend's own driver sent) - and compiled `.pyc` files. Symbolic
  *  links are not followed, and the walk refuses to find one (the plugin ships real
- *  files only; its default templates are real files under todo/todo_templates). The walk must visit at
- *  least MIN_FILES files and every file in MUST_VISIT, so an empty or pruned walk
- *  is red, not green.
+ *  files only; its default templates are real files under todo/todo_templates). What
+ *  the walk visits must EQUAL the manifest SHIPPED below, file for file: an empty,
+ *  pruned or grown walk is red, and adding a file to the plugin means adding it here.
  *  NAME and VOCABULARY: every byte of every walked file - code, comments,
  *  docstrings, strings of any quoting, docs, data - is searched for the backend's
  *  name (any case), its capitalised entity word, its route prefix and its tool-name
  *  shapes (see `vocabulary`). There is no tokenizer, so no quoting, comment or
  *  extension can hide a match.
- *  IMPORTS: in .mjs/.js/.ts files, an import-from, export-from, side-effect import,
- *  import() or require() whose literal specifier names the adapter directory.
+ *  IMPORTS: in every walked file, whatever its extension, an import-from,
+ *  export-from, side-effect import, import() or require() whose literal specifier
+ *  names the adapter directory.
  *  NOT covered: text or specifiers assembled at run time from pieces (this file
  *  assembles its own tokens that way), and names the backend uses that are not in
  *  this list - the adapter side checks the plugin against the tool names it really
@@ -34,11 +35,40 @@ const word = (...parts) => parts.join('');
 export { vocabulary };
 const adapterImport = new RegExp('(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)([\'"`])[^\'"`]*' + word('dsh-', 'driver') + '[^\'"`]*\\1');
 export const EXCLUDED = [`node_modules`, join('test', 'fixtures', 'request-bodies')];
-export const MIN_FILES = 30;
-export const MUST_VISIT = ['index.mjs', 'host.d.ts', 'roles.json', 'director.md', 'worker.md', join('lib', 'core.mjs'),
-  join('lib', 'host.mjs'), join('hosts', 'local.mjs'), join('todo', 'dsh_todo', 'cli.py'), join('todo', 'dsh_todo', 'batch.py'),
-  join('standalone', 'scenario.mjs'), join('standalone', 'run-in-container.sh'), join('test', 'boundary.test.mjs'),
-  join('tools', 'vocabulary.mjs'), join('todo', 'todo_templates', 'change_files.yaml')];
+export const SHIPPED = [
+  join('conformance', 'index.mjs'),
+  join('director.md'),
+  join('host.d.ts'),
+  join('hosts', 'local.mjs'),
+  join('index.mjs'),
+  join('lib', 'core.mjs'),
+  join('lib', 'goal.mjs'),
+  join('lib', 'host.mjs'),
+  join('lib', 'roles.mjs'),
+  join('lib', 'tool-discovery.mjs'),
+  join('package.json'),
+  join('roles.json'),
+  join('standalone', 'run-in-container.sh'),
+  join('standalone', 'scenario.mjs'),
+  join('test', 'boundary.test.mjs'),
+  join('test', 'host.test.mjs'),
+  join('test', 'local-host.test.mjs'),
+  join('test', 'request-bodies.test.mjs'),
+  join('todo', 'dsh_todo', '__init__.py'),
+  join('todo', 'dsh_todo', '__main__.py'),
+  join('todo', 'dsh_todo', 'batch.py'),
+  join('todo', 'dsh_todo', 'cli.py'),
+  join('todo', 'dsh_todo', 'default_hooks.py'),
+  join('todo', 'dsh_todo', 'hooks.py'),
+  join('todo', 'dsh_todo', 'plan.py'),
+  join('todo', 'dsh_todo', 'runtime.py'),
+  join('todo', 'dsh_todo', 'security_jail.py'),
+  join('todo', 'dsh_todo', 'templates.py'),
+  join('todo', 'todo_templates', 'change_files.yaml'),
+  join('tools', 'normalize-recording.mjs'),
+  join('tools', 'vocabulary.mjs'),
+  join('worker.md'),
+].map(path => path);
 
 /** Whether a plugin-relative path is excluded from the walk (exact paths only). */
 export const excluded = rel => EXCLUDED.includes(rel) || rel.endsWith('.pyc');
@@ -59,15 +89,16 @@ export function scan(text, path) {
   const found = [];
   text.split('\n').forEach((line, i) => {
     for (const [pattern, reason] of vocabulary) if (pattern.test(line)) found.push(`${i + 1}: ${reason}`);
-    if (/\.(mjs|js|ts)$/.test(path) && adapterImport.test(line)) found.push(`${i + 1}: adapter import`);
+    if (adapterImport.test(line)) found.push(`${i + 1}: adapter import`);
   });
   return found;
 }
 
-test('the walk visits the plugin, not an empty or pruned tree', () => {
-  const visited = walk().map(path => relative(root, path));
-  assert.ok(visited.length >= MIN_FILES, `visited only ${visited.length} files: ${visited.join(', ')}`);
-  for (const file of MUST_VISIT) assert.ok(visited.includes(file), `not visited: ${file}`);
+test('the walk visits exactly the shipped manifest, file for file', () => {
+  const visited = walk().map(path => relative(root, path)).sort();
+  const expected = [...SHIPPED].sort();
+  assert.deepEqual({ unexpected: visited.filter(f => !expected.includes(f)), missing: expected.filter(f => !visited.includes(f)) },
+    { unexpected: [], missing: [] });
   assert.ok(!visited.some(file => file.startsWith(EXCLUDED[1] + sep)), 'the recorded request bodies were walked');
 });
 
@@ -96,6 +127,9 @@ test('the gate refuses one sample of every shape its header says it covers', () 
     ['x.mjs', "const m = await import('" + adapter + "');"],
     ['x.mjs', 'const m = await import(' + bt + adapter + bt + ');'],
     ['x.mjs', "const m = require('" + adapter + "');"],
+    ['x.cjs', "const m = require('" + adapter + "');"],
+    ['X.MJS', "import { a } from '" + adapter + "';"],
+    ['notes.md', "see import('" + adapter + "')"],
   ];
   for (const [path, text] of cases) assert.notDeepEqual(scan(text, path), [], 'not refused: ' + path + ': ' + text);
   for (const text of ["const reason = 'you hold work that is not finished';", "import { x } from './lib/core.mjs';",

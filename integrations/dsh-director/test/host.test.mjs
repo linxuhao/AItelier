@@ -1,7 +1,7 @@
 /** Loading refuses a host that cannot work, naming every problem (design §9 MF3/MF4). */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateHost } from '../lib/host.mjs';
+import { validateHost, OPTIONAL_OPS } from '../lib/host.mjs';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,5 +83,24 @@ test('capabilities is required and must be an array of op names; a string is nam
   assert.throws(() => validateHost({ ...good(), capabilities: 'progress' }), error =>
     /missing capabilities: an array/.test(error.message) && !/implemented but not declared/.test(error.message));
   assert.throws(() => validateHost({ ...good(), capabilities: [42] }), /every entry must be an op name string/);
-  assert.throws(() => validateHost({ ...good(), capabilities: ['progress', 'progress'] }), /capabilities: duplicate entries \(progress\)/);
+});
+
+test('a repeated capability is refused for that alone, and does not blame the ops the host does declare', () => {
+  // The host implements every optional op and declares them all, one twice: a duplicate
+  // list must not make the "implemented but not declared" check run against no list.
+  const implemented = Object.fromEntries(OPTIONAL_OPS.map(op => [op, op === 'texts' || op === 'labels' ? {} : () => {}]));
+  const allDeclared = [...OPTIONAL_OPS, 'progress'];
+  const refusedProblems = host => {
+    try { validateHost(host); }
+    catch (error) {
+      assert.ok(error.message.startsWith('directorHost refused: '), error.message);
+      return error.message.slice('directorHost refused: '.length).split('; ');
+    }
+    throw new Error('the host was accepted');
+  };
+  assert.deepEqual(refusedProblems({ ...good(), ...implemented, capabilities: allDeclared }),
+    ['capabilities: duplicate entries (progress)']);
+  // The duplicate does not silence a genuinely undeclared, implemented op.
+  assert.deepEqual(refusedProblems({ ...good(), ...implemented, capabilities: allDeclared.filter(op => op !== 'workState') }),
+    ['capabilities: duplicate entries (progress)', 'implemented but not declared: workState']);
 });

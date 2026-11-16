@@ -16,10 +16,13 @@ Dependencies: the suite requires the pinned ``@deepseek-ai/dsh`` install at
 install comes from the image, not from a ``node_modules`` tree in the repository, so no
 npm install is needed. ``node`` is expected at ``/usr/local/bin/node`` in the image.
 
-Runner shape: the suite measured 146/146 both with and without an init (``docker run
---init``) as PID 1. Without an init, an unreaped orphan is a zombie; the driver's
-``alive()`` probe is zombie-aware (it reads ``/proc/<pid>/stat`` and treats state ``Z`` as
-dead), so the verdict does not depend on the runner reaping. A real leak is still caught.
+Runner shape: when this row was written the suite was green both with and without an init
+(``docker run --init``) as PID 1, and it has grown since, so read the row's own counts.
+Without an init, an unreaped orphan is a zombie, and the driver's
+``alive()`` probe is zombie-aware: it reads ``/proc/<pid>/stat`` and treats ``Z`` as dead,
+the dying states ``X``/``x`` as dead, and a per-pid read that fails as dead wherever
+``/proc`` exists (only a machine with no ``/proc`` at all keeps the ``kill(pid, 0)``
+answer). So the verdict does not depend on the runner reaping. A real leak is still caught.
 
 Never a skip: where ``node`` is missing or the pinned install is absent, the row FAILS,
 because the driver suite is then unmeasured and a skip would look like a pass.

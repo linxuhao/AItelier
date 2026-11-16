@@ -205,6 +205,38 @@ def _overwritten_by_runtime_exit(text):
     return str(text or "").startswith(RUNTIME_EXIT_NOTICE)
 
 
+def record_exit(row, watched, uptime, *, supervisor_stopped):
+    """The ONE line a driver's exit leaves in the unit journal, and nothing else.
+
+    A driver that had been SERVING used to leave no trace at all when it went:
+    `DshDrivers._observe` writes `DSH exited with code N` into `last_error`, and
+    the next `start()` stamps `phase='starting', last_error=''` over it, so a
+    crash, an operator restart and a watchdog kill read identically afterwards
+    and the in-flight turn's children are the only evidence - gone with them.
+
+    The journal is the sink that outlives the process (the unit's StandardOutput
+    is journald), and one bounded line is what an operator can afford per exit.
+    It carries the driver id, the pid, the STATUS as the code or - for a negative
+    returncode - the signal, the uptime, and whether this supervisor is why the
+    child is gone. It carries no log text, so it cannot echo a credential.
+
+    Only an exit this loop watched is recorded: a spawn that never reached a
+    serving phase has its own line (the failed-start one, which is untouched by
+    this) and a second line for one death would read as two events. Nothing is
+    claimed that was not seen - no returncode, no line, and no signal invented.
+    """
+    proc = watched["proc"]
+    if not watched["served"] or proc.returncode is None:
+        return False
+    status = (f"signal {-proc.returncode}" if proc.returncode < 0
+              else f"exit code {proc.returncode}")
+    print(f"DSH host {_bounded(str(row['project_id']))}: "
+          f"{_bounded(str(row['driver_id']))} pid {proc.pid} exited with {status} "
+          f"after {uptime:.1f}s uptime, supervisor_stopped="
+          f"{'true' if supervisor_stopped else 'false'}", flush=True)
+    return True
+
+
 async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WINDOW_SECONDS):
     """One controller per installation; systemd owns its entire process group.
 
@@ -226,6 +258,13 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
     `startup_window` keeps its own, narrower job - a child alive past it has
     survived its start, which ends a streak - and `STARTUP_DECISION_SECONDS`
     bounds how long a spawn stays undecided when nothing ever reports in.
+
+    A SERVING driver's exit is a different event with its own record: one line in
+    the journal (`record_exit`), written for the child this loop spawned, naming
+    the driver, the pid, the exit code or signal, the uptime and whether this
+    supervisor asked for the stop. It changes nothing about the failed-start
+    machinery above - a serving death still counts nothing, writes no record and
+    stamps no row text.
     """
     runtime.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (runtime.root / "host-supervisor.lock").open("a") as lock:
@@ -242,6 +281,13 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
         # project -> this spawn has served: the runtime reported one of the serving
         # phases for it, which is the only evidence that a start worked.
         served = set()
+        # project -> {"proc": child, "started": monotonic instant, "served": bool}
+        # for each child THIS loop spawned whose exit it has not yet recorded.
+        # Deliberately separate from `spawned_at`/`served` above: those answer
+        # whether a START worked and are dropped the moment that is decided, so
+        # they stop watching the child entirely - and the death worth a record is
+        # the one after that point, of a driver that had been serving for minutes.
+        children = {}
         try:
             while not stopped.is_set():
                 try:
@@ -252,6 +298,16 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                 for row in rows:
                     project = row["project_id"]
                     try:
+                        watched = children.get(project)
+                        if watched is not None and watched["proc"].returncode is not None:
+                            # The child this loop spawned is gone, whether or not
+                            # its death was a start problem. Recorded first, while
+                            # the state that describes it is still here, and
+                            # exactly once: the entry goes with the record.
+                            # Nothing below is changed by it.
+                            children.pop(project, None)
+                            record_exit(row, watched, time.monotonic() - watched["started"],
+                                        supervisor_stopped=False)
                         if not row["enabled"]:
                             retry_at.pop(project, None)
                             failures.pop(project, None)
@@ -260,8 +316,22 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                             served.discard(project)
                             if project in runtime.processes:
                                 await runtime.stop(project)
+                                # The exit above is this supervisor's own decision,
+                                # not a crash: the line says so, and a driver
+                                # stopped here is not a failed start either.
+                                child = children.pop(project, None)
+                                if child is not None:
+                                    record_exit(row, child,
+                                                time.monotonic() - child["started"],
+                                                supervisor_stopped=True)
                         else:
                             now = time.monotonic()
+                            watching = children.get(project)
+                            if watching is not None and row.get("phase") in SERVING_PHASES:
+                                # The runtime reported in over /activity for THIS
+                                # child, so whatever ends it from here is the exit
+                                # of a driver that had been serving.
+                                watching["served"] = True
                             alive = runtime.running(project)
                             spawned = spawned_at.get(project)
                             if spawned is not None and row.get("phase") in SERVING_PHASES:
@@ -358,6 +428,10 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 else:
                                     if runtime.processes.get(project) is not None:
                                         spawned_at[project] = time.monotonic()
+                                        children[project] = {
+                                            "proc": runtime.processes[project],
+                                            "started": spawned_at[project],
+                                            "served": False}
                                         served.discard(project)  # a new spawn, nothing served yet
                                     # No child to watch means this runtime did not
                                     # spawn one, so there is nothing to judge here.
@@ -369,9 +443,19 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                 except asyncio.TimeoutError:
                     pass
         finally:
+            # Every child still ALIVE here is one this supervisor is about to
+            # stop: `close()` asks each of them, so their exits are this loop's
+            # decision and the line says so. One that died on its own just before
+            # the shutdown is not - it gets the exit it actually was.
+            stopping = {project for project, child in children.items()
+                        if child["proc"].returncode is None}
             await runtime.close()
             for row in runtime.rows():
                 publish(runtime, row)
+                child = children.pop(row["project_id"], None)
+                if child is not None:
+                    record_exit(row, child, time.monotonic() - child["started"],
+                                supervisor_stopped=row["project_id"] in stopping)
 
 
 async def main():

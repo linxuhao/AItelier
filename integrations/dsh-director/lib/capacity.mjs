@@ -9,6 +9,7 @@
  *  went out, so a restart in between still wakes the director. */
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 /** The guard's numbers. `reserve` is at least 1: the slot step 6 resumes a worker in. */
 export function capacityLimits({ hostLimit, dshLimit, reservedSlots }) {
@@ -39,7 +40,7 @@ export function isDshLimitRefusal(result) {
 
 /** Refused dispatches waiting for a free slot, persisted (`refused-dispatches.json`). */
 export class RefusedDispatches {
-  constructor(dir) { this.dir = dir; this.file = join(dir, 'refused-dispatches.json'); this.list = []; this.seq = 0; this.writing = Promise.resolve(); }
+  constructor(dir) { this.dir = dir; this.file = join(dir, 'refused-dispatches.json'); this.list = []; this.writing = Promise.resolve(); }
   async load() {
     await mkdir(this.dir, { recursive: true });
     try { const parsed = JSON.parse(await readFile(this.file, 'utf8')); if (Array.isArray(parsed)) this.list = parsed.filter(e => typeof e?.key === 'string'); }
@@ -57,7 +58,9 @@ export class RefusedDispatches {
   }
   /** Record one refusal (`by`: 'plugin' for the guard, 'dsh' for DSH's own refusal). */
   add(dispatch, by) {
-    this.list.push({ ...dispatch, by, at: new Date().toISOString(), key: `${Date.now()}-${process.pid}-${++this.seq}` });
+    // A random key: a counter restarts with each instance and a clock repeats within
+    // a millisecond, and a repeated key would drop a refusal no wake named.
+    this.list.push({ ...dispatch, by, at: new Date().toISOString(), key: randomUUID() });
     return this.#save();
   }
   /** Drop the refusals a delivered wake named; refusals recorded since stay. */

@@ -166,8 +166,8 @@ def _drive(sf, run_id, monkeypatch, *, ticks, clock_step, second_driver=True):
 
     * `get_skillflow` / `_get_or_create_skillflow_run` point the tick at this
       test's host and run instead of the server's;
-    * `_sync_project_status_to_db` / `_reconcile_lease` / `_odbg` write the
-      server's project table, lease and debug log, none of which exist here;
+    * `_sync_project_status_to_db` / `_reconcile_lease` write the
+      server's project table and lease, neither of which exists here;
     * `tick_log` is recorded instead of written to the operator's log file;
     * `aitelier.runner.AgentStepRunner` is the LLM agent: it writes one code
       change for a claimed step and returns an empty result;
@@ -188,7 +188,6 @@ def _drive(sf, run_id, monkeypatch, *, ticks, clock_step, second_driver=True):
     monkeypatch.setattr(scheduler, "tick_log",
                         lambda project_id, outcome, **detail:
                         logged.append((outcome, detail)))
-    monkeypatch.setattr(scheduler, "_odbg", lambda *a, **k: None)
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
     monkeypatch.setattr(scheduler, "_get_or_create_skillflow_run",
                         lambda project_id: run_id)

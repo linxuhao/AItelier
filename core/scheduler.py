@@ -21,7 +21,6 @@ from api.dependencies import get_db_manager, get_workspace_manager, get_skillflo
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 from core.workspace_manager import DPE_GRAPH_NAME
 from aitelier.step_labels import COARSE_MAP
-from core.orphan_dbg import odbg as _odbg
 from core import gate_deferral
 from core import event_loop_lag
 
@@ -168,11 +167,6 @@ _hung_warnings: dict[tuple, float] = {}  # (run_id, step_id, step_instance_id) -
 # pause emits exactly once. Cleared when the run leaves "paused", so rejection
 # loop-backs and task-goal loops re-pausing the same step re-emit.
 _checkpoint_emitted: set[tuple] = set()
-
-# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause
-# is pinned). `_odbg` (shared with aitelier/runner.py via core.orphan_dbg) mirrors
-# every line to stdout AND a durable ~/.AItelier/orphan_dbg.log.
-_orphan_snapshots: set = set()  # (run_id, step_instance_id) already-dumped, for dedup
 
 
 db = get_db_manager()
@@ -1035,8 +1029,8 @@ async def _check_hung_claims():
             # skillflow_steps has no such column, so this SELECT raised
             # OperationalError on EVERY run and the bare `except: continue`
             # below swallowed it, silently reducing the entire supervisor —
-            # hung warnings AND the orphan snapshot — to a no-op. Which is the
-            # real reason nobody ever caught the orphan in the act.
+            # hung warnings included — to a no-op. Which is the real reason
+            # nobody ever caught the orphan in the act.
             try:
                 row = sf._conn.execute(
                     "SELECT id AS step_instance_id, step_id, claimed_at "
@@ -1071,53 +1065,6 @@ async def _check_hung_claims():
                 duration_s = (now_dt - claimed_at_dt).total_seconds()
             except Exception:
                 continue
-
-            # ORPHAN-DBG: trace-recency heartbeat. A claimed step whose latest
-            # skillflow_trace row is stale = executor dead/zombie/hung. Dump a
-            # ONE-SHOT forensic snapshot (all thread stacks) BEFORE the reaper
-            # above resets it to pending, so the next occurrence is captured in
-            # the act rather than after the fact.
-            #
-            # This was a hardcoded 120 under a comment claiming re-dispatch at
-            # "~300s" — skillflow's DEFAULT, not the threshold AItelier actually
-            # passes to SkillFlow(). Against the real value the trap sprang
-            # strictly AFTER the event it exists to catch, every single time. A
-            # restated constant drifts from the configured one, so derive it:
-            # half the live window is comfortably before the reap and still
-            # several 25s heartbeat intervals of silence, so it cannot fire on a
-            # merely slow step. Floor at 50s for the same reason.
-            try:
-                _ORPHAN_TRACE_STALE_S = max(
-                    50.0, float(getattr(sf, "_stale_threshold", 300)) / 2.0)
-                _osnap_key = (run_id, row["step_instance_id"])
-                if _osnap_key not in _orphan_snapshots:
-                    rows = sf.trace_query(run_id,
-                        "SELECT MAX(created_at) FROM skillflow_trace "
-                        "WHERE run_id = ? AND step_id = ?",
-                        (run_id, row["step_id"]))
-                    _lt = rows[0] if rows else None
-                    _last_trace = _lt[0] if _lt else None
-                    if _last_trace:
-                        _lt_dt = _dt.datetime.strptime(
-                            _last_trace[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S"
-                        ).replace(tzinfo=_dt.timezone.utc)
-                        _trace_age = (now_dt - _lt_dt).total_seconds()
-                        if _trace_age > _ORPHAN_TRACE_STALE_S:
-                            _orphan_snapshots.add(_osnap_key)
-                            import sys as _sys, traceback as _tb, threading as _th
-                            _lock_held = _get_tick_lock(project_id).locked()
-                            _odbg(f"ORPHAN/HUNG SNAPSHOT project={project_id} "
-                                  f"step={row['step_id']} inst={row['step_instance_id']} "
-                                  f"claim_age={duration_s:.0f}s trace_age={_trace_age:.0f}s "
-                                  f"tick_lock_held={_lock_held} last_trace={_last_trace}")
-                            _frames = _sys._current_frames()
-                            for _to in _th.enumerate():
-                                _fr = _frames.get(_to.ident)
-                                if _fr is not None:
-                                    _odbg(f"  thread {_to.name} ({_to.ident}):\n"
-                                          + "".join(_tb.format_stack(_fr)))
-            except Exception as _e:
-                _odbg(f"orphan-snapshot check failed: {_e}")
 
             if duration_s <= warn_threshold_s:
                 continue
@@ -1587,18 +1534,11 @@ async def _run_skillflow_tick(project_id: str, loop):
         event_bus=_get_event_bus(),
     )
 
-    # ORPHAN-DBG: correlation id = step instance + claim version (unique per attempt,
-    # available on both sides of the executor boundary — no signature change needed).
-    _cid = f"inst{claimed.token.step_instance_id}.v{claimed.token.version}"
     _t0 = _time.time()
-    _cur = asyncio.current_task()
-    _odbg(f"{_cid} tick execute BEGIN step={claimed.step_id} project={project_id} "
-          f"task={_cur.get_name() if _cur else '?'}")
-    # THREE facts the log used to collapse into one word. `_executed` = the
-    # runner returned. `_confirm_returned` = `confirm_step` came back without
-    # raising. Neither is "the work was accepted", and the field is named for
-    # what is actually observed rather than for what a reader would like it to
-    # mean.
+    # TWO facts the log used to collapse into one word. `_confirm_returned` =
+    # `confirm_step` came back without raising. It is not "the work was
+    # accepted", and the field is named for what is actually observed rather
+    # than for what a reader would like it to mean.
     #
     # A normal return is NOT acceptance, and that is not a corner case:
     # `confirm_step` returns normally after an output-schema failure, after a
@@ -1608,17 +1548,12 @@ async def _run_skillflow_tick(project_id: str, loop):
     # opposite. Establishing acceptance from here would mean re-reading the step
     # row, i.e. asking skillflow a question it has no API for; naming the
     # observed fact honestly is the smaller and truer change.
-    _executed = False
     _confirm_returned = False
     _fenced = False
     try:
         result = await runner.execute(claimed)
-        _executed = True
-        _odbg(f"{_cid} execute returned; confirm BEGIN step={claimed.step_id}")
         sf.confirm_step(claimed.token, result)
         _confirm_returned = True
-        _odbg(f"{_cid} confirm returned (not necessarily accepted) "
-              f"step={claimed.step_id}")
 
         # Sync task manifest to DB when the PM step or its review completes.
         # FW-2: also sync on "3" so a re-run (3_review reject → 3) refreshes the
@@ -1633,7 +1568,6 @@ async def _run_skillflow_tick(project_id: str, loop):
         # one would only re-open the claim `fail_run` just closed (which is why
         # `fail_step` no-ops on a terminal run too). Say what happened; the run
         # is already terminal and `_sync_project_status_to_db` below carries it.
-        _odbg(f"{_cid} fenced by cancellation step={claimed.step_id}: {e}")
         tick_log(project_id, "cancelled_mid_step", run=run_id[:8],
                  step=claimed.step_id, elapsed=f"{_time.time() - _t0:.1f}s",
                  reason=str(e)[:160])
@@ -1653,12 +1587,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         # tick at once — `_cancel_detached_ticks` for `poll_and_execute`'s
         # detached ticks, apscheduler's own job cancellation for the demo and
         # per-owner pollers — so ONE shutdown strands every in-flight claim
-        # without this), so the diagnostic stays and the claim goes back.
-        import traceback as _tb
-        _odbg(f"{_cid} *** CANCELLED *** step={claimed.step_id} "
-              f"execute_returned={_executed} elapsed={_time.time() - _t0:.1f}s — "
-              f"releasing the claim. stack:\n"
-              + "".join(_tb.format_stack()))
+        # without this), so the claim goes back.
         from core.run_driver import release_claim_on_cancel
         release_claim_on_cancel(sf, claimed)
         raise
@@ -1683,8 +1612,6 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "executed", run=run_id[:8], step=claimed.step_id,
                  confirm_returned=_confirm_returned,
                  elapsed=f"{_time.time() - _t0:.1f}s")
-    _odbg(f"{_cid} tick END step={claimed.step_id} executed={_executed} "
-          f"confirm_returned={_confirm_returned}")
 
 
 def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str):
@@ -2048,7 +1975,7 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
 
 
 def log_job_event(ev) -> None:
-    """APScheduler anomaly → the orphan sink AND the tick log.
+    """APScheduler anomaly → the tick log.
 
     Module level so the scheduler and its test run the same code: the first
     version of this lived inside the start function, and its test could only
@@ -2066,8 +1993,6 @@ def log_job_event(ev) -> None:
     outcome = {EVENT_JOB_MAX_INSTANCES: "tick_skipped",
                EVENT_JOB_MISSED: "tick_missed",
                EVENT_JOB_ERROR: "tick_error"}.get(ev.code, "tick_event")
-    _odbg(f"apscheduler job={getattr(ev, 'job_id', '?')} code={ev.code} "
-          f"outcome={outcome} exc={getattr(ev, 'exception', None)}")
     when = (getattr(ev, "scheduled_run_times", None)
             or getattr(ev, "scheduled_run_time", None))
     if isinstance(when, (list, tuple)):

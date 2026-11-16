@@ -93,10 +93,6 @@ def native_context_dir() -> Path:
     return aitelier_home() / "native_context"
 
 
-def orphan_log_path() -> Path:
-    return aitelier_home() / "orphan_dbg.log"
-
-
 def logs_dir() -> Path:
     """Diagnostic artifacts that outlive one request (stack dumps, traces).
 

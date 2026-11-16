@@ -85,7 +85,7 @@ def test_datadir_honors_env_isolation(tmp_path, monkeypatch):
         assert str(tmp_path) in p
     for p in (datadir.workspaces_dir(), datadir.projects_dir(),
               datadir.configs_dir(), datadir.meta_dir(),
-              datadir.scratch_dir(), datadir.orphan_log_path()):
+              datadir.scratch_dir()):
         assert str(p).startswith(str(tmp_path))
 
 

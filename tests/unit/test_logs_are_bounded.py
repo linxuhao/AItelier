@@ -5,43 +5,9 @@ leak, not a diagnostic — and this one lives on the MOUNTED data volume, so it
 survives every container rebuild that would otherwise have wiped it.
 """
 
-import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-def _reset(mod):
-    mod._logger = None
-    for h in list(logging.getLogger("aitelier.orphan_dbg").handlers):
-        logging.getLogger("aitelier.orphan_dbg").removeHandler(h)
-
-
-def test_the_orphan_debug_sink_rotates(tmp_path, monkeypatch):
-    """It was a bare `open(..., "a")`: every line ever written, kept forever.
-    5.1 MB by the time anyone looked, with nothing to stop it."""
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
-    from core import orphan_dbg
-    _reset(orphan_dbg)
-    try:
-        handlers = orphan_dbg._sink().handlers
-        rot = [h for h in handlers if isinstance(h, RotatingFileHandler)]
-        assert rot, "the durable orphan log has no rotation"
-        assert rot[0].maxBytes > 0 and rot[0].backupCount > 0
-    finally:
-        _reset(orphan_dbg)
-
-
-def test_the_orphan_sink_actually_writes(tmp_path, monkeypatch):
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
-    from core import orphan_dbg, datadir
-    _reset(orphan_dbg)
-    try:
-        orphan_dbg.odbg("hello")
-        assert "hello" in datadir.orphan_log_path().read_text()
-    finally:
-        _reset(orphan_dbg)
 
 
 def test_no_durable_log_is_opened_for_append_without_rotation():

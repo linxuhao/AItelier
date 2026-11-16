@@ -1050,15 +1050,63 @@ test('CLI results: a refusal is returned with the brief, a missing brief is fill
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+// Liveness of a pid this driver watches, at module scope because it carries a contract of
+// its own (the witness below states it through `seam`, with no real process to race):
+//  - Z (zombie), X and x (dying) are all DEAD. kill(pid, 0) alone reads an unreaped zombie
+//    as alive: a SIGKILLed grandchild whose parent has exited stays `Z` until someone reaps
+//    it, and that is not a survivor.
+//  - A /proc read that fails for THIS pid (ESRCH/ENOENT: it exited between the two reads)
+//    is DEAD on a machine that has /proc. Only a machine with no /proc at all keeps the
+//    kill(0) answer, and that is decided by probing /proc/self/stat once - never by reading
+//    every per-pid error as "no /proc", which is exactly how a pid that just died came back
+//    alive.
+//  - The order (kill(pid, 0) first, then /proc) is what makes the first answer mean
+//    anything, and the process-group semantics are unchanged: a negative pid is the group.
+const alive = (pid, { kill = (target, signal) => process.kill(target, signal), read = path => readFileSync(path, 'utf8') } = {}) => {
+  try { kill(pid, 0); } catch { return false; }
+  let stat;
+  try {
+    stat = read(`/proc/${pid}/stat`);
+  } catch {
+    // It left between the two reads. Dead where /proc exists; a machine with no /proc at
+    // all keeps the kill(0) answer, decided by one probe rather than by this error.
+    try { read('/proc/self/stat'); return false; } catch { return true; }
+  }
+  // `pid (comm) ST ...`: comm may contain spaces and parentheses, so the state is the first
+  // field after the LAST ')'.
+  const state = stat.slice(stat.lastIndexOf(')') + 2).trimStart().charAt(0);
+  return state !== 'Z' && state !== 'X' && state !== 'x';
+};
+
+test('pid liveness: a process that left between the two reads, or is Z/X/x, is dead; S is alive', () => {
+  // The witness drives the helper through its seam: the seam answers for this pid, so no
+  // arm depends on winning the race against a real process exiting.
+  const pid = 424242;
+  const esrch = Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+  const noent = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  const line = state => `${pid} (a worker (with) parens) ${state} 1 1 1 0 -1 4194560`;
+  const seam = ({ stat, error, proc = true, kill }) => ({
+    kill: kill ?? ((target, signal) => { if (target !== pid || signal !== 0) throw new Error('unexpected kill ' + target + ' ' + signal); }),
+    read: path => {
+      if (path === `/proc/${pid}/stat`) { if (error) throw error; return stat; }
+      if (path === '/proc/self/stat') { if (proc) return '1 (node) S 1 1 1'; throw noent; }
+      throw noent;
+    },
+  });
+  assert.equal(alive(pid, seam({ error: esrch })), false, 'an ESRCH from the /proc read read as alive');
+  assert.equal(alive(pid, seam({ stat: line('X') })), false, 'state X read as alive');
+  assert.equal(alive(pid, seam({ stat: line('x') })), false, 'state x read as alive');
+  assert.equal(alive(pid, seam({ stat: line('Z') })), false, 'zombie Z read as alive');
+  assert.equal(alive(pid, seam({ stat: line('S') })), true, 'a live S read as dead');
+  // No /proc at all on the machine is the one case that keeps the kill(0) answer.
+  assert.equal(alive(pid, seam({ error: esrch, proc: false })), true, 'a machine with no /proc lost the kill(0) answer');
+  assert.equal(alive(pid, seam({ stat: line('S'), kill: () => { throw esrch; } })), false, 'kill(0) ESRCH read as alive');
+  // And the real path (no seam) still reads this live process alive.
+  assert.equal(alive(process.pid), true, 'the real /proc path read a live pid as dead');
+});
+
 test('CLI bounds: done/finish get the plan budget plus a minute; a timeout or abort stops the process group (SIGTERM, then SIGKILL)', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-todo-bound-'));
-  // kill(pid, 0) alone reads an unreaped zombie as alive: a SIGKILLed grandchild whose
-  // parent has exited stays `Z` until someone reaps it, and that is not a survivor.
-  const alive = pid => {
-    try { process.kill(pid, 0); } catch { return false; }
-    try { if (/\)\s+Z\s/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false; } catch { /* no /proc: kill(0) alone */ }
-    return true;
-  };
   let sleeper;
   try {
     const cli = await fakeCli(join(directory, 'cli'));

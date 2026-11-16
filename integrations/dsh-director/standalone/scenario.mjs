@@ -66,6 +66,7 @@ export function apply(ctx) {
       else if (options.sessionId !== 'director') block = { type: 'text', text: 'Fixture session' };
       else block = once('take1', () => tool('take-w1', 'work_update', { id: W[0].id, title: 'first', holder: 'director' }))
         ?? once('take2', () => tool('take-w2', 'work_update', { id: W[1].id, title: 'second', holder: 'director' }))
+        ?? once('held', () => tool('held-sleep', 'idle_dormant', { reason: 'nothing to do yet', wake_after_minutes: 60 }))
         ?? once('plan1', () => plan(W[0])) ?? once('plan2', () => plan(W[1]))
         ?? once('spawn1', () => tool('spawn-w1', 'subagent', { description: 'worker ' + W[0].id, prompt: 'WORKER_FOR ' + W[0].id + ': run your plan', cwd: W[0].repo }))
         ?? once('spawn2', () => tool('spawn-w2', 'subagent', { description: 'worker ' + W[1].id, prompt: 'WORKER_FOR ' + W[1].id + ': run your plan', cwd: W[1].repo }))
@@ -145,6 +146,16 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
     const deadline = Date.now() + timeoutMs;
     while (!said('ALL_DONE') && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 200));
     check(said('ALL_DONE'), 'the director never finished (ALL_DONE)');
+    // The work-item half: both items were taken (created, held by the director, working)
+    // before anything closed them, and dormancy was refused while they were held.
+    for (const w of work) {
+      const [taken] = results('take-' + w.id);
+      check(taken?.item?.id === w.id && taken.item.holder === 'director' && taken.item.state === 'working',
+        `${w.id}: not taken by the director: ${JSON.stringify(taken).slice(0, 300)}`);
+    }
+    const [heldSleep] = results('held-sleep');
+    check(heldSleep?.refused === 'live_claims' && JSON.stringify(heldSleep.node_keys) === JSON.stringify(work.map(w => w.id)),
+      'dormancy was not refused for the held work items: ' + JSON.stringify(heldSleep).slice(0, 300));
     for (const w of work) {
       const [planned] = results('plan-' + w.id);
       check(Array.isArray(planned?.items) && planned.items.join() === 'write,deliver', `${w.id}: plan not frozen as write,deliver: ${JSON.stringify(planned).slice(0, 300)}`);

@@ -1,7 +1,7 @@
 """Plans are expanded from reusable repository templates, never written per task.
 
 A template is a versioned asset in `todo_templates/<name>.yaml` (the host's TEMPLATES_DIR hook
-names its own directory; AITELIER_TODO_TEMPLATES overrides both), reviewed like the predicate library it
+names its own directory; the TEMPLATES setting overrides both), reviewed like the predicate library it
 binds. It declares typed params and items whose predicate args may reference a param
 as a WHOLE value (`paths: $paths`) and whose titles may interpolate `${param}`.
 
@@ -64,7 +64,7 @@ from typing import Any, Mapping, NamedTuple
 # A report's PARENT is judged by `dsh_todo.security_jail.verify_path_safe`, the call the run makes
 # (`dsh_todo.runtime._owned_entry`), so the audit and the run cannot disagree about which parent
 # escapes through a symlink. `dsh_todo.security_jail` imports nothing from `dsh_todo`, so no cycle.
-from dsh_todo.hooks import TEMPLATES_DIR
+from dsh_todo.hooks import TEMPLATES_DIR, setting
 from dsh_todo.security_jail import SecurityException, verify_path_safe
 from dsh_todo.plan import Refusal, TodoPlan, _relative
 # `_scope_regex` is reused, not restated: at run time `changes_within` compiles each scope glob with
@@ -104,9 +104,9 @@ _STAGE_REPORT_PREDICATE = {"find": "findings_shape", "verify": "verdict_enum"}
 
 
 def default_dir() -> Path:
-    """AITELIER_TODO_TEMPLATES, like `create --plan-json`, is not gated: both rely on the DSH tool
+    """The TEMPLATES setting, like `create --plan-json`, is not gated: both rely on the DSH tool
     that calls `create` being root-only (a child must never choose the template directory)."""
-    return Path(os.environ.get("DSH_TODO_TEMPLATES") or os.environ.get("AITELIER_TODO_TEMPLATES") or TEMPLATES_DIR
+    return Path(setting("TEMPLATES") or TEMPLATES_DIR
                 or Path(__file__).resolve().parents[1] / "todo_templates")
 
 

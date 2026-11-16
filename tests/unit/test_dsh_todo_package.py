@@ -66,9 +66,9 @@ items:
         args: {scope: $scope}
 """
 
-#: The CLI's environment contract with the driver runtime (runtime.mjs sets the first, the
-#: driver or a test the others). Renaming them changes that contract, which is not this move.
-ALLOWED_NAMES = ("AITELIER_TODO_TEMPLATES", "AITELIER_TODO_CLOCK_OVERRIDE", "AITELIER_DSH_STATE_DIR")
+#: No exceptions: the package reads its settings as DSH_TODO_<name> through the setting()
+#: hook; this deployment's older names live in core/dsh_todo_hooks.py, not in the package.
+ALLOWED_NAMES = ()
 
 
 def git(repo: Path, *args: str) -> str:
@@ -98,7 +98,7 @@ def test_the_package_runs_a_template_plan_with_nothing_but_its_own_directory(tmp
     git(repo, "commit", "-q", "-m", "base")
     base = git(repo, "rev-parse", "HEAD")
     # No DSH_TODO_HOOKS, no PYTHONPATH: the package's own default hooks.
-    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "AITELIER_TODO_TEMPLATES": str(templates), **_GIT_ENV}
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "DSH_TODO_TEMPLATES": str(templates), **_GIT_ENV}
 
     def ok(*args: str) -> dict:
         code, result = standalone(*args, cwd=tmp_path, env=env)
@@ -184,17 +184,23 @@ def test_the_driver_environment_runs_the_cli_with_the_same_hooks_and_templates(t
     assert json.loads(new.stdout)["directory"] == str(REPO_ROOT / "todo_templates")
 
 
-def test_the_package_finds_its_store_from_its_own_variable_or_the_aitelier_one(tmp_path):
-    """DSH_TODO_STATE_DIR is the package's own name (a host without AItelier sets
-    it); AITELIER_DSH_STATE_DIR, what the AItelier driver has always set, is read
-    only when the first is absent; with neither, the refusal names both."""
+def test_the_package_reads_only_its_own_settings_and_the_aitelier_hooks_add_the_legacy_names(tmp_path, monkeypatch):
+    """Alone, the package's store comes from DSH_TODO_STATE_DIR only: the driver's older
+    AITELIER_DSH_STATE_DIR means nothing to it, and with neither the refusal names its own
+    variable. Through this deployment's hooks (core/dsh_todo_hooks.py) the older names still
+    work, after the package's own: every setting, own name first."""
     base = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
     own, legacy = tmp_path / "own", tmp_path / "legacy"
     for d in (own, legacy):
         (d / "todo").mkdir(parents=True)
-    code, result = standalone("list", cwd=tmp_path, env={**base, "DSH_TODO_STATE_DIR": str(own), "AITELIER_DSH_STATE_DIR": str(legacy)})
-    assert code == 0 and result.get("store") in (None, str(own / "todo")), result
-    code, result = standalone("list", cwd=tmp_path, env={**base, "AITELIER_DSH_STATE_DIR": str(legacy)})
+    code, result = standalone("list", cwd=tmp_path, env={**base, "DSH_TODO_STATE_DIR": str(own)})
     assert code == 0, result
-    code, result = standalone("list", cwd=tmp_path, env=base)
-    assert code == 2 and "DSH_TODO_STATE_DIR" in json.dumps(result) and "AITELIER_DSH_STATE_DIR" in json.dumps(result), result
+    code, result = standalone("list", cwd=tmp_path, env={**base, "AITELIER_DSH_STATE_DIR": str(legacy)})
+    assert code == 2 and "DSH_TODO_STATE_DIR" in json.dumps(result), result
+    from core import dsh_todo_hooks
+    for name, legacy_name in dsh_todo_hooks.LEGACY_SETTINGS.items():
+        monkeypatch.delenv("DSH_TODO_" + name, raising=False)
+        monkeypatch.setenv(legacy_name, "legacy")
+        assert dsh_todo_hooks.setting(name) == "legacy", name
+        monkeypatch.setenv("DSH_TODO_" + name, "own")
+        assert dsh_todo_hooks.setting(name) == "own", name

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import time
 
@@ -15,6 +16,11 @@ WAIT_SECONDS = 300.0                 # one wait before an absent item is measure
 EPISODE_MAX_SECONDS = 12600.0        # past this an absence ends, naming itself
 ABSENCE_TERMINAL = "gate did not run: no verdict was measured"
 TEMPLATES_DIR = None                 # the package's own todo_templates/ (templates.default_dir)
+
+
+def setting(name: str) -> str | None:
+    """One of the package's settings (STATE_DIR, TEMPLATES, CLOCK_OVERRIDE): DSH_TODO_<name>."""
+    return os.environ.get("DSH_TODO_" + name) or None
 
 
 @dataclass

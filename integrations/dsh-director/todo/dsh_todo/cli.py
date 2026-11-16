@@ -15,7 +15,7 @@ Every state-changing command takes the plan's flock, rehydrates a TodoRun from
 `<store>/<attempt_id>.json` (ledger episodes included, so `started_at` never
 moves), acts, and replaces the file atomically. `--now` fixes the clock so tests can
 walk the ledger's wait and ceiling deterministically; it is refused unless the
-environment sets AITELIER_TODO_CLOCK_OVERRIDE=1, because whoever picks the clock picks
+host's CLOCK_OVERRIDE setting is "1" (DSH_TODO_CLOCK_OVERRIDE by default), because whoever picks the clock picks
 when an absence expires. Anything that is not a refusal is reported as
 {"refused": "internal"}: the exit status is 0 or 2, never a traceback.
 
@@ -26,7 +26,7 @@ every finder passed, `batch-fanin` writes the summary. A sub-plan (`<attempt>~fi
 batch's binding rules under the batch lock, and `finish` on the batch attempt checks every
 sub-plan's persisted observations (no predicate runs again) and produces one candidate.
 
-Trust: `create --plan-json` and AITELIER_TODO_TEMPLATES are not gated here. They rely on
+Trust: `create --plan-json` and the TEMPLATES setting are not gated here. They rely on
 the DSH tool that calls `create` being root-only: a child must never pick the plan source
 or the template directory.
 """
@@ -48,7 +48,7 @@ from typing import Any, Iterator
 from dsh_todo.plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, load_run,
                            new_document, require_library_version, save_observations)
 from dsh_todo import batch as todo_batch, templates
-from dsh_todo.hooks import candidate_rejection
+from dsh_todo.hooks import candidate_rejection, setting
 from dsh_todo.runtime import builtin_library
 
 _BRIEF_CHARS = 600
@@ -553,10 +553,10 @@ COMMANDS = {"templates": cmd_templates, "create": cmd_create, "status": cmd_stat
 
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--store", help="plan directory (default: $DSH_TODO_STATE_DIR/todo, else $AITELIER_DSH_STATE_DIR/todo)")
+    common.add_argument("--store", help="plan directory (default: <the STATE_DIR setting>/todo; DSH_TODO_STATE_DIR by default)")
     common.add_argument("--now", type=float,
                         help="fix the clock (seconds since epoch). TESTS ONLY: refused unless "
-                             "AITELIER_TODO_CLOCK_OVERRIDE=1, since the clock decides when an absence expires")
+                             "the CLOCK_OVERRIDE setting is 1 (DSH_TODO_CLOCK_OVERRIDE), since the clock decides when an absence expires")
     parser = _Parser(prog="python -m dsh_todo")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
 
@@ -574,7 +574,7 @@ def _parser() -> argparse.ArgumentParser:
             ("--attempt", {}), ("--node-key", {}), ("--context-hash", {}), ("--base-sha", {}),
             ("--workspace", {}), ("--goal", {}),
             ("--plan-json", {"metavar": "FILE", "help": "TESTS ONLY: a free-form plan, not gated here - it relies on the DSH create tool being "
-                                    "root-only (as does AITELIER_TODO_TEMPLATES)"}))
+                                    "root-only (as does the TEMPLATES setting)"}))
     command("status", attempt)
     command("begin", attempt, item, ("--session", {"metavar": "SID"}),
             ("--rebind", {"action": "store_true",
@@ -604,14 +604,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.now is not None and (os.environ.get("DSH_TODO_CLOCK_OVERRIDE") or os.environ.get("AITELIER_TODO_CLOCK_OVERRIDE")) != "1":
-            raise Refusal("clock_override_disabled", "--now is for tests; set AITELIER_TODO_CLOCK_OVERRIDE=1 to use it")
-        # DSH_TODO_STATE_DIR is the package's own name; the legacy driver variable is
-        # read only when the first is absent.
-        state_dir = os.environ.get("DSH_TODO_STATE_DIR") or os.environ.get("AITELIER_DSH_STATE_DIR")
+        if args.now is not None and setting("CLOCK_OVERRIDE") != "1":
+            raise Refusal("clock_override_disabled", "--now is for tests; set DSH_TODO_CLOCK_OVERRIDE=1 to use it")
+        state_dir = setting("STATE_DIR")
         root = args.store or (os.path.join(state_dir, "todo") if state_dir else None)
         if root is None and args.command != "templates":
-            raise Refusal("usage", "no --store and neither DSH_TODO_STATE_DIR nor AITELIER_DSH_STATE_DIR is set")
+            raise Refusal("usage", "no --store and no STATE_DIR setting (DSH_TODO_STATE_DIR)")
         out = COMMANDS[args.command](args, None if args.command == "templates" else PlanStore(Path(root)),
                                      time.time() if args.now is None else args.now)
         code = 0

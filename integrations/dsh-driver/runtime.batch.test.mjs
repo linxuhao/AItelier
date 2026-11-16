@@ -209,7 +209,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access', AITELIER_DSH_IDLE_REVIEW_MS: '3000',
-      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: TODO_ROOT, AITELIER_TODO_TEMPLATES: await templates(join(directory, 'templates')),
+      AITELIER_TODO_PYTHON: PYTHON, AITELIER_TODO_CWD: TODO_ROOT, DSH_TODO_TEMPLATES: await templates(join(directory, 'templates')),
       AITELIER_TEST_BATCH: JSON.stringify({ attempt, base: reviewed, input, findings: FINDINGS }) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
 

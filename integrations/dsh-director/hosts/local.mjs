@@ -4,12 +4,12 @@
  *
  *    - { insert: [{ id: 'dsh-director', name: '<dir>/dsh-director/index.mjs' },
  *                 { id: 'director-local', name: '<dir>/dsh-director/hosts/local.mjs',
- *                   config: { root, todo: { module, stateDirEnv, python?, cwd? }, rolesFile?, ... } }] }
+ *                   config: { root, rolesFile?, todo?: { module?, stateDirEnv?, python?, cwd? }, ... } }] }
  *
- *  `rolesFile` defaults to the plugin's own roles.json (with director.md and
- *  worker.md next to it). `todo` (the todo CLI module and its state-directory
- *  variable) is required: this plugin ships no todo package of its own yet, and the
- *  host refuses to start without it rather than pointing at one that does not exist.
+ *  Zero-config apart from `root`: `rolesFile` defaults to the plugin's own roles.json
+ *  (with director.md and worker.md next to it) and `todo` to the plugin's own todo
+ *  package (python -m dsh_todo in todo/, state in DSH_TODO_STATE_DIR); any of them
+ *  can be overridden.
  *
  *  An external host (the State adapter, or anyone's) replaces this plugin;
  *  it is never active next to one. It deliberately stays small: work items with a
@@ -44,9 +44,7 @@ async function writeJson(file, value) {
  *  objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv }. */
 export function localHost(options = {}) {
   const root = options.root;
-  const missing = [!root && 'root (the local host keeps its files there)',
-    !(options.todo?.module && options.todo?.stateDirEnv) && 'todo.module and todo.stateDirEnv (the todo CLI)'].filter(Boolean);
-  if (missing.length) throw new Error('directorHost refused: missing config: ' + missing.join('; '));
+  if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
     done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl') };
@@ -62,7 +60,8 @@ export function localHost(options = {}) {
       dshEntry: options.dshEntry ?? process.argv[1],
       rolesFile: options.rolesFile ?? fileURLToPath(new URL('../roles.json', import.meta.url)),
       sessionEnv: options.sessionEnv,
-      todo: { ...options.todo },
+      todo: { python: 'python3', cwd: fileURLToPath(new URL('../todo', import.meta.url)), module: 'dsh_todo',
+        stateDirEnv: 'DSH_TODO_STATE_DIR', ...(options.todo ?? {}) },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
       dormantCompactMinTokens: options.dormantCompactMinTokens,
     },

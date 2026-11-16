@@ -17,6 +17,7 @@ Two ways in. In-process (the core.todo_* forwards): `install()`. The driver's
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -28,6 +29,17 @@ TODO_ROOT = REPO_ROOT / "integrations" / "dsh-director" / "todo"
 #: DSH_TODO_HOOKS_PATH lets the CLI import this module from TODO_ROOT, outside the repository root.
 CLI_ENV = {"DSH_TODO_HOOKS": __name__, "DSH_TODO_HOOKS_PATH": str(REPO_ROOT)}
 TEMPLATES_DIR = REPO_ROOT / "todo_templates"
+
+
+#: This deployment's older names for dsh_todo's settings, honoured after the package's own
+#: DSH_TODO_<name> so existing tests and drivers that set them keep working.
+LEGACY_SETTINGS = {"STATE_DIR": "AITELIER_DSH_STATE_DIR", "TEMPLATES": "AITELIER_TODO_TEMPLATES",
+                   "CLOCK_OVERRIDE": "AITELIER_TODO_CLOCK_OVERRIDE"}
+
+
+def setting(name: str) -> str | None:
+    """dsh_todo's settings hook: DSH_TODO_<name>, else this deployment's legacy name."""
+    return os.environ.get("DSH_TODO_" + name) or os.environ.get(LEGACY_SETTINGS.get(name, ""), "") or None
 
 
 def candidate_rejection(report_bytes: bytes, status: str, artifact: str | None) -> str | None:

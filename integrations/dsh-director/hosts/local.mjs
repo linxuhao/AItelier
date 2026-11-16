@@ -19,12 +19,13 @@
  *
  *  Files under `root`:
  *    work.json       { "items": [{ "id", "title", "state", "holder"?, "node_key"? }] }
- *    notes.md        the director's notes (note_write appends)
- *    inbox/*.json|txt one wake event per file; delivered once, then moved to inbox/done/
+ *    notes.md        the director's notes (note_write appends, once per request_key)
+ *    inbox/*.json|txt one wake event per file, id 'inbox:<file>'; delivered, then moved to inbox/done/
  *    progress.jsonl  one phase report per line
  *    state/          the director's own state (todo plans) */
-import { readFile, writeFile, appendFile, readdir, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES } from '../lib/host.mjs';
 
@@ -47,7 +48,7 @@ export function localHost(options = {}) {
   if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
-    done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl') };
+    done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json') };
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];
   let timer, finish;
   return {
@@ -104,19 +105,28 @@ export function localHost(options = {}) {
         },
       }));
       scope.tools.register(defineTool({ name: 'note_write',
-        description: 'Director only. Append one paragraph to your notes; they are part of every startup and post-compaction snapshot.',
-        parameters: { text: { type: 'string', required: true } }, output: jsonOutput,
+        description: 'Director only. Append one paragraph to your notes; they are part of every startup and post-compaction snapshot. request_key makes it safe to retry: the same key with the same text writes once, the same key with other text is refused.',
+        parameters: { text: { type: 'string', required: true }, request_key: { type: 'string', required: true } }, output: jsonOutput,
         async execute(args) {
           const text = String(args.text ?? '').trim();
+          const key = String(args.request_key ?? '').trim();
           if (!text) return { refused: 'empty_note', reason: 'say something' };
+          if (!key) return { refused: 'request_key_required', reason: 'give each note its own request_key' };
           await mkdir(root, { recursive: true });
+          const keys = await readJson(files.noteKeys, {});
+          const digest = createHash('sha256').update(text).digest('hex');
+          if (keys[key] === digest) return { written: false, duplicate: true };
+          if (keys[key]) return { refused: 'request_key_reused', reason: `request_key ${key} already wrote another note` };
           await appendFile(files.notes, text + '\n\n');
+          keys[key] = digest;
+          await writeJson(files.noteKeys, keys);
           return { written: true };
         },
       }));
     },
-    /** Wake events: every file that lands in inbox/ is delivered once, then moved to
-     *  inbox/done/ (the move is the cursor: a restart does not deliver it again). */
+    /** Wake events: every file that lands in inbox/ is delivered, then moved to
+     *  inbox/done/ (the move is the cursor). A crash before the move redelivers it under
+     *  the same id; the director recognises it. */
     async events({ ctx, notify, agent, isDisposed }) {
       await mkdir(files.done, { recursive: true });
       if (options.objective && !ctx.goals.get(agent)) ctx.goals.create(agent, { objective: options.objective });
@@ -125,9 +135,14 @@ export function localHost(options = {}) {
           .map(e => e.name).sort();
         for (const file of names) {
           if (isDisposed()) return;
-          const text = await readFile(join(files.inbox, file), 'utf8');
+          const path = join(files.inbox, file);
+          const [text, { ino, mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+          // Deliver first, then move (plugin step 7): a crash in between redelivers this
+          // file under the same id, which the director recognises; moving first lost it.
+          // The id is this file (name, inode, write time; the inode alone tells a later
+          // file of the same name apart while the delivered one sits in done/).
+          await notify('Director event (' + file + '):\n' + text, { id: `inbox:${file}:${ino}:${mtimeMs}` });
           await rename(join(files.inbox, file), join(files.done, file));
-          await notify('Director event (' + file + '):\n' + text);
         }
       };
       await sweep();

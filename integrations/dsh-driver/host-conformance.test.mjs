@@ -56,8 +56,8 @@ function fakeState() {
 
 /** The director api the adapter's events() reads, with stub DSH services. */
 function directorApi() {
-  const notified = [];
-  return { notified, notify: async text => { notified.push(text); }, eventMessage: text => text,
+  const notified = [], notifiedIds = [];
+  return { notified, notifiedIds, notify: async (text, options = {}) => { notified.push(text); notifiedIds.push(options.id); }, eventMessage: text => text,
     setHostError: async () => {}, clearHostError: async () => {}, isDisposed: () => false,
     agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
     ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {},
@@ -72,7 +72,13 @@ async function make() {
   const runtime = new DriverRuntime({ project: 'alpha', driver: 'dsh-a', directory, request: state.request, retryDelayMs: 10 });
   await runtime.init();
   const host = aitelierHost(envFor(directory), { request: state.request, runtime });
-  return { host, api: directorApi(), state, seed: { settled: 'att-candidate', active: 'att-running', held: 'n-mine', event: async () => state.release() } };
+  // A restart: a new runtime over the same State and the same cursor.json.
+  const reopen = async () => {
+    const next = new DriverRuntime({ project: 'alpha', driver: 'dsh-a', directory, request: state.request, retryDelayMs: 10 });
+    await next.init();
+    return aitelierHost(envFor(directory), { request: state.request, runtime: next });
+  };
+  return { host, reopen, api: directorApi(), state, seed: { settled: 'att-candidate', active: 'att-running', held: 'n-mine', event: async () => state.release() } };
 }
 
 conformance('State adapter', make);

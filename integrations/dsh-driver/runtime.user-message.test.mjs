@@ -195,6 +195,28 @@ test('native send_user_message forwards tagged segments and the reply link to th
     project_id: 'alpha', refs: { node_key: 'n' }, segments, reply_to_message_id: 'user-msg-1' });
 });
 
+// A question block is citable only through its id: State skips a question
+// segment that carries none, and the guide tells the driver to set a stable
+// one. So a caller id must reach the command as written, while a block that
+// came without one must post no id key at all - the service assigns it there,
+// and inventing a key here would be the tool answering a question it cannot see.
+test('native send_user_message forwards a segment id and posts none for a block without one', { timeout: 60000 }, async (t) => {
+  const result = await driveSendUserMessage(t, { request_key: 'cited', subject: 'Restart', body: 'see below',
+    segments: [{ kind: 'question', text: 'may I restart now?', id: 'restart-1' },
+      { kind: 'info', text: 'restart is coordinated' }] });
+  if (!result) return;
+  assert.equal(result.exitCode, null, result.output);
+  assert.equal(result.sent.length, 1, 'the native tool never reached the State command\n' + result.output + JSON.stringify(result.activity));
+  const segments = result.sent[0].segments;
+  assert.equal(segments.length, 2, JSON.stringify(segments));
+  // The caller's id is the citation key: it is posted exactly as written.
+  assert.deepEqual(segments[0], { kind: 'question', text: 'may I restart now?', id: 'restart-1' });
+  // The other block posts the body it always did: no id key, not even null.
+  assert.deepEqual(segments[1], { kind: 'info', text: 'restart is coordinated' });
+  assert.ok(!Object.prototype.hasOwnProperty.call(segments[1], 'id'),
+    'the tool invented a segment id: ' + JSON.stringify(segments));
+});
+
 test('native send_user_message refuses a segment whose kind is not info or question, and sends nothing', { timeout: 60000 }, async (t) => {
   const result = await driveSendUserMessage(t, { request_key: 'bad-kind', subject: 'Restart', body: 'x',
     segments: [{ kind: 'demand', text: 'do it now' }] });

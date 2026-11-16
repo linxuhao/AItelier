@@ -581,7 +581,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
           body: { type: 'string', required: true }, node_key: { type: 'string' },
           segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
-            kind: { type: 'string', required: true }, text: { type: 'string', required: true } } } },
+            kind: { type: 'string', required: true }, text: { type: 'string', required: true },
+            id: { type: 'string' } } } },
           reply_to_message_id: { type: 'string' } },
         output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
         async execute(args, exec) {
@@ -607,7 +608,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           }
           const body = { ...rest, project_id: project };
           if (node_key) body.refs = { node_key };
-          if (segments !== undefined) body.segments = segments.map(({ kind, text }) => ({ kind, text }));
+          // A caller-supplied `id` is the citation key the State guide tells a
+          // driver to set, and the service keeps it exactly as sent, so it is
+          // forwarded; a block without one keeps today's body byte for byte
+          // (the service assigns the id in that case), and an absent or null id
+          // is never sent as a key of its own.
+          if (segments !== undefined) body.segments = segments.map(({ kind, text, id }) => (id == null ? { kind, text } : { kind, text, id }));
           const result = await request('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);

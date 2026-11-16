@@ -46,6 +46,7 @@ export const texts = Object.freeze({
   toolDiscoverySection: discoveryTexts.section,
   heldWork: 'you hold live State claims',
   slotFree: 'AItelier worker slot free:\n',
+  workersResumed: 'AItelier workers resumed after a restart:\n',
   wakesOn: ['State event', 'inbox message', 'owner message', 'child message', 'wake_after_minutes running out'],
   tools: {
     search_tools: discoveryTexts.searchDescription,

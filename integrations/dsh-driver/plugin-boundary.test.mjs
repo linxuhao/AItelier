@@ -17,6 +17,7 @@ import '../dsh-director/test/host.test.mjs';
 import '../dsh-director/test/local-host.test.mjs';
 import '../dsh-director/test/outbox.test.mjs';
 import '../dsh-director/test/capacity.test.mjs';
+import '../dsh-director/test/resume.test.mjs';
 import '../dsh-director/test/request-bodies.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';

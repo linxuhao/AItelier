@@ -97,6 +97,15 @@ def orphan_log_path() -> Path:
     return aitelier_home() / "orphan_dbg.log"
 
 
+def logs_dir() -> Path:
+    """Diagnostic artifacts that outlive one request (stack dumps, traces).
+
+    Under the data root, so the directory is on the mounted volume and resolves
+    to the same absolute path on the host and in the container.
+    """
+    return aitelier_home() / "logs"
+
+
 def semantic_index_control_dir() -> Path:
     """Small host/sidecar demand ledger, outside all agent worktrees."""
     return aitelier_home() / "semantic-index-control"

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore } from '../lib/memory/store.mjs';
+import { profileSection } from '../lib/memory/tools.mjs';
 import { gitEnv } from '../lib/memory/git.mjs';
 
 const USER = 'owner@example.com';
@@ -306,3 +307,48 @@ for (const [killAt, expected] of [['beforeForgetRecords', 'rolled_back'], ['befo
     await store.close();
   });
 }
+
+// ---- step 11 fixes (claude-dev-mcp), stacked on the purge-durability branch
+
+test('iss-e4eb: a filter that keeps the text and drops only the id is caught by the text check', async () => {
+  const { root, store } = await seeded();
+  // The reviewer's mutant: the purged line survives without its id, so no id-keyed check sees it.
+  store.faults = { filterLine: (line, purged) => {
+    try { const row = JSON.parse(line); if (purged.has(row.id)) { delete row.id; return JSON.stringify(row); } } catch {}
+    return line;
+  } };
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, false, JSON.stringify(r));
+  assert.ok(r.failures.some(f => /still holds the text of t-gone-0/.test(f)), JSON.stringify(r.failures));
+  assert.deepEqual(leftovers(root), []);
+  await store.close();
+});
+
+test('iss-e4eb: the same words in a surviving entry are not a finding; the purged one is still gone', async () => {
+  const root = newRoot(); const store = await open(root);
+  await store.recordTurn('a', [{ role: 'owner', text: 'the same words twice' }]);
+  await store.recordTurn('b', [{ role: 'owner', text: 'the same words twice' }]);
+  await store.flush();
+  const r = await store.purge(['t-a-0']);
+  assert.equal(r.purged, true, JSON.stringify(r));
+  assert.equal(count(root, 't-a-0'), 0);
+  assert.equal(count(root, 't-b-0'), 1);
+  assert.deepEqual((await store.search('same words')).grep.hits.map(h => h.id), ['t-b-0']);
+  await store.close();
+});
+
+test('f7: an interrupted purge\'s notice survives restarts and rides in the snapshot until acknowledged', async () => {
+  const root = newRoot();
+  const child = spawnSync(process.execPath, [crashFixture, root, USER, 'afterVerify', '0'], { encoding: 'utf8' });
+  assert.equal(child.signal, 'SIGKILL', child.stderr + child.stdout);
+  let store = await open(root); await store.close();
+  store = await open(root); // a second boot: nothing left to recover, the notice is still there
+  assert.match(store.statusLine().notices?.[0] ?? '', /已回退/);
+  assert.match(await profileSection({ store }), /Memory notices - tell your owner:\n- 上次彻底删除/);
+  store.acknowledgeNotices();
+  assert.equal(store.statusLine().notices, undefined);
+  await store.close();
+  store = await open(root);
+  assert.doesNotMatch(await profileSection({ store }), /Memory notices/);
+  await store.close();
+});

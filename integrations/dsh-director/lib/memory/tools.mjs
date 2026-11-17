@@ -4,7 +4,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryStore, PROFILE_LIMIT, TOP_K_MAX } from './store.mjs';
-import { leaderboardRanked } from './leaderboard.mjs';
+import { remoteRanked } from './remote.mjs';
 
 export const MEMORY_TOOLS = ['memory_search', 'memory_note', 'memory_profile_update', 'memory_forget'];
 export const defaultMemoryRoot = () => join(homedir(), '.local', 'share', 'dsh-director', 'memory');
@@ -13,7 +13,7 @@ export const defaultMemoryRoot = () => join(homedir(), '.local', 'share', 'dsh-d
  *  {error}, and every memory tool answers that error while the rest of the role runs. */
 export async function openMemory(memory, { logger, sessionId } = {}) {
   try {
-    const ranked = memory.remote ? leaderboardRanked({ ...memory.remote, userId: memory.remote.userId ?? memory.userId,
+    const ranked = memory.remote ? remoteRanked({ ...memory.remote, userId: memory.remote.userId ?? memory.userId,
       sessionId: memory.remote.sessionId ?? sessionId,
       onCheck: r => logger?.('memory/remote-id-check', r) }) : undefined;
     const store = await MemoryStore.open({ root: memory.root ?? defaultMemoryRoot(), userId: memory.userId, ranked, logger,
@@ -30,8 +30,11 @@ export async function openMemory(memory, { logger, sessionId } = {}) {
 export async function profileSection(memory) {
   if (memory.error) return `\n\nOwner profile: unavailable (${memory.error})`;
   const p = await memory.store.profile();
+  // f7: what the owner must be told (an interrupted purge) rides along until acknowledged.
+  const notices = memory.store.notices?.length
+    ? `\n\nMemory notices - tell your owner:\n${memory.store.notices.map(n => '- ' + n).join('\n')}` : '';
   return `\n\nOwner profile (resident; version ${p.version}; edit with memory_profile_update and this version):\n`
-    + (p.text.trim() ? p.text : '(empty)');
+    + (p.text.trim() ? p.text : '(empty)') + notices;
 }
 
 /** @param scope the director-scope (or role-scope) agent context

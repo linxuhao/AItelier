@@ -14,20 +14,21 @@ export function filterLine(line, purged) {
   return JSON.stringify({ id: row.id, at: row.at, purged: true, ...(row.batch ? { batch: row.batch } : {}) });
 }
 
-export function filterBlob(content, purged) {
+export function filterBlob(content, purged, lineFilter = filterLine) {
   const text = content.toString('utf8');
   if (![...purged].some(id => text.includes(id))) return content;
   const lines = text.split('\n');
   const kept = [];
   for (const line of lines) {
-    const out = filterLine(line, purged);
+    const out = lineFilter(line, purged);
     if (out !== null) kept.push(out);
   }
   return Buffer.from(kept.join('\n'), 'utf8');
 }
 
-/** Filter a whole fast-export stream (Buffer in, Buffer out). */
-export function filterExportStream(stream, purged) {
+/** Filter a whole fast-export stream (Buffer in, Buffer out). `lineFilter` exists for the
+ *  tests that prove the verification catches a wrong filter. */
+export function filterExportStream(stream, purged, lineFilter = filterLine) {
   const parts = [];
   let pos = 0, lastCommand = '';
   while (pos < stream.length) {
@@ -39,7 +40,7 @@ export function filterExportStream(stream, purged) {
       if (!Number.isInteger(n) || n < 0) throw new Error('fast-export stream: unsupported data header ' + JSON.stringify(line.slice(0, 40)));
       const body = stream.subarray(end + 1, end + 1 + n);
       if (body.length !== n) throw new Error('fast-export stream: truncated data');
-      const out = lastCommand === 'blob' ? filterBlob(body, purged) : body;
+      const out = lastCommand === 'blob' ? filterBlob(body, purged, lineFilter) : body;
       parts.push(Buffer.from(`data ${out.length}\n`), out);
       pos = end + 1 + n;
       continue;

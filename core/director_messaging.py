@@ -476,6 +476,19 @@ class SQLiteDirectorMessaging:
                     self._project(conn, cited["project_id"])
                     targets = [cited["project_id"]]
                     thread_id = cited["thread_id"]
+                if targets[0] == sender_project_id:
+                    # The cited letter's own project is the CALLER's project, so the
+                    # reply would be delivered back into the caller's own inbox: a
+                    # self-addressed message reported as success. The `targeted`
+                    # branch refuses the same shape; refuse it here BEFORE any row is
+                    # written, and name the channel that does answer such a letter.
+                    refusal = ("reply_to_delivery_id: the cited message belongs to this same "
+                               "project, so the reply would be delivered back to its sender; "
+                               "answer it with send_driver_message")
+                    if self.reply_schema == V3_SCHEMA_ID:
+                        raise DirectorMessageError("use_driver_inbox", V3_SCHEMA_ID,
+                                                   message=refusal)
+                    _invalid(refusal)
 
             from core.director_messaging_quorum import members
             if self.v3 and ack_mode == "at_least_n" and any(ack_quorum > len(members(conn,t)) for t in targets):

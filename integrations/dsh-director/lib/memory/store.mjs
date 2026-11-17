@@ -175,7 +175,15 @@ export class MemoryStore {
     }
     chmodSync(this.dir, 0o700);
     await this.#commitIfDirty('recover: uncommitted changes at boot');
-    this.#load();
+    // (a) An ordinary forget is not journalled (`#dropFromWorkTree`), so a crash between its
+    // records and its strip leaves the id in the log AND in forgotten.jsonl with nothing to
+    // finish it: #recoverPurge above finishes and reports only the forgets of a purge it knows
+    // about. So the ordinary window is closed here, from the state this boot load reads, and
+    // the strip it makes is committed at once, like any other boot repair. (A restore that died
+    // before its `restored` record leaves the same two lines; the surviving record there still
+    // says forgotten, so this is also the reading the disk supports.)
+    const finished = this.#finishForget(this.#load(), { loaded: true });
+    if (finished) await this.#commitIfDirty('recover: finished an interrupted forget at boot');
     await this.#replaySpool();
     await this.#replayPending(true);
   }
@@ -250,6 +258,9 @@ export class MemoryStore {
     return readdirSync(logDir).filter(n => /^\d{4}-\d{2}\.jsonl$/.test(n)).sort().reverse();
   }
 
+  /** Read the repository into memory. Returns the ids the log AND forgotten.jsonl both name:
+   *  an ordinary forget appends its records before it strips the log lines, so a crash in
+   *  between leaves exactly that, and no journal row says so (#boot finishes them). */
   #load() {
     const started = performance.now();
     this.entries.clear(); this.forgotten.clear(); this.index = new Bm25Index();
@@ -288,6 +299,12 @@ export class MemoryStore {
       };
       setImmediate(next);
     } else this.coverage = 'all';
+    // Still in the log and recorded as forgotten: a forget that died in the window between its
+    // two writes. A restored id has left `forgotten`, and a purged one is not listed any more
+    // (its records carry no sha256), so neither belongs here.
+    return [...this.forgotten.values()]
+      .filter(r => !r.purged && r.sha256 && this.entries.has(r.id))
+      .map(r => r.id);
   }
 
   #cutoffMonth() {
@@ -736,11 +753,18 @@ export class MemoryStore {
 
   /** Put the old repository back: journal the intent, then the two renames, then drop the
    *  build. Shared by the in-purge rollback and by recovery, so both leave the same rows and
-   *  a crash in either window is describable from the layout alone. */
+   *  a crash in either window is describable from the layout alone.
+   *
+   *  The build is dropped BEFORE the first rename, not after the second: a repository, an old
+   *  copy and a build at once (an interrupted delete of a build leaves exactly that) made that
+   *  rename throw a bare ENOTEMPTY, and a rollback's job is to be one decision on every boot.
+   *  Every caller holds this.dir, so the build here is never the only copy; a build that is
+   *  already gone makes this a no-op. */
   async #rollbackSwap(plan, { reason, fromLayout } = {}) {
     this.#journal({ ...plan, phase: 'rolling_back',
       ...(reason ? { reason: String(reason).slice(0, 500) } : {}), ...(fromLayout ? { from_layout: fromLayout } : {}) });
     if (this.faults?.beforeRollback) await this.faults.beforeRollback();
+    this.#discardBuild(plan);
     renameSync(this.dir, plan.new_dir); fsyncDir(this.root);
     if (this.faults?.duringRollback) await this.faults.duringRollback();
     renameSync(plan.pre_purge_dir, this.dir); fsyncDir(this.root);
@@ -925,14 +949,17 @@ export class MemoryStore {
 
   /** Step 1 is a forget, and its records are appended before the log lines go: a crash in
    *  between leaves an id in the log AND in forgotten.jsonl. Finish the removal here, so a
-   *  forgotten entry is never searchable again. Returns how many ids it finished. */
-  #finishForget(ids) {
-    this.#load();
+   *  forgotten entry is never searchable again. Called with the ids a purge's journal names
+   *  (recovery) and with the ids the boot load found in both places (an ordinary forget, whose
+   *  window no journal describes); `loaded` says that load has already run on this layout.
+   *  Returns how many ids it finished. */
+  #finishForget(ids, { loaded = false } = {}) {
+    if (!loaded) this.#load(); // a directory swap since the last load makes it worthless
     const both = ids.filter(id => this.entries.has(id) && this.forgotten.has(id));
     if (!both.length) return 0;
     this.#stripLogLines(both);
     for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, e.text); }
-    this.log('memory/purge-recovered-forget', { ids: both });
+    this.log('memory/forget-finished', { ids: both });
     return both.length;
   }
 

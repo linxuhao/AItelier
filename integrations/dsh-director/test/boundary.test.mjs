@@ -68,6 +68,7 @@ export const SHIPPED = [
   join('test', 'request-bodies.test.mjs'),
   join('test', 'memory.test.mjs'),
   join('test', 'memory-purge.test.mjs'),
+  join('test', 'memory-recovery.test.mjs'),
   join('test', 'memory-remote.test.mjs'),
   join('test', 'fixtures', 'memory-crash.mjs'),
   join('todo', 'dsh_todo', '__init__.py'),

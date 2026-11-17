@@ -10,6 +10,8 @@
  *    <userId>.spool.jsonl      writes that arrived during a purge
  *    <userId>.purge.jsonl      the purge journal (ids and phases only, never text)
  *    <userId>.ranked-pending.json   remote batches whose add failed
+ *    <userId>.notices.jsonl    what the owner must be told (an interrupted purge), until acknowledged
+ *    <userId>.profile-pending.json  who wrote a profile change whose commit failed (its author survives)
  *  The lock, spool, journal and pending file sit beside the repository, not in it, so the
  *  purge's directory swap can never move or drop them.
  *
@@ -18,7 +20,7 @@
  *  name entry ids and lengths, never memory text. */
 import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync,
-  rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync } from 'node:fs';
+  rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Bm25Index, bm25Ranked } from './bm25.mjs';
 import { git, gitOk } from './git.mjs';
@@ -26,6 +28,8 @@ import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
 export const PROFILE_LIMIT = 4000;
 export const TOP_K_MAX = 20;
+/** Design 3.3's budget. Crossing a line is logged once and stays on status.over_budget. */
+export const BUDGET = Object.freeze({ entries: 100000, syncLoadMs: 3000, writeP95Ms: 200 });
 const USER_ID = /^[A-Za-z0-9@_+-][A-Za-z0-9@._+-]{0,127}$/;
 const ENTRY_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 const ROLES = ['owner', 'steward'];
@@ -76,6 +80,24 @@ function parseLines(file) {
   return out;
 }
 
+/** Non-overlapping occurrences of `needle` in `text`. */
+function occurrences(text, needle) {
+  if (!needle) return 0;
+  let n = 0;
+  for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) n++;
+  return n;
+}
+
+/** `text` without the lines that are a JSON row (optionally after a diff marker) naming
+ *  one of `ids`. */
+function withoutLinesNaming(text, ids) {
+  return text.split('\n').filter(line => {
+    const i = line.indexOf('{');
+    if (i < 0 || ![...ids].some(id => line.includes(id))) return true;
+    try { return !ids.has(JSON.parse(line.slice(i)).id); } catch { return true; }
+  }).join('\n');
+}
+
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
@@ -100,7 +122,7 @@ export class MemoryStore {
   }
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
-    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults }) {
+    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
     this.root = root; this.userId = userId; this.log = logger; this.now = now;
     this.grepTimeoutMs = grepTimeoutMs; this.syncMonths = syncMonths; this.backupRemote = backupRemote; this.warnEntries = warnEntries;
@@ -109,6 +131,11 @@ export class MemoryStore {
     this.spoolFile = join(root, userId + '.spool.jsonl');
     this.journalFile = join(root, userId + '.purge.jsonl');
     this.pendingFile = join(root, userId + '.ranked-pending.json');
+    this.noticesFile = join(root, userId + '.notices.jsonl');
+    this.profilePendingFile = join(root, userId + '.profile-pending.json');
+    this.budget = { ...BUDGET, ...budget };
+    this.overBudget = new Map(); // kind -> line
+    this.writeMs = [];           // the last 100 writes, fsync to commit
     this.entries = new Map();   // id -> entry (as written)
     this.forgotten = new Map(); // id -> last record
     this.index = new Bm25Index();
@@ -135,7 +162,12 @@ export class MemoryStore {
     chmodSync(this.root, 0o700);
     this.#acquireLock();
     const notice = await this.#recoverPurge();
-    if (notice) this.notices.push(notice);
+    // f7: the notice outlives this process: it is kept beside the repository until the
+    // owner acknowledges it, shown on status and in every snapshot meanwhile.
+    // A boot that recovers the same purge again (a crash loop) adds no second copy.
+    if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
+      appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
+    this.notices = parseLines(this.noticesFile).map(n => n.text);
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
       if (leftovers.length) throw new MemoryUnavailable(`memory: ${this.dir} is missing while ${leftovers.join(', ')} exists; refusing to start an empty repository over it`);
@@ -148,8 +180,13 @@ export class MemoryStore {
     await this.#replayPending(true);
   }
 
+  /** f6: the takeover of a dead holder's lock is a rename to a name of our own (atomic: of
+   *  two processes taking over, one rename finds nothing), and what was renamed is checked:
+   *  if it is not the dead holder's lock - someone took it over meanwhile - it is put back
+   *  and we are refused. Only then O_EXCL. A lock is ours only while it names our pid. */
   #acquireLock() {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const readHolder = file => { try { return Number(readFileSync(file, 'utf8').trim()); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } };
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const fd = openSync(this.lockFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
         try { writeSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
@@ -157,19 +194,42 @@ export class MemoryStore {
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
-        const holder = Number(readFileSync(this.lockFile, 'utf8').trim());
-        if (holder !== process.pid && pidAlive(holder)) throw new MemoryUnavailable(`memory: locked by process ${holder}`);
-        this.log('memory/lock-taken-over', { stale_pid: holder });
-        unlinkSync(this.lockFile);
       }
+      const holder = readHolder(this.lockFile);
+      if (holder === undefined) continue;                       // released meanwhile: try again
+      if (pidAlive(holder)) throw new MemoryUnavailable(`memory: locked by process ${holder}`);
+      this.faults?.beforeLockTakeover?.();
+      const aside = `${this.lockFile}.stale-${process.pid}-${attempt}`;
+      try { renameSync(this.lockFile, aside); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; } // another process took it first
+      this.faults?.afterLockAside?.();
+      const moved = readHolder(aside);
+      if (moved !== holder) {
+        // Not the stale lock we judged: a live takeover happened in between. Put it back -
+        // with link, which fails rather than replace a lock a third process made meanwhile.
+        try { linkSync(aside, this.lockFile); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+        unlinkSync(aside);
+        throw new MemoryUnavailable(`memory: locked by process ${moved}`);
+      }
+      unlinkSync(aside);
+      this.log('memory/lock-taken-over', { stale_pid: holder });
     }
     throw new MemoryUnavailable('memory: could not take the lock');
   }
 
-  /** Release the process lock (the store is unusable afterwards). */
+  /** Release the process lock (the store is unusable afterwards); a lock that no longer
+   *  names this process is someone else's and is left alone. */
   async close() {
     await this.queue;
-    if (this.lockHeld) { try { unlinkSync(this.lockFile); } catch {} this.lockHeld = false; }
+    if (!this.lockHeld) return;
+    this.lockHeld = false;
+    try { if (Number(readFileSync(this.lockFile, 'utf8').trim()) === process.pid) unlinkSync(this.lockFile); } catch {}
+  }
+
+  /** The owner has seen the notices: they leave status and the snapshot. */
+  acknowledgeNotices() {
+    if (existsSync(this.noticesFile)) writeDurable(this.noticesFile, '');
+    this.notices = [];
   }
 
   async #init(dir = this.dir) {
@@ -191,6 +251,7 @@ export class MemoryStore {
   }
 
   #load() {
+    const started = performance.now();
     this.entries.clear(); this.forgotten.clear(); this.index = new Bm25Index();
     if (!this.remote) this.ranked = bm25Ranked(this.index, id => this.entries.get(id)?.text);
     // forgotten holds what is forgotten NOW: a restore record takes its id out again.
@@ -207,6 +268,10 @@ export class MemoryStore {
       else later.push(rows);
     }
     if (this.entries.size > this.warnEntries) this.log('memory/large', { entries: this.entries.size });
+    this.#overBudget('entries', this.entries.size > this.budget.entries,
+      `${this.entries.size} entries > ${this.budget.entries} (design 3.3: 100,000 entries within 150 MB)`);
+    const loadMs = Math.round(performance.now() - started);
+    this.#overBudget('sync_load', loadMs > this.budget.syncLoadMs, `synchronous load ${loadMs} ms > ${this.budget.syncLoadMs} ms`);
     // A remote that traces hits to turns must know every turn, forgotten ones included.
     if (this.remote?.learnBatches) {
       const batches = new Set([...this.entries.values()].map(e => e.batch));
@@ -243,6 +308,7 @@ export class MemoryStore {
   /** Commit everything; a failure only degrades (it is reported, and the next commit takes it). */
   async #commit(message, dir = this.dir) {
     try {
+      await this.#commitPendingProfile(dir);
       await gitOk(dir, ['add', '-A']);
       const staged = await git(dir, ['diff', '--cached', '--quiet']);
       if (staged.code === 0) { this.gitState = { ok: true }; return true; }
@@ -262,8 +328,43 @@ export class MemoryStore {
     }
   }
 
+  /** write-f1: a profile change whose own commit failed keeps its author. The next commit,
+   *  whichever write triggers it, first commits profile.md alone under the recorded message;
+   *  only a change nobody recorded (an edit on disk) is the owner's. Throws like gitOk. */
+  async #commitPendingProfile(dir = this.dir) {
+    if (!existsSync(this.profilePendingFile)) return false;
+    let pending;
+    try { pending = JSON.parse(readFileSync(this.profilePendingFile, 'utf8')); } catch { pending = undefined; }
+    const text = existsSync(join(dir, 'profile.md')) ? readFileSync(join(dir, 'profile.md'), 'utf8') : '';
+    const dirty = await git(dir, ['status', '--porcelain', '--', 'profile.md']);
+    if (pending?.sha256 === sha256(text) && dirty.code === 0 && dirty.stdout.length) {
+      await gitOk(dir, ['add', '--', 'profile.md']);
+      await gitOk(dir, ['commit', '-q', '--no-verify', '-m', pending.message, '--', 'profile.md']);
+    }
+    // Committed now, or the file moved on since (the owner edited it, or it was committed):
+    // either way the record has done its work.
+    unlinkSync(this.profilePendingFile);
+    return true;
+  }
+
   /** Wait for every queued write and commit (tests, shutdown). */
   flush() { return this.#locked(() => {}); }
+
+  /** iss-a81f: a budget line crossed is logged once and kept on status.over_budget. */
+  #overBudget(kind, over, line) {
+    if (!over) { this.overBudget.delete(kind); return; }
+    if (!this.overBudget.has(kind)) this.log('memory/over-budget', { kind, line });
+    this.overBudget.set(kind, line);
+  }
+
+  #recordWriteMs(ms) {
+    this.writeMs.push(ms);
+    if (this.writeMs.length > 100) this.writeMs.shift();
+    if (this.writeMs.length < 20) return;
+    const p95 = [...this.writeMs].sort((a, b) => a - b)[Math.floor(this.writeMs.length * 0.95)];
+    this.#overBudget('write_p95', p95 > this.budget.writeP95Ms,
+      `write p95 ${Math.round(p95)} ms > ${this.budget.writeP95Ms} ms over the last ${this.writeMs.length} writes (on disk to committed)`);
+  }
 
   statusLine() {
     return {
@@ -272,6 +373,7 @@ export class MemoryStore {
       ...(this.purging ? { purge: 'in progress: writes are spooled' } : {}),
       ...(this.notices.length ? { notices: this.notices } : {}),
       ...(this.pendingStuck?.length ? { ranked_pending_stuck: this.pendingStuck } : {}),
+      ...(this.overBudget.size ? { over_budget: [...this.overBudget.values()] } : {}),
     };
   }
 
@@ -309,6 +411,7 @@ export class MemoryStore {
       return { written: entries.length, spooled: true };
     }
     let fresh;
+    const started = performance.now();
     const written = this.#locked(async () => {
       if (this.purging) return { spool: true };
       fresh = this.#appendEntries(entries);
@@ -318,7 +421,7 @@ export class MemoryStore {
     if (result.spool) return this.#writeEntries(entries, message);
     // The commit runs after the caller has its answer (it never delays a reply).
     if (fresh.length) {
-      this.#locked(() => this.#commit(message));
+      this.#locked(() => this.#commit(message).then(() => this.#recordWriteMs(performance.now() - started)));
       this.#remoteAdd(fresh);
     }
     return result;
@@ -342,11 +445,13 @@ export class MemoryStore {
     const rows = parseLines(this.spoolFile);
     if (!rows.length) { if (existsSync(this.spoolFile)) writeDurable(this.spoolFile, ''); return; }
     await this.#locked(async () => {
-      let n = 0;
-      for (const row of rows) n += this.#appendEntries(row.entries ?? []).length;
-      await this.#commit(`spool: ${n} entries written during a purge (runtime)`);
+      const fresh = [];
+      for (const row of rows) fresh.push(...this.#appendEntries(row.entries ?? []));
+      await this.#commit(`spool: ${fresh.length} entries written during a purge (runtime)`);
       writeDurable(this.spoolFile, '');
-      this.log('memory/spool-replayed', { entries: n });
+      // f4: a spooled write was acknowledged like any other, so it reaches the remote too.
+      this.#remoteAdd(fresh);
+      this.log('memory/spool-replayed', { entries: fresh.length });
     });
   }
 
@@ -403,8 +508,9 @@ export class MemoryStore {
 
   async #profileRead() {
     {
+      await this.#commitPendingProfile().catch(() => {});
       const dirty = await git(this.dir, ['status', '--porcelain', '--', 'profile.md']);
-      if (dirty.code === 0 && dirty.stdout.length) {
+      if (dirty.code === 0 && dirty.stdout.length && !existsSync(this.profilePendingFile)) {
         await gitOk(this.dir, ['add', '--', 'profile.md']).catch(() => {});
         await git(this.dir, ['commit', '-q', '--no-verify', '-m', 'profile (owner): edited on disk', '--', 'profile.md']);
       }
@@ -423,9 +529,14 @@ export class MemoryStore {
     return this.#locked(async () => {
       // Checked inside the lock: the owner's edit can never be overwritten by a stale version.
       const current = await this.#profileRead();
-      if (expectedVersion !== current.version) return { refused: 'version_conflict', current };
+      // The version names the content: an "uncommitted:<sha256>" handed out while commits
+      // were failing still names the same text once that text is committed (write-f1).
+      const same = expectedVersion === current.version || expectedVersion === 'uncommitted:' + sha256(current.text);
+      if (!same) return { refused: 'version_conflict', current };
       writeDurable(join(this.dir, 'profile.md'), value);
-      await this.#commit(`profile (${by}): ${why.slice(0, 200)}`);
+      const message = `profile (${by}): ${why.slice(0, 200)}`;
+      writeDurable(this.profilePendingFile, JSON.stringify({ message, sha256: sha256(value), at: this.now() }));
+      await this.#commit(message);
       this.log('memory/profile', { by, length: value.length });
       return { updated: true, version: await this.#profileVersion(value), status: this.statusLine() };
     });
@@ -725,7 +836,7 @@ export class MemoryStore {
 
   async #buildFiltered(newDir, ids) {
     const exported = await gitOk(this.dir, ['fast-export', '--all', '--signed-tags=strip', '--reencode=yes'], { timeoutMs: 600000 });
-    const stream = filterExportStream(exported.stdout, ids);
+    const stream = filterExportStream(exported.stdout, ids, this.faults?.filterLine);
     mkdirSync(newDir, { mode: 0o700 });
     await gitOk(newDir, ['init', '-q', '--shared=0600', '-b', 'main']);
     await gitOk(newDir, ['fast-import', '--quiet'], { input: stream, timeoutMs: 600000 });
@@ -763,6 +874,26 @@ export class MemoryStore {
     if (holds(logp.stdout)) failures.push('git log -p --all still holds a purged entry');
     const all = await git(newDir, ['cat-file', '--batch-all-objects', '--batch']);
     if (holds(all.stdout)) failures.push('an object still holds a purged entry');
+    // iss-e4eb: the id check alone is blind to a text that lost its id. So the text itself is
+    // counted too: outside lines naming a purged id, the new repository may hold it only as
+    // often as the old one did (the same words said in another entry, the profile, an id).
+    // Each side is split once: the lines still naming a purged id are the id check's
+    // business (they carry no text, or the id check already failed) and are set aside.
+    const outside = text => withoutLinesNaming(text, ids);
+    const sides = [
+      ['git log -p --all', outside((await git(oldDir, ['log', '-p', '--all', '--format='])).stdout.toString('utf8')), outside(logp.stdout.toString('utf8'))],
+      ['cat-file --batch-all-objects', outside((await git(oldDir, ['cat-file', '--batch-all-objects', '--batch'])).stdout.toString('utf8')), outside(all.stdout.toString('utf8'))],
+    ];
+    for (const id of ids) {
+      const e = await this.#fromHistory(id, undefined, oldDir);
+      if (!e) continue; // never committed: nothing of it can be in history
+      const forms = [...new Set([e.text, JSON.stringify(e.text).slice(1, -1)])];
+      for (const [name, before, after] of sides) {
+        const allowed = forms.reduce((n, f) => n + occurrences(before, f), 0);
+        const found = forms.reduce((n, f) => n + occurrences(after, f), 0);
+        if (found > allowed) failures.push(`${name} still holds the text of ${id} (${found} times, ${allowed} outside purged lines)`);
+      }
+    }
     const count = async d => (await git(d, ['rev-list', '--all', '--count'])).stdout.toString().trim();
     if (await count(newDir) !== await count(oldDir)) failures.push('commit counts differ');
     const files = async d => (await git(d, ['ls-files'])).stdout.toString().split('\n').filter(Boolean).sort().join('\n');

@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryStore } from '../lib/memory/store.mjs';
-import { amiPrefix, leaderboardRanked } from '../lib/memory/leaderboard.mjs';
+import { amiPrefix, remoteRanked } from '../lib/memory/remote.mjs';
 
 const USER = 'owner@example.com';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-remote-'));
@@ -39,7 +39,7 @@ async function fixture() {
 }
 
 const openRemote = (root, srv, extra = {}) => MemoryStore.open({ root, userId: USER,
-  ranked: leaderboardRanked({ url: srv.url, name: 'Fixture', userId: 'u-1', sessionId: 's-1', ...extra }) });
+  ranked: remoteRanked({ url: srv.url, name: 'Fixture', userId: 'u-1', sessionId: 's-1', ...extra }) });
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
 test('protocol mapping: one /add per turn, /search mapped, the source names the remote', async () => {
@@ -53,7 +53,7 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   srv.data = () => [{ id: 'r1', content: '想做记账工具', score: 0.9, created_at: '2026-11-16T22:31:00Z' }];
   const r = await store.search('记账', 5);
   assert.deepEqual(srv.searches.at(-1), { query: '记账', user_id: 'u-1', top_k: 5 });
-  assert.equal(r.ranked.source, 'leaderboard · Fixture');
+  assert.equal(r.ranked.source, 'remote · Fixture');
   assert.deepEqual(r.ranked.hits.map(h => [h.ref, h.score, h.at]), [['r1', 0.9, '2026-11-16T22:31:00Z']]);
   assert.equal(r.ranked.hits[0].also_in_grep, true, 'matched to the local entry by its text');
   assert.equal(r.grep.hits[0].also_in_ranked, true);
@@ -69,7 +69,7 @@ test('an unreachable remote: ranked carries the error verbatim, grep is complete
   const r = await store.search('ledger');
   assert.match(r.ranked.error, /search exploded/);
   assert.equal(r.ranked.hits, undefined);
-  assert.equal(r.ranked.source, 'leaderboard · Fixture');
+  assert.equal(r.ranked.source, 'remote · Fixture');
   assert.deepEqual([r.grep.complete, r.grep.hits.length], [true, 1]);
   await store.close(); await srv.close();
 });
@@ -142,4 +142,18 @@ test('AMI ids that do not follow the rule withdraw batchOf: forgetting is then r
   assert.equal(r.ranked.remote_forget, 'unsupported');
   assert.equal(r.ranked.hits.length, 1, 'results still come back');
   await store.close(); await srv.close();
+});
+
+test('f4: a write spooled during a purge reaches the remote index once the spool is replayed', async (t) => {
+  const srv = await fixture(); const root = newRoot();
+  t.after(() => srv.close());
+  const store = await openRemote(root, srv);
+  await store.recordTurn('keep', [{ role: 'owner', text: 'keep' }]);
+  await store.recordTurn('gone', [{ role: 'owner', text: 'gone' }]);
+  await store.flush();
+  store.faults = { afterVerify: async () => { assert.equal((await store.recordTurn('during', [{ role: 'owner', text: 'said during the purge' }])).spooled, true); } };
+  assert.equal((await store.purge(['t-gone-0'])).purged, true);
+  await settle();
+  assert.deepEqual(srv.adds.map(a => a.request_id), ['keep', 'gone', 'during']);
+  await store.close();
 });

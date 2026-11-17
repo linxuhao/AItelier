@@ -3,8 +3,8 @@
  *  Remote index: memory-remote. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bm25Index, documentTokens, queryTokens } from '../lib/memory/bm25.mjs';
@@ -327,4 +327,87 @@ test('a repository directory that vanished while a pre-purge copy exists is neve
   rmSync(repo(root), { recursive: true });
   await assert.rejects(open(root), MemoryUnavailable);
   assert.ok(!existsSync(repo(root)));
+});
+
+// ---- step 11 fixes (claude-dev-mcp), stacked on the purge-durability branch
+
+test('f6: a live takeover between our judgement and our rename is put back, and we are refused', async () => {
+  const root = newRoot();
+  const sleeper = spawn('sleep', ['30']);
+  try {
+    const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim();
+    mkdirSync(root, { recursive: true });
+    const lock = join(root, USER + '.lock');
+    writeFileSync(lock, dead);
+    // Another process takes the stale lock over after we judged it stale and before we move it.
+    const faults = { beforeLockTakeover: () => { unlinkSync(lock); writeFileSync(lock, String(sleeper.pid)); } };
+    await assert.rejects(open(root, { faults }), new RegExp(`locked by process ${sleeper.pid}`));
+    assert.equal(readFileSync(lock, 'utf8'), String(sleeper.pid), 'the live holder still has its lock');
+    assert.deepEqual(readdirSync(root).filter(n => n.includes('.stale-')), []);
+  } finally { sleeper.kill(); }
+});
+
+test('f6: the put-back never replaces a lock a third process made meanwhile', async () => {
+  const root = newRoot();
+  const second = spawn('sleep', ['30']), third = spawn('sleep', ['30']);
+  try {
+    const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim();
+    mkdirSync(root, { recursive: true });
+    const lock = join(root, USER + '.lock');
+    writeFileSync(lock, dead);
+    // A second process takes the stale lock over; after we moved it aside, a third makes its own.
+    const faults = { beforeLockTakeover: () => { unlinkSync(lock); writeFileSync(lock, String(second.pid)); },
+      afterLockAside: () => writeFileSync(lock, String(third.pid)) };
+    await assert.rejects(open(root, { faults }), new RegExp(`locked by process ${second.pid}`));
+    assert.equal(readFileSync(lock, 'utf8'), String(third.pid), 'the third process\'s lock was not replaced');
+    assert.deepEqual(readdirSync(root).filter(n => n.includes('.stale-')), []);
+  } finally { second.kill(); third.kill(); }
+});
+
+test('f6: close() leaves alone a lock that no longer names this process', async () => {
+  const root = newRoot(); const store = await open(root);
+  const sleeper = spawn('sleep', ['30']);
+  try {
+    writeFileSync(join(root, USER + '.lock'), String(sleeper.pid));
+    await store.close();
+    assert.equal(readFileSync(join(root, USER + '.lock'), 'utf8'), String(sleeper.pid));
+  } finally { sleeper.kill(); }
+});
+
+test('write-f1: a profile change committed late keeps its author, and the version handed out still works', async () => {
+  const root = newRoot(); const store = await open(root);
+  const p = await store.profile();
+  writeFileSync(join(repo(root), '.git', 'index.lock'), '');
+  const r = await store.updateProfile('written while commits fail', p.version, 'learned a preference');
+  assert.equal(r.updated, true);
+  assert.match(r.version, /^uncommitted:/);
+  rmSync(join(repo(root), '.git', 'index.lock'));
+  await store.recordTurn('t1', [{ role: 'owner', text: 'any later write' }]);
+  await store.flush();
+  const log = subjects(root);
+  assert.ok(log.includes('profile (steward): learned a preference'), log.join(' | '));
+  assert.ok(!log.includes('profile (owner): edited on disk'), 'the steward\'s write is not blamed on the owner');
+  assert.equal((await store.updateProfile('next', r.version, 'continue from the version I was given')).updated, true);
+  // A real edit on disk is still the owner's.
+  writeFileSync(join(repo(root), 'profile.md'), 'the owner typed this');
+  await store.profile();
+  assert.equal(subjects(root)[0], 'profile (owner): edited on disk');
+  await store.close();
+});
+
+test('iss-a81f: a crossed budget line is logged once and stays on status.over_budget', async () => {
+  const root = newRoot();
+  const lines = [];
+  let store = await open(root, { budget: { writeP95Ms: -1 }, logger: (event, fields) => lines.push([event, fields]) });
+  // 40 writes: the p95 is evaluated from the 20th on, so 21 evaluations - "once" means once.
+  for (let i = 0; i < 40; i++) { await store.recordTurn('t' + i, [{ role: 'owner', text: 'entry ' + i }]); await store.flush(); }
+  assert.ok(store.statusLine().over_budget?.some(l => /^write p95 \d+ ms > -1 ms/.test(l)), JSON.stringify(store.statusLine()));
+  assert.equal(lines.filter(([e, f]) => e === 'memory/over-budget' && f.kind === 'write_p95').length, 1, 'logged once, not per write');
+  await store.close();
+  store = await open(root, { budget: { entries: 5 }, logger: (event, fields) => lines.push([event, fields]) });
+  assert.ok((await store.search('entry')).status.over_budget?.some(l => /^40 entries > 5/.test(l)));
+  await store.close();
+  store = await open(root);
+  assert.equal(store.statusLine().over_budget, undefined, 'within the real budget nothing is reported');
+  await store.close();
 });

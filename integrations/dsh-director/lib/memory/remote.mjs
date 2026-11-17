@@ -1,7 +1,9 @@
-/** The remote ranked index (design 3.2): any memory system that speaks the Agent Memory
+/** The remote ranked index (design 3.2; file and source label `remote`, owner 2026-11-17).
+ *  Off by default and never verified against a real ActiveMemoryIndex (the owner chose the
+ *  built-in memory). It talks to any memory system that speaks the Agent Memory
  *  Leaderboard protocol - POST /add {request_id, user_id, session_id, messages[{role,
  *  content, timestamp}]} and POST /search {query, user_id, top_k} -> {data: [{id, content,
- *  score, created_at?}]}. Off by default. Every call may cost money on the remote side.
+ *  score, created_at?}]}. Every call may cost money on the remote side.
  *
  *  batchOf (AMI only, option amiIds): ActiveMemoryIndex derives its ids from ours -
  *  sha1(user_id + "\0" + request_id)[:16] + "-<kind><n>" (AMI app/store.py) - so a remote
@@ -21,7 +23,7 @@ export function amiPrefix(userId, requestId) {
 
 /** @param o url, name (e.g. "ActiveMemoryIndex"), userId, sessionId, tokenFile?, amiIds?,
  *  timeoutMs (30000), fetch (injectable) */
-export function leaderboardRanked({ url, name, userId, sessionId = 'steward', tokenFile, amiIds = false,
+export function remoteRanked({ url, name, userId, sessionId = 'steward', tokenFile, amiIds = false,
   timeoutMs = 30000, fetch = globalThis.fetch, onCheck = () => {} }) {
   if (!url || !userId) throw new Error('memory: the remote index needs url and userId');
   const base = url.replace(/\/+$/, '');
@@ -39,7 +41,7 @@ export function leaderboardRanked({ url, name, userId, sessionId = 'steward', to
   }
 
   const index = {
-    name: 'leaderboard · ' + name,
+    name: 'remote · ' + name,
     /** The store tells the adapter every batch id it knows (log and forgotten records). */
     learnBatches(ids) { if (amiIds) for (const id of ids) prefixes.set(amiPrefix(userId, id), id); },
     async add(batch, signal) {

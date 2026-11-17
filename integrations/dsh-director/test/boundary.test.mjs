@@ -51,7 +51,7 @@ export const SHIPPED = [
   join('lib', 'tool-discovery.mjs'),
   join('lib', 'memory', 'bm25.mjs'),
   join('lib', 'memory', 'git.mjs'),
-  join('lib', 'memory', 'leaderboard.mjs'),
+  join('lib', 'memory', 'remote.mjs'),
   join('lib', 'memory', 'purge-filter.mjs'),
   join('lib', 'memory', 'store.mjs'),
   join('lib', 'memory', 'tools.mjs'),

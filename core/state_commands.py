@@ -1116,6 +1116,44 @@ class DriverPostcompactGuidance(Project):
     standing_only: bool = False
 
 
+class CreateStewardProposal(Project):
+    """The steward proposes; only its owner can approve (plugin step 13).
+
+    `project_id` is the steward's own project (filled from its credential), where
+    its proposals and the owner's memory requests live; it is not the target."""
+
+    request_key: str = Field(min_length=1, max_length=320)
+    kind: Literal["create_project", "start_driver", "stop_driver"]
+    payload: dict[str, Any] = Field(description=(
+        "create_project {project_id, title, goal, seed_nodes: [add_nodes node: {key, goal, acceptance, ...}]}; "
+        "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server)."))
+    reason: str = Field(min_length=1, max_length=4000)
+    supersedes: str | None = Field(default=None, min_length=1, max_length=200, description=(
+        "One of your OPEN proposals that this one replaces; it becomes superseded."))
+
+
+class WithdrawStewardProposal(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    proposal_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ListStewardProposals(Request):
+    status: Literal["open", "all"] = "open"
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListStewardMemoryRequests(Request):
+    status: Literal["pending"] = "pending"
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class CompleteStewardMemoryRequest(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    request_id: str = Field(min_length=1, max_length=200)
+    result: dict[str, Any]
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1146,6 +1184,8 @@ READ_REQUESTS = {
     "project_visibility": ProjectVisibility,
     "list_claims": ListClaims, "get_claim": ClaimRef,
     "list_subagents": ListSubagents, "list_handoffs": ListHandoffs, "get_handoff": HandoffRef,
+    "list_steward_proposals": ListStewardProposals,
+    "list_steward_memory_requests": ListStewardMemoryRequests,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1218,6 +1258,9 @@ WRITER_ONLY_READS = frozenset({
     "list_user_conversation", "user_conversation_unread", "list_user_questions",
     # P3: subagent registry (workspaces) and handoff packages. Both private.
     "list_subagents", "list_handoffs", "get_handoff",
+    # The owner's steward (plugin steps 13-14): its proposals and the owner's
+    # memory requests. Private tables (core.state_privacy).
+    "list_steward_proposals", "list_steward_memory_requests",
 })
 
 
@@ -1273,6 +1316,9 @@ WRITE_REQUESTS = {
     "register_subagent": RegisterSubagent,
     "offer_handoff": OfferHandoff, "accept_handoff": AcceptHandoff,
     "decline_handoff": DeclineHandoff, "withdraw_handoff": WithdrawHandoff,
+    "create_steward_proposal": CreateStewardProposal,
+    "withdraw_steward_proposal": WithdrawStewardProposal,
+    "complete_steward_memory_request": CompleteStewardMemoryRequest,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1621,6 +1667,11 @@ def _handlers(service) -> dict:
         "offer_handoff": service.handoffs.offer_handoff, "accept_handoff": service.handoffs.accept_handoff,
         "decline_handoff": service.handoffs.decline_handoff, "withdraw_handoff": service.handoffs.withdraw_handoff,
         "list_handoffs": service.handoffs.list_handoffs, "get_handoff": service.handoffs.get_handoff,
+        "create_steward_proposal": service.steward.create_proposal,
+        "withdraw_steward_proposal": service.steward.withdraw_proposal,
+        "list_steward_proposals": service.steward.list_proposals,
+        "list_steward_memory_requests": service.steward.list_memory_requests,
+        "complete_steward_memory_request": service.steward.complete_memory_request,
     }
 
 
@@ -1685,12 +1736,12 @@ def _driver_defaults(service, action, arguments):
 
 # The steward's write whitelist (plugin step 12; design "管家只读"). Everything
 # else a steward-role driver writes is refused. create_steward_proposal and
-# withdraw_steward_proposal are step 13's actions, named here already so that
-# step needs no change to this list; until they exist they stay unknown actions.
+# withdraw_steward_proposal are step 13's; complete_steward_memory_request is
+# step 14's, called by the steward's runtime code, never by its model.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
-    "create_steward_proposal", "withdraw_steward_proposal"})
+    "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 

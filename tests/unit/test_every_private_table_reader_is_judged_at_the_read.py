@@ -650,3 +650,118 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
     errors = sorted((k, v[1]) for k, v in cells.items() if v[0] == "ERROR")
     assert not errors, f"measurement failures (not refusals): {errors}"
     assert not leaked, f"{mode}: in-scope readers delivered private rows: {leaked}"
+
+
+# ---------------------------------------------------------------- the steward's readers
+# Plugin steps 13-14: every reader of state_steward_proposals and
+# state_steward_memory_requests - the two list queries, the impact read, the
+# owner's memory-request read, the decision endpoints, and the steward's wake
+# (a driver-inbox delivery carrying the result) - refuses the anonymous identity
+# and delivers neither canary.
+STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests")
+
+
+def _steward_wake_with_canary(db, tmp_path):
+    """Register the steward of aitelier-home and decline the canary proposal as
+    the owner, so the steward's inbox holds a wake whose result carries the
+    proposal table's canary."""
+    from core.drivers import DriverRegistry
+    from core.dsh_driver import DshDrivers
+    from core.state_steward import steward_project
+    writer = StateService(db, actor="seeder", project_read_trusted=True)
+    writer.create_project(steward_project(), "Home")
+    registry = DriverRegistry(db, "steward-canary-pepper-" * 3)
+    DshDrivers(db, registry, tmp_path / "drivers")._provision(steward_project(), "aitelier", "driver", "seeder")
+    owner = StateService(db, actor="owner:seeder@example.com", project_read_trusted=True)
+    owner.steward.decline(C.STEWARD_PROPOSAL, 1, reason=C.canary("state_steward_proposals"))
+    with db.get_connection() as conn:
+        bodies = " ".join(r[0] for r in conn.execute("SELECT body FROM driver_inbox_messages"))
+    assert C.canary("state_steward_proposals") in bodies, "control: the wake carries the canary"
+
+
+def _steward_calls(svc):
+    from core.state_steward import steward_project
+    return {
+        "execute list_steward_proposals": lambda: execute(svc, "list_steward_proposals", {"status": "all"}),
+        "execute list_steward_memory_requests": lambda: execute(svc, "list_steward_memory_requests", {}),
+        "list_proposals": lambda: svc.steward.list_proposals("all", 50),
+        "get_proposal": lambda: svc.steward.get_proposal(C.STEWARD_PROPOSAL),
+        "impact": lambda: svc.steward.impact(C.STEWARD_PROPOSAL),
+        "list_memory_requests": lambda: svc.steward.list_memory_requests("pending", 50),
+        "read_memory_request": lambda: svc.steward.read_memory_request(C.STEWARD_MEMORY_REQUEST),
+        "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
+        "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
+            "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
+    }
+
+
+class TestTheStewardReadersRefuseTheAnonymous:
+    def test_in_process(self, anonymous, tmp_path):
+        _steward_wake_with_canary(_trusted_db(anonymous), tmp_path)
+        results = {}
+        for name, call in _steward_calls(anonymous).items():
+            try:
+                out = call()
+                results[name] = ("ANSWERED", C.leaked_tables(json.dumps(out, default=str)))
+            except ProjectPrivate:
+                results[name] = ("REFUSED", [])
+            except Exception as exc:  # the owner check refuses with its own word
+                results[name] = (f"{type(exc).__name__}: {exc}", C.leaked_tables(str(exc)))
+        for name, result in sorted(results.items()):
+            print(f"STEWARD in-process reader={name} outcome={result}")
+        assert results["read_memory_request"][0] == "StateGraphError: owner_session_required"
+        wrong = {k: v for k, v in results.items() if v[1] or (
+            k != "read_memory_request" and v[0] != "REFUSED")}
+        assert not wrong, wrong
+
+    @pytest.mark.parametrize("mode", ["main"])
+    def test_over_http(self, tmp_path, monkeypatch, mode):
+        from core.state_steward import steward_project
+        C.arm(monkeypatch)
+        db = C.new_database(tmp_path, f"steward-{mode}.sqlite")
+        _steward_wake_with_canary(db, tmp_path)
+        # The decline above settled the canary proposal; plant a fresh open one for
+        # the decision endpoints.
+        raw = sqlite3.connect(db.db_path)
+        raw.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+                    "created_by,created_at) VALUES('proposal-canary-2',1,'start_driver',?,?,'open','seeder','t')",
+                    ('{"project_id": "%s"}' % C.OPEN, C.canary("state_steward_proposals")))
+        raw.commit()
+        raw.close()
+        app = C.app_for(mode, db)
+        client = C.client_for(app, mode)
+        requests = [
+            ("POST", "/api/state/query/list_steward_proposals", {"status": "all"}),
+            ("POST", "/api/state/query/list_steward_memory_requests", {}),
+            ("GET", f"/api/steward/proposals/{C.STEWARD_PROPOSAL}/impact", None),
+            ("GET", f"/api/steward/memory-requests/{C.STEWARD_MEMORY_REQUEST}", None),
+            ("POST", "/api/steward/proposals/proposal-canary-2/approve", {"expected_version": 1}),
+            ("POST", "/api/steward/proposals/proposal-canary-2/decline", {"expected_version": 1}),
+            ("POST", "/api/steward/memory-requests", {"kind": "profile_read", "payload": {}}),
+            ("POST", "/api/state/query/list_driver_messages", {}),
+            ("POST", "/api/state/query/wait_for_state_change",
+             {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
+        ]
+        results = {}
+        try:
+            assert C.request_is_anonymous(app, client), "the per-request service is not anonymous"
+            for method, path, body in requests:
+                response = client.request(method, path, json=body)
+                results[f"{method} {path}"] = (response.status_code, C.leaked_tables(response.text))
+        finally:
+            C.release(app)
+        for name, result in sorted(results.items()):
+            print(f"STEWARD http reader={name} outcome={result}")
+        wrong = {k: v for k, v in results.items() if v != (403, [])}
+        assert not wrong, wrong
+        with db.get_connection() as conn:
+            assert conn.execute("SELECT status FROM state_steward_proposals WHERE proposal_id="
+                                "'proposal-canary-2'").fetchone()[0] == "open"
+            assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 1
+
+
+def _trusted_db(anonymous):
+    """The raw handle of the database the anonymous fixture reads (a fixture's
+    trusted construction point), for seeding the steward's wake."""
+    from core.state_database import StateDatabase
+    return StateDatabase(anonymous.store.db.db_path)

@@ -596,14 +596,20 @@ class StateGraphStore:
         if source_project_id is not None:
             key(source_project_id, "source project")
         with self.transaction(write=True) as conn:
-            existing = conn.execute("SELECT * FROM state_projects WHERE project_id=?", (project_id,)).fetchone()
-            if existing:
-                if existing["title"] != title or existing["source_project_id"] != source_project_id:
-                    raise StateConflict("project identity already exists with different settings")
-                return dict(existing)
-            conn.execute("INSERT INTO state_projects VALUES(?,?,?,?)", (project_id, title, source_project_id, now()))
-            self._event(conn, project_id, None, "project_created", {"title": title, "source_project_id": source_project_id})
-            return self._project(conn, project_id)
+            return self._create_project(conn, project_id, title, source_project_id)
+
+    def _create_project(self, conn, project_id, title, source_project_id):
+        """`create_project` on the caller's connection (its transaction), so a
+        caller can create a project and its first nodes in ONE transaction
+        (an approved steward proposal, core/state_steward.py)."""
+        existing = conn.execute("SELECT * FROM state_projects WHERE project_id=?", (project_id,)).fetchone()
+        if existing:
+            if existing["title"] != title or existing["source_project_id"] != source_project_id:
+                raise StateConflict("project identity already exists with different settings")
+            return dict(existing)
+        conn.execute("INSERT INTO state_projects VALUES(?,?,?,?)", (project_id, title, source_project_id, now()))
+        self._event(conn, project_id, None, "project_created", {"title": title, "source_project_id": source_project_id})
+        return self._project(conn, project_id)
 
     def list_projects(self, public_only: bool | None = None) -> list[dict]:
         """A store that is not trusted lists only opened projects.

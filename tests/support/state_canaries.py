@@ -38,6 +38,8 @@ OPEN_NOTE = "OPEN-NOTEBOOK-PUBLIC-TEXT-51d2"
 NOTEBOOK_TABLES = ("state_driver_notes", "state_driver_note_revisions",
                    "state_driver_note_entries")
 ADMIN_TOKEN = "state-canaries-admin-token-not-a-secret"
+STEWARD_PROPOSAL = "proposal-canary"
+STEWARD_MEMORY_REQUEST = "memreq-canary"
 
 
 def canary(table: str) -> str:
@@ -160,6 +162,18 @@ def _plan():
              "retirement-canary-run", SHUT, c("state_context_run_protection_retirements"),
              SHUT, c("state_context_run_protection_retirements"), "seeder",
              c("state_context_run_protection_retirements"), now)),
+        # A steward proposal about the OPENED project, the canary in its payload
+        # and reason; and a done owner memory request whose result carries it
+        # (as a profile_read result carries the owner's profile text).
+        "state_steward_proposals": (
+            ("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+             "created_by,created_at) VALUES(?,1,'start_driver',?,?,'open','seeder',?)"),
+            (STEWARD_PROPOSAL, '{"project_id": "%s", "note": "%s"}' % (OPEN, c("state_steward_proposals")),
+             c("state_steward_proposals"), now)),
+        "state_steward_memory_requests": (
+            ("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,result_json,"
+             "created_at,completed_at,created_by) VALUES(?,'profile_read','{}','done',?,?,?,'owner:seeder')"),
+            (STEWARD_MEMORY_REQUEST, '{"text": "%s"}' % c("state_steward_memory_requests"), now, now)),
     }
 
 

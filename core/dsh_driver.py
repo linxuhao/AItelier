@@ -971,7 +971,8 @@ class DshDrivers:
                                                         "running_pipelines": 0,
                                                         "unsettled_attempts": 0,
                                                         "unsettled_expired_attempts": 0})
-            p["managed"] = self.public(row)
+            # The dashboard lays the steward out by this, never by the project id.
+            p["managed"] = {**self.public(row), "role": role_for_project(row["project_id"])}
             p["running_subagents"] = len(json.loads(row["subagents_json"])) if self.running(row["project_id"]) else 0
         for pid, slot in unsettled.items():
             p = projects[pid]

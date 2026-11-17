@@ -40,6 +40,7 @@ from api.config_routers import router as config_router
 from api.admin_routers import router as admin_router
 from api.driver_routers import router as driver_router
 from api.dsh_driver_routers import router as dsh_driver_router
+from api.steward_routers import router as steward_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
@@ -276,6 +277,16 @@ async def lifespan(app: FastAPI):
     from starlette.requests import Request as _Request
     dsh_runtime = dsh_manager(_Request({"type": "http", "app": app}))
     await dsh_runtime.resume()
+    # Steward proposals left `executing` by a crash get a definite end, and
+    # results no steward received yet are delivered (core/state_steward.py).
+    try:
+        from api.dependencies import get_db_manager as _steward_db
+        from core.state_service import StateService as _StewardState
+        await _asyncio.to_thread(_StewardState(_steward_db(), actor="steward-recovery",
+                                               project_read_trusted=True).steward.recover, dsh_runtime)
+    except Exception:  # noqa: BLE001 - never block startup on this
+        import logging as _logging
+        _logging.getLogger(__name__).exception("Steward proposal recovery at startup failed")
     print("DPE APScheduler started. skillflow NotificationBus → SSE bridge active.")
     # The MCP sub-app is MOUNTED, and a mounted app's own lifespan is never run by
     # the parent — its only job is `session_manager.run()`, so without this every
@@ -321,6 +332,7 @@ app.include_router(config_router)
 app.include_router(admin_router)
 app.include_router(driver_router)
 app.include_router(dsh_driver_router)
+app.include_router(steward_router)
 app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)

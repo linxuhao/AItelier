@@ -143,8 +143,9 @@ def test_the_steward_writes_no_other_notebook(world):
 
 
 def test_proposal_actions_are_named_for_step_13():
-    from core.state_commands import STEWARD_WRITE_ACTIONS
-    assert {"create_steward_proposal", "withdraw_steward_proposal"} <= STEWARD_WRITE_ACTIONS
+    from core.state_commands import STEWARD_WRITE_ACTIONS, WRITE_REQUESTS
+    steward_actions = {"create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request"}
+    assert steward_actions <= STEWARD_WRITE_ACTIONS and steward_actions <= set(WRITE_REQUESTS)
 
 
 def test_a_director_is_unchanged(world):
@@ -253,6 +254,12 @@ def test_the_enumeration_sees_every_kind_of_write_route():
                      "/api/dsh-drivers/{project_id}/work", "/api/dsh-drivers/{project_id}/completion",
                      "/api/dsh-drivers/{project_id}/heartbeat", "/api/dsh-drivers/{project_id}/activity"):
         assert expected in paths, expected
+    # Steps 13-14: the owner's decision and memory-request routes are write routes
+    # the steward token may NOT use (owner only): the enumeration below refuses
+    # them with steward_read_only by the path rule.
+    for owner_only in ("/api/steward/proposals/{proposal_id}/approve",
+                       "/api/steward/proposals/{proposal_id}/decline", "/api/steward/memory-requests"):
+        assert owner_only in paths and _klass(owner_only) == "other", owner_only
 
 
 def test_every_write_route_with_a_steward_token(world, client):

@@ -87,6 +87,10 @@ PRIVATE_STATE_TABLES = frozenset({
     # (report refs, private note addresses, next steps). Never public.
     "state_handoffs",
     "state_context_run_protection_retirements",
+    # The owner's steward (plugin steps 13-14): proposals awaiting the owner's
+    # decision and their results, and the owner's memory requests, whose results
+    # can carry the owner's profile text. No projection: never public.
+    "state_steward_proposals", "state_steward_memory_requests",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

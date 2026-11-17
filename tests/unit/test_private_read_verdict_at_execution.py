@@ -62,6 +62,8 @@ _ARGS = {
     "project_visibility": {"project_id": C.OPEN},
     "wait_for_state_change": {"project_id": C.OPEN, "timeout_seconds": 0,
                               "actionable_only": False},
+    "list_steward_proposals": {"status": "all"},
+    "list_steward_memory_requests": {},
 }
 
 
@@ -84,6 +86,24 @@ def _services(tmp_path):
     trusted.driver_inbox.send_driver_message("execpoint", SECRET, SECRET,
             target_driver_id="execpoint", delivery_mode="standing")
     return trusted, StateService(db, actor="anonymous", project_read_trusted=False)
+
+
+def _steward_reader(trusted, tmp_path):
+    """The one trusted caller list_steward_memory_requests answers: the steward
+    of aitelier-home (plugin step 14). Every other trusted caller is refused
+    with steward_role_required, so the control needs this identity."""
+    from core.drivers import DriverRegistry
+    from core.dsh_driver import DshDrivers
+    from core.state_steward import steward_project
+    trusted.create_project(steward_project(), "Home")
+    registry = DriverRegistry(trusted.db, "owned-execution-point-pepper-not-a-secret")
+    row = DshDrivers(trusted.db, registry, tmp_path / "drivers")._provision(
+        steward_project(), "aitelier", "driver", "fixture")
+    return StateService(trusted.db, actor="driver:" + row["driver_id"], driver_id=row["driver_id"],
+                        project_read_trusted=True)
+
+
+_STEWARD_ONLY_READS = {"list_steward_memory_requests"}
 
 
 def _classify(call):
@@ -137,9 +157,11 @@ class TestEveryNonPublicReadIsJudgedAtExecution:
     def test_the_arguments_are_valid(self, tmp_path):
         """Control: a TRUSTED caller gets an answer with the same arguments."""
         trusted, _ = _services(tmp_path)
+        steward = _steward_reader(trusted, tmp_path)
         invalid = {}
         for action in NON_PUBLIC_READS:
-            result, detail = _classify(lambda: execute(trusted, action, _args(action)))
+            reader = steward if action in _STEWARD_ONLY_READS else trusted
+            result, detail = _classify(lambda: execute(reader, action, _args(action)))
             print(f"TRUSTED action={action} outcome={'answered' if result == 'leaked' else result}")
             if result != "leaked":
                 invalid[action] = (result, detail)

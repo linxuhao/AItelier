@@ -1,0 +1,132 @@
+"""The owner's decisions on the steward's proposals, and the owner's memory requests
+(plugin steps 13-14, design-steward 3.4 and 5).
+
+Approve / decline and the memory requests are the OWNER's: an `owner:` session that
+is no driver (core.state_steward.StateSteward.is_owner_session), on top of the
+writer verdict. A steward token never reaches them: they are not on its write
+whitelist (api/authz._steward_denial). The impact read is the owner's or the
+steward's. Every answer is a private record: none is served to an anonymous caller.
+"""
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from api import authz
+from api.dsh_driver_routers import manager
+from api.state_graph_routers import get_service
+from core.state_graph import StateGraphError, StateNotFound
+from core.state_steward import ProposalConflict, impact_is_empty, stop_impact
+
+router = APIRouter(prefix="/api/steward", tags=["Steward"])
+
+
+class Approve(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    confirm_interrupt: bool = False
+
+
+class Decline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class MemoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(min_length=1, max_length=40)
+    payload: dict = Field(default_factory=dict)
+
+
+def _owner(service):
+    if not service.steward.is_owner_session():
+        raise HTTPException(403, "owner_session_required")
+
+
+def _conflict(exc: ProposalConflict):
+    # The web card shows the CURRENT row a 409 carries (web/src/lib/api.ts).
+    return JSONResponse({"detail": exc.row}, status_code=409)
+
+
+@router.post("/proposals/{proposal_id}/approve", dependencies=[Depends(authz.require_writer)])
+async def approve(proposal_id: str, body: Approve, service=Depends(get_service), runtime=Depends(manager)):
+    """Approve exactly the version the owner saw; execute its frozen payload once."""
+    _owner(service)
+    steward = service.steward
+    try:
+        row = await asyncio.to_thread(steward.get_proposal, proposal_id)
+        impact = None
+        if row["kind"] == "stop_driver" and row["status"] == "open" and row["version"] == body.expected_version:
+            # Checked again now: refused (row stays open) unless the owner confirmed.
+            impact = await asyncio.to_thread(_impact_now, service, row["payload"]["project_id"])
+            if not impact_is_empty(impact) and not body.confirm_interrupt:
+                return JSONResponse({"detail": {"code": "confirm_interrupt_required", "impact": impact,
+                                                "proposal": row}}, status_code=422)
+        row = await asyncio.to_thread(steward.begin_approval, proposal_id, body.expected_version)
+    except ProposalConflict as exc:
+        return _conflict(exc)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
+    if row["kind"] == "create_project":
+        return await asyncio.to_thread(steward.execute_create_project, proposal_id)
+    if row["kind"] == "stop_driver":
+        await asyncio.to_thread(steward.record_confirmation, proposal_id, body.confirm_interrupt, impact)
+    target = row["payload"]["project_id"]
+    try:
+        if row["kind"] == "start_driver":
+            # The entry POST /api/dsh-drivers/{project_id}/start uses; the model is the role's route.
+            driver = await runtime.start(target, provider="aitelier", model=None, actor=service.actor)
+        else:
+            driver = await runtime.stop(target)
+    except Exception as exc:  # noqa: BLE001 - any failure is the proposal's result
+        return await asyncio.to_thread(steward.fail, proposal_id, f"{type(exc).__name__}: {exc}")
+    return await asyncio.to_thread(steward.finish, proposal_id, "done", {"driver": driver})
+
+
+def _impact_now(service, project_id):
+    with service.store.transaction() as conn:
+        return stop_impact(conn, project_id)
+
+
+@router.post("/proposals/{proposal_id}/decline", dependencies=[Depends(authz.require_writer)])
+async def decline(proposal_id: str, body: Decline, service=Depends(get_service)):
+    _owner(service)
+    try:
+        return await asyncio.to_thread(service.steward.decline, proposal_id, body.expected_version, body.reason)
+    except ProposalConflict as exc:
+        return _conflict(exc)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/proposals/{proposal_id}/impact", dependencies=[Depends(authz.require_reader)])
+def impact(proposal_id: str, service=Depends(get_service)):
+    """What stopping the proposal's target driver would interrupt now (the owner or the steward)."""
+    if not (service.steward.is_owner_session() or service.steward.is_steward()):
+        raise HTTPException(403, "owner_or_steward_required")
+    try:
+        return service.steward.impact(proposal_id)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/memory-requests", dependencies=[Depends(authz.require_writer)])
+def create_memory_request(body: MemoryRequest, service=Depends(get_service)):
+    _owner(service)
+    try:
+        return service.steward.create_memory_request(body.kind, body.payload)
+    except StateGraphError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/memory-requests/{request_id}", dependencies=[Depends(authz.require_reader)])
+def read_memory_request(request_id: str, service=Depends(get_service)):
+    _owner(service)
+    try:
+        return service.steward.read_memory_request(request_id)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc

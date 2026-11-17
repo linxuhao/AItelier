@@ -177,6 +177,10 @@ class StateService:
         self.claims = StateClaims(self.store, actor, driver_id=driver_id, is_admin=self.is_admin)
         from core.driver_inbox import DriverInbox
         self.driver_inbox = DriverInbox(self.store, actor, driver_id)
+        # Plugin steps 13-14: the steward's proposals and the owner's memory
+        # requests (after the inbox: it uses the inbox's request ledger).
+        from core.state_steward import StateSteward
+        self.steward = StateSteward(self.store, actor, driver_id)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

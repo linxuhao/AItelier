@@ -45,7 +45,7 @@ async def test_independent_tokens_one_process_per_dag_and_clean_stop(runtime):
             # from the running counts so a registered-but-idle attempt can never
             # read as a live worker.
             "unsettled_attempts": 0, "unsettled_expired_attempts": 0,
-            "managed": runtime.public(runtime.get("alpha")),
+            "managed": {**runtime.public(runtime.get("alpha")), "role": "director"},
         }
         assert "token" not in json.dumps(status)
         proc = runtime.processes["alpha"]

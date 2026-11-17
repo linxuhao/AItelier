@@ -7,12 +7,18 @@
  *  The inbox reader exists because a wake carries only the first 240 characters of every
  *  message body: anything longer than that is unread until it is fetched whole. Its bounds are
  *  in its description, and the host states the same numbers back in every answer (`limits`), so
- *  a steward can tell what it was and was not shown. */
+ *  a steward can tell what it was and was not shown.
+ *
+ *  The steward's one inbox write is registered the same way, only when the host's portfolio
+ *  acknowledges: a wake re-injects every unread delivery, so acknowledging one is the only
+ *  thing that stops the same letters coming back. It is a write, not a read, so it is not part
+ *  of PORTFOLIO_TOOLS; a host without it registers no such tool. */
 
 export const PORTFOLIO_TOOLS = ['portfolio_projects', 'portfolio_project', 'portfolio_conversation', 'portfolio_inbox'];
 
 /** @param portfolio host.portfolio: { projects(signal), project(id, signal), conversation(id, cursor, signal),
- *    inbox(page, signal) } - `inbox` is optional; without it the reader is not registered.
+ *    inbox(page, signal), acknowledge({ deliveryId, version }, signal) } - both are optional;
+ *    without `inbox` the reader is not registered, without `acknowledge` neither is the write.
  *  @param handoff host.handoff: ({ projectId, text, citesUserMessageId }, signal) => result */
 export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio, handoff }) {
   const projectId = { type: 'string', required: true };
@@ -38,6 +44,16 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
         limit: { type: 'integer', description: 'deliveries to return; at most 5, and fewer when an answer would pass its cap' } },
       output: jsonOutput,
       execute: (args, exec) => portfolio.inbox({ after: args.after, limit: args.limit }, exec.signal),
+    }));
+    // One inbox write, and only for a delivery in the steward's own inbox: the wake
+    // carries each delivery's id and version, and an acknowledged delivery's body is
+    // withheld from later wakes. No resolve: standing guidance is the project's call.
+    if (portfolio.acknowledge) scope.tools.register(defineTool({ name: 'portfolio_inbox_acknowledge',
+      description: 'Acknowledge ONE delivery in your own inbox, so it stops being re-injected: pass the delivery_id and version the wake (or the inbox page) showed you. It is recorded under your own driver id; an acknowledged delivery\'s body is withheld from later wakes. It writes nothing else: no resolve, no other project, no other driver. The same delivery and version is the same request, so a retry is not a second acknowledgement.',
+      parameters: { delivery_id: { type: 'string', required: true },
+        version: { type: 'integer', required: true, description: 'the delivery version the wake showed you' } },
+      output: jsonOutput,
+      execute: (args, exec) => portfolio.acknowledge({ deliveryId: args.delivery_id, version: args.version }, exec.signal),
     }));
   }
   if (handoff) scope.tools.register(defineTool({ name: 'handoff',

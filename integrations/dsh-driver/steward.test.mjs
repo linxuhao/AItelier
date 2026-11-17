@@ -22,6 +22,13 @@ const text = readFileSync(new URL('../dsh-director/roles.json', import.meta.url)
 const table = loadRoles();
 const variant = edit => { const copy = JSON.parse(text); edit(copy); return copy; };
 const exec = name => ({ name, arguments: {} });
+/** Register what the plugin registers for a host, without DSH. */
+const collectPortfolio = options => {
+  const tools = new Map();
+  registerPortfolioTools({ tools: { register: t => tools.set(t.name, t) } },
+    { defineTool: t => t, jsonOutput: {}, ...options });
+  return tools;
+};
 
 test('the steward is an optional role: loaded from roles.json, absent is fine, its keys are checked', () => {
   assert.equal(table.steward.prompt, 'steward.md');
@@ -220,7 +227,8 @@ function stewardInboxTool(request) {
   const tools = new Map();
   registerPortfolioTools({ tools: { register: tool => tools.set(tool.name, tool) } },
     { defineTool: tool => tool, jsonOutput: {}, portfolio: stewardOps({ request, project: 'aitelier-home', me: 'drv-home' }).portfolio });
-  assert.deepEqual([...tools.keys()], PORTFOLIO_TOOLS, 'the host provides all four portfolio tools');
+  assert.deepEqual([...tools.keys()], [...PORTFOLIO_TOOLS, 'portfolio_inbox_acknowledge'],
+    'the steward host registers the four portfolio reads and its one inbox write');
   return tools.get('portfolio_inbox');
 }
 const toolCall = { signal: AbortSignal.timeout(5000) };
@@ -342,4 +350,46 @@ test('owner memory requests (step 14): each kind runs against the store as the o
   assert.equal(completed.at(-1).result.text, 'likes short replies');
   assert.ok(MEMORY_REQUEST_EVENTS.has('steward_memory_request_created'));
   await store.close();
+});
+
+test('inbox acknowledgement: the registered tool writes ONE acknowledge for the delivery the wake showed, and a retry is the same request', async () => {
+  const calls = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path !== '/api/state/commands/acknowledge_director_message') throw new Error('unexpected ' + path);
+    if (body.delivery_id === 'd-gone') {
+      // The director-messaging contract's refusal envelope, not an HTTP error.
+      return { schema: 'aitelier.director-messaging.v3', code: 'unknown_delivery',
+        detail: { message: 'unknown_delivery' } };
+    }
+    return { schema: 'aitelier.director-messaging.v3', result: {
+      delivery: { delivery_id: body.delivery_id, status: 'resolved', version: body.expected_version + 1 },
+      replayed: calls.length > 1 } };
+  };
+  const ops = stewardOps({ request, project: 'aitelier-home', me: 'drv-home' });
+  const tools = collectPortfolio({ portfolio: ops.portfolio });
+  assert.ok(tools.has('portfolio_inbox_acknowledge'), 'registered when the host acknowledges');
+  const tool = tools.get('portfolio_inbox_acknowledge');
+  const first = await tool.execute({ delivery_id: 'd-1', version: 1 }, exec);
+  assert.deepEqual(first.delivery, { delivery_id: 'd-1', status: 'resolved', version: 2 });
+  assert.equal(calls.length, 1, 'one acknowledgement is one write');
+  assert.deepEqual(calls[0], ['/api/state/commands/acknowledge_director_message', {
+    project_id: 'aitelier-home', protocol_version: 'v3', delivery_id: 'd-1', expected_version: 1,
+    request_key: 'steward-ack:d-1:1' }], 'the wake\'s delivery identity and version, its own project only');
+  // Same delivery and version = same request key: State replays it, no second write.
+  assert.equal((await tool.execute({ delivery_id: 'd-1', version: 1 }, exec)).replayed, true);
+  assert.equal(calls[1][1].request_key, calls[0][1].request_key);
+  assert.ok(calls.every(([path]) => path === '/api/state/commands/acknowledge_director_message'), 'nothing else was written');
+  // An unknown delivery is a named refusal, never a silent success.
+  const unknown = await tool.execute({ delivery_id: 'd-gone', version: 1 }, exec);
+  assert.deepEqual({ refused: unknown.refused, code: unknown.code }, { refused: 'state_refused', code: 'unknown_delivery' });
+  // What it cannot identify writes nothing at all.
+  const before = calls.length;
+  assert.equal((await tool.execute({ delivery_id: '', version: 1 }, exec)).refused, 'invalid_delivery');
+  assert.equal((await tool.execute({ delivery_id: 'd-1', version: 0 }, exec)).refused, 'invalid_version');
+  assert.equal(calls.length, before, 'a refused call writes nothing');
+  // A host that does not offer the acknowledgement registers no such tool.
+  const readOnly = collectPortfolio({ portfolio: { projects: async () => ({}), project: async () => ({}),
+    conversation: async () => ({}) } });
+  assert.equal(readOnly.has('portfolio_inbox_acknowledge'), false);
 });

@@ -1040,10 +1040,12 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
         # Reader C above.
         ret_f = focused_check(kind="godot_scenario", scenario="s1",
                               project_root=str(proj), timeout_seconds=10)
-        # The stand-in must still be holding while every reader above is queued. A
-        # holder whose own valve closed hands the lock to the next reader, and the
-        # "a queued request rendered" assertion below would then report the
-        # instrument expiring as if the product had let a request through.
+        # In the live-holder branch the stand-in must still be holding while every
+        # reader above is queued. A holder whose own valve closed hands the lock to
+        # the next reader, and the "a queued request rendered" assertion below would
+        # then report the instrument expiring as if the product had let a request
+        # through. (The deployment-fence branch spawns no stand-in body, so nothing
+        # can return there and this assertion has nothing to watch.)
         assert not rig.held_bodies_returned, (
             "the holder's stand-in window closed before the test released it, so the "
             f"readers below were no longer queued behind it; rendered={rig.rendered}")
@@ -1099,8 +1101,8 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
 # 2.0 s window in one, 1.80 s into another, and never in 2 (the socket expired
 # first).  At the 2 s value this test shipped with, 2 of 6 runs were inside the
 # last 0.6 s of their window.  10 s gives the measured path two orders of
-# magnitude of room and still sits inside the rig's own 30 s render block, and the
-# assertions below name the ordering they depend on.
+# magnitude of room and still sits well inside the rig's own hold valve
+# (HOLDER_HOLD_SEC), and the assertions below name the ordering they depend on.
 WITNESS_SOCKET_SEC = 10.0
 
 

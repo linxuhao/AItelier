@@ -25,7 +25,7 @@
                   "watch_process", "create_goal", "update_goal", "ask_owner", "close_question"]
   },
   "steward": {
-    "route": "driver",
+    "route": "steward",
     "reasoning_effort": "high",
     "compaction": {"thresholdRatio": 0.25, "retainTokens": 0},
     "prompt": "steward.md",

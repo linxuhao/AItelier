@@ -1,6 +1,7 @@
 /** Plugin step 12 (design-steward 4), the JS side: the steward role in the table, its
  *  closed tool set, the AItelier host started as the steward, the owner's conversation
- *  recorded into memory, the owner-message check, the handoff and the portfolio reads.
+ *  recorded into memory, the owner-message check, the handoff, the portfolio reads and
+ *  the reader for the inbox the wake only injects an excerpt of.
  *  The server-side limits (steward_read_only) are tests/unit's; the real-DSH boot is
  *  runtime.steward.test.mjs. */
 import { test } from 'node:test';
@@ -11,8 +12,9 @@ import { join } from 'node:path';
 import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools } from './tool-discovery.mjs';
-import { aitelierHost } from './runtime.mjs';
+import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, syncConversation } from './steward-host.mjs';
+import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
 
@@ -39,16 +41,20 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
 test('presented_only: the steward has exactly its presented tools; everything else is refused, however it is called', () => {
   const steward = aitelierRoles(table).steward;
   assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message'], 'the adapter adds only the owner message');
+  // The inbox reader is the steward's own and nobody else's.
+  assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
+  assert.equal(refusal(steward, exec('portfolio_inbox')), undefined);
   for (const name of ['bash', 'read', 'write', 'edit', 'grep', 'subagent', 'call_tool', 'search_tools', 'state_read', 'todo_plan',
     'project_work', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'web_fetch', 'some_new_tool'])
     assert.equal(refusal(steward, exec(name)), `${name} is not available to this role`, name);
   for (const name of steward.presented) assert.equal(refusal(steward, exec(name)), undefined, name);
-  const registered = ['bash', 'memory_search', 'memory_read', 'portfolio_projects', 'handoff', 'send_user_message', 'call_tool'].map(name => ({ name }));
-  assert.deepEqual(presentTools(registered, steward).map(t => t.name), ['memory_search', 'memory_read', 'portfolio_projects', 'handoff', 'send_user_message']);
+  const registered = ['bash', 'memory_search', 'memory_read', 'portfolio_projects', 'portfolio_inbox', 'handoff', 'send_user_message', 'call_tool'].map(name => ({ name }));
+  assert.deepEqual(presentTools(registered, steward).map(t => t.name), ['memory_search', 'memory_read', 'portfolio_projects', 'portfolio_inbox', 'handoff', 'send_user_message']);
   // The director and the worker are untouched by the steward's closed set.
   const effective = aitelierRoles(table);
   assert.equal(refusal(effective.director, exec('some_new_tool')), undefined);
   assert.equal(refusal(effective.worker, exec('some_new_tool')), undefined);
+  for (const role of ['director', 'worker']) assert.ok(!effective[role].presented.includes('portfolio_inbox'), role);
 });
 
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
@@ -61,6 +67,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
+  assert.deepEqual(Object.keys(steward.portfolio).sort(), ['conversation', 'inbox', 'project', 'projects'],
+    'the steward\'s own inbox page is one of the reads this host provides');
   assert.doesNotThrow(() => validateHost(steward));
   const director = aitelierHost(env());
   assert.equal(director.config.rootRole, undefined);
@@ -184,6 +192,99 @@ test('portfolio: every other project with its director and open questions; one p
   assert.deepEqual(Object.keys(one), ['project_id', 'overview', 'open_issues', 'open_questions']);
   assert.deepEqual((await ops.portfolio.conversation('wuxia', 'c-1')).body, { project_id: 'wuxia', limit: 30, cursor: 'c-1' });
   assert.ok(calls.every(([path]) => path.startsWith('/api/state/query/') || path === '/api/dsh-drivers'), 'reads only');
+});
+
+/** A fake State for this steward's own inbox: deliveries stored whole, paged by
+ *  delivery_seq the way the inbox query pages them, and every call remembered. */
+function fakeInbox(bodies) {
+  const calls = [];
+  const deliveries = bodies.map((body, index) => ({
+    message: { message_id: `m-${index + 1}`, thread_id: `thr-${index + 1}`, sender_project_id: 'wuxia',
+      subject: `subject ${index + 1}`, body, created_at: `2026-11-17T10:${String(index).padStart(2, '0')}:00Z` },
+    delivery: { delivery_id: `dlv-${index + 1}`, delivery_seq: index + 1, status: 'unread', version: 1 },
+    acked_by_me: false }));
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path !== '/api/state/query/list_director_messages') throw new Error('the inbox reader called ' + path);
+    if (body.project_id !== 'aitelier-home') throw new Error('the inbox reader read another project: ' + body.project_id);
+    const left = deliveries.filter(d => d.delivery.delivery_seq > body.after), page = left.slice(0, body.limit);
+    return { result: { project_id: body.project_id, items: page, matched_total: left.length,
+      has_more: left.length > page.length, next_after: page.length ? page.at(-1).delivery.delivery_seq : body.after } };
+  };
+  return { request, calls, deliveries };
+}
+
+/** The inbox reader exactly as the steward is given it: the delivered registered tool
+ *  over the delivered adapter operations. */
+function stewardInboxTool(request) {
+  const tools = new Map();
+  registerPortfolioTools({ tools: { register: tool => tools.set(tool.name, tool) } },
+    { defineTool: tool => tool, jsonOutput: {}, portfolio: stewardOps({ request, project: 'aitelier-home', me: 'drv-home' }).portfolio });
+  assert.deepEqual([...tools.keys()], PORTFOLIO_TOOLS, 'the host provides all four portfolio tools');
+  return tools.get('portfolio_inbox');
+}
+const toolCall = { signal: AbortSignal.timeout(5000) };
+
+test('the inbox reader (step 12 follow-up): a body longer than the injected excerpt comes back whole, equal to the stored body', async () => {
+  const stored = '0123456789abcdef'.repeat(117).slice(0, 1863);
+  assert.equal(stored.length, 1863);
+  assert.ok(stored.length > INBOX_EXCERPT_CHARS, 'longer than the excerpt the wake injects');
+  const state = fakeInbox([stored, 'tiny', 'also tiny']);
+  const tool = stewardInboxTool(state.request);
+  const answer = await tool.execute({ after: 0, limit: 50 }, toolCall);
+  assert.equal(answer.project_id, 'aitelier-home');
+  assert.deepEqual(answer.items.map(item => item.delivery_seq), [1, 2, 3]);
+  const [first] = answer.items;
+  assert.deepEqual({ delivery_id: first.delivery_id, delivery_seq: first.delivery_seq, message_id: first.message_id,
+    body_chars: first.body_chars }, { delivery_id: 'dlv-1', delivery_seq: 1, message_id: 'm-1', body_chars: 1863 });
+  assert.equal(first.body, stored, 'the whole stored body, not an excerpt');
+  assert.equal(first.body_truncated, undefined);
+  assert.equal(answer.matched_total, 3);
+  assert.equal(answer.has_more, false);
+  assert.equal(answer.next_after, null);
+  // The bounds the description states are the bounds the answer reports, and the request
+  // carried the per-page bound, not the 50 the caller asked for.
+  const stated = tool.description.match(/at most (\d+) deliveries, one body at most (\d+) characters, and the whole answer is capped at (\d+) characters/);
+  assert.ok(stated, tool.description);
+  assert.deepEqual(answer.limits, { items_per_page: Number(stated[1]), body_chars: Number(stated[2]), answer_chars: Number(stated[3]) });
+  assert.deepEqual(state.calls, [['/api/state/query/list_director_messages', { project_id: 'aitelier-home',
+    protocol_version: 'v3', statuses: ['unread', 'acknowledged'], after: 0, limit: answer.limits.items_per_page }]]);
+});
+
+test('inbox bounds: a body past the per-body bound carries its true body_chars and a truncation flag; a page past the item bound carries matched_total, has_more and the next cursor', async () => {
+  const enormous = 'y'.repeat(9000);
+  const state = fakeInbox([enormous, ...Array.from({ length: 11 }, (_, i) => 'small ' + i)]);
+  const tool = stewardInboxTool(state.request);
+  const first = await tool.execute({ after: 0, limit: 50 }, toolCall);
+  assert.equal(first.items.length, 5, 'the item bound holds, though 12 are waiting');
+  const [cut] = first.items;
+  assert.equal(cut.body_chars, 9000, 'the true size of the stored body');
+  assert.equal(cut.body_truncated, true);
+  assert.equal(cut.body, enormous.slice(0, first.limits.body_chars));
+  assert.equal(first.matched_total, 12);
+  assert.equal(first.has_more, true);
+  assert.equal(first.next_after, 5);
+  const second = await tool.execute({ after: first.next_after, limit: 50 }, toolCall);
+  assert.deepEqual(second.items.map(item => item.delivery_seq), [6, 7, 8, 9, 10]);
+  assert.equal(second.matched_total, 7);
+  assert.equal(second.has_more, true);
+  assert.equal(second.next_after, 10);
+  const last = await tool.execute({ after: second.next_after, limit: 50 }, toolCall);
+  assert.deepEqual(last.items.map(item => item.delivery_seq), [11, 12]);
+  assert.equal(last.has_more, false);
+  assert.equal(last.next_after, null);
+  assert.ok(state.calls.every(([path]) => path === '/api/state/query/list_director_messages'), 'read-only: one query, no acknowledgement, no write');
+});
+
+test('the inbox answer itself is bounded: a page of long bodies is cut and counted, and its cursor still moves', async () => {
+  const state = fakeInbox(Array.from({ length: 5 }, () => 'z'.repeat(9000)));
+  const tool = stewardInboxTool(state.request);
+  const answer = await tool.execute({ after: 0, limit: 5 }, toolCall);
+  assert.ok(JSON.stringify(answer).length <= answer.limits.answer_chars, 'one call cannot flood the steward\'s context');
+  assert.ok(answer.items.length >= 1 && answer.items.length < 5, 'fewer than the page asked for, not more than the cap');
+  assert.equal(answer.items_omitted, 5 - answer.items.length);
+  assert.equal(answer.has_more, true);
+  assert.equal(answer.next_after, answer.items.at(-1).delivery_seq, 'the cursor resumes after the last delivery it showed');
 });
 
 test('proposals (step 13): propose records one open proposal under a digest key; withdraw names the proposal; a refusal is an answer', async () => {

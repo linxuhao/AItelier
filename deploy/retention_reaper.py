@@ -8,9 +8,12 @@ accident rather than by need. Measured 2026-11-16:
 
   * ``godot-control/evidence/<32hex>/`` — one proof directory per Godot sidecar
     tool call: 3276 directories, 38.37 GB, and nothing reads them back.
-  * ``release-watch/runs/`` — 28 run directories, 13.19 GB. ``release-watch/outcomes/``
-    holds 24 files that mention a run directory by path, so a run is not
-    automatically spent just because it is old: something recorded a verdict about it.
+  * ``release-watch/runs/`` — 28 run directories, 13.23 GB. ``release-watch/outcomes/``
+    holds 100 files that cite exactly 24 distinct paths, and every one of those paths
+    is a DIRECTORY below a run (``release-watch/runs/<id>/<segment>/demo``): no outcome
+    names a file and no outcome names a bare run directory. A citation keeps the
+    subtree it points at — not the half-gigabyte run around it, which is what a bare
+    "some outcome mentioned this run" test used to keep forever.
   * ``scratch/`` 4.55 GB and ``worktrees-scratch/`` 3.3 GB, never reclaimed.
   * the whole driver home 65 GB.
 
@@ -51,10 +54,14 @@ CLASSES AND THEIR AGE SIGNAL
 ----------------------------
 ``godot-control/evidence/<32hex>/`` — default 3 days (owner ruling).
 ``release-watch/runs/<run>/``       — default 14 days, and only when
-                                        ``release-watch/outcomes/`` mentions the
-                                        run directory name nowhere (file name or
-                                        content); an expired but referenced run is
-                                        kept as ``referenced-by-outcome``.
+                                        ``release-watch/outcomes/`` does not cite the
+                                        run. A run cited only BELOW itself
+                                        (``runs/<id>/<segment>/demo``) keeps exactly
+                                        the cited subtree as ``referenced-by-outcome``
+                                        and offers the rest as
+                                        ``uncited-remainder``; a run cited at its own
+                                        directory, named by an outcome file name, or
+                                        named only as a bare word is still kept whole.
 ``scratch/``                        — default 14 days.
 ``worktrees-scratch/``              — default 14 days.
 
@@ -62,6 +69,15 @@ Age is the entry's own mtime (``lstat``, never followed): for these classes the
 directory is written last and its mtime is when the work stopped. ``--retention
 <class>=<days>`` overrides one class per flag and can name a class more than
 once (last wins).
+
+THE THREE NUMBERS THAT HAVE TO RECONCILE
+----------------------------------------
+Each class reports ``total_bytes``, measured before anything is removed, split into
+``kept_bytes``, ``reclaimable_bytes`` and ``deleted_bytes``. The three are DISJOINT and
+add back up to ``total_bytes``: a partially cited run appears once as kept bytes (the
+cited subtree) and once as reclaimable bytes (the rest), never with the same byte in
+both. Refused entries (symlinks, paths outside ``--home``) carry no bytes in that sum;
+they are listed under ``refused`` and are the only entries the sum leaves out.
 
 USAGE
 -----
@@ -79,6 +95,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -208,6 +225,48 @@ def _entry_bytes(path: Path) -> int:
     return st.st_size
 
 
+def _subtree_bytes(path: Path) -> int:
+    """Bytes that stay when ``path`` is retained: the entry itself plus all below it.
+
+    ``_tree_bytes`` counts what is *below* a directory, which is the right measure for
+    an entry the reaper may remove wholesale (the directory inode goes with it). A
+    subtree that is KEPT also keeps the directory inode, so this adds it — otherwise a
+    partially cited run's remainder would silently carry the kept directory's own size
+    and the class total would not add up.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0
+    if os.path.isdir(path) and not os.path.islink(path):
+        return st.st_size + _tree_bytes(path)
+    return st.st_size
+
+
+def _remainders(root: Path, kept: Iterable[Path]) -> list[Path]:
+    """Topmost paths below ``root`` that can go without touching any of ``kept``.
+
+    ``kept`` are the cited subtrees that stay. A child that CONTAINS a kept path is
+    not itself a removal target: it is descended into, so its other children can be.
+    This names what the one deletion primitive would be handed; it decides nothing.
+    """
+    kept_paths = tuple(kept)
+    targets: list[Path] = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return targets
+    for child in children:
+        if any(child == other or child in other.parents for other in kept_paths):
+            # ``child`` is a cited subtree (kept whole) or holds one (descent needed).
+            if child in kept_paths:
+                continue
+            targets.extend(_remainders(child, kept_paths))
+        else:
+            targets.append(child)
+    return targets
+
+
 def _age_days(mtime: float, now: float) -> float:
     return max(0.0, (now - mtime) / SECONDS_PER_DAY)
 
@@ -225,6 +284,31 @@ def _remove(path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: A run path as outcomes write it: ``release-watch/runs/<id>`` with any path below it.
+#: The measured shape (2026-11-16) is ``release-watch/runs/<id>/<segment>/demo`` in all
+#: 24 cited paths of 100 outcome files; the optional tail is kept general but never
+#: guessed — what is not in the text is not a citation.
+_RUN_PATH_RE = re.compile(
+    r"release-watch/runs/(?P<run>[A-Za-z0-9._-]+)"
+    r"(?P<below>(?:/[^\s\"'`,;:()\[\]{}<>\\|*?]+)*)"
+)
+
+
+def _cited_suffix(below: str) -> str:
+    """Run-relative suffix of a cited path; ``""`` when the run dir itself is cited."""
+    suffix = below.strip("/")
+    suffix = re.sub(r"[.,;:!?]+$", "", suffix)  # a sentence-ending dot is not a segment
+    return suffix.strip("/")
+
+
+def _citations(blob: str) -> dict[str, set[str]]:
+    """Every ``release-watch/runs/<run>[/<below>]`` path the outcome text names."""
+    found: dict[str, set[str]] = {}
+    for match in _RUN_PATH_RE.finditer(blob):
+        found.setdefault(match.group("run"), set()).add(_cited_suffix(match.group("below")))
+    return found
+
+
 @dataclass
 class OutcomeIndex:
     """Everything ``release-watch/outcomes/`` says, searchable by run dir name."""
@@ -233,9 +317,16 @@ class OutcomeIndex:
     complete: bool = True
     files: int = 0
     unreadable: list[str] = field(default_factory=list)
+    #: run directory name -> the run-relative path suffixes outcomes cite below it
+    #: (``""`` means the run directory itself was cited).
+    citations: dict[str, set[str]] = field(default_factory=dict)
 
     def mentions(self, name: str) -> bool:
         return name in self.blob
+
+    def cites(self, name: str) -> tuple[str, ...]:
+        """The cited run-relative suffixes for ``name``, sorted (empty when none)."""
+        return tuple(sorted(self.citations.get(name, ())))
 
 
 def _read_outcomes(outcomes_dir: Path) -> OutcomeIndex:
@@ -265,7 +356,93 @@ def _read_outcomes(outcomes_dir: Path) -> OutcomeIndex:
                 index.complete = False
                 index.unreadable.append(str(path))
     index.blob = "\n\u0000\n".join(chunks)
+    index.citations = _citations(index.blob)
     return index
+
+
+@dataclass(frozen=True)
+class _Claim:
+    """What ``release-watch/outcomes`` claims about ONE run directory."""
+
+    #: True when the whole run directory is claimed and stays exactly as it is today.
+    whole: bool
+    #: Home-relative cited paths that keep bytes here (what the report names as kept-by).
+    kept_by: tuple[str, ...]
+    #: Bytes under those cited paths.
+    kept_bytes: int
+    #: The cited subtrees themselves, for carving the remainder out of the run.
+    kept_paths: tuple[Path, ...] = ()
+    #: Why this is the decision, when the reason column alone is too terse.
+    detail: str | None = None
+
+
+def _claim_for(
+    outcomes: OutcomeIndex,
+    run_name: str,
+    run_rel: str,
+    path: Path,
+    size: int,
+) -> _Claim | None:
+    """Decide what the outcomes claim about one run, or None when nothing cites it.
+
+    Three shapes, in increasing precision, and each one is only as aggressive as the
+    evidence: a bare name mention keeps the whole run (as before this change), a
+    citation of the run directory or of a single file inside it keeps the whole run
+    too (the reaper does not carve a run around one file), and a citation of a
+    directory BELOW the run keeps exactly that subtree.
+    """
+    suffixes = outcomes.cites(run_name)
+    if not suffixes:
+        if outcomes.mentions(run_name):
+            return _Claim(
+                whole=True,
+                kept_by=(run_rel,),
+                kept_bytes=size,
+                detail="run directory named by an outcome, with no path below it",
+            )
+        return None
+    if "" in suffixes:
+        return _Claim(
+            whole=True,
+            kept_by=(run_rel,),
+            kept_bytes=size,
+            detail="an outcome cites the run directory itself",
+        )
+
+    kept_paths: list[Path] = []
+    kept_by: list[str] = []
+    for suffix in sorted(suffixes, key=lambda s: (s.count("/"), s)):
+        target = path / suffix
+        if target.is_symlink() or not target.exists():
+            continue  # cited but absent here: it keeps no bytes in this run
+        if not target.is_dir():
+            # A claim on a single FILE. Keep the whole run rather than carve around it:
+            # the measured shape never does this, and half a run is not evidence.
+            return _Claim(
+                whole=True,
+                kept_by=(f"{run_rel}/{suffix}",),
+                kept_bytes=size,
+                detail="an outcome cites a single file inside the run",
+            )
+        if any(target == other or other in target.parents for other in kept_paths):
+            continue  # already covered by a cited parent path
+        kept_paths.append(target)
+        kept_by.append(f"{run_rel}/{suffix}")
+
+    if not kept_paths:
+        return _Claim(
+            whole=True,
+            kept_by=(run_rel,),
+            kept_bytes=size,
+            detail="outcomes cite only paths that are absent under this run",
+        )
+    return _Claim(
+        whole=False,
+        kept_by=tuple(kept_by),
+        kept_bytes=sum(_subtree_bytes(target) for target in kept_paths),
+        kept_paths=tuple(kept_paths),
+        detail="outcomes cite only these paths below the run",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -294,8 +471,10 @@ def _plan_class(
         "root": cls.rel_root,
         "retention_days": days,
         "present": root.exists() or root.is_symlink(),
+        "total_bytes": 0,
         "candidate_count": 0,
         "candidate_bytes": 0,
+        "reclaimable_bytes": 0,
         "deleted_count": 0,
         "deleted_bytes": 0,
         "kept_count": 0,
@@ -345,6 +524,7 @@ def _plan_class(
             continue
 
         size = _entry_bytes(path)
+        report["total_bytes"] += size
         age = _age_days(mtime, now)
         measured = {"age_days": round(age, 2), "bytes": size}
 
@@ -354,6 +534,7 @@ def _plan_class(
             report["kept_bytes"] += size
             continue
 
+        claim: _Claim | None = None
         if cls.outcome_referenced and outcomes is not None:
             if not outcomes.complete:
                 report["kept"].append(
@@ -368,34 +549,82 @@ def _plan_class(
                 report["kept_count"] += 1
                 report["kept_bytes"] += size
                 continue
-            if outcomes.mentions(entry.name) or outcomes.mentions(rel):
+            claim = _claim_for(outcomes, entry.name, rel, path, size)
+            if claim is not None and claim.whole:
                 report["kept"].append(
-                    _record(rel, "kept", "referenced-by-outcome", **measured)
+                    _record(
+                        rel,
+                        "kept",
+                        "referenced-by-outcome",
+                        kept_by=list(claim.kept_by),
+                        detail=claim.detail,
+                        **measured,
+                    )
                 )
                 report["kept_count"] += 1
                 report["kept_bytes"] += size
                 continue
+            if claim is not None:
+                # A citation BELOW the run keeps exactly the cited subtree; the rest of
+                # the run is reclaimable. The two records are DISJOINT in bytes — the
+                # kept subtree plus the remainder is the entry size measured above — so
+                # the class total still reconciles and no byte is counted twice.
+                report["kept"].append(
+                    _record(
+                        rel,
+                        "kept",
+                        "referenced-by-outcome",
+                        age_days=round(age, 2),
+                        bytes=claim.kept_bytes,
+                        kept_by=list(claim.kept_by),
+                        detail=claim.detail,
+                    )
+                )
+                report["kept_count"] += 1
+                report["kept_bytes"] += claim.kept_bytes
+
+        # ---- what is left of this entry is a candidate -------------------------- #
+        if claim is not None:
+            reclaimable = size - claim.kept_bytes
+            targets = _remainders(path, claim.kept_paths)
+            reason = "uncited-remainder"
+            details: dict[str, Any] = {
+                "kept_bytes": claim.kept_bytes,
+                "kept_by": list(claim.kept_by),
+            }
+        else:
+            reclaimable = size
+            targets = [path]
+            reason = "expired"
+            details = {}
+        if reclaimable <= 0:
+            continue
 
         report["candidate_count"] += 1
-        report["candidate_bytes"] += size
+        report["candidate_bytes"] += reclaimable
+        accounting = {"age_days": round(age, 2), "bytes": reclaimable, **details}
+
         if not delete:
-            report["candidates"].append(
-                _record(rel, "would-delete", "expired", **measured)
-            )
+            report["reclaimable_bytes"] += reclaimable
+            report["candidates"].append(_record(rel, "would-delete", reason, **accounting))
             continue
 
-        try:
-            _remove(path)
-        except OSError as exc:
+        failures: list[str] = []
+        for target in targets:  # the one deletion primitive, at its one call site
+            try:
+                _remove(target)
+            except OSError as exc:
+                failures.append(f"{target.name}: {exc}")
+        if failures:
             report["kept"].append(
-                _record(rel, "kept", "delete-failed", detail=str(exc), **measured)
+                _record(rel, "kept", "delete-failed", detail="; ".join(failures), **accounting)
             )
             report["kept_count"] += 1
-            report["kept_bytes"] += size
+            report["kept_bytes"] += reclaimable
             continue
-        report["deleted"].append(_record(rel, "deleted", "expired", **measured))
+        report["deleted"].append(_record(rel, "deleted", reason, **accounting))
         report["deleted_count"] += 1
-        report["deleted_bytes"] += size
+        report["deleted_bytes"] += reclaimable
 
     return report
 
@@ -460,8 +689,10 @@ def run(
     }
 
     totals = {
+        "total_bytes": 0,
         "candidate_count": 0,
         "candidate_bytes": 0,
+        "reclaimable_bytes": 0,
         "deleted_count": 0,
         "deleted_bytes": 0,
         "kept_count": 0,
@@ -484,6 +715,19 @@ def run(
     return report
 
 
+def _render_record(record: dict[str, Any]) -> str:
+    """One entry line; ``kept-by=`` names the citation whose bytes were kept."""
+    line = "  {status:<12} {reason:<22} {age:>7.2f}d {bytes:>12} B  {path}".format(
+        status=record["status"], reason=record["reason"],
+        age=record.get("age_days", 0.0), bytes=record.get("bytes", 0),
+        path=record["path"],
+    )
+    kept_by = record.get("kept_by") or []
+    if kept_by:
+        line += "  kept-by=" + ", ".join(kept_by)
+    return line
+
+
 def render_text(report: dict[str, Any]) -> str:
     """The operator-facing rendering of the same report ``--json`` writes."""
     headline = (
@@ -491,6 +735,8 @@ def render_text(report: dict[str, Any]) -> str:
         "  candidate {candidate_count} entr(ies), {candidate_bytes} bytes; "
         "deleted {deleted_count} entr(ies), {deleted_bytes} bytes; "
         "kept {kept_count}; refused {refused_count}\n"
+        "  accounted: total {total_bytes} B = kept {kept_bytes} B "
+        "+ reclaimable {reclaimable_bytes} B + deleted {deleted_bytes} B\n"
     ).format(home=report["home"], mode=report["mode"], **report["totals"])
     if report["mode"] == "dry-run":
         headline += "  dry run: nothing was deleted (pass --delete to reclaim)\n"
@@ -498,18 +744,21 @@ def render_text(report: dict[str, Any]) -> str:
     lines = [headline.rstrip("\n")]
     for name, class_report in report["classes"].items():
         lines.append(
-            "\n[{name}] root={root} retention={days:g}d  "
-            "candidates={candidate_count} ({candidate_bytes} B)  "
+            "\n[{name}] root={root} retention={days:g}d  total={total_bytes} B  "
+            "kept={kept_count} ({kept_bytes} B)  "
+            "reclaimable={candidate_count} ({reclaimable_bytes} B)  "
             "deleted={deleted_count} ({deleted_bytes} B)  "
-            "kept={kept_count}  refused={refused_count}".format(
+            "refused={refused_count}".format(
                 name=name,
                 root=class_report["root"],
                 days=class_report["retention_days"],
+                total_bytes=class_report["total_bytes"],
+                kept_count=class_report["kept_count"],
+                kept_bytes=class_report["kept_bytes"],
                 candidate_count=class_report["candidate_count"],
-                candidate_bytes=class_report["candidate_bytes"],
+                reclaimable_bytes=class_report["reclaimable_bytes"],
                 deleted_count=class_report["deleted_count"],
                 deleted_bytes=class_report["deleted_bytes"],
-                kept_count=class_report["kept_count"],
                 refused_count=class_report["refused_count"],
             )
         )
@@ -517,21 +766,9 @@ def render_text(report: dict[str, Any]) -> str:
             lines.append("  absent (nothing at this path)")
             continue
         for record in class_report["candidates"] + class_report["deleted"]:
-            lines.append(
-                "  {status:<12} {reason:<22} {age:>7.2f}d {bytes:>12} B  {path}".format(
-                    status=record["status"], reason=record["reason"],
-                    age=record.get("age_days", 0.0), bytes=record.get("bytes", 0),
-                    path=record["path"],
-                )
-            )
+            lines.append(_render_record(record))
         for record in class_report["kept"]:
-            lines.append(
-                "  {status:<12} {reason:<22} {age:>7.2f}d {bytes:>12} B  {path}".format(
-                    status=record["status"], reason=record["reason"],
-                    age=record.get("age_days", 0.0), bytes=record.get("bytes", 0),
-                    path=record["path"],
-                )
-            )
+            lines.append(_render_record(record))
         for record in class_report["refused"]:
             lines.append(
                 "  {status:<12} {reason:<22} {path}  ({detail})".format(

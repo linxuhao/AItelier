@@ -11,6 +11,10 @@ Witnesses, all through the production entry points (``StateService`` and the
 3. The reply FK is gone from fresh and from populated pre-existing databases,
    every pre-existing row survives with identical values, and a second open is a
    no-op.
+4. A cited letter sent INSIDE the caller's own project is refused before any row
+   is written (``use_driver_inbox`` under v3, ``invalid_request`` under v2,
+   naming ``send_driver_message``), while a cited letter whose ``project_id`` is
+   NULL keeps refusing as before.
 """
 import json
 import sqlite3
@@ -50,6 +54,20 @@ def _delivery_rows(db):
         project = conn.execute("SELECT COUNT(*) FROM state_director_deliveries").fetchone()[0]
         driver = conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries").fetchone()[0]
     return project, driver
+
+
+def _mailbox_rows(db):
+    """(state_director_messages, state_director_deliveries) row counts, same file."""
+    with db.get_connection() as conn:
+        messages = conn.execute("SELECT COUNT(*) FROM state_director_messages").fetchone()[0]
+        deliveries = conn.execute("SELECT COUNT(*) FROM state_director_deliveries").fetchone()[0]
+    return messages, deliveries
+
+
+def _messages_with_subject(db, subject):
+    with db.get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM state_director_messages WHERE subject=?",
+                            (subject,)).fetchone()[0]
 
 
 def _send_to_driver(service, target, project_id="alpha", request_key="note"):
@@ -136,6 +154,68 @@ def test_refuses_project_inbox_delivery_cited_by_a_non_addressee_project(world):
             "alpha", "ada", "wrong-project", "subject", "body", reply_to_delivery_id=cited)
     assert refused.value.code == "unknown_delivery"
     assert _delivery_rows(db) == before
+
+
+@pytest.mark.parametrize("protocol_version,expected_code",
+                         [("v3", "use_driver_inbox"), (None, "invalid_request")])
+def test_refuses_a_reply_to_a_letter_sent_inside_the_callers_own_project(
+        world, protocol_version, expected_code):
+    """A driver letter sent INSIDE the caller's own project is not answerable
+    through the project mailbox: the reply's target would be the caller itself.
+
+    carol and bob are both members of beta, so carol's note to bob about beta is
+    a delivery inside beta. bob (of beta) cites it with ``reply_to_delivery_id``
+    and no ``target_project_id``, so the resolved target is beta, the caller's
+    own project: the reply would be delivered back to bob and reported as
+    success. The ``targeted`` branch already refuses that shape; the replying
+    branch must refuse it too, before writing anything, and name
+    ``send_driver_message`` as the channel that answers such a letter.
+    """
+    db, services = world
+    note = _send_to_driver(services["carol"], "bob", project_id="beta",
+                           request_key="own-project-note")
+    cited = note["deliveries"][0]["delivery_id"]
+    subject = "reply-to-own-project-subject"
+    before = _mailbox_rows(db)
+    assert _messages_with_subject(db, subject) == 0
+
+    arguments = dict(sender_project_id="beta", director_identity="bob",
+                     request_key="self-reply", subject=subject,
+                     body="reply body", reply_to_delivery_id=cited)
+    if protocol_version is not None:
+        arguments["protocol_version"] = protocol_version
+    with pytest.raises(DirectorMessageError) as refused:
+        services["bob"].director_messages.send_director_message(**arguments)
+
+    error = refused.value
+    assert error.code == expected_code
+    assert "send_driver_message" in error.envelope["detail"]["message"]
+    # Nothing was written: no message row, no delivery row, and no row carrying
+    # the refused request's subject.
+    assert _mailbox_rows(db) == before
+    assert _messages_with_subject(db, subject) == 0
+
+
+def test_refuses_a_reply_to_a_driver_letter_that_names_no_project(world):
+    """The neighbour case, kept as it is: a cited driver letter whose project_id
+    is NULL has no project to reply to, so it still refuses as invalid_request
+    naming send_driver_message, and writes nothing."""
+    db, services = world
+    note = services["carol"].driver_inbox.send_driver_message(
+        "projectless-note", "no project", "note body", target_driver_id="bob")
+    cited = note["deliveries"][0]["delivery_id"]
+    subject = "reply-to-projectless-subject"
+    before = _mailbox_rows(db)
+    assert _messages_with_subject(db, subject) == 0
+
+    with pytest.raises(DirectorMessageError) as refused:
+        services["bob"].director_messages.send_director_message(
+            "beta", "bob", "projectless-reply", subject, "reply body",
+            reply_to_delivery_id=cited)
+    assert refused.value.code == "invalid_request"
+    assert "send_driver_message" in refused.value.envelope["detail"]["message"]
+    assert _mailbox_rows(db) == before
+    assert _messages_with_subject(db, subject) == 0
 
 
 # ---------------------------------------------------------------------------

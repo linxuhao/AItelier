@@ -3,10 +3,10 @@
  *  plugin step 12). There is deliberately no purge tool: purging is the owner's alone. */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { MemoryStore, PROFILE_LIMIT, TOP_K_MAX } from './store.mjs';
+import { MemoryStore, PROFILE_LIMIT, READ_CHARS, READ_IDS_MAX, TOP_K_MAX } from './store.mjs';
 import { remoteRanked } from './remote.mjs';
 
-export const MEMORY_TOOLS = ['memory_search', 'memory_note', 'memory_profile_update', 'memory_forget'];
+export const MEMORY_TOOLS = ['memory_search', 'memory_read', 'memory_note', 'memory_profile_update', 'memory_forget'];
 export const defaultMemoryRoot = () => join(homedir(), '.local', 'share', 'dsh-director', 'memory');
 
 /** Open the store a host config asks for. Never throws: a memory that cannot start is
@@ -45,6 +45,12 @@ export function registerMemoryTools(scope, { defineTool, jsonOutput, memory, own
     description: `Search your owner's memory. Two answers come back, each naming its source: grep (literal, case-insensitive match of the whole query in the memory log and the profile - quote these as the owner's own words) and ranked (BM25, or the configured remote index: records close in meaning - say they are similar records, not quotes). Use exact words, names, dates or ids for grep; describe the idea for ranked. top_k 1-${TOP_K_MAX} (default 10).`,
     parameters: { query: { type: 'string', required: true }, top_k: { type: 'integer' } }, output: jsonOutput,
     execute: args => memory.error ? unavailable() : memory.store.search(args.query, args.top_k ?? 10),
+  }));
+  scope.tools.register(defineTool({ name: 'memory_read',
+    description: `Read whole memory entries that memory_search named: a grep hit's id, a local ranked hit's ref, or a remote hit's id when it has one; "profile" is the resident profile. Search shows excerpts only - read before you quote or decide. with_turn: true also returns the rest of that conversation turn (marked context), e.g. your own reply to an owner message. Forgotten entries are not returned. Up to ${READ_IDS_MAX} ids and ${READ_CHARS} characters in all: entries that did not fit are listed in omitted (read them next); one entry longer than that comes in pieces - read it alone with offset = cut.next_offset.`,
+    parameters: { ids: { type: 'array', items: { type: 'string' }, required: true }, with_turn: { type: 'boolean' }, offset: { type: 'integer' } },
+    output: jsonOutput,
+    execute: args => memory.error ? unavailable() : memory.store.read(args.ids, { withTurn: args.with_turn === true, offset: args.offset ?? 0 }),
   }));
   scope.tools.register(defineTool({ name: 'memory_note',
     description: 'Write one thing worth remembering into your owner\'s memory (an idea, a decision, a preference in their words). Each conversation turn is recorded already; use this for what you concluded or were asked to keep.',

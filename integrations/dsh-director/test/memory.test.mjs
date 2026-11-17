@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, sta
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bm25Index, documentTokens, queryTokens } from '../lib/memory/bm25.mjs';
-import { MemoryStore, MemoryUnavailable, PROFILE_LIMIT } from '../lib/memory/store.mjs';
+import { MemoryStore, MemoryUnavailable, PROFILE_LIMIT, READ_CHARS, READ_IDS_MAX } from '../lib/memory/store.mjs';
 import { MEMORY_TOOLS, profileSection, registerMemoryTools } from '../lib/memory/tools.mjs';
 import { gitEnv } from '../lib/memory/git.mjs';
 
@@ -123,6 +123,66 @@ test('one search, both answers, each naming its source and marking the other', a
   const loose = await store.search('small app');
   assert.deepEqual(loose.grep.hits, []);
   assert.equal(loose.ranked.hits[0].ref, 't-t1-0');
+  await store.close();
+});
+
+test('memory_read: the whole text a search only excerpted, the profile, and the rest of the turn on request', async () => {
+  const root = newRoot(); const store = await open(root);
+  const long = '开头' + 'x'.repeat(400) + ' LEDGER_MARK ' + 'y'.repeat(400) + '结尾';
+  await store.recordTurn('t1', [{ role: 'owner', text: long }, { role: 'steward', text: '好的，先做记账' }, { role: 'owner', text: '再加导出' }]);
+  await store.recordTurn('t2', [{ role: 'owner', text: '别的事' }]);
+  const p = await store.profile();
+  await store.updateProfile('喜欢简洁', p.version, 'test');
+  const hit = (await store.search('LEDGER_MARK')).grep.hits[0];
+  assert.ok(hit.excerpt.length < long.length && !hit.excerpt.includes('结尾'), 'search gives an excerpt only');
+  const r = await store.read([hit.id]);
+  assert.deepEqual(r.entries.map(e => [e.id, e.role, e.source, e.turn, e.text]), [['t-t1-0', 'owner', 'conversation', 't1', long]]);
+  assert.equal(r.omitted, undefined); assert.equal(r.status.git, 'ok');
+  // with_turn: the rest of that turn, in order, marked context; another turn never joins.
+  const t = await store.read(['t-t1-1'], { withTurn: true });
+  assert.deepEqual(t.entries.map(e => [e.id, e.context ?? false]), [['t-t1-1', false], ['t-t1-0', true], ['t-t1-2', true]]);
+  // An id asked for that already came as context is not repeated.
+  assert.deepEqual((await store.read(['t-t1-0', 't-t1-2'], { withTurn: true })).entries.map(e => e.id), ['t-t1-0', 't-t1-1', 't-t1-2']);
+  const prof = await store.read(['profile']);
+  assert.deepEqual(prof.entries.map(e => [e.id, e.text, e.version]), [['profile', '喜欢简洁', (await store.profile()).version]]);
+  // Forgotten: named, no text; unknown: not_found; restored: readable again.
+  await store.forget(['t-t1-2'], { reason: 'asked', by: 'owner' });
+  const f = await store.read(['t-t1-2', 'no-such-id', 't-t2-0']);
+  assert.deepEqual(f.entries.map(e => e.id), ['t-t2-0']);
+  assert.deepEqual(f.forgotten, ['t-t1-2']); assert.deepEqual(f.not_found, ['no-such-id']);
+  assert.ok(!JSON.stringify(f).includes('再加导出'));
+  assert.ok(!JSON.stringify(await store.read(['t-t1-0'], { withTurn: true })).includes('再加导出'), 'a forgotten message never rides along as context');
+  await store.restore('t-t1-2');
+  assert.equal((await store.read(['t-t1-2'])).entries[0].text, '再加导出');
+  await store.close();
+});
+
+test('memory_read limits: ids capped; texts past the character budget are omitted, one long entry comes in pieces', async () => {
+  const root = newRoot(); const store = await open(root);
+  assert.deepEqual(await store.read([]), { refused: 'ids_required' });
+  assert.deepEqual(await store.read(Array.from({ length: READ_IDS_MAX + 1 }, (_, i) => 'id' + i)), { refused: 'too_many_ids', limit: READ_IDS_MAX });
+  const third = Math.floor(READ_CHARS / 3) + 1;
+  await store.recordTurn('big', [0, 1, 2].map(i => ({ role: 'owner', text: String(i).repeat(third) })));
+  const r = await store.read(['t-big-0', 't-big-1', 't-big-2']);
+  assert.deepEqual(r.entries.map(e => e.id), ['t-big-0', 't-big-1']);
+  assert.ok(r.entries.every(e => e.text.length === third), 'what fits is whole');
+  assert.deepEqual(r.omitted, [{ id: 't-big-2', length: third }]);
+  const huge = 'abc'.repeat(Math.ceil((READ_CHARS * 2 + 10) / 3));
+  await store.recordTurn('huge', [{ role: 'owner', text: huge }]);
+  let offset = 0, joined = '', pieces = 0;
+  for (;;) {
+    const piece = await store.read(['t-huge-0'], { offset });
+    assert.ok(piece.entries[0].text.length <= READ_CHARS);
+    joined += piece.entries[0].text; pieces++;
+    if (!piece.entries[0].cut) break;
+    assert.equal(piece.entries[0].cut.length, huge.length);
+    offset = piece.entries[0].cut.next_offset;
+  }
+  assert.equal(joined, huge, 'the pieces put back together are the entry'); assert.equal(pieces, 3);
+  assert.equal((await store.read(['t-huge-0', 't-big-0'], { offset: 5 })).refused, 'offset_needs_one_id');
+  assert.equal((await store.read(['t-huge-0'], { offset: 5, withTurn: true })).refused, 'offset_needs_one_id');
+  assert.deepEqual(await store.read(['t-huge-0'], { offset: huge.length }), { refused: 'offset_past_end', length: huge.length });
+  assert.deepEqual(await store.read(['t-huge-0'], { offset: -1 }), { refused: 'bad_offset' });
   await store.close();
 });
 
@@ -294,7 +354,7 @@ test('older months load in the background; coverage says so until they are in', 
   await store.close();
 });
 
-test('the tools: exactly four, no purge; forget only on an owner message; an unavailable memory answers its error', async () => {
+test('the tools: exactly five, no purge; forget only on an owner message; an unavailable memory answers its error', async () => {
   const root = newRoot(); const store = await open(root);
   await store.recordTurn('t1', [{ role: 'owner', text: 'forget me' }]);
   const tools = new Map();
@@ -314,6 +374,12 @@ test('the tools: exactly four, no purge; forget only on an owner message; an una
   const note = await tools.get('memory_note').execute({ text: 'a note' }, exec);
   assert.match(note.id, /^n-/);
   assert.equal((await tools.get('memory_search').execute({ query: 'a note' }, exec)).grep.hits[0].id, note.id);
+  const read = await tools.get('memory_read').execute({ ids: [note.id] }, exec);
+  assert.deepEqual(read.entries.map(e => [e.id, e.text, e.source]), [[note.id, 'a note', 'note']]);
+  assert.equal(read.entries[0].turn, undefined, 'a note is its own turn');
+  await store.recordTurn('t2', [{ role: 'owner', text: 'q' }, { role: 'steward', text: 'a' }]);
+  assert.equal((await tools.get('memory_read').execute({ ids: ['t-t2-0'], with_turn: 'yes' }, exec)).entries.length, 1, 'only a real true asks for the turn');
+  assert.equal((await tools.get('memory_read').execute({ ids: ['t-t2-0'], with_turn: true }, exec)).entries.length, 2);
   const broken = new Map();
   registerMemoryTools({ tools: { register: t => broken.set(t.name, t) } }, { defineTool, jsonOutput: {}, memory: { error: 'memory: locked by process 1' } });
   for (const [name, tool] of broken) assert.deepEqual(await tool.execute({ query: 'x', text: 'x', ids: ['x'], reason: 'r', owner_message_id: 'o', expected_version: 'v' }, exec),

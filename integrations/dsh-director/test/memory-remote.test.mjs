@@ -42,8 +42,9 @@ const openRemote = (root, srv, extra = {}) => MemoryStore.open({ root, userId: U
   ranked: remoteRanked({ url: srv.url, name: 'Fixture', userId: 'u-1', sessionId: 's-1', ...extra }) });
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
-test('protocol mapping: one /add per turn, /search mapped, the source names the remote', async () => {
+test('protocol mapping: one /add per turn, /search mapped, the source names the remote', async (t) => {
   const srv = await fixture(); const root = newRoot();
+  t.after(() => srv.close());
   const store = await openRemote(root, srv);
   await store.recordTurn('turn-9', [{ role: 'owner', text: '想做记账工具' }, { role: 'steward', text: '记下了' }]);
   await settle();
@@ -58,7 +59,12 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   assert.equal(r.ranked.hits[0].also_in_grep, true, 'matched to the local entry by its text');
   assert.equal(r.grep.hits[0].also_in_ranked, true);
   assert.equal(r.ranked.remote_forget, 'unsupported', 'no remove, no batchOf: said on every search');
-  await store.close(); await srv.close();
+  assert.equal(r.ranked.hits[0].id, 't-turn-9-0', 'the matched local id, which memory_read takes');
+  assert.equal((await store.read([r.ranked.hits[0].id])).entries[0].text, '想做记账工具');
+  srv.data = () => [{ id: 'r2', content: 'User wants a ledger', score: 0.8 }];
+  const loose = await store.search('ledger', 5);
+  assert.equal(loose.ranked.hits[0].id, undefined, 'an extracted fact with no local twin has no id to read');
+  await store.close();
 });
 
 test('an unreachable remote: ranked carries the error verbatim, grep is complete, no BM25 stands in', async () => {

@@ -28,6 +28,9 @@ import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
 export const PROFILE_LIMIT = 4000;
 export const TOP_K_MAX = 20;
+/** memory_read: at most this many ids per call and this many characters of text in all. */
+export const READ_IDS_MAX = 20;
+export const READ_CHARS = 60000;
 /** Design 3.3's budget. Crossing a line is logged once and stays on status.over_budget. */
 export const BUDGET = Object.freeze({ entries: 100000, syncLoadMs: 3000, writeP95Ms: 200 });
 const USER_ID = /^[A-Za-z0-9@_+-][A-Za-z0-9@._+-]{0,127}$/;
@@ -689,6 +692,8 @@ export class MemoryStore {
       const rankedIds = new Set();
       for (const h of ranked.hits) {
         const id = this.remote ? grepTexts.get(h.text) : h.ref;
+        // A remote hit has the remote's ref; when its text is a local entry's, memory_read can take that id.
+        if (this.remote && id) h.id = id;
         if (id && grepIds.has(id)) { h.also_in_grep = true; rankedIds.add(id); }
       }
       for (const h of grep.hits) if (rankedIds.has(h.id)) h.also_in_ranked = true;
@@ -696,6 +701,55 @@ export class MemoryStore {
     for (const h of grep.hits) delete h.text;
     for (const h of ranked.hits ?? []) delete h.text;
     return { query: q, grep, ranked, status: this.statusLine() };
+  }
+
+  /** memory_read (design 3.5): the whole entries a search named. `profile` is the resident
+   *  profile. withTurn adds the other live entries of the same turn, marked context. A
+   *  forgotten entry answers `forgotten`; a purged or unknown id answers `not_found` - no
+   *  text comes back through here that search would not show. The texts are whole up to
+   *  READ_CHARS in all: an entry past that is listed in `omitted` (read it next), and an
+   *  entry longer than the limit on its own comes in pieces, `cut.next_offset` naming where
+   *  the next piece starts (read that id alone with that offset). */
+  async read(ids, { withTurn = false, offset = 0 } = {}) {
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !id)) return { refused: 'ids_required' };
+    const wanted = [...new Set(ids)];
+    if (wanted.length > READ_IDS_MAX) return { refused: 'too_many_ids', limit: READ_IDS_MAX };
+    if (!Number.isInteger(offset) || offset < 0) return { refused: 'bad_offset' };
+    if (offset && (wanted.length !== 1 || withTurn)) return { refused: 'offset_needs_one_id', reason: 'offset continues one entry: pass that id alone, without with_turn' };
+    const items = [], forgotten = [], notFound = [], seen = new Set();
+    for (const id of wanted) {
+      if (seen.has(id)) continue;
+      if (id === 'profile') {
+        const p = await this.profile();
+        seen.add(id); items.push({ id, text: p.text, version: p.version });
+        continue;
+      }
+      const e = this.entries.get(id);
+      if (!e) { (this.forgotten.has(id) && !this.forgotten.get(id).purged ? forgotten : notFound).push(id); continue; }
+      seen.add(id); items.push(this.#readable(e));
+      if (!withTurn || !e.batch) continue;
+      const turn = [...this.entries.values()].filter(x => x.batch === e.batch && !seen.has(x.id))
+        .sort((a, b) => (a.at > b.at ? 1 : a.at < b.at ? -1 : a.id.localeCompare(b.id, 'en', { numeric: true })));
+      for (const x of turn) { seen.add(x.id); items.push({ ...this.#readable(x), context: true }); }
+    }
+    if (offset && items.length && offset >= items[0].text.length) return { refused: 'offset_past_end', length: items[0].text.length };
+    const entries = [], omitted = [];
+    let used = 0;
+    for (const item of items) {
+      const text = offset ? item.text.slice(offset) : item.text;
+      if (used + text.length <= READ_CHARS) { entries.push({ ...item, text, ...(offset ? { offset } : {}) }); used += text.length; }
+      else if (!entries.length) {
+        entries.push({ ...item, text: text.slice(0, READ_CHARS), ...(offset ? { offset } : {}),
+          cut: { next_offset: offset + READ_CHARS, length: item.text.length } });
+        used = READ_CHARS;
+      } else omitted.push({ id: item.id, length: item.text.length });
+    }
+    return { entries, ...(omitted.length ? { omitted } : {}), ...(forgotten.length ? { forgotten } : {}),
+      ...(notFound.length ? { not_found: notFound } : {}), status: this.statusLine() };
+  }
+
+  #readable(e) {
+    return { id: e.id, at: e.at, role: e.role, source: e.source, text: e.text, ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
   }
 
   async #grep(query, k) {

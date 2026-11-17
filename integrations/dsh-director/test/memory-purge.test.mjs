@@ -58,6 +58,10 @@ test('purge: the text is in no commit, object, reflog or working file; everythin
   assert.ok(!logLines(root).some(l => l.includes('4242')), 'working tree');
   assert.equal(count(root, 't-keep-0'), 1); assert.equal(count(root, 't-keep-1'), 1);
   assert.equal(count(root, 't-gone-1'), 1, 'the other message of the same turn stays');
+  const read = await store.read(['t-gone-0', 't-gone-1'], { withTurn: true });
+  assert.deepEqual(read.not_found, ['t-gone-0'], 'a purged id reads as never there');
+  assert.equal(read.forgotten, undefined);
+  assert.ok(!JSON.stringify(read).includes('4242'), 'memory_read never returns purged text');
   assert.equal(count(root, 't-gone-0'), 0, 'no line of the purged entry is left in the log, reduced or not');
   assert.ok(!gitIn(repo(root), 'log', '-p', '--all', '--format=', '--', 'log').stdout.toString().includes('"id":"t-gone-0"'),
     'no historical version of the log names it either (only forgotten.jsonl keeps {id, at, purged, batch})');

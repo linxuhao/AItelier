@@ -560,6 +560,8 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL schema for the state metadata table",
     ("core/state_run_summary.py", "USAGE_SQL"):
         "SQL query for token usage accounting",
+    ("core/state_steward.py", "SCHEMA"):
+        "SQL DDL for the steward proposal and memory-request tables",
     ("core/state_subagents.py", "SCHEMA"):
         "SQL DDL for the driver subagent table and its indexes",
     # Executable plumbing, never rendered into a prompt.

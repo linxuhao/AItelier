@@ -115,8 +115,11 @@
       "A resumed child is live again: leave its plan to it, and take over only a plan whose child could not be resumed.",
       "Anything you wait on from your owner (a ruling, an authorization, a choice only they can make) is asked with ask_owner(question_id, question, context), one concrete question per call under an id of your own; a retry with the same id and text asks nothing new, and the answer comes back to you as an event.",
       "When such a question no longer needs an answer, take it back with close_question(question_id, reason); it stays visible to your owner as withdrawn, and an answered question cannot be closed.",
-      "Waiting on an answer never blocks idle_dormant: its result lists the questions still open."
+      "Waiting on an answer never blocks idle_dormant: its result lists the questions still open.",
+      "A new project starts with no work items.",
+      "Before dispatching anything there, read the goal your owner gave you and the project's source binding, ask_owner what would make the result acceptable, and then define the first work items through your host's tools, each with one acceptance a reviewer can check.",
+      "Only then start the normal plan-and-dispatch loop."
     ]
   },
-  "added_why": "review of 76660e847e: 'work item' was used in the generic half but defined only in state.md; this sentence defines it there (and rules out passing a node key as attempt_id). It is new text, not a moved sentence."
+  "added_why": "Each addition is new text, not a moved sentence. 1: review of 76660e847e - 'work item' was used in the generic half but defined only in state.md; this sentence defines it there (and rules out passing a node key as attempt_id). 2-3: plugin step 6 - a child cut off by a host restart is resumed in its own session before any takeover. 4-6: plugin step 8 - questions to the owner (ask_owner, close_question) and that waiting on them never blocks idle_dormant. 7-9: plugin step 10 - a new project with no work items: read the owner's goal and the source binding, ask for acceptance, define the first work items, only then dispatch."
 }

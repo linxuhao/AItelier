@@ -337,6 +337,30 @@ describe('a stop_driver card', () => {
     await fireEvent.click(approve);
     await waitFor(() => expect(api.approveStewardProposal).toHaveBeenCalledWith('p1', 3, false));
   });
+
+  it('422 at the click: shows the impact the server just measured and asks for the tick', async () => {
+    // The card measured "nothing running" when it rendered, and work started before
+    // the click. The approve endpoint measures again and refuses until the owner
+    // confirms; the refusal carries that measurement, so the card must show it and
+    // render the tick instead of an opaque status text the owner cannot act on.
+    api.approveStewardProposal
+      .mockRejectedValueOnce(new ApiError(422, 'Unprocessable Entity', null, {
+        code: 'confirm_interrupt_required',
+        impact: {running_subagents: [{session_id: 'sess-late'}], unsettled_attempts: []},
+        proposal: stop}))
+      .mockResolvedValueOnce({...stop, status: 'executing'});
+    const view = render(StewardProposalCard, props());
+    const approve = view.getByRole('button', {name: 'Approve'}) as HTMLButtonElement;
+    await waitFor(() => expect(approve.disabled).toBe(false));
+    await fireEvent.click(approve);
+    await view.findByText('sess-late');
+    expect(api.approveStewardProposal.mock.calls[0]).toEqual(['p1', 3, false]);
+    expect(view.getByRole('status').textContent).toContain('Something started since this card loaded');
+    expect(approve.disabled).toBe(true);
+    await fireEvent.click(view.getByLabelText('Stop anyway (interrupts the work listed above)'));
+    await fireEvent.click(approve);
+    await waitFor(() => expect(api.approveStewardProposal).toHaveBeenLastCalledWith('p1', 3, true));
+  });
 });
 
 describe('"change it" goes through the conversation', () => {

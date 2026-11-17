@@ -14,7 +14,8 @@
     /** "Change it": the steward is asked in the conversation; it proposes again. */
     onrevise: (row: StewardProposal) => void;
   } = $props();
-  let busy = $state(false), error = $state(''), changed = $state(false), confirmStop = $state(false);
+  let busy = $state(false), error = $state(''), changed = $state(false), impactMoved = $state(false),
+    confirmStop = $state(false);
   // What stopping would interrupt NOW, read when the card renders: the recorded
   // impact in the payload is what the steward saw when it proposed.
   let impact = $state<StewardImpact | null>(null), impactState = $state<'loading' | 'ready' | 'failed'>('loading');
@@ -33,9 +34,21 @@
   function isRow(value: unknown): value is StewardProposal {
     return !!value && typeof value === 'object' && (value as StewardProposal).proposal_id === proposal.proposal_id;
   }
+  /** The impact the approve endpoint measured again at the click, or null when this
+   *  refusal is something else. The server refuses a stop whose owner has not
+   *  confirmed work the CARD had not seen (api/steward_routers.py, 422
+   *  confirm_interrupt_required) and sends that measurement along; without this the
+   *  owner would only see a status text and could never reach the tick box. */
+  function freshImpact(detail: unknown): StewardImpact | null {
+    if (!detail || typeof detail !== 'object') return null;
+    const body = detail as {code?: unknown; impact?: unknown};
+    if (body.code !== 'confirm_interrupt_required') return null;
+    return body.impact && typeof body.impact === 'object' ? {running_subagents: [], unsettled_attempts: [],
+      ...(body.impact as Partial<StewardImpact>)} : null;
+  }
   async function decide(action: 'approve' | 'decline') {
     if (busy) return;
-    busy = true; error = ''; changed = false;
+    busy = true; error = ''; changed = false; impactMoved = false;
     try {
       const row = action === 'approve'
         ? await approveStewardProposal(proposal.proposal_id, proposal.version, isStop && needsConfirm && confirmStop)
@@ -46,7 +59,14 @@
         // The version or status moved under the owner: show the current row and say so.
         changed = true; confirmStop = false;
         if (isRow(e.detail)) onupdate(e.detail); else onreload();
-      } else error = String(e instanceof Error ? e.message : e);
+      } else {
+        // Work started between rendering this card and pressing Approve: the approve
+        // endpoint measured the impact again and refused until the owner confirms.
+        const fresh = e instanceof ApiError && e.status === 422 ? freshImpact(e.detail) : null;
+        if (fresh) {
+          impact = fresh; impactState = 'ready'; confirmStop = false; impactMoved = true;
+        } else error = String(e instanceof Error ? e.message : e);
+      }
     } finally { busy = false; }
   }
   function show(value: unknown): string {
@@ -92,6 +112,7 @@
     </section>
   {/if}
   {#if changed}<p class="changed" role="status">{t('steward.changed')}</p>{/if}
+  {#if impactMoved}<p class="changed" role="status">{t('steward.impactMoved')}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if proposal.status === 'open'}
     {#if needsConfirm}

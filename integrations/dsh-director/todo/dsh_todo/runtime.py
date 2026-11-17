@@ -52,7 +52,7 @@ import re
 import signal
 import subprocess
 import time
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, NamedTuple, Sequence
 
 from dsh_todo.hooks import DeferralLedger, read_absence
 from dsh_todo.security_jail import SecurityException, verify_path_safe
@@ -305,18 +305,44 @@ def _scope_regex(pattern: str) -> "re.Pattern[str]":
     return re.compile("".join(out) + r"\Z")
 
 
-def _file_delta(target: Path, rel: str, before: str | None, contains: str | None) -> str:
-    """Why `rel` is not changed as intended, or "" when it is. Never asks for a bad starting point."""
+class FileDelta(NamedTuple):
+    """One path's delta against the state captured when the step began.
+
+    `problem` is why it is NOT changed as intended ("" when it is); `detail` says what did
+    change, so a removal reads differently from an edit; `removed` lets the N-file predicate
+    say which of its paths were retired.
+    """
+
+    problem: str
+    detail: str
+    removed: bool = False
+
+
+def _file_delta(target: Path, rel: str, before: str | None, contains: str | None) -> FileDelta:
+    """Whether `rel` changed as intended. Never asks for a bad starting point.
+
+    A path that was a file at step start and is gone after it HAS changed: retiring a file is
+    a declared edit like any other, and a plan whose own contract requires a path to be absent
+    could otherwise never satisfy its write item. A path absent at BOTH ends is not a change -
+    no step can claim credit for a file that never existed - and `contains` against a removed
+    path still fails, because a file that is gone cannot contain the text.
+    """
     after = _digest(target)
     if after is None:
-        return f"{rel} does not exist after the step"
+        if before is None:
+            return FileDelta(problem=f"{rel} does not exist after the step", detail="")
+        if contains is not None:
+            return FileDelta(problem=f"{rel} does not exist after the step, "
+                                     f"so it cannot contain {contains!r}", detail="")
+        return FileDelta(problem="", removed=True,
+                         detail=f"{rel} was removed (present at step start, absent after it)")
     if after == before:
-        return f"{rel} is byte-identical to the state captured at step start"
+        return FileDelta(problem=f"{rel} is byte-identical to the state captured at step start", detail="")
     if contains is not None and contains not in target.read_text(errors="replace"):
         # A change that is not the INTENDED change is still a failure: any
         # spurious edit would otherwise satisfy a bare delta.
-        return f"{rel} changed but does not contain {contains!r}"
-    return ""
+        return FileDelta(problem=f"{rel} changed but does not contain {contains!r}", detail="")
+    return FileDelta(problem="", detail=f"{rel} changed as intended")
 
 
 def _report_path(workspace: Path, report: str | None) -> Path | None:
@@ -529,22 +555,30 @@ def builtin_library() -> PredicateLibrary:
         rel = str(path)
         if rel not in pre_state:
             raise ValueError(f"file_changed({rel!r}) needs a pre-state; capture it when the item begins")
-        problem = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
-        return PredicateResult("file_changed", "fail", problem) if problem else \
-            PredicateResult("file_changed", "pass", f"{rel} changed as intended")
+        delta = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
+        return PredicateResult("file_changed", "fail", delta.problem) if delta.problem else \
+            PredicateResult("file_changed", "pass", delta.detail)
 
     @library.define("files_changed")
     def files_changed(*, workspace: Path, pre_state: Mapping[str, Any], paths: Sequence[str],
                       contains: str | None = None) -> PredicateResult:
         """file_changed for N files in one binding: EVERY path must differ from its state at the
-        start of the step (and carry `contains`, when given). Names the first path that does not."""
+        start of the step (and carry `contains`, when given). Names the first path that does not.
+        A path removed by this step changed; the pass detail names the retired ones, so a
+        retirement is never reported as an ordinary edit."""
+        removed: list[str] = []
         for rel in map(str, paths):
             if rel not in pre_state:
                 raise ValueError(f"files_changed({rel!r}) needs a pre-state; capture it when the item begins")
-            problem = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
-            if problem:
-                return PredicateResult("files_changed", "fail", problem)
-        return PredicateResult("files_changed", "pass", f"all {len(paths)} file(s) changed as intended")
+            delta = _file_delta(Path(workspace) / rel, rel, pre_state[rel], contains)
+            if delta.problem:
+                return PredicateResult("files_changed", "fail", delta.problem)
+            if delta.removed:
+                removed.append(rel)
+        detail = f"all {len(paths)} file(s) changed as intended"
+        if removed:
+            detail += f" (removed: {', '.join(removed)})"
+        return PredicateResult("files_changed", "pass", detail)
 
     @library.define("command_exit")
     def command_exit(*, workspace: Path, pre_state: Mapping[str, Any], argv: Sequence[str],

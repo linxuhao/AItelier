@@ -354,6 +354,63 @@ def test_file_changed_is_a_delta_that_never_demands_a_bad_starting_point(tmp_pat
     assert run.observe("edit").outcome == "pass"
 
 
+def test_a_deletion_is_a_change_but_only_of_a_path_that_existed_at_step_start(tmp_path):
+    """Retiring a declared file is an edit, and `files_changed` must see it.
+
+    iss-5094f3d330da4b57: a plan whose own contract requires a path to be ABSENT
+    could never satisfy its `files_changed` item, so a finished delivery could not
+    close its plan. The invariant is a delta, not a release: a path absent at BOTH
+    ends still fails, and `contains` against a removed path still fails.
+    """
+    (tmp_path / "api").mkdir()
+    (tmp_path / "api" / "agent_routers.py").write_text("router = None\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "old.py").write_text("k = 1\n")
+    (tmp_path / "edited.py").write_text("e = 1\n")
+    retire = Item(id="retire", title="", predicates=(
+        Binding("files_changed", {"paths": ["api/agent_routers.py"]}),))
+    single = Item(id="single", title="", predicates=(
+        Binding("file_changed", {"path": "app.py"}),))
+    never_existed = Item(id="never", title="", predicates=(
+        Binding("files_changed", {"paths": ["api/never_existed.py"]}),))
+    with_contains = Item(id="contains", title="", predicates=(
+        Binding("file_changed", {"path": "old.py", "contains": "k = 2"}),))
+    edited_beside = Item(id="edited", title="", predicates=(
+        Binding("files_changed", {"paths": ["api/agent_routers.py", "edited.py"]}),))
+    run = _run(tmp_path, retire, single, never_existed, with_contains, edited_beside)
+    for item in run.plan.items:
+        run.begin(item.id)                          # the pre-state is captured HERE, before any work
+    assert run.pre_states["retire"]["api/agent_routers.py"] is not None, "present at step start"
+    assert run.pre_states["never"]["api/never_existed.py"] is None, "absent at step start"
+
+    (tmp_path / "api" / "agent_routers.py").unlink()
+    (tmp_path / "app.py").unlink()
+    (tmp_path / "old.py").unlink()
+    (tmp_path / "edited.py").write_text("e = 2\n")
+
+    removed = run.observe("retire")
+    assert removed.outcome == "pass", "present at step start, absent after: that IS a change"
+    assert "does not exist" not in removed.results[0].detail
+    assert "removed" in removed.results[0].detail and "api/agent_routers.py" in removed.results[0].detail
+
+    single_removed = run.observe("single")
+    assert single_removed.outcome == "pass"
+    assert "removed" in single_removed.results[0].detail and "app.py" in single_removed.results[0].detail
+
+    absent_both_ends = run.observe("never")
+    assert absent_both_ends.outcome == "fail", "no credit for a file that never existed"
+    assert "does not exist after the step" in absent_both_ends.results[0].detail
+
+    cannot_contain = run.observe("contains")
+    assert cannot_contain.outcome == "fail", "a removed file cannot contain the text"
+    assert "does not exist after the step" in cannot_contain.results[0].detail
+    assert "cannot contain 'k = 2'" in cannot_contain.results[0].detail
+
+    mixed = run.observe("edited")
+    assert mixed.outcome == "pass", "one edit and one retirement are both declared changes"
+    assert "removed" in mixed.results[0].detail and "api/agent_routers.py" in mixed.results[0].detail
+
+
 # -- TodoRun: the two ledger fixes ---------------------------------------------------------
 
 SLOW = [sys.executable, "-c", "import time; time.sleep(30)"]

@@ -53,17 +53,33 @@ describe('NewStateProject (plugin step 10)', () => {
     expect(api.startDshDriver).not.toHaveBeenCalled();
   });
 
-  it('refuses an invalid id or an empty title before calling the backend', async () => {
-    const { view, form, field } = await openForm();
+  it('leaves the id rule to the backend: an invalid id reaches it and its refusal is shown verbatim', async () => {
+    api.createStateProject.mockRejectedValue(new Error('key must be 1-128 letters/digits/._-, starting with a letter or digit'));
+    const { view, form, field, oncreated } = await openForm();
     await fireEvent.input(field('project_id'), { target: { value: '-bad id' } });
     await fireEvent.input(field('title'), { target: { value: 'X' } });
     await fireEvent.submit(form);
-    expect(view.getByRole('alert').textContent).toContain('must be 1-128');
-    await fireEvent.input(field('project_id'), { target: { value: 'good' } });
-    await fireEvent.input(field('title'), { target: { value: '   ' } });
+    await waitFor(() => expect(view.getByRole('alert').textContent).toBe('key must be 1-128 letters/digits/._-, starting with a letter or digit'));
+    expect(api.createStateProject).toHaveBeenCalledWith('-bad id', 'X', undefined);
+    expect(api.sendDriverConversationMessage).not.toHaveBeenCalled();
+    expect(oncreated).not.toHaveBeenCalled();
+  });
+
+  it('a retry after a later failure never sends the goal twice', async () => {
+    api.createStateProject.mockResolvedValue({});            // identical row: create answers it again
+    api.sendDriverConversationMessage.mockResolvedValue({});
+    api.startDshDriver.mockRejectedValueOnce(new Error('driver identity must be enabled')).mockResolvedValueOnce({});
+    const { view, form, field } = await openForm();
+    await fireEvent.input(field('project_id'), { target: { value: 'again' } });
+    await fireEvent.input(field('title'), { target: { value: 'Again' } });
+    await fireEvent.input(field('goal'), { target: { value: 'Say it once.' } });
     await fireEvent.submit(form);
-    expect(view.getByRole('alert').textContent).toBe('A title is required.');
-    expect(api.createStateProject).not.toHaveBeenCalled();
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('the driver did not start'));
+    expect(field('goal').value).toBe('');                  // the sent goal left the form
+    await fireEvent.submit(form);                          // the owner retries
+    await waitFor(() => expect(api.startDshDriver).toHaveBeenCalledTimes(2));
+    expect(api.sendDriverConversationMessage).toHaveBeenCalledTimes(1);
+    expect(api.createStateProject).toHaveBeenCalledTimes(2);
   });
 
   it('shows the backend refusal verbatim and creates nothing further', async () => {

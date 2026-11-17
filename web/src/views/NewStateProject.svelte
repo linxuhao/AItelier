@@ -5,11 +5,14 @@
    *  from the dashboard. The goal is sent as the owner's first message in the
    *  project's conversation, so the director reads it in the owner's own words.
    *  The project is not published. Each step reports its own failure: a project
-   *  that was created stays created even when a later step fails. */
+   *  that was created stays created even when a later step fails. The id and title
+   *  are judged by the backend only (its refusal is shown verbatim), so there is one
+   *  key rule, not a second copy here. A goal that was sent is cleared from the form,
+   *  so retrying after a later failure never sends it twice (create_project answers
+   *  an identical existing project instead of refusing it). */
   let { oncreated = () => {} }: { oncreated?: (projectId: string) => void } = $props();
   let open = $state(false), busy = $state(false), error = $state(''), done = $state('');
   let projectId = $state(''), title = $state(''), goal = $state(''), source = $state(''), startDriver = $state(true);
-  const KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
   const message = (e: unknown) => String(e instanceof Error ? e.message : e);
 
   async function submit(event: SubmitEvent) {
@@ -17,15 +20,13 @@
     if (busy) return;
     error = ''; done = '';
     const id = projectId.trim(), name = title.trim();
-    if (!KEY.test(id)) { error = st('newProjectIdInvalid'); return; }
-    if (!name) { error = st('newProjectTitleRequired'); return; }
     busy = true;
     try {
       try { await createStateProject(id, name, source.trim() || undefined); }
       catch (e) { error = message(e); return; }
       const failures: string[] = [];
       if (goal.trim()) {
-        try { await sendDriverConversationMessage(id, goal.trim()); }
+        try { await sendDriverConversationMessage(id, goal.trim()); goal = ''; }
         catch (e) { failures.push(st('newProjectGoalFailed') + ': ' + message(e)); }
       }
       if (startDriver) {

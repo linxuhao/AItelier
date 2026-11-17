@@ -125,8 +125,11 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "send_user_message", "withdraw_user_question", "send_director_message",
         "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
         "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
-        "acknowledge_director_message"}
+        "acknowledge_director_message",
+        # Owner 2026-11-17: replies in the private inbox, reply-only (see the both-inboxes test).
+        "send_driver_message"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
+    assert not {"acknowledge_driver_message", "resolve_driver_message"} & STEWARD_WRITE_ACTIONS
     assert "resolve_director_message" not in STEWARD_WRITE_ACTIONS
 
 
@@ -240,6 +243,64 @@ def test_the_steward_writes_no_other_notebook(world):
         with pytest.raises(StateGraphError, match=re.escape(_refusal("write_driver_note_entry"))):
             execute(steward, "write_driver_note_entry", {**scope, "assertion": "a", "body": "b",
                                                          "director_identity": sid}, allow_write=True)
+
+
+def _letter(world, target, key):
+    """One director message from alpha's director to `target`; its delivery as the target reads it."""
+    did = world.director["driver_id"]
+    sent = execute(world.service(world.director), "send_director_message", {
+        "protocol_version": "v3", "sender_project_id": "alpha", "director_identity": did, "request_key": key,
+        "subject": "fixture letter", "body": "x" * 1863, "target_project_id": target}, allow_write=True)
+    delivery = sent["result"]["deliveries"][0]
+    return {k: delivery[k] for k in ("delivery_id", "version", "status")}
+
+
+def _private_letter(world, key):
+    """One private message from alpha's director to the steward; its delivery to the steward."""
+    sid = world.steward["driver_id"]
+    execute(world.service(world.director), "send_driver_message", {"request_key": key, "subject": "private",
+            "body": "y" * 900, "target_driver_id": sid}, allow_write=True)
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT delivery_id, version FROM driver_inbox_deliveries WHERE target_driver_id=? "
+                           "ORDER BY rowid DESC LIMIT 1", (sid,)).fetchone()
+    return dict(row)
+
+
+def test_the_steward_answers_letters_in_both_inboxes_but_never_starts_one(world):
+    """Owner 2026-11-17: the steward replies to directors in the project inbox and in its
+    private inbox. A private message from it is only ever a reply, to the sender of the
+    delivery it cites; it never settles a private delivery (not on its whitelist)."""
+    steward = world.service(world.steward)
+    sid, did = world.steward["driver_id"], world.director["driver_id"]
+    # Project inbox: a reply to the letter, back to the sender's project.
+    letter = _letter(world, HOME, "letter-3")
+    try:
+        execute(steward, "send_director_message", {"protocol_version": "v3", "sender_project_id": HOME,
+                "director_identity": sid, "request_key": "reply-3", "subject": "Re", "body": "got it",
+                "target_project_id": "alpha", "reply_to_delivery_id": letter["delivery_id"]}, allow_write=True)
+    except StateGraphError as exc:
+        assert not str(exc).startswith("steward_"), exc
+    # Private inbox: the reply passes, to the sender only.
+    private = _private_letter(world, "private-1")
+    sent = execute(steward, "send_driver_message", {"request_key": "p-reply", "subject": "Re", "body": "noted",
+                   "target_driver_id": did, "reply_to_delivery_id": private["delivery_id"]}, allow_write=True)
+    assert sent
+    refused = {
+        "no reply": {"request_key": "p1", "subject": "s", "body": "b", "target_driver_id": did},
+        "another driver": {"request_key": "p2", "subject": "s", "body": "b", "target_driver_id": sid,
+                           "reply_to_delivery_id": private["delivery_id"]},
+        "a delivery not addressed to it": {"request_key": "p3", "subject": "s", "body": "b", "target_driver_id": did,
+                                           "reply_to_delivery_id": "no-such-delivery"},
+        "a whole project": {"request_key": "p4", "subject": "s", "body": "b", "project_members": "alpha",
+                            "reply_to_delivery_id": private["delivery_id"]},
+    }
+    for why, arguments in refused.items():
+        with pytest.raises(StateGraphError, match=re.escape(_refusal("send_driver_message"))):
+            execute(steward, "send_driver_message", arguments, allow_write=True)
+    for action in ("acknowledge_driver_message", "resolve_driver_message", "resolve_director_message"):
+        with pytest.raises(StateGraphError, match=re.escape(_refusal(action))):
+            execute(steward, action, {"delivery_id": private["delivery_id"], "expected_version": private["version"],
+                    "request_key": "settle-" + action, "project_id": HOME}, allow_write=True)
 
 
 def test_proposal_actions_are_named_for_step_13():

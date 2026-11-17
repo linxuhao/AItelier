@@ -48,6 +48,32 @@ test('BM25 cuts a run at the script boundary: a Latin word glued to Chinese is o
   assert.deepEqual(hits, ['glued', 'spaced']);
 });
 
+test('BM25 keeps the kana prolonged sound mark inside the CJK segment: トー and ーク survive', () => {
+  // The sample without the mark first: plain kana segmentation is what it was before the change
+  // (identical at ed5237edba and 7967e64a74), so the mark is the only difference below.
+  const plain = 'カタカナ';
+  const plainTokens = documentTokens(plain);
+  console.log('documentTokens(' + JSON.stringify(plain) + ') =', JSON.stringify(plainTokens));
+  assert.deepEqual(plainTokens, ['\u0001カ', '\u0001タ', '\u0001カ', '\u0001ナ', 'カタ', 'タカ', 'カナ'],
+    'without the mark: one CJK segment, every character a unigram, every adjacent pair a bigram');
+  const sample = 'カタカナトーク';
+  const tokens = documentTokens(sample);
+  console.log('documentTokens(' + JSON.stringify(sample) + ') =', JSON.stringify(tokens));
+  assert.deepEqual(tokens, [
+    '\u0001カ', '\u0001タ', '\u0001カ', '\u0001ナ', '\u0001ト', '\u0001ー', '\u0001ク',
+    'カタ', 'タカ', 'カナ', 'ナト', 'トー', 'ーク',
+  ], 'one CJK segment: every character a unigram, every adjacent pair a bigram');
+  assert.ok(!tokens.includes('ー'), 'the prolonged sound mark is not a free-standing word');
+  const query = queryTokens('トーク');
+  console.log('queryTokens("トーク") =', JSON.stringify(query));
+  assert.deepEqual(query, ['トー', 'ーク']);
+  const index = new Bm25Index();
+  index.add('jp', sample, '2026-11-01');
+  const hits = index.search('トーク', 10).map(h => h.id);
+  console.log('search("トーク") =', JSON.stringify(hits));
+  assert.deepEqual(hits, ['jp'], 'a query that crosses the mark reaches the record');
+});
+
 test('BM25 ranks mixed and pure-Chinese queries, newest first on a tie', () => {
   const index = new Bm25Index();
   index.add('a', '我想做个记账小工具', '2026-11-01');

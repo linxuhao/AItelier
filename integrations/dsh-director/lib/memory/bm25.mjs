@@ -3,14 +3,21 @@
  * Tokens: a run of letters/digits is cut at the script boundary first, so a Latin word glued
  * to Chinese stays one word (`用memory系统` gives `memory`); a non-CJK segment is a word,
  * lower-cased; a CJK segment gives its adjacent pairs (bigrams), and every CJK character also
- * gives a unigram token, which only a single-character query uses. Punctuation is dropped.
+ * gives a unigram token, which only a single-character query uses. Punctuation is dropped,
+ * and the prolonged sound mark stays inside its kana word (`カタカナトーク` gives `トー`).
  * k1 = 1.2, b = 0.75; equal scores order newest first. The inverted index lives in memory. */
 
 // `\p{L}` contains Han, so a run may mix scripts: the two capture groups below cut it into
 // maximal CJK and maximal non-CJK segments, and the group that matched says which it is.
 // Classifying a whole run by "contains any CJK" would swallow a glued Latin word.
+// The kana prolonged sound mark (U+30FC, and its halfwidth form U+FF70) is listed by hand
+// because its Script is Common, yet it lengthens the kana in front of it (コーヒー, トーク):
+// cut off, it became a word of its own and the bigrams across it (トー, ーク) were lost.
+// U+30FB KATAKANA MIDDLE DOT is deliberately absent: it is an interpunct between words
+// (パン・ケーキ), punctuation already dropped before a run is built, so it never gets here.
+const CJK_CHAR = '\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\u30FC\\uFF70';
 const WORD = /[\p{L}\p{N}]+/gu;
-const SEGMENT = /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+)|([^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+)/gu;
+const SEGMENT = new RegExp(`([${CJK_CHAR}]+)|([^${CJK_CHAR}]+)`, 'gu');
 const UNI = '\u0001'; // marks a CJK unigram token, so it never equals a word
 
 /** One letter/digit run as [segment, isCjk] pairs: maximal CJK and maximal non-CJK pieces. */

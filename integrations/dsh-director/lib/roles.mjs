@@ -42,9 +42,6 @@ export function validateRoles(table) {
     const value = table[role];
     if (value === undefined && !REQUIRED_ROLES.includes(role)) continue;
     exactKeys(value, ROLE_KEYS, role, ROLE_KEYS.filter(key => key !== 'presented_only'));
-    // presented_only: the presented list is the whole tool set; any other tool is refused.
-    if (value.presented_only !== undefined && typeof value.presented_only !== 'boolean')
-      throw new Error(`roles: ${role}.presented_only must be true or false`);
     if (typeof value.route !== 'string' || !value.route) throw new Error(`roles: ${role}.route must be a non-empty string`);
     if (!EFFORTS.includes(value.reasoning_effort)) throw new Error(`roles: ${role}.reasoning_effort must be one of ${EFFORTS.join(', ')}`);
     exactKeys(value.compaction, COMPACTION_KEYS, role + '.compaction', ['thresholdRatio']);
@@ -58,6 +55,10 @@ export function validateRoles(table) {
     const presented = names(value.presented, role + '.presented'), forbidden = names(value.forbidden, role + '.forbidden');
     const both = presented.filter(name => forbidden.includes(name));
     if (both.length) throw new Error(`roles: ${role} both presents and forbids ${both.join(', ')}`);
+    // presented_only: the presented list is the whole tool set; any other tool is refused.
+    // Checked last, as core/dsh_driver.py does, so both parsers name the same first problem.
+    if (Object.hasOwn(value, 'presented_only') && typeof value.presented_only !== 'boolean')
+      throw new Error(`roles: ${role}.presented_only must be a boolean`);
   }
   return table;
 }

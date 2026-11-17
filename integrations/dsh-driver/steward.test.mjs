@@ -28,7 +28,7 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
   assert.doesNotThrow(() => validateRoles(variant(t => { delete t.steward; })), 'a table without a steward is the table before step 12');
   assert.throws(() => validateRoles(variant(t => { t.steward.models = []; })), /unknown key steward\.models/);
   assert.throws(() => validateRoles(variant(t => { delete t.steward.forbidden; })), /missing key steward\.forbidden/);
-  assert.throws(() => validateRoles(variant(t => { t.steward.presented_only = 'yes'; })), /steward\.presented_only must be true or false/);
+  assert.throws(() => validateRoles(variant(t => { t.steward.presented_only = 'yes'; })), /steward\.presented_only must be a boolean/);
   assert.throws(() => validateRoles(variant(t => { delete t.director; })), /missing key table\.director/);
   assert.doesNotThrow(() => validateRoles(variant(t => { t.worker.presented_only = false; })), 'presented_only is open to every role');
   assert.equal(roleOf('root', 'root', 'steward'), 'steward');

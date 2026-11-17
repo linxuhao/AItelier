@@ -22,6 +22,11 @@ BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
 # from — the same private fields as the protections themselves — so the table is
 # PRIVATE and has its own denied-reader canary in tests/support/state_canaries.py.
 CONTEXT_PROTECTION_PRIVATE={'state_context_run_protection_retirements'}
+# Steward home (steps 13-14): a proposal row carries the owner's decision context —
+# the goal, the reason and the actions about to run — and a memory-request row
+# carries the archive text itself, so both are PRIVATE and both have their own
+# denied-reader canary in tests/support/state_canaries.py.
+STEWARD_PRIVATE={'state_steward_proposals','state_steward_memory_requests'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 # Both history rows replay a pre-policy source out of the git object store, so
 # they need a checkout WITH history, not a docker daemon.
@@ -54,11 +59,11 @@ def old_sets():
            "worktree mounted without the shared repository has no objects)")
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
     assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
-    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE) & set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def stored_director_event(service,project_id,event_type,delivery_id):
     """The one stored state_events row of this type for this delivery, payload decoded."""

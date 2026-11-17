@@ -18,6 +18,7 @@ import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './mod
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { openProposals, stewardOps, syncConversation } from './steward-host.mjs';
+import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
@@ -724,7 +725,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
+      // Plugin step 14: the owner's memory requests from the dashboard run here, in code.
+      const ownerRequests = () => steward ? processMemoryRequests({ request, memory, log: line => ctx.logger.warn(line) })
+        .catch(error => ctx.logger.warn('memory requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       await sync();
+      await ownerRequests();
       // Bounded and self-describing: the newest page of the matches, projected (see
       // listProjectInbox / projectInboxDigest). An injection is re-sent on every
       // director-message wake, so it must not grow with project history - and it must
@@ -736,7 +741,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         await setHostError(message);
       };
       runtime.onConnectionRestored = () => clearHostError();
-      runtime.onEvent = async result => {
+      runtime.onEvent = async raw => {
+        // The owner's memory requests are the runtime's, never a model turn: run them and
+        // drop their events from what the steward is woken with.
+        const memoryRequest = steward && raw.events?.some(e => MEMORY_REQUEST_EVENTS.has(e.event_type));
+        if (memoryRequest) await ownerRequests();
+        const result = memoryRequest ? { ...raw, events: raw.events.filter(e => !MEMORY_REQUEST_EVENTS.has(e.event_type)) } : raw;
         // Steering starts an idle agent or queues input at the next active step.
         // Queue into the durable DSH inbox before committing the State cursor. An
         // interrupted delivery is replayed, never silently skipped.

@@ -207,3 +207,38 @@ test('proposals (step 13): propose records one open proposal under a digest key;
   assert.equal((await proposals.withdraw({ id: 'p-gone', reason: 'x' })).refused, 'state_refused');
   assert.ok(calls.every(([path]) => /\/(create|withdraw)_steward_proposal$/.test(path)), 'nothing but the two steward writes');
 });
+
+test('owner memory requests (step 14): each kind runs against the store as the owner; results go back; an unwritten result runs again', async () => {
+  const { runOwnerMemoryRequest, processMemoryRequests, MEMORY_REQUEST_EVENTS } = await import('./memory-requests.mjs');
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  await store.recordTurn('o1', [{ role: 'owner', part: 'o', text: 'secret account 4242' }, { role: 'owner', part: 'x', text: 'keep this' }]);
+  const run = (kind, payload) => runOwnerMemoryRequest(store, { kind, payload });
+  const profile = await run('profile_read');
+  assert.equal(profile.text, '');
+  const updated = await run('profile_update', { text: 'likes short replies', expected_version: profile.version });
+  assert.equal(updated.updated, true);
+  assert.equal((await run('profile_update', { text: 'again', expected_version: profile.version })).refused, 'version_conflict', 'a repeat with the old version is refused');
+  assert.deepEqual((await run('forget', { ids: ['t-o1-o'] })).forgotten, ['t-o1-o']);
+  assert.deepEqual((await run('forgotten_list')).forgotten.map(r => [r.id, r.by]), [['t-o1-o', 'owner']]);
+  assert.deepEqual((await run('restore', { id: 't-o1-o' })).restored, 't-o1-o');
+  assert.equal((await run('purge', { ids: ['t-o1-o'] })).purged, true);
+  assert.deepEqual((await store.read(['t-o1-o'])).not_found, ['t-o1-o']);
+  assert.equal((await run('deploy')).refused, 'unknown_kind');
+  assert.deepEqual(await runOwnerMemoryRequest(undefined, { kind: 'profile_read' }), { refused: 'memory_unavailable' });
+  // The loop: every pending row runs and is completed; a completion that fails stays pending.
+  const completed = [];
+  let failOnce = true;
+  const request = async (path, body) => {
+    if (path.endsWith('list_steward_memory_requests')) return { result: { requests: [{ request_id: 'r1', kind: 'forgotten_list' }, { request_id: 'r2', kind: 'profile_read' }] } };
+    if (body.request_id === 'r2' && failOnce) { failOnce = false; throw new Error('HTTP 503'); }
+    completed.push(body); return { result: { completed: true } };
+  };
+  const logged = [];
+  assert.deepEqual(await processMemoryRequests({ request, memory: store, log: line => logged.push(line) }), { pending: 2, done: 1 });
+  assert.match(logged[0], /memory request r2: result not written/);
+  assert.deepEqual(await processMemoryRequests({ request, memory: store }), { pending: 2, done: 2 });
+  assert.deepEqual(completed.map(c => [c.request_key, c.request_id]), [['memory-request:r1', 'r1'], ['memory-request:r1', 'r1'], ['memory-request:r2', 'r2']]);
+  assert.equal(completed.at(-1).result.text, 'likes short replies');
+  assert.ok(MEMORY_REQUEST_EVENTS.has('steward_memory_request_created'));
+  await store.close();
+});

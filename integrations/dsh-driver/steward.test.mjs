@@ -74,8 +74,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
-  assert.deepEqual(Object.keys(steward.portfolio).sort(), ['conversation', 'inbox', 'project', 'projects'],
-    'the steward\'s own inbox page is one of the reads this host provides');
+  assert.deepEqual(Object.keys(steward.portfolio).sort(), ['acknowledge', 'conversation', 'inbox', 'project', 'projects'],
+    'the steward\'s own inbox page is one of the reads this host provides, and acknowledging a delivery is its one write');
   assert.doesNotThrow(() => validateHost(steward));
   const director = aitelierHost(env());
   assert.equal(director.config.rootRole, undefined);

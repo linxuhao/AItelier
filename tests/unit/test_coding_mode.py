@@ -415,10 +415,13 @@ class TestCondenser:
 
 
 class TestCodingTaskRunner:
-    """The real plan-gated flow (governing association, user-only approval with
-    the exact retained token, gate across requests) is exercised end to end
-    through the authenticated chat route in
-    tests/integration/test_coding_workspace_integration.py."""
+    """The runner tool surface, gated by mode.
+
+    The real plan-gated flow (governing association, user-only approval with the
+    exact retained token, gate across requests) used to be exercised end to end
+    through the authenticated chat route; that backend was retired on 2026-11-17,
+    so what is pinned here is the half that lives in the agent: runner tools are
+    refused outside coding mode."""
 
     async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
         for name, args in (

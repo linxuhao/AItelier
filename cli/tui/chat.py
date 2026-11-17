@@ -1,7 +1,8 @@
 # cli/tui/chat.py
-# Chat zone — conversational interface with the Meta Agent.
-# Handles user input, streams SSE responses, manages context.
-# Includes /-command completion candidates display.
+# Chat zone — the input pane and its history/context management.
+# The butler chat backend it used to stream from is retired; a send now answers
+# with one message naming the replacement entry point (see
+# BUTLER_CHAT_RETIRED_NOTICE). Includes /-command completion candidates display.
 
 import json
 import os
@@ -667,8 +668,19 @@ class BriefReviewModal(ModalScreen[bool]):
             pass
 
 
+# The butler chat backend was retired on the owner's 2026-11-17 ruling, so no chat
+# request goes out from this pane any more. Saying nothing would read as a broken
+# input; this is the one visible answer a send produces, and it names where the
+# conversation lives now: a project's driver conversation in the dashboard.
+BUTLER_CHAT_RETIRED_NOTICE = (
+    "Butler chat has been retired: this message was not sent. The replacement is a "
+    "project's driver conversation in the dashboard — "
+    "GET /api/dsh-drivers/{project_id}/conversation."
+)
+
+
 class ChatZone(Container):
-    """Middle zone: conversational chat with the Meta Agent."""
+    """Middle zone: the chat input, its history and the /-command surface."""
 
     class ContextSaved(Message):
         def __init__(self, project_id: str) -> None:
@@ -682,9 +694,10 @@ class ChatZone(Container):
         self.current_project: str | None = None
         self.session_id: str | None = None
         # Butler vs coding mode — user-toggled (never model-toggled, so prompt
-        # injection can't escalate). Sent on every /api/agent/chat request and
-        # persisted server-side to sessions.mode. Coding mode unlocks the
-        # interactive coding agent (edit_file/bash/generate_pipeline/…).
+        # injection can't escalate). The mode used to ride every chat request and
+        # be persisted server-side to sessions.mode; with the backend retired it
+        # is local UI state only. Coding mode used to unlock the interactive
+        # coding agent (edit_file/bash/generate_pipeline/…).
         self._agent_mode: str = "butler"
         self._agent_streaming = False
         self._queued_message: str | None = None
@@ -718,16 +731,12 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _init_session(self):
-        """Create or load the chat session for this TUI instance."""
-        try:
-            resp = await self.app.http.post(
-                f"{self.server_url}/api/agent/session/create", timeout=5.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                self.session_id = data.get("session_id")
-        except Exception:
-            pass  # Non-critical; chat works without session
+        """Set up the chat pane for this TUI instance.
+
+        There is no server-side session to create any more — the chat backend
+        that minted one was retired — so `self.session_id` stays None and
+        persistence falls back to the project-scoped rows.
+        """
         self.query_one("#chat-log").can_focus = False
         self.query_one("#completion-candidates").can_focus = False
         self.query_one("#completion-candidates").display = False
@@ -1888,7 +1897,13 @@ class ChatZone(Container):
 
     @work(exclusive=True, group=_STREAM_GROUP)
     async def _stream_agent_response(self, message: str):
-        """POST to /api/agent/chat and stream SSE events.
+        """Answer the send instead of calling a backend.
+
+        The butler chat backend was retired (owner ruling 2026-11-17), so there
+        is nothing to POST to and nothing to stream: the turn emits exactly one
+        visible message naming the replacement entry point. The
+        worker/queue/stall scaffolding around it is kept because it is the shape
+        the replacement wiring needs.
 
         Callers must not start this while `_agent_streaming` is set — being exclusive,
         starting it cancels the turn in flight. `on_input_submitted` queues instead;
@@ -1901,132 +1916,10 @@ class ChatZone(Container):
         self._agent_streaming = True
         self._last_agent_event_at = time.monotonic()
         self._stall_warned = False
-        agent_widget = None
-        full_agent_text = ""
 
         try:
-            async with self.app.http.stream(
-                "POST",
-                "/api/agent/chat",
-                json={
-                    "message": message,
-                    "history": self.history,
-                    "current_project": self.current_project,
-                    "session_id": self.session_id,
-                    "mode": self._agent_mode,
-                },
-                timeout=None,
-            ) as resp:
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        try:
-                            event = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
-
-                        etype = event.get("type")
-                        self._last_agent_event_at = time.monotonic()
-
-                        if etype == "session":
-                            # Server-minted session id (our request carried
-                            # none) — adopt it so history persists and the
-                            # butler can resume this conversation's runs.
-                            sid = event.get("session_id")
-                            if sid:
-                                self.session_id = sid
-                            continue
-
-                        if etype == "text_delta":
-                            if agent_widget is None:
-                                agent_widget = self._add_message("agent", "")
-                            full_agent_text += event.get("content", "")
-                            agent_widget.update(full_agent_text)
-                            self._scroll_to_bottom()
-
-                        elif etype == "tool_call":
-                            name = event.get("name", "?")
-                            args = event.get("args", {})
-                            summary = ""
-                            for key in ("project_id", "task_id", "prompt", "checkpoint", "name"):
-                                if key in args:
-                                    val = str(args[key])
-                                    if len(val) > 40:
-                                        val = val[:40] + "..."
-                                    summary = f'{key}="{val}"'
-                                    break
-                            self._add_tool(
-                                f"Calling {name}({summary})" if summary else f"Calling {name}()"
-                            )
-                            self._scroll_to_bottom()
-
-                        elif etype == "tool_result":
-                            name = event.get("name", "?")
-                            result = event.get("result", {})
-                            summary = _format_tool_result(name, result)
-                            self._add_tool(summary)
-                            self._scroll_to_bottom()
-
-                            # Intercept pending_confirm: show project review modal
-                            if result.get("status") == "pending_confirm":
-                                r_pid = result.get("project_id", "")
-                                content = result.get("brief_markdown") or ""
-                                brief_data = result.get("brief")
-                                approved = await self._show_brief_review_modal(
-                                    "project", r_pid, content, brief_data
-                                )
-                                if approved:
-                                    self._add_system(
-                                        "Project submitted — pipeline starting."
-                                    )
-                                else:
-                                    # Append rejection feedback to history so meta-agent can retry
-                                    self.history.append({
-                                        "role": "user",
-                                        "content": (
-                                            "The project was not approved. "
-                                            "Please ask what changes the user wants and revise."
-                                        ),
-                                    })
-                                    self._add_system(
-                                        "Project review cancelled. Describe what to change."
-                                    )
-                                # Refresh dashboard on either outcome
-                                self.app.query_one("#dashboard-zone")._fetch_projects()
-
-                        elif etype == "done":
-                            msg = event.get("message", {})
-                            content = msg.get("content", "")
-                            if agent_widget is None:
-                                agent_widget = self._add_message("agent", content)
-                            else:
-                                agent_widget.update(content)
-                            self.history.append({"role": "assistant", "content": content})
-                            self._scroll_to_bottom()
-                            # Always refresh dashboard after agent finishes a turn
-                            dashboard = self.app.query_one("#dashboard-zone")
-                            if self.current_project:
-                                dashboard._fetch_tasks()
-                            else:
-                                dashboard._fetch_projects()
-
-                        elif etype == "budget_exhausted":
-                            # The turn stopped because it hit its tool-turn budget —
-                            # not because the work is done. Left unsaid, the user
-                            # reads the silence as a finished (or broken) agent.
-                            self._add_system(
-                                "The agent paused: it used its whole tool-turn budget "
-                                "for this message. Reply 'continue' to let it carry on "
-                                "from where it stopped."
-                            )
-                            self._scroll_to_bottom()
-
-                        elif etype == "error":
-                            self._add_error(event.get("message", "Unknown error"))
-                            self._scroll_to_bottom()
-
-        except Exception as e:
-            self._add_error(f"Connection error: {e}")
+            self._add_system(BUTLER_CHAT_RETIRED_NOTICE)
+            self._scroll_to_bottom()
         finally:
             self._agent_streaming = False
             # Reload history to pick up any checkpoint messages injected by scheduler

@@ -1,7 +1,7 @@
 """Actual State owner, Coding Mode SDK workspace, delivery and normal push.
 
 Everything here runs against the SHARED Coding Mode fixture
-(`tests.integration.test_coding_workspace_integration`), and that fixture has two
+(`tests.integration.coding_workspace_fixture`), and that fixture has two
 environment preconditions this file inherits:
 
   * the tree is mounted at ``/src`` — the fixture hashes ``/src/<module>`` into the
@@ -32,7 +32,7 @@ import uuid
 
 import pytest
 
-from tests.integration.test_coding_workspace_integration import env, project, git
+from tests.integration.coding_workspace_fixture import env, project, git
 from core.dsh_work import project_work, pipeline_source
 from core.state_commands import execute
 from core.state_service import StateService

@@ -31,6 +31,9 @@ const ENTRY_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 const ROLES = ['owner', 'steward'];
 const sha256 = text => createHash('sha256').update(text).digest('hex');
 const month = at => String(at).slice(0, 7);
+/** The purge phases before the directory swap: a journal that ends in one of them describes
+ *  a repository nothing was swapped into yet, whatever the layout says afterwards. */
+const PRE_SWAP_PHASES = new Set(['forgetting', 'forget_done', 'building', 'verified', 'rolling_back']);
 
 export class MemoryUnavailable extends Error {
   constructor(message) { super(message); this.name = 'MemoryUnavailable'; }
@@ -97,7 +100,7 @@ export class MemoryStore {
   }
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
-    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000 }) {
+    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
     this.root = root; this.userId = userId; this.log = logger; this.now = now;
     this.grepTimeoutMs = grepTimeoutMs; this.syncMonths = syncMonths; this.backupRemote = backupRemote; this.warnEntries = warnEntries;
@@ -117,6 +120,7 @@ export class MemoryStore {
     this.notices = [];
     this.queue = Promise.resolve();
     this.lockHeld = false;
+    this.faults = faults; // test hooks: a crash point is a hook that throws or kills the process
   }
 
   /** Serialize every repository change (the in-process half of the write lock). */
@@ -429,6 +433,52 @@ export class MemoryStore {
 
   // ---------------------------------------------------------------- forget / restore
 
+  /** Remove these ids' lines from log/<YYYY-MM>.jsonl. Returns how many files it rewrote. */
+  #stripLogLines(ids) {
+    const drop = new Set(ids);
+    const files = new Set();
+    for (const id of drop) { const e = this.entries.get(id); if (e) files.add(month(e.at)); }
+    let changed = 0;
+    for (const m of files) {
+      const file = join(this.dir, 'log', m + '.jsonl');
+      if (!existsSync(file)) continue;
+      const lines = readLines(file);
+      const kept = lines.filter(line => { try { return !drop.has(JSON.parse(line).id); } catch { return true; } });
+      if (kept.length === lines.length) continue;
+      writeDurable(file, kept.length ? kept.join('\n') + '\n' : '');
+      changed++;
+    }
+    return changed;
+  }
+
+  /** Level 1 out of the working tree: the forgotten records are appended BEFORE the log lines
+   *  go. That order is the point: a crash in between leaves the id in BOTH places, which the
+   *  next boot finishes (`#finishForget`), while the other order leaves a window where the id
+   *  is in neither and the text is gone with no record that it ever existed. Returns the
+   *  entries it dropped. */
+  async #dropFromWorkTree(ids, { reason, by }) {
+    const at = this.now();
+    const rows = [];
+    for (const id of ids) {
+      const e = this.entries.get(id);
+      if (e) rows.push({ id: e.id, at, reason, by, sha256: sha256(e.text), batch: e.batch });
+    }
+    if (!rows.length) return [];
+    if (this.faults?.beforeForgetRecords) await this.faults.beforeForgetRecords();
+    appendDurable(join(this.dir, 'forgotten.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+    if (this.faults?.beforeForgetStrip) await this.faults.beforeForgetStrip();
+    this.#stripLogLines(rows.map(r => r.id));
+    const dropped = [];
+    for (const r of rows) {
+      const e = this.entries.get(r.id);
+      if (!e) continue;
+      this.entries.delete(e.id); this.index.remove(e.id, e.text);
+      this.forgotten.set(e.id, { id: e.id, at, by, batch: e.batch });
+      dropped.push(e);
+    }
+    return dropped;
+  }
+
   /** Forget (design 3.6 level 1): out of the working tree, grep and BM25; recoverable
    *  from history. `by` names who asked (owner, or steward citing an owner message). */
   async forget(ids, { reason, by }) {
@@ -437,37 +487,20 @@ export class MemoryStore {
     if (!why) return { refused: 'reason_required' };
     if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string')) return { refused: 'ids_required' };
     return this.#locked(async () => {
-      const forgotten = [], unknown = [], already = [];
-      const files = new Map();
+      const live = [], unknown = [], already = [];
       for (const id of new Set(ids)) {
-        const e = this.entries.get(id);
-        if (!e) { (this.forgotten.has(id) ? already : unknown).push(id); continue; }
-        forgotten.push(e);
-        if (!files.has(month(e.at))) files.set(month(e.at), new Set());
-        files.get(month(e.at)).add(id);
+        if (this.entries.has(id)) live.push(id);
+        else (this.forgotten.has(id) ? already : unknown).push(id);
       }
-      for (const [m, drop] of files) {
-        const file = join(this.dir, 'log', m + '.jsonl');
-        const kept = readLines(file).filter(line => { try { return !drop.has(JSON.parse(line).id); } catch { return true; } });
-        writeDurable(file, kept.length ? kept.join('\n') + '\n' : '');
-      }
-      const at = this.now();
-      if (forgotten.length) {
-        appendDurable(join(this.dir, 'forgotten.jsonl'), forgotten.map(e => JSON.stringify(
-          { id: e.id, at, reason: why, by, sha256: sha256(e.text), batch: e.batch })).join('\n') + '\n');
-      }
-      for (const e of forgotten) {
-        this.entries.delete(e.id); this.index.remove(e.id, e.text);
-        this.forgotten.set(e.id, { id: e.id, at, by, batch: e.batch });
-      }
+      const dropped = await this.#dropFromWorkTree(live, { reason: why, by });
       let remote = this.remote ? (this.remote.remove ? 'removed' : this.remote.batchOf ? 'filtered_by_turn' : 'unsupported') : 'local';
-      if (forgotten.length && this.remote?.remove) {
-        try { await this.remote.remove(forgotten.map(e => e.id)); }
+      if (dropped.length && this.remote?.remove) {
+        try { await this.remote.remove(dropped.map(e => e.id)); }
         catch (error) { remote = 'remove_failed: ' + String(error.message).slice(0, 200); }
       }
-      if (forgotten.length) await this.#commit(`forget ${forgotten.map(e => e.id).join(',')} (${by})`);
-      this.log('memory/forgotten', { ids: forgotten.map(e => e.id), by });
-      return { forgotten: forgotten.map(e => e.id), already, unknown, remote_forget: remote,
+      if (dropped.length) await this.#commit(`forget ${dropped.map(e => e.id).join(',')} (${by})`);
+      this.log('memory/forgotten', { ids: dropped.map(e => e.id), by });
+      return { forgotten: dropped.map(e => e.id), already, unknown, remote_forget: remote,
         note: 'the text stays in git history until purged' + (remote === 'unsupported' ? '; the remote index may still return it' : ''),
         status: this.statusLine() };
     });
@@ -584,6 +617,26 @@ export class MemoryStore {
     appendDurable(this.journalFile, JSON.stringify({ ...row, at: this.now() }) + '\n');
   }
 
+  /** Drop a build directory that will not be swapped in (the caller journals first). */
+  #discardBuild(plan) {
+    if (!existsSync(plan.new_dir)) return;
+    rmSync(plan.new_dir, { recursive: true, force: true }); fsyncDir(this.root);
+  }
+
+  /** Put the old repository back: journal the intent, then the two renames, then drop the
+   *  build. Shared by the in-purge rollback and by recovery, so both leave the same rows and
+   *  a crash in either window is describable from the layout alone. */
+  async #rollbackSwap(plan, { reason, fromLayout } = {}) {
+    this.#journal({ ...plan, phase: 'rolling_back',
+      ...(reason ? { reason: String(reason).slice(0, 500) } : {}), ...(fromLayout ? { from_layout: fromLayout } : {}) });
+    if (this.faults?.beforeRollback) await this.faults.beforeRollback();
+    renameSync(this.dir, plan.new_dir); fsyncDir(this.root);
+    if (this.faults?.duringRollback) await this.faults.duringRollback();
+    renameSync(plan.pre_purge_dir, this.dir); fsyncDir(this.root);
+    if (this.faults?.afterRollback) await this.faults.afterRollback();
+    this.#discardBuild(plan);
+  }
+
   /** Purge (design 3.6 level 2): owner only, never a steward tool. Build a filtered copy,
    *  verify it, swap it in, verify again, then delete the old repository. */
   async purge(ids, { by = 'owner' } = {}) {
@@ -602,16 +655,14 @@ export class MemoryStore {
         const known = ids.filter(id => this.entries.has(id) || this.forgotten.has(id));
         if (known.length !== ids.length) return { refused: 'unknown_ids', unknown: ids.filter(id => !known.includes(id)) };
         if (live.length) {
-          const files = new Map();
-          for (const id of live) { const e = this.entries.get(id); if (!files.has(month(e.at))) files.set(month(e.at), new Set()); files.get(month(e.at)).add(id); }
-          for (const [m, drop] of files) {
-            const file = join(this.dir, 'log', m + '.jsonl');
-            const kept = readLines(file).filter(line => { try { return !drop.has(JSON.parse(line).id); } catch { return true; } });
-            writeDurable(file, kept.length ? kept.join('\n') + '\n' : '');
+          // Journalled before the first destructive edit: a crash inside step 1 has to be
+          // recognisable at the next boot, and step 1 IS a forget, the remote included.
+          this.#journal({ ...plan, phase: 'forgetting' });
+          const dropped = await this.#dropFromWorkTree(live, { reason: 'purge', by });
+          if (dropped.length && this.remote?.remove) {
+            try { await this.remote.remove(dropped.map(e => e.id)); }
+            catch (error) { this.log('memory/remote-forget-failed', { ids: dropped.map(e => e.id), reason: String(error.message).slice(0, 200) }); }
           }
-          const at = this.now();
-          appendDurable(join(this.dir, 'forgotten.jsonl'), live.map(id => JSON.stringify({ id, at, reason: 'purge', by, batch: this.entries.get(id).batch })).join('\n') + '\n');
-          for (const id of live) { const e = this.entries.get(id); this.forgotten.set(id, { id, at, by, batch: e.batch }); this.entries.delete(id); this.index.remove(id, e.text); }
         }
         if (!await this.#commitIfDirty(`forget ${ids.join(',')} (${by}, before purge)`)) return { refused: 'commit_failing', status: this.statusLine() };
         this.#journal({ ...plan, phase: 'forget_done' });
@@ -641,8 +692,7 @@ export class MemoryStore {
         // 5. verify again, at the final path
         const again = await this.verifyPurged(this.dir, plan.pre_purge_dir, new Set(ids));
         if (again.length) {
-          renameSync(this.dir, plan.new_dir); renameSync(plan.pre_purge_dir, this.dir); fsyncDir(this.root);
-          rmSync(plan.new_dir, { recursive: true, force: true });
+          await this.#rollbackSwap(plan, { reason: again.join('; ') });
           this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason: again.join('; ').slice(0, 500) });
           this.#load();
           return { purged: false, reason: 'the re-check after the swap failed; the old repository is back', failures: again };
@@ -729,41 +779,94 @@ export class MemoryStore {
     return failures;
   }
 
-  /** Boot: finish or roll back a purge the journal shows unfinished (design 3.6), the
-   *  phase corrected from which directories actually exist. Returns a notice or undefined. */
+  /** Is this a complete repository, i.e. one we would dare to put back in place? A copy whose
+   *  delete had begun is not: git still calls it a repository while its log files are gone. */
+  async #completeRepository(dir) {
+    if (!existsSync(join(dir, '.git'))) return false;
+    const head = await git(dir, ['rev-parse', '--verify', 'HEAD']);
+    if (head.code !== 0 || !head.stdout.toString().trim()) return false;
+    const fsck = await git(dir, ['fsck', '--connectivity-only', '--no-dangling']);
+    if (fsck.code !== 0) return false;
+    const files = (await git(dir, ['ls-files'])).stdout.toString().split('\n').filter(Boolean);
+    if (!files.length) return false;
+    return files.every(f => existsSync(join(dir, f)));
+  }
+
+  /** Step 1 is a forget, and its records are appended before the log lines go: a crash in
+   *  between leaves an id in the log AND in forgotten.jsonl. Finish the removal here, so a
+   *  forgotten entry is never searchable again. Returns how many ids it finished. */
+  #finishForget(ids) {
+    this.#load();
+    const both = ids.filter(id => this.entries.has(id) && this.forgotten.has(id));
+    if (!both.length) return 0;
+    this.#stripLogLines(both);
+    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, e.text); }
+    this.log('memory/purge-recovered-forget', { ids: both });
+    return both.length;
+  }
+
+  /** Boot: finish or roll back a purge the journal shows unfinished (design 3.6).
+   *
+   *  WHICH action is possible is decided from the directories that exist, never from the
+   *  journal phase alone: a journal row is written after its step, so a crash can leave a
+   *  step done and its row missing. The journal supplies only the two things the layout
+   *  cannot say: whether a delete of the old copy had begun (that row is written BEFORE the
+   *  delete, which is why a torn old copy is never mistaken for a repository) and the label
+   *  of a finish whose disk state is the same either way. Every layout this store can leave
+   *  behind therefore has exactly one action, and none of them needs a human to edit the
+   *  journal. Returns the notice for the owner. */
   async #recoverPurge() {
     const rows = parseLines(this.journalFile);
     const last = rows.at(-1);
     if (!last || last.phase === 'done') return undefined;
-    const plan = rows.filter(r => r.purge_id === last.purge_id)[0];
+    const plan = rows.filter(r => r.purge_id === last.purge_id)[0] ?? last;
     const has = p => existsSync(p);
     const dir = has(plan.dir), pre = has(plan.pre_purge_dir), fresh = has(plan.new_dir);
-    // The journal line is written after each step, so a crash can leave the step done and
-    // its line missing: which directories exist is the truth, the journal the hint.
-    const late = ['rechecked', 'deleting_old'].includes(last.phase);
-    let phase;
-    if (!dir && pre) phase = 'renamed_old';                        // 4a done, 4b not
-    else if (dir && pre && !fresh) phase = late ? 'deleting_old' : 'renamed_new';
-    else if (dir && !pre) {
-      if (late) phase = 'deleting_old_done';
-      else if (['forget_done', 'building', 'verified'].includes(last.phase)) phase = 'building';
-      else throw new MemoryUnavailable(`memory: purge ${plan.purge_id} journal says ${last.phase} but the pre-purge copy is gone; left for the owner`);
-    } else if (dir && pre && fresh) throw new MemoryUnavailable('memory: purge journal and directories disagree (all three exist); left for the owner');
-    else throw new MemoryUnavailable(`memory: ${plan.dir} and its pre-purge copy are both missing`);
+    const layout = `${dir ? 'repo' : 'no-repo'}/${pre ? 'old' : 'no-old'}/${fresh ? 'build' : 'no-build'}`;
+    const ids = new Set(plan.ids ?? []);
+    const dropOld = async () => {
+      if (last.phase !== 'deleting_old') this.#journal({ ...plan, phase: 'deleting_old', from_layout: layout });
+      if (this.faults?.recoveryBeforeDelete) await this.faults.recoveryBeforeDelete();
+      rmSync(plan.pre_purge_dir, { recursive: true, force: true }); fsyncDir(this.root);
+    };
     let outcome;
-    if (phase === 'building') {
-      rmSync(plan.new_dir, { recursive: true, force: true }); outcome = 'rolled_back';
-    } else if (phase === 'renamed_old') {
-      renameSync(plan.pre_purge_dir, plan.dir); rmSync(plan.new_dir, { recursive: true, force: true }); fsyncDir(this.root); outcome = 'rolled_back';
-    } else if (phase === 'renamed_new') {
-      const failures = await this.verifyPurged(plan.dir, plan.pre_purge_dir, new Set(plan.ids));
-      if (failures.length) {
-        renameSync(plan.dir, plan.new_dir); renameSync(plan.pre_purge_dir, plan.dir); fsyncDir(this.root);
-        rmSync(plan.new_dir, { recursive: true, force: true }); outcome = 'rolled_back';
-      } else { rmSync(plan.pre_purge_dir, { recursive: true, force: true }); fsyncDir(this.root); outcome = 'completed'; }
-    } else { rmSync(plan.pre_purge_dir, { recursive: true, force: true }); fsyncDir(this.root); outcome = 'completed'; }
-    this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase });
-    this.log('memory/purge-recovered', { purge_id: plan.purge_id, from: last.phase, outcome });
+    if (!dir && !pre) {
+      throw new MemoryUnavailable(`memory: purge ${plan.purge_id} left neither ${plan.dir} nor ${plan.pre_purge_dir} (${layout}); there is nothing to put back`);
+    } else if (!dir) {
+      // The old repository was renamed aside and the new one never arrived: it is the only copy.
+      this.#journal({ ...plan, phase: 'rolling_back', from_layout: layout });
+      renameSync(plan.pre_purge_dir, plan.dir); fsyncDir(this.root);
+      this.#discardBuild(plan); outcome = 'rolled_back';
+    } else if (pre) {
+      if (last.phase === 'deleting_old' || !await this.#completeRepository(plan.pre_purge_dir)) {
+        // The delete had begun, or the old copy is already torn: never put it back.
+        await dropOld(); outcome = 'completed';
+      } else if (last.phase === 'rolling_back') {
+        // The rollback was already decided before the crash: finish it instead of deciding
+        // again, so two verdicts on the same bytes can never disagree across a boot.
+        await this.#rollbackSwap(plan, { fromLayout: layout });
+        outcome = 'rolled_back';
+      } else {
+        const failures = await this.verifyPurged(plan.dir, plan.pre_purge_dir, ids);
+        if (failures.length) {
+          await this.#rollbackSwap(plan, { reason: failures.join('; '), fromLayout: layout });
+          outcome = 'rolled_back';
+        } else { await dropOld(); outcome = 'completed'; }
+      }
+    } else if (fresh) {
+      // The repository in place is the old one and the build is what is left over (a rollback
+      // whose renames ran, or a build that was never swapped in): discard the build.
+      this.#journal({ ...plan, phase: 'rolling_back', from_layout: layout });
+      this.#discardBuild(plan); outcome = 'rolled_back';
+    } else {
+      // Only the repository is left: the old one (nothing was swapped) or the new one (the
+      // delete finished). The layout cannot say which; the last phase can.
+      outcome = PRE_SWAP_PHASES.has(last.phase) ? 'rolled_back' : 'completed';
+    }
+    const finished = this.#finishForget(plan.ids ?? []);
+    this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,
+      ...(finished ? { forget_finished: finished } : {}) });
+    this.log('memory/purge-recovered', { purge_id: plan.purge_id, from: last.phase, layout, outcome, forget_finished: finished });
     return `上次彻底删除（${plan.purge_id}，条目 ${plan.ids.join(', ')}）被中断，结果为：${outcome === 'completed' ? '已完成' : '已回退，未删除'}`;
   }
 }

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,145 @@ for (const [killAt, outcome] of Object.entries(points)) for (const writeDuring o
     assert.equal(history.includes('secret account 4242'), outcome === 'rolled_back');
     assert.equal(count(root, 't-keep-0'), 1);
     if (writeDuring === '1') assert.equal(count(root, 't-during-0'), 1, 'the spooled write lands exactly once');
+    await store.close();
+  });
+}
+
+// ---------------------------------------------------------------- crash safety of recovery
+const journalOf = root => readFileSync(join(root, USER + '.purge.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+/** A root whose purge really died by SIGKILL at that point (the fixture's argv). */
+function crashAt(killAt, flags = '0', mode = 'purge') {
+  const root = newRoot();
+  const child = spawnSync(process.execPath, [crashFixture, root, USER, killAt, flags, mode], { encoding: 'utf8' });
+  assert.equal(child.signal, 'SIGKILL', child.stderr + child.stdout);
+  return root;
+}
+const history = root => gitIn(repo(root), 'log', '-p', '--all').stdout.toString();
+
+// c1: the completed branch deletes the only recoverable copy. A kill inside that delete leaves
+// a TORN old copy beside the swapped-in one, and the base commit then re-verified against the
+// torn copy, failed, and put it back - promoting a mutilated repository over a verified one.
+const tornOldCopy = () => {
+  const root = crashAt('afterSwap');
+  const plan = journalOf(root).at(-1);
+  assert.equal(plan.phase, 'renamed_new', 'a real SIGKILL right after the swap');
+  // what an interrupted `rmSync(old, {recursive:true})` leaves: the first subtree gone, the
+  // .git still there, so git still answers as if the copy were a whole repository.
+  rmSync(join(plan.pre_purge_dir, 'log'), { recursive: true, force: true });
+  assert.ok(existsSync(join(plan.pre_purge_dir, '.git')), 'the torn copy still looks like a repository');
+  assert.equal(gitIn(plan.pre_purge_dir, 'rev-parse', '--verify', 'HEAD').status, 0, 'git still verifies its HEAD');
+  return { root, plan };
+};
+
+test('c1: a torn old copy left by an interrupted delete is finished off, never promoted', async () => {
+  const { root } = tornOldCopy();
+  const store = await open(root); // the base commit puts the torn copy back here and loses the entries
+  assert.ok(existsSync(join(repo(root), 'log')), 'the swapped-in copy is in place, not the torn old one');
+  assert.equal(count(root, 't-keep-0'), 1, 'the entry that survives the purge is still there');
+  assert.ok(!logLines(root).some(l => l.includes('4242')), 'the purged text is gone');
+  assert.deepEqual(leftovers(root), [], 'the torn copy is finished off, not put back');
+  assert.equal(gitIn(repo(root), 'fsck', '--full').status, 0);
+  assert.deepEqual((await store.search('secret account')).grep.hits, []);
+  const done = journalOf(root).at(-1);
+  assert.equal(done.phase, 'done');
+  assert.equal(done.outcome, 'completed');
+  await store.close();
+});
+
+test('c1: the recovery journals its delete of the old copy before it runs, so a second kill is still decidable', async () => {
+  const { root } = tornOldCopy();
+  const again = spawnSync(process.execPath, [crashFixture, root, USER, 'recoveryBeforeDelete', '0', 'recover'], { encoding: 'utf8' });
+  assert.equal(again.signal, 'SIGKILL', again.stderr + again.stdout);
+  const killed = journalOf(root).at(-1);
+  assert.equal(killed.phase, 'deleting_old', 'the delete is journalled before it runs');
+  assert.equal(killed.from_layout, 'repo/old/no-build', 'the row names the layout it decided from');
+  const store = await open(root);
+  assert.equal(count(root, 't-keep-0'), 1, 'the surviving entry is still there');
+  assert.ok(!logLines(root).some(l => l.includes('4242')), 'the purged text is gone');
+  assert.deepEqual(leftovers(root), []);
+  const done = journalOf(root).at(-1);
+  assert.equal(done.phase, 'done');
+  assert.equal(done.outcome, 'completed');
+  await store.close();
+});
+
+// c2: both rollback windows. Each leaves the repository in place with the build beside it, and
+// on the base commit the next boot threw memory_unavailable every single time and needed the
+// owner to delete the journal. The windows are reproduced from a real SIGKILL at the nearest
+// fixture point plus the renames the window itself performs, and (second loop) from kills
+// inside the rollback, which now journals its intent before the first rename.
+const renames = (plan, n) => { renameSync(plan.dir, plan.new_dir); if (n > 1) renameSync(plan.pre_purge_dir, plan.dir); };
+for (const [name, steps] of [['after its first rename', 1], ['after its second rename', 2]]) {
+  test(`c2: the in-purge rollback ${name}: three boots decide from the layout, no hand-edited journal`, async () => {
+    const root = crashAt('afterSwap');
+    const plan = journalOf(root).at(-1);
+    assert.equal(plan.phase, 'renamed_new');
+    renames(plan, steps); // the exact bytes a kill inside that window leaves
+    for (let boot = 1; boot <= 3; boot++) {
+      const store = await open(root); // the base commit throws memory_unavailable here, every boot
+      if (boot === 1) {
+        assert.match(store.statusLine().notices?.[0] ?? '', /已回退/, 'the owner is told what happened');
+        assert.equal((await store.restore('t-gone-0')).restored, 't-gone-0', 'the rolled-back entry is recoverable');
+        await store.forget(['t-gone-0'], { reason: 'leave the next boots a clean purge state', by: 'owner' });
+      }
+      assert.equal(count(root, 't-keep-0'), 1, `boot ${boot}: the surviving entry is there`);
+      assert.ok(history(root).includes('4242'), `boot ${boot}: the rolled-back purge left the text in history`);
+      const last = journalOf(root).at(-1);
+      assert.equal(last.phase, 'done', `boot ${boot}: one terminal row`);
+      assert.equal(last.outcome, 'rolled_back', `boot ${boot}: the decision was rollback`);
+      assert.deepEqual(leftovers(root), []);
+      await store.close();
+    }
+  });
+}
+
+for (const killAt of ['beforeRollback', 'duringRollback', 'afterRollback']) {
+  test(`c2: SIGKILL at ${killAt} inside the rollback: the next boot decides, three times over`, async () => {
+    const root = crashAt(killAt, 'recheck-fails');
+    assert.equal(journalOf(root).at(-1).phase, 'rolling_back', 'the rollback journals before its first rename');
+    for (let boot = 1; boot <= 3; boot++) {
+      const store = await open(root);
+      assert.equal(count(root, 't-keep-0'), 1, `boot ${boot}: the surviving entry is there`);
+      assert.ok(history(root).includes('4242'), `boot ${boot}: the rolled-back purge left the text in history`);
+      const last = journalOf(root).at(-1);
+      assert.equal(last.phase, 'done', `boot ${boot}: one terminal row`);
+      assert.equal(last.outcome, 'rolled_back', `boot ${boot}: the decision was rollback`);
+      assert.deepEqual(leftovers(root), []);
+      await store.close();
+    }
+  });
+}
+
+// c3: every destructive step is journalled before it acts. A forget whose records cannot be
+// written must not have stripped the log first: that order is what left an id in neither the
+// log nor forgotten.jsonl with the text already gone.
+test('c3: a forget that cannot record its records first leaves the text in the log', async () => {
+  const { root, store } = await seeded();
+  rmSync(join(repo(root), 'forgotten.jsonl'));
+  mkdirSync(join(repo(root), 'forgotten.jsonl')); // a directory: the records cannot be written
+  await assert.rejects(store.purge(['t-gone-0']));
+  assert.equal(count(root, 't-gone-0'), 1, 'nothing is stripped before the record of the strip exists');
+  assert.ok(logLines(root).some(l => l.includes('4242')), 'the text is untouched');
+  await store.close();
+});
+
+for (const [killAt, expected] of [['beforeForgetRecords', 'rolled_back'], ['beforeForgetStrip', 'rolled_back'], ['beforeDelete', 'completed']]) {
+  test(`c3: SIGKILL at ${killAt}: the purged id ends up in the log or in forgotten, never in neither`, async () => {
+    const root = crashAt(killAt);
+    const store = await open(root);
+    const forgotten = readFileSync(join(repo(root), 'forgotten.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+    const inLog = count(root, 't-gone-0') > 0;
+    const recorded = forgotten.some(r => r.id === 't-gone-0');
+    assert.ok(inLog || recorded, `t-gone-0 is in the log (${inLog}) or in forgotten.jsonl (${recorded}), not in neither`);
+    const last = journalOf(root).at(-1);
+    assert.equal(last.phase, 'done');
+    assert.equal(last.outcome, expected);
+    assert.equal(count(root, 't-keep-0'), 1);
+    // a replay of the same turn never brings the purged entry back
+    await store.recordTurn('gone', [{ role: 'owner', text: SECRET }, { role: 'steward', text: 'reply stays' }]);
+    await store.flush();
+    assert.equal(count(root, 't-gone-0'), inLog ? 1 : 0, 'the replay does not resurrect it');
+    assert.deepEqual(leftovers(root), []);
     await store.close();
   });
 }

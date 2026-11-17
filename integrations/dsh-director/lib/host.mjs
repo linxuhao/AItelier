@@ -13,10 +13,14 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { ROOT_ROLES } from './roles.mjs';
 
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
-export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory'];
+export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory',
+  'portfolio', 'handoff'];
+/** v1.2 (plugin step 12): what each object-shaped capability must implement. */
+const OBJECT_OPS = { attention: ['ask', 'close', 'list'], memory: ['ownerMessage'], portfolio: ['projects', 'project', 'conversation'] };
 /** The states a work item can be in (aligned with MCP Tasks / A2A task states). */
 export const WORK_STATES = ['working', 'input_required', 'completed', 'failed', 'cancelled', 'unknown'];
 /** States after which nothing of the work item may run again. */
@@ -48,7 +52,8 @@ export function validateHost(host) {
       let table;
       try { table = JSON.parse(readFileSync(config.rolesFile, 'utf8')); }
       catch (error) { problems.push(`config: rolesFile ${config.rolesFile} is not a readable role table (${error.code ?? error.message})`); }
-      for (const role of ['director', 'worker']) {
+      const rootRole = ROOT_ROLES.includes(config.rootRole) ? config.rootRole : 'director';
+      for (const role of [...new Set(['director', 'worker', rootRole])]) {
         const prompt = table?.[role]?.prompt;
         if (table && (typeof prompt !== 'string' || !existsSync(join(dirname(config.rolesFile), prompt))))
           problems.push(`config: rolesFile ${role} prompt ${prompt} is not next to ${config.rolesFile}`);
@@ -71,6 +76,9 @@ export function validateHost(host) {
     if (config.reservedSlots !== undefined && !(Number.isSafeInteger(config.reservedSlots) && config.reservedSlots >= 1
       && config.reservedSlots < (config.maxActiveSubagents ?? 8)))
       problems.push('config: reservedSlots must be an integer from 1 to maxActiveSubagents - 1 when given (one slot stays reserved for resuming a worker)');
+    // v1.2 (plugin step 12): the root session's role; the steward needs a steward entry above.
+    if (config.rootRole !== undefined && !ROOT_ROLES.includes(config.rootRole))
+      problems.push(`config: rootRole must be one of ${ROOT_ROLES.join(', ')} when given, got ${JSON.stringify(config.rootRole)}`);
     for (const key of ['sessionEnv', 'projectId', 'permissionPreset'])
       if (config[key] !== undefined && !isText(config[key])) problems.push(`config: ${key} must be a non-empty string when given`);
     // v1.2 (plugin step 11): the owner's memory; absent, no memory and no memory tools.
@@ -101,10 +109,9 @@ export function validateHost(host) {
   } else declared = host.capabilities;
   for (const op of declared) {
     if (!OPTIONAL_OPS.includes(op)) problems.push(`unknown capability: ${op}`);
-    else if (op === 'attention' ? !['ask', 'close', 'list'].every(name => typeof host.attention?.[name] === 'function')
-      : op === 'memory' ? typeof host.memory?.ownerMessage !== 'function'
+    else if (OBJECT_OPS[op] ? !OBJECT_OPS[op].every(name => typeof host[op]?.[name] === 'function')
       : op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
-      problems.push(`capability declared but not implemented: ${op}${op === 'attention' ? ' (ask, close and list must all be functions)' : ''}`);
+      problems.push(`capability declared but not implemented: ${op}${OBJECT_OPS[op]?.length > 1 ? ` (${OBJECT_OPS[op].slice(0, -1).join(', ')} and ${OBJECT_OPS[op].at(-1)} must all be functions)` : ''}`);
   }
   if (Array.isArray(host.capabilities))
     for (const op of OPTIONAL_OPS) if (host[op] !== undefined && !declared.includes(op)) problems.push(`implemented but not declared: ${op}`);
@@ -122,6 +129,8 @@ export const optionalDefaults = Object.freeze({
   setup: async () => {},               // no director-scope tools, sections or hooks of its own
   attention: undefined,                // no question channel: ask_owner / close_question refuse
   memory: undefined,                   // no owner-message check: memory_forget refuses (the owner can still forget)
+  portfolio: undefined,                // no cross-project view: the portfolio tools are not registered
+  handoff: undefined,                  // no handoff channel: handoff is not registered
 });
 
 /** Whether a work state means nothing of that work may run again. */

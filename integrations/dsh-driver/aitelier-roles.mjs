@@ -32,5 +32,8 @@ export function roles(table) {
   return { ...table,
     director: { ...table.director, presented: [...table.director.presented, ...adapterDirectorTools, stateWriteTool] },
     worker: { ...table.worker, forbidden: [...table.worker.forbidden, ...adapterDirectorOnly, ...directorOnlyStateTools],
-      allowed_actions: { [stateWriteTool]: workerStateActions }, notes } };
+      allowed_actions: { [stateWriteTool]: workerStateActions }, notes },
+    // The steward (plugin step 12) talks to its owner through the same durable message;
+    // it gets no State read or write tool (its reads are the portfolio tools).
+    ...(table.steward ? { steward: { ...table.steward, presented: [...table.steward.presented, 'send_user_message'] } } : {}) };
 }

@@ -20,6 +20,9 @@ export function presentTools(tools, role) {
  *  argument is not on that tool's list (a missing or non-string action included).
  *  `notes` adds the adapter's reason for one tool. */
 export function refusal(role, exec) {
+  // A presented_only role (the steward) has exactly its presented tools: any other name,
+  // called directly or through a transport, is refused.
+  if (role.presented_only && !role.presented.includes(exec.name)) return `${exec.name} is not available to this role`;
   const actions = role.allowed_actions?.[exec.name];
   if (!role.forbidden.includes(exec.name) && !(actions && !actions.includes(exec.arguments?.action))) return undefined;
   const note = role.notes?.[exec.name];
@@ -49,9 +52,9 @@ export const defaultDiscoveryTexts = Object.freeze({
   searchDescription: 'Find available tools by name or description and return their parameter schemas (default 5, maximum 10). Includes the less-used native tools that are not listed and every deferred MCP capability. Use call_tool to invoke a result. The catalog follows live MCP updates and your own agent scope.',
 });
 
-export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, roles, texts = {} }) {
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {} }) {
   const wording = { ...defaultDiscoveryTexts, ...Object.fromEntries(Object.entries(texts).filter(([, v]) => v !== undefined)) };
-  const roleFor = sessionId => roles[roleOf(sessionId, rootSession)];
+  const roleFor = sessionId => roles[roleOf(sessionId, rootSession, rootRole)];
   // Keyed on the caller's session, not on a prompt. A global guard covers both
   // call_tool targets and a direct call of the (merely unlisted) name.
   ctx.tools.guard(exec => refusal(roleFor(exec.agent?.session?.id), exec));

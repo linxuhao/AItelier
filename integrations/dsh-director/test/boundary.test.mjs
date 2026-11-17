@@ -40,6 +40,7 @@ export const EXCLUDED = [`node_modules`, join('test', 'fixtures', 'request-bodie
 export const SHIPPED = [
   join('conformance', 'index.mjs'),
   join('director.md'),
+  join('steward.md'),
   join('host.d.ts'),
   join('hosts', 'local.mjs'),
   join('index.mjs'),
@@ -50,6 +51,7 @@ export const SHIPPED = [
   join('lib', 'capacity.mjs'),
   join('lib', 'resume.mjs'),
   join('lib', 'roles.mjs'),
+  join('lib', 'portfolio.mjs'),
   join('lib', 'tool-discovery.mjs'),
   join('lib', 'memory', 'bm25.mjs'),
   join('lib', 'memory', 'git.mjs'),

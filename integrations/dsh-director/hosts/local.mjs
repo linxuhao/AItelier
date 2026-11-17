@@ -79,6 +79,8 @@ export function localHost(options = {}) {
       maxActiveSubagents: options.maxActiveSubagents, reservedSlots: options.reservedSlots,
       // Plugin step 11: the owner's memory, passed through as given (absent: none).
       ...(options.memory ? { memory: options.memory } : {}),
+      // Plugin step 12: run the root session as the steward (needs roles.json's steward).
+      ...(options.rootRole ? { rootRole: options.rootRole } : {}),
     },
     /** The startup / post-compaction snapshot: the work items and the notes. */
     async context() {

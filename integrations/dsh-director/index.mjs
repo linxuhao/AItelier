@@ -28,6 +28,7 @@ import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches 
 import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
+import { registerPortfolioTools } from './lib/portfolio.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -59,17 +60,21 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   const roles = op('roles')(loadRoles(config.rolesFile));
   if (roles && typeof roles.then === 'function') throw new Error('directorHost refused: roles(table) must return the table synchronously, not a Promise');
   validateEffectiveRoles(roles);
+  // Plugin step 12: the root session's role - the director, or the steward when the host
+  // says so (validateHost checked the name; the table must have that role).
+  const rootRole = config.rootRole ?? 'director';
+  if (!roles[rootRole]) throw new Error(`directorHost refused: config.rootRole is ${rootRole} but the role table has no ${rootRole}`);
   const promptDir = dirname(config.rolesFile);
-  const runtimeSkill = readFileSync(join(promptDir, roles.director.prompt), 'utf8');
+  const runtimeSkill = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
-  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, roles,
+  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles,
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
       searchDescription: texts.tools.search_tools } });
   // The worker protocol reaches every native child and never the director (whose
   // prompt is a root-scope section in setup). A caller-less assembly gets neither.
   ctx.systemPrompt.section({ name: labels.sectionPrefix + ':worker-protocol', order: 12, interpolate: false, text: context => {
     const id = (context?.agent ?? context?.scope)?.session?.id;
-    return id !== undefined && roleOf(id, config.sessionId) === 'worker' ? workerSkill : '';
+    return id !== undefined && roleOf(id, config.sessionId, rootRole) === 'worker' ? workerSkill : '';
   } });
   const todo = new TodoCli({ python: config.todo.python ?? 'python3', cwd: config.todo.cwd, stateDir: config.stateDir,
     module: config.todo.module, stateDirEnv: config.todo.stateDirEnv });
@@ -327,7 +332,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // The host's context source, read for every startup / post-compaction snapshot.
   let contextText = '';
   const contextSource = { refresh: async () => {
-    contextText = await host.context('director') + (memory ? await profileSection(memory) : ''); }, render: () => contextText };
+    contextText = await host.context(rootRole) + (memory ? await profileSection(memory) : ''); }, render: () => contextText };
   const setup = async (scope, subject) => {
     agentCtx = scope;
     // The host's director-scope pieces come first: its sections, model selection,
@@ -551,6 +556,9 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     }));
     if (memory) registerMemoryTools(scope, { defineTool, jsonOutput, memory,
       ownerMessage: host.memory ? (id, signal) => host.memory.ownerMessage(id, signal) : undefined });
+    // Plugin step 12: the steward's read-only view of every project and its handoff to a
+    // project's director, when the host provides them (which role sees them is roles.json's).
+    if (host.portfolio || host.handoff) registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio: host.portfolio, handoff: host.handoff });
   };
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;

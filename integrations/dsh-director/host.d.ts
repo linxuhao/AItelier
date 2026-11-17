@@ -20,8 +20,11 @@ export interface HostConfig {
   stateDir: string;
   /** The DSH entry; DSH libraries are resolved from it. */
   dshEntry: string;
-  /** roles.json (director/worker table); role prompts are read next to it. */
+  /** roles.json (director/worker/steward table); role prompts are read next to it. */
   rolesFile: string;
+  /** v1.2, plugin step 12: the root session's role, 'director' (default) or 'steward'.
+   *  The steward needs a `steward` entry in rolesFile; its native children are workers. */
+  rootRole?: 'director' | 'steward';
   /** The todo CLI: `python -m <module>` in `cwd` (default: the process's directory) with
    *  python defaulting to python3; the CLI reads its state directory from `stateDirEnv`. */
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
@@ -90,12 +93,13 @@ export interface DirectorHost {
   /** semver; the director accepts ^1. */
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
-  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'>;
+  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
+    | 'portfolio' | 'handoff'>;
   config: HostConfig;
 
   // ---- required ----
-  /** Startup / post-compaction snapshot text for a role. */
-  context(role: 'director'): Promise<string>;
+  /** Startup / post-compaction snapshot text for the root role (config.rootRole). */
+  context(role: 'director' | 'steward'): Promise<string>;
   /** Deliver what is waiting and everything that arrives later through api.notify, each
    *  event with a stable id (v1.1); deliver before moving your own cursor past it.
    *  `done` rejects on a fatal failure (the director then stops); `stop` ends delivery. */
@@ -135,6 +139,22 @@ export interface DirectorHost {
   /** v1.2, plugin step 11: whether `id` names a message the owner wrote; memory_forget
    *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses]. */
   memory?: { ownerMessage(id: string, signal?: AbortSignal): Promise<boolean> };
+  /** v1.2, plugin step 12: the steward's read-only view of every project, behind
+   *  portfolio_projects / portfolio_project / portfolio_conversation [none: not registered].
+   *  Reads only what the host already lets this identity read; it grants nothing.
+   *  - projects: each project's id and title, its director's state, its open questions;
+   *  - project: one project's overview, open issues and open questions;
+   *  - conversation: one page of the owner/director conversation, newest first, with a
+   *    cursor for the next older page. */
+  portfolio?: {
+    projects(signal?: AbortSignal): Promise<object>;
+    project(projectId: string, signal?: AbortSignal): Promise<object>;
+    conversation(projectId: string, cursor?: string, signal?: AbortSignal): Promise<object>;
+  };
+  /** v1.2, plugin step 12: pass the owner's words to a project's director, behind the
+   *  handoff tool [none: not registered]. The host checks that citesUserMessageId is a
+   *  message the owner wrote (refusing otherwise) and quotes it to the director. */
+  handoff?(handoff: { projectId: string; text: string; citesUserMessageId: string }, signal?: AbortSignal): Promise<object>;
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */

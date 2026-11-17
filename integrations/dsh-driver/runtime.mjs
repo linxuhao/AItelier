@@ -17,6 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
+import { stewardOps, syncConversation } from './steward-host.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
@@ -475,13 +476,18 @@ function askOwnerRequest(project, { id, text, context }) {
 export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
+  // Plugin step 12: the backend starts the reserved steward project with this role. The
+  // steward gets no full-access preset, no project work, no goal mandate and no State tools
+  // beyond its own (the server enforces the same: steward_read_only).
+  const steward = env.AITELIER_DSH_ROLE === 'steward';
   // A supplied request (tests) serves the State reads before install() runs; a
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
   let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
-  return {
+  const host = {
     version: '1.0.0',
-    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention'],
+    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
+      ...(steward ? ['memory', 'portfolio', 'handoff'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -490,7 +496,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // The same number core/dsh_driver.py writes into the profile for DSH (plugin step 9).
       ...(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS ? { maxActiveSubagents: Number(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS) } : {}),
       dormantMinuteMs: env.AITELIER_DSH_DORMANT_MINUTE_MS, idleReviewMs: env.AITELIER_DSH_IDLE_REVIEW_MS,
-      permissionPreset: hostExecution ? 'danger-full-access' : undefined },
+      permissionPreset: hostExecution && !steward ? 'danger-full-access' : undefined,
+      // The owner's memory lives on the host, outside every container mount (design 3.3).
+      ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
+        ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}) } } : {}) },
     labels,
     texts,
     /** The effective table: roles.json plus AItelier's State additions. */
@@ -519,7 +528,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // Efforts from roles.json; AITELIER_DSH_ROOT_REASONING_EFFORT still overrides the
       // director (an invalid value: max, as before the table).
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,
-        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles.director.reasoning_effort),
+        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles[steward ? 'steward' : 'director'].reasoning_effort),
         workerEffort: roles.worker.reasoning_effort,
         retry: modelRetryOptions(env) });
       // Resolve the existing mounted secret file into DSH's private credential
@@ -531,7 +540,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       // Host-scoped tools are available to native children too. Resolve the actual
       // caller from ToolExecution, never from the root agent captured by setup.
-      if (!hostExecution) ctx.tools.register(defineTool({ name: 'project_work',
+      if (!hostExecution && !steward) ctx.tools.register(defineTool({ name: 'project_work',
         description: 'Full project coding for this driver AND native subagents. Requires your assigned State attempt_id and owner fence. open: independent owned workspace; read: path; write: path/content/create; edit: path/old_str/new_str; bash: command/timeout in the existing isolated executor; deliver: optional commit_message, applies tested changes to Source and commits only those paths; push: expected_head, ordinary push to Source origin/current branch. Supply action and arguments. Use this for repository code/tests/integration; native local bash remains for driver-local orchestration. No additional plan/approval gate.',
         parameters: { attempt_id: { type: 'string', required: true }, fence: { type: 'integer', required: true },
           action: { type: 'string', required: true, enum: ['open', 'read', 'write', 'edit', 'bash', 'deliver', 'push'] },
@@ -545,9 +554,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           return result;
         },
       }));
-      if (!hostExecution) ctx.systemPrompt.section({ name: 'aitelier:project-work', order: 5, interpolate: false,
+      if (!hostExecution && !steward) ctx.systemPrompt.section({ name: 'aitelier:project-work', order: 5, interpolate: false,
         text: `Project ${project}: project_work is available to the driver and all native subagents. Parent assignments must include the registered State attempt_id and current owner fence. Each caller gets its own owned worktree: open, then read/write/edit/bash there, verify, then deliver (commit_message when needed). Only deliver writes back to Source. push(expected_head) uses the project's actual origin without force. bash runs in the existing isolated test container; do not run repository tests in the production backend. Use native local tools for orchestration/inbox/history, not as a fallback for denied project work. No new planning gate is required.` });
-      if (hostExecution) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
+      if (hostExecution && !steward) ctx.systemPrompt.section({ name: 'aitelier:host-work', order: 5, interpolate: false,
         text: `Project ${project}: you and your native DSH subagents run on the Linux host with danger-full-access and approval never. Use native file and bash tools directly for coding, Git fetch/merge/commit/push, Docker and installed agent CLIs. project_work is not mounted in this runtime. Existing history or notes describing workspace-write, read-only Git or missing Docker describe the previous container runtime. Read the current State source binding for the repository; the backend binding /app maps to host ${env.AITELIER_DSH_BACKEND_SOURCE ?? 'the AItelier deployment checkout'}, all other absolute bindings retain their host path. Each writer needs its own checkout/worktree, each run one controller. Run AItelier pytest only in disposable containers: docker run --rm --network none --cpus 2 --memory 2g, one worker, at most four concurrent; never directly on the host or in the production container. Use your own driver token for AItelier calls. Full access does not change project rules or grant permission to publish private source publicly.` });
       // A worker's State limits follow the generic worker prompt; the director never gets them.
       ctx.systemPrompt.section({ name: 'aitelier:worker-state', order: 12.5, interpolate: false, text: context => {
@@ -561,13 +570,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     },
     /** Director scope: the goal and protocol sections, model selection, the hidden
      *  waits, state_read and send_user_message - in their old order. */
-    async setup(scope, subject, { ctx, defineTool, runtimeSection, contextHooks }) {
-      scope.systemPrompt.section({ name: 'aitelier:driver-goal', order: 10, interpolate: false,
+    async setup(scope, subject, { ctx, defineTool, runtimeSection, contextHooks, memory }) {
+      // The director's goal, its driver protocol and the State protocol are a director's
+      // mandate and tools; the steward has neither (its prompt is steward.md).
+      if (!steward) scope.systemPrompt.section({ name: 'aitelier:driver-goal', order: 10, interpolate: false,
         text: () => driverGoalSection(ctx.goals, subject) });
-      scope.systemPrompt.section({ name: 'aitelier:driver-protocol', order: 11, interpolate: false,
+      if (!steward) scope.systemPrompt.section({ name: 'aitelier:driver-protocol', order: 11, interpolate: false,
         text: () => runtime.snapshot.driver_skill ?? '' });
       runtimeSection();
-      scope.systemPrompt.section({ name: 'aitelier:state-protocol', order: 12.5, interpolate: false, text: stateSkill });
+      if (!steward) scope.systemPrompt.section({ name: 'aitelier:state-protocol', order: 12.5, interpolate: false, text: stateSkill });
       installModelSelection(scope, { current: { provider: env.AITELIER_DSH_PROVIDER,
         model: env.AITELIER_DSH_MODEL }, assembled: undefined });
       contextHooks();
@@ -575,7 +586,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       const hidden = ['state_graph_read', 'wait_for_run', 'wait_for_driver_inbox']
         .map(n => 'mcp__aitelier__' + n).filter(n => scope.tools.get(n));
       if (hidden.length) scope.tools.restrict({ deny: hidden });
-      scope.tools.register(defineTool({ name: 'state_read',
+      if (!steward) scope.tools.register(defineTool({ name: 'state_read',
         description: 'Query State. Use state_graph_help for action schemas. Current project_id is supplied when omitted. Runtime delivers event notifications automatically.',
         parameters: { action: { type: 'string', required: true }, arguments: { type: 'object', additionalProperties: true } },
         output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
@@ -627,6 +638,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           const result = await request('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);
+          // The steward's reply joins its owner's turn in memory (a failure is logged, the reply stands).
+          if (steward && memory) await syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory, signal: exec.signal })
+            .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300)));
           return result;
         },
       }));
@@ -699,7 +713,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory }) {
+      // The steward's owner conversation goes into memory before each turn sees it.
+      const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
+        .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
+      await sync();
       // Bounded and self-describing: the newest page of the matches, projected (see
       // listProjectInbox / projectInboxDigest). An injection is re-sent on every
       // director-message wake, so it must not grow with project history - and it must
@@ -723,6 +741,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         if (!eventCarriesSomething({ ...result, project_inbox: inbox })) return;
         // Its own writes coming back: the director already knows; a turn on them is waste.
         if (ownEchoOnly({ ...result, project_inbox: inbox }, env.AITELIER_DRIVER_ID)) return;
+        await sync();
         // The id is the payload's digest (plugin step 7): a replay from the same cursor that
         // returns the same batch is recognised and not delivered twice; a batch that grew
         // has a new id and is delivered. Stable across restarts: it depends on nothing local.
@@ -748,7 +767,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       });
       const objective = driverGoal(project);
       let seeded;
-      const goal = bindDriverGoal(ctx.goals, agent, objective, { onSeed: (after, before) => { seeded = { after, before }; } });
+      const goal = steward ? undefined : bindDriverGoal(ctx.goals, agent, objective, { onSeed: (after, before) => { seeded = { after, before }; } });
       if (seeded) {
         // goal.md is a non-human authorization channel: every applied rewrite of a
         // mandate leaves a durable, append-only trace (the headless host shows no
@@ -780,6 +799,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       return { done: runtime.pump(), stop: () => runtime.close() };
     },
   };
+  // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a
+  // director's host does not have them (implemented-but-undeclared is refused).
+  if (steward) Object.assign(host, stewardOps({ request: (...args) => request(...args), project, me: env.AITELIER_DRIVER_ID }));
+  return host;
 }
 
 /** How much of a cause this runtime's own exit line carries, in characters. It is

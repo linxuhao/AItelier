@@ -406,10 +406,19 @@ export class MemoryStore {
     const at = this.now();
     const entries = messages.map((m, i) => {
       if (!ROLES.includes(m.role)) throw new Error('memory: role must be owner or steward');
-      return { id: `t-${turnId}-${i}`, at: m.at ?? at, role: m.role, source: 'conversation', text: String(m.text), batch: turnId };
+      // `part` (plugin step 12): a stable name for the message within its turn, for a host
+      // whose turn grows message by message (an owner message now, the reply later); by
+      // default the position.
+      const id = `t-${turnId}-${m.part ?? i}`;
+      if (!ENTRY_ID.test(id)) throw new Error('memory: message part must be letters, digits, . _ : -');
+      return { id, at: m.at ?? at, role: m.role, source: 'conversation', text: String(m.text), batch: turnId };
     }).filter(e => e.text.trim());
     return this.#writeEntries(entries, `turn ${turnId} (runtime)`);
   }
+
+  /** Whether an entry id was ever written here: live, forgotten or purged (none of those is
+   *  written again). A host syncing a conversation stops paging at a message it knows. */
+  known(id) { return this.entries.has(id) || this.forgotten.has(id); }
 
   /** memory_note: one explicit entry. */
   note(text, role = 'steward') {

@@ -141,8 +141,11 @@ test('memory_read: the whole text a search only excerpted, the profile, and the 
   // with_turn: the rest of that turn, in order, marked context; another turn never joins.
   const t = await store.read(['t-t1-1'], { withTurn: true });
   assert.deepEqual(t.entries.map(e => [e.id, e.context ?? false]), [['t-t1-1', false], ['t-t1-0', true], ['t-t1-2', true]]);
-  // An id asked for that already came as context is not repeated.
-  assert.deepEqual((await store.read(['t-t1-0', 't-t1-2'], { withTurn: true })).entries.map(e => e.id), ['t-t1-0', 't-t1-1', 't-t1-2']);
+  // Every entry asked for comes first, in the order asked, never as context; then the rest of the turn.
+  assert.deepEqual((await store.read(['t-t1-2', 't-t1-0'], { withTurn: true })).entries.map(e => [e.id, e.context ?? false]),
+    [['t-t1-2', false], ['t-t1-0', false], ['t-t1-1', true]]);
+  assert.deepEqual((await store.read(['t-t1-1', 't-t1-0'], { withTurn: true })).entries.map(e => [e.id, e.context ?? false]),
+    [['t-t1-1', false], ['t-t1-0', false], ['t-t1-2', true]]);
   const prof = await store.read(['profile']);
   assert.deepEqual(prof.entries.map(e => [e.id, e.text, e.version]), [['profile', '喜欢简洁', (await store.profile()).version]]);
   // Forgotten: named, no text; unknown: not_found; restored: readable again.

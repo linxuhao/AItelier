@@ -64,6 +64,18 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   srv.data = () => [{ id: 'r2', content: 'User wants a ledger', score: 0.8 }];
   const loose = await store.search('ledger', 5);
   assert.equal(loose.ranked.hits[0].id, undefined, 'an extracted fact with no local twin has no id to read');
+  // A hit close in meaning whose text is a local entry WITHOUT the query's words: grep cannot
+  // find it, and it still gets the local id (design 3.5: text equal to a local entry).
+  await store.recordTurn('t9', [{ role: 'owner', text: '先说别的' }, { role: 'owner', text: '预算表要能导出' }]);
+  srv.data = () => [{ id: 'r9', content: '预算表要能导出', score: 0.7 }];
+  const meaning = await store.search('记账', 5);
+  assert.deepEqual(meaning.grep.hits.map(h => h.id), ['t-turn-9-0'], 'grep finds only the literal match');
+  assert.equal(meaning.ranked.hits[0].id, 't-t9-1');
+  assert.equal(meaning.ranked.hits[0].also_in_grep, undefined, 'not in grep, so not marked');
+  assert.equal((await store.read([meaning.ranked.hits[0].id])).entries[0].text, '预算表要能导出');
+  // A forgotten local twin gives no id: its text is not readable.
+  await store.forget(['t-t9-1'], { reason: 'asked', by: 'owner' });
+  assert.equal((await store.search('记账', 5)).ranked.hits[0].id, undefined);
   await store.close();
 });
 

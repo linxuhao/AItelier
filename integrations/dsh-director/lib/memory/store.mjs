@@ -687,12 +687,16 @@ export class MemoryStore {
     const k = Math.max(1, Math.min(TOP_K_MAX, Number.isInteger(topK) ? topK : 10));
     const [grep, ranked] = await Promise.all([this.#grep(q, k), this.#ranked(q, k)]);
     const grepIds = new Set(grep.hits.map(h => h.id));
-    const grepTexts = new Map(grep.hits.filter(h => h.text).map(h => [h.text, h.id]));
+    // A remote hit has the remote's ref. When its text is a live local entry's - any entry,
+    // not only one grep found (a hit close in meaning rarely holds the query's words) - it
+    // also gets that entry's id, which memory_read takes. One pass over the entries, only
+    // on a remote search that returned hits.
+    const localTexts = new Map();
+    if (this.remote && ranked.hits?.length) for (const e of this.entries.values()) localTexts.set(e.text, e.id);
     if (ranked.hits) {
       const rankedIds = new Set();
       for (const h of ranked.hits) {
-        const id = this.remote ? grepTexts.get(h.text) : h.ref;
-        // A remote hit has the remote's ref; when its text is a local entry's, memory_read can take that id.
+        const id = this.remote ? localTexts.get(h.text) : h.ref;
         if (this.remote && id) h.id = id;
         if (id && grepIds.has(id)) { h.also_in_grep = true; rankedIds.add(id); }
       }
@@ -704,9 +708,10 @@ export class MemoryStore {
   }
 
   /** memory_read (design 3.5): the whole entries a search named. `profile` is the resident
-   *  profile. withTurn adds the other live entries of the same turn, marked context. A
-   *  forgotten entry answers `forgotten`; a purged or unknown id answers `not_found` - no
-   *  text comes back through here that search would not show. The texts are whole up to
+   *  profile. withTurn adds the other live entries of the same turns, marked context, after
+   *  every entry asked for. A forgotten entry answers `forgotten`; a purged or unknown id
+   *  answers `not_found` - forgotten and purged text is as invisible here as in search
+   *  (an id is not checked to come from a search: the memory is the steward's own). The texts are whole up to
    *  READ_CHARS in all: an entry past that is listed in `omitted` (read it next), and an
    *  entry longer than the limit on its own comes in pieces, `cut.next_offset` naming where
    *  the next piece starts (read that id alone with that offset). */
@@ -716,9 +721,9 @@ export class MemoryStore {
     if (wanted.length > READ_IDS_MAX) return { refused: 'too_many_ids', limit: READ_IDS_MAX };
     if (!Number.isInteger(offset) || offset < 0) return { refused: 'bad_offset' };
     if (offset && (wanted.length !== 1 || withTurn)) return { refused: 'offset_needs_one_id', reason: 'offset continues one entry: pass that id alone, without with_turn' };
-    const items = [], forgotten = [], notFound = [], seen = new Set();
+    const items = [], forgotten = [], notFound = [], seen = new Set(), turns = [];
+    // The entries asked for first, in the order asked, never marked context.
     for (const id of wanted) {
-      if (seen.has(id)) continue;
       if (id === 'profile') {
         const p = await this.profile();
         seen.add(id); items.push({ id, text: p.text, version: p.version });
@@ -727,8 +732,11 @@ export class MemoryStore {
       const e = this.entries.get(id);
       if (!e) { (this.forgotten.has(id) && !this.forgotten.get(id).purged ? forgotten : notFound).push(id); continue; }
       seen.add(id); items.push(this.#readable(e));
-      if (!withTurn || !e.batch) continue;
-      const turn = [...this.entries.values()].filter(x => x.batch === e.batch && !seen.has(x.id))
+      if (withTurn && e.batch && !turns.includes(e.batch)) turns.push(e.batch);
+    }
+    // Then the rest of their turns, each turn in time order.
+    for (const batch of turns) {
+      const turn = [...this.entries.values()].filter(x => x.batch === batch && !seen.has(x.id))
         .sort((a, b) => (a.at > b.at ? 1 : a.at < b.at ? -1 : a.id.localeCompare(b.id, 'en', { numeric: true })));
       for (const x of turn) { seen.add(x.id); items.push({ ...this.#readable(x), context: true }); }
     }

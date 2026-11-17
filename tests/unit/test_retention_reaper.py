@@ -16,6 +16,11 @@ Four criteria, one group each:
      candidates. The witness is a live deletion run with every retention forced
      to zero: the immune entries are still there, and every path handed to the
      single deletion primitive was enumerated under a managed root.
+  c5 CITED SUBTREES — an outcome that cites ``runs/<id>/<segment>/demo`` keeps that
+     subtree and makes the REST of the run reclaimable (``uncited-remainder``); a
+     run cited only at its own directory keeps every byte. The class report states
+     kept, reclaimable and deleted bytes, and the three add back up to the class
+     total measured before the pass.
 
 The fixtures are all ``tmp_path``; nothing here reads or writes a real
 ``~/.AItelier``.
@@ -88,6 +93,38 @@ def _make_file(
     if days is not None:
         _set_age(path, days, now)
     return path
+
+
+def _bytes_below(path: Path) -> int:
+    """Bytes an entry is measured at: everything below it (spelled independently here)."""
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for name in sorted(dirnames + filenames):
+            total += os.lstat(os.path.join(dirpath, name)).st_size
+    return total
+
+
+def _bytes_kept_with(path: Path) -> int:
+    """Bytes that stay when ``path`` is retained: the entry itself plus all below it."""
+    return os.lstat(path).st_size + _bytes_below(path)
+
+
+def _make_run(
+    root: Path,
+    name: str,
+    *,
+    now: float,
+    days: float,
+    files: dict[str, bytes],
+) -> Path:
+    """One run directory: run-relative files, aged by the run directory's own mtime."""
+    run = root / name
+    for rel, payload in files.items():
+        target = run / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    _set_age(run, days, now)
+    return run
 
 
 def _snapshot(root: Path) -> dict[str, tuple[int, int, bool, str | None]]:
@@ -447,6 +484,193 @@ def test_release_watch_run_is_kept_when_outcomes_cannot_be_read(home: Path, monk
     assert (runs / run).is_dir()
     assert class_report["refused_count"] == 0
     assert {record["reason"] for record in class_report["kept"]} == {"outcome-unreadable"}
+
+
+# --------------------------------------------------------------------------- #
+# c5 — outcomes cite PATHS: the cited subtree stays, the rest of the run goes
+# --------------------------------------------------------------------------- #
+
+#: The three run ids of the c5 fixture (fixed so the report order is fixed too).
+CITED, WHOLE, SPENT = "1" * 40, "2" * 40, "3" * 40
+
+
+def _cited_runs_fixture(home: Path, now: float) -> dict[str, Path]:
+    """One run cited BELOW itself, one cited at its directory, one spent.
+
+    Every run looks like the measured shape on this machine: a per-segment
+    ``<segment>/demo`` directory holding the verdict, with the raw ``<segment>/raw``
+    logs next to it. The outcome cites one ``demo`` subtree and one bare run
+    directory, and says nothing at all about the third run.
+    """
+    runs = home / "release-watch" / "runs"
+    outcomes = home / "release-watch" / "outcomes"
+    outcomes.mkdir(parents=True)
+    created = {
+        "cited": _make_run(
+            runs,
+            CITED,
+            now=now,
+            days=FAR_PAST,
+            files={
+                "seg-a/demo/verdict.bin": b"v" * 4096,
+                "seg-a/raw/watch.log": b"r" * 8192,
+                "seg-b/demo/shots.bin": b"s" * 1024,
+            },
+        ),
+        "whole": _make_run(
+            runs,
+            WHOLE,
+            now=now,
+            days=FAR_PAST,
+            files={
+                "seg-a/demo/verdict.bin": b"p" * 2048,
+                "seg-a/raw/watch.log": b"t" * 512,
+            },
+        ),
+        "spent": _make_run(
+            runs,
+            SPENT,
+            now=now,
+            days=FAR_PAST,
+            files={"seg-a/demo/verdict.bin": b"e" * 7000},
+        ),
+    }
+    _make_file(
+        outcomes,
+        "verdict.json",
+        now=now,
+        days=None,
+        payload=json.dumps(
+            {
+                "verdicts": [
+                    f"release-watch/runs/{CITED}/seg-a/demo",
+                    f"release-watch/runs/{WHOLE}",
+                ]
+            }
+        ).encode(),
+    )
+    return created
+
+
+def test_a_cited_subtree_is_kept_and_the_rest_of_the_run_is_reclaimable(home: Path) -> None:
+    now = time.time()
+    created = _cited_runs_fixture(home, now)
+    cited_rel = f"release-watch/runs/{CITED}"
+    demo_rel = f"{cited_rel}/seg-a/demo"
+    demo_bytes = _bytes_kept_with(created["cited"] / "seg-a" / "demo")
+    run_bytes = _bytes_below(created["cited"])
+    assert demo_bytes < run_bytes, "the fixture must have bytes outside the citation"
+
+    report = reaper.run(home, now=now)
+    class_report = report["classes"]["release-watch-runs"]
+
+    # (a) the cited run keeps exactly the subtree the outcome points at ...
+    kept = [record for record in class_report["kept"] if record["path"] == cited_rel]
+    assert len(kept) == 1, class_report["kept"]
+    assert kept[0]["bytes"] == demo_bytes, "a cited subtree keeps only its own bytes"
+    assert kept[0]["status"] == "kept"
+    assert kept[0]["reason"] == "referenced-by-outcome"
+    assert kept[0]["kept_by"] == [demo_rel], "the kept record must name the citation"
+
+    # ... and the REST of that run is reclaimable, with a reason.
+    rest = [record for record in class_report["candidates"] if record["path"] == cited_rel]
+    assert len(rest) == 1, class_report["candidates"]
+    assert rest[0]["status"] == "would-delete"
+    assert rest[0]["reason"] == "uncited-remainder"
+    assert rest[0]["bytes"] == run_bytes - demo_bytes
+    assert rest[0]["kept_bytes"] == demo_bytes
+    assert rest[0]["kept_by"] == [demo_rel]
+
+    # (b) a run cited only at its OWN directory keeps every byte, as before, and
+    # the record names the citation that kept it.
+    whole_rel = f"release-watch/runs/{WHOLE}"
+    whole_kept = [record for record in class_report["kept"] if record["path"] == whole_rel]
+    assert len(whole_kept) == 1
+    assert whole_kept[0]["reason"] == "referenced-by-outcome"
+    assert whole_kept[0]["kept_by"] == [whole_rel], "the record must name what kept it"
+    assert whole_kept[0]["bytes"] == _bytes_below(created["whole"])
+    assert not [record for record in class_report["candidates"] if record["path"] == whole_rel]
+
+    # The pass that really deletes takes the uncited remainder and nothing else.
+    reaper.run(home, now=now, delete=True)
+    assert (created["cited"] / "seg-a" / "demo" / "verdict.bin").read_bytes() == b"v" * 4096
+    assert not (created["cited"] / "seg-a" / "raw").exists()
+    assert not (created["cited"] / "seg-b").exists()
+    assert (created["whole"] / "seg-a" / "raw" / "watch.log").exists()
+    assert not created["spent"].exists()
+
+
+def test_release_watch_report_reconciles_kept_reclaimable_and_deleted_bytes(
+    home: Path, tmp_path: Path
+) -> None:
+    now = time.time()
+    created = _cited_runs_fixture(home, now)
+    runs = home / "release-watch" / "runs"
+    class_total = sum(_bytes_below(runs / name) for name in (CITED, WHOLE, SPENT))
+    cited_rel = f"release-watch/runs/{CITED}"
+    demo_rel = f"{cited_rel}/seg-a/demo"
+    demo_bytes = _bytes_kept_with(created["cited"] / "seg-a" / "demo")
+    whole_bytes = _bytes_below(created["whole"])
+
+    report_path = tmp_path / "reports" / "reaper.json"
+    printed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deploy.retention_reaper",
+            "--home",
+            str(home),
+            "--json",
+            str(report_path),
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert printed.returncode == 0, printed.stderr
+    doc = json.loads(report_path.read_text())["classes"]["release-watch-runs"]
+
+    # The --json document states all three quantities, measured at the start.
+    assert doc["total_bytes"] == class_total
+    assert doc["kept_bytes"] + doc["reclaimable_bytes"] + doc["deleted_bytes"] == doc["total_bytes"]
+    assert doc["deleted_bytes"] == 0, "a dry run deletes nothing"
+    assert doc["kept_bytes"] == demo_bytes + whole_bytes
+    assert doc["reclaimable_bytes"] == class_total - doc["kept_bytes"]
+    # Kept bytes name the cited path that kept them; reclaimable bytes carry a reason.
+    assert [
+        record["kept_by"] for record in doc["kept"] if record["path"] == cited_rel
+    ] == [[demo_rel]]
+    assert [(record["path"], record["reason"]) for record in doc["candidates"]] == [
+        (cited_rel, "uncited-remainder"),
+        (f"release-watch/runs/{SPENT}", "expired"),
+    ]
+    # No entry counted twice: the records partition the class total byte for byte.
+    records = [record for key in ("kept", "candidates", "deleted") for record in doc[key]]
+    assert sum(record["bytes"] for record in records) == class_total
+    assert len({record["path"] for record in doc["kept"]}) == len(doc["kept"])
+
+    # ... and the human text states the same three numbers and the same citation.
+    text = printed.stdout
+    assert f"total={doc['total_bytes']} B" in text
+    assert f"kept={doc['kept_count']} ({doc['kept_bytes']} B)" in text
+    assert f"reclaimable={doc['candidate_count']} ({doc['reclaimable_bytes']} B)" in text
+    assert f"deleted={doc['deleted_count']} ({doc['deleted_bytes']} B)" in text
+    assert f"kept-by={demo_rel}" in text
+    assert "uncited-remainder" in text
+
+    # The same identity holds in the pass that really deletes: the reclaimed bytes
+    # move to ``deleted`` and never sit in two columns at once.
+    deleted = reaper.run(home, now=now, delete=True)["classes"]["release-watch-runs"]
+    assert deleted["total_bytes"] == class_total
+    assert (
+        deleted["kept_bytes"] + deleted["reclaimable_bytes"] + deleted["deleted_bytes"]
+        == deleted["total_bytes"]
+    )
+    assert deleted["kept_bytes"] == demo_bytes + whole_bytes
+    assert deleted["reclaimable_bytes"] == 0
+    assert deleted["deleted_bytes"] == class_total - deleted["kept_bytes"]
+    assert not created["spent"].exists()
 
 
 # --------------------------------------------------------------------------- #

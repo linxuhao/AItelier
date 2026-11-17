@@ -462,6 +462,13 @@ async def write_gate(request: Request, call_next):
     # The verdict moves to the tool: api/mcp_router._authorize re-applies exactly
     # this check for every tool declared `write`. Do not remove one half.
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+        # The one exception: a steward token has no MCP surface at all, reads
+        # included (plugin step 12), so it is refused here, before any tool. Only
+        # an off-tunnel token can be a steward's, so browser and tunnel callers pay
+        # no lookup.
+        if (authz.presented_token(request) and not authz.is_via_cloudflare(request)
+                and await _write_denial_reason(request) == authz.STEWARD_READ_ONLY):
+            return JSONResponse(authz.denial_body(authz.STEWARD_READ_ONLY), status_code=403)
         return await call_next(request)
     # `/api/state` has the same property as `/mcp`: one path family carries BOTH
     # classes. `POST /api/state/query/{action}` serves the public reads and the

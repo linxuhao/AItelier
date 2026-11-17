@@ -1683,6 +1683,68 @@ def _driver_defaults(service, action, arguments):
     return out
 
 
+# The steward's write whitelist (plugin step 12; design "管家只读"). Everything
+# else a steward-role driver writes is refused. create_steward_proposal and
+# withdraw_steward_proposal are step 13's actions, named here already so that
+# step needs no change to this list; until they exist they stay unknown actions.
+STEWARD_WRITE_ACTIONS = frozenset({
+    "send_user_message", "withdraw_user_question", "send_director_message",
+    "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
+    "create_steward_proposal", "withdraw_steward_proposal"})
+_STEWARD_NOTEBOOK_WRITES = frozenset({
+    "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
+
+
+def _refuse_steward_write(service, action, arguments) -> None:
+    """The server-side steward restriction on a WRITE by a registered driver.
+
+    Fails closed: capabilities that cannot be read or parsed refuse the write
+    (`driver_capabilities_unreadable`); a driver bound to a reserved project
+    (core.dsh_driver.RESERVED_ROLES) whose capabilities do not carry that role
+    is refused (`steward_role_missing`), so a registration that lost its role
+    never makes the steward an ordinary writer. A steward may write only the
+    whitelist above, its notebook writes only into its OWN notebooks (its private
+    one, or its bound project's). Any other driver is unchanged.
+    """
+    driver_id = getattr(service, "driver_id", None)
+    if not driver_id:
+        return
+    from core.dsh_driver import RESERVED_ROLES
+    try:
+        with service.db.get_connection() as conn:
+            # A database with no driver registry (or no DSH runtime) has no
+            # capabilities (or binding) to read: nothing there can be a steward.
+            # Every deployment that authenticates a driver id has the registry.
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drivers','dsh_drivers')")}
+            row = bound = None
+            if "drivers" in tables:
+                # Read the same way driver_inbox._authorize reads the drivers table.
+                row = conn.execute("SELECT capabilities_json FROM drivers WHERE driver_id=?",
+                                   (driver_id,)).fetchone()
+            if "dsh_drivers" in tables:
+                hit = conn.execute("SELECT project_id FROM dsh_drivers WHERE driver_id=?",
+                                   (driver_id,)).fetchone()
+                bound = hit[0] if hit is not None else None
+        capabilities = json.loads(row[0]) if row is not None else {}
+    except (sqlite3.Error, ValueError, TypeError):
+        raise StateGraphError("driver_capabilities_unreadable") from None
+    if not isinstance(capabilities, dict):
+        raise StateGraphError("driver_capabilities_unreadable")
+    role = capabilities.get("role")
+    if bound in RESERVED_ROLES and role != RESERVED_ROLES[bound]:
+        raise StateGraphError("steward_role_missing")
+    if role != "steward":
+        return
+    allowed = action in STEWARD_WRITE_ACTIONS
+    if allowed and action in _STEWARD_NOTEBOOK_WRITES:
+        target = arguments if isinstance(arguments, dict) else {}
+        allowed = ((target.get("driver_id") == driver_id and not target.get("project_id"))
+                   or (bound is not None and target.get("project_id") == bound and not target.get("driver_id")))
+    if not allowed:
+        raise StateGraphError(f"steward_read_only: {action} is not available to the steward role")
+
+
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
     if isinstance(action, str) and action in RETIRED_ACTIONS:
         raise StateGraphError(RETIRED_ACTIONS[action])
@@ -1690,6 +1752,9 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("unknown state graph action; use state_graph_help")
     if action in WRITE_REQUESTS and not allow_write:
         raise StateGraphError("mutating action is not available on the read surface")
+    if action in WRITE_REQUESTS:
+        # Write allowed; before validation and dispatch, the steward restriction.
+        _refuse_steward_write(service, action, arguments)
     director_action = action in {
         "send_director_message", "list_director_messages",
         "acknowledge_director_message", "resolve_director_message"}

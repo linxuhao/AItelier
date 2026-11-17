@@ -1,0 +1,172 @@
+"""Plugin step 12, the DSH side: the reserved project `aitelier-home` runs its
+driver as the steward role.
+
+Covered here: the role-to-project mapping, the role-dependent completion route,
+compaction policy and start (model, environment, refusal without a steward
+entry), `capabilities.role` at provisioning, and the steward's profile without
+the `mcp-aitelier` wiring. Ordinary projects are asserted unchanged next to
+each steward case."""
+import asyncio
+import copy
+import json
+import sys
+
+import pytest
+
+from core import dsh_driver
+from core.dsh_driver import (DshDrivers, RESERVED_ROLES, compaction_config, completion_route,
+                             load_roles, role_for_project)
+from core.drivers import DriverRegistry
+from core.state_database import StateDatabase
+from core.state_service import StateService
+
+STEWARD_PROJECT = "aitelier-home"
+STEWARD = {"route": "steward-route", "reasoning_effort": "high",
+           "compaction": {"thresholdRatio": 0.4, "retainTokens": 3}, "prompt": "steward.md",
+           "presented": ["ask_owner", "close_question"], "forbidden": ["subagent"],
+           "presented_only": True}
+
+
+def _table(steward=True):
+    table = copy.deepcopy(load_roles())
+    table.pop("steward", None)
+    if steward:
+        table["steward"] = copy.deepcopy(STEWARD)
+    return table
+
+
+@pytest.fixture
+def roles_file(tmp_path, monkeypatch):
+    """Point the runtime at a roles.json with (or, rewritten, without) a steward."""
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(_table()))
+    monkeypatch.setattr(dsh_driver, "ROLES_FILE", path)
+    return path
+
+
+@pytest.fixture
+def runtime(tmp_path):
+    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    service = StateService(db, actor="fixture", project_read_trusted=True)
+    service.store.create_project("alpha", "Alpha")
+    service.store.create_project(STEWARD_PROJECT, "Home")
+    registry = DriverRegistry(db, "dsh-fixture-pepper-" * 3)
+    registry.seed("fixture-owner-token")
+    return DshDrivers(db, registry, tmp_path / "drivers", command=[sys.executable,
+        "-c", "import time; time.sleep(90)"])
+
+
+def _patch(runtime, row):
+    import yaml
+
+    class _Any(yaml.SafeLoader):
+        pass
+    _Any.add_multi_constructor("tag:yaml.org,2002:",
+                               lambda loader, suffix, node: loader.construct_scalar(node))
+    path = runtime.root / row["driver_id"] / "home" / "profiles" / "driver" / "cordis.patch.yml"
+    return yaml.load(path.read_text(), Loader=_Any)
+
+
+def _inserted_ids(patches):
+    return [p["id"] for p in next(p for p in patches if "insert" in p)["insert"]]
+
+
+def test_only_the_reserved_project_is_the_steward():
+    assert RESERVED_ROLES == {STEWARD_PROJECT: "steward"}
+    assert role_for_project(STEWARD_PROJECT) == "steward"
+    for other in ("alpha", "aitelier", "aitelier-home-2", "", None):
+        assert role_for_project(other) == "director"
+
+
+def test_completion_route_and_compaction_follow_the_projects_role(monkeypatch):
+    monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
+    table = _table()
+    steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
+    director = dict(steward, project_id="alpha")
+    assert completion_route(steward, "root", table) == "steward-route"
+    assert completion_route(director, "root", table) == table["director"]["route"]
+    # Children are workers whoever the root is; the row's model still wins for the root.
+    assert completion_route(steward, "child", table) == table["worker"]["route"]
+    assert completion_route(dict(steward, model="owner-pick"), "root", table) == "owner-pick"
+    root = compaction_config(steward, table)["modelPolicies"][0]
+    assert root == {"provider": "aitelier", "model": "steward-route", "thresholdRatio": 0.4, "retainTokens": 3}
+    assert compaction_config(director, table)["modelPolicies"][0] == {
+        "provider": "aitelier", "model": table["director"]["route"], **table["director"]["compaction"]}
+
+
+def test_a_table_without_a_steward_refuses_the_steward_and_nobody_else(monkeypatch):
+    monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
+    table = _table(steward=False)
+    steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
+    for call in (lambda: completion_route(steward, "root", table), lambda: compaction_config(steward, table)):
+        with pytest.raises(ValueError, match="no steward entry"):
+            call()
+    director = dict(steward, project_id="alpha")
+    assert completion_route(director, "root", table) == table["director"]["route"]
+    compaction_config(director, table)
+
+
+def test_starting_the_steward_without_a_steward_entry_fails_before_provisioning(runtime, roles_file):
+    roles_file.write_text(json.dumps(_table(steward=False)))
+    for model in (None, "driver"):  # a named model does not skip the check
+        with pytest.raises(ValueError, match="aitelier-home runs as steward, and roles.json has no steward entry"):
+            asyncio.run(runtime.start(STEWARD_PROJECT, model=model, actor="fixture"))
+    assert runtime.get(STEWARD_PROJECT) is None, "nothing was provisioned"
+    assert not runtime.root.exists() or not any(runtime.root.iterdir())
+
+
+def test_provisioning_records_the_role_in_capabilities(runtime, roles_file):
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    assert runtime.registry.get(steward["driver_id"])["capabilities"] == {
+        "runtime": "dsh", "project_id": STEWARD_PROJECT, "role": "steward"}
+    assert runtime.registry.get(director["driver_id"])["capabilities"] == {
+        "runtime": "dsh", "project_id": "alpha", "role": "director"}
+
+
+def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_file, monkeypatch):
+    monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    runtime._environment(steward)
+    runtime._environment(director)
+    steward_patch, director_patch = _patch(runtime, steward), _patch(runtime, director)
+    assert "mcp-aitelier" not in _inserted_ids(steward_patch)
+    assert _inserted_ids(steward_patch)[:2] == ["dsh-director", "aitelier-driver"]
+    assert "mcp-aitelier" in _inserted_ids(director_patch)
+    # Apart from the State MCP entry and the compaction policy, the two profiles are the same.
+    compaction = {p["id"]: p for p in steward_patch if p.get("id")}["compaction-basic"]["config"]
+    assert compaction["modelPolicies"][0] == {"provider": "aitelier", "model": "steward-route",
+                                              "thresholdRatio": 0.4, "retainTokens": 3}
+    strip = lambda patches: [p for p in patches if p.get("id") != "compaction-basic" and "insert" not in p]
+    assert strip(steward_patch) == strip(director_patch)
+    assert ([e for e in next(p for p in steward_patch if "insert" in p)["insert"]]
+            == [e for e in next(p for p in director_patch if "insert" in p)["insert"] if e["id"] != "mcp-aitelier"])
+
+
+def test_start_passes_the_role_only_to_the_steward(runtime, roles_file, monkeypatch):
+    monkeypatch.setenv("AITELIER_DSH_ROLE", "steward")  # a leaked variable never reaches a director
+    monkeypatch.setenv("AITELIER_DSH_MEMORY_USER", "someone")
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    steward_env, director_env = runtime._environment(steward), runtime._environment(director)
+    assert steward_env["AITELIER_DSH_ROLE"] == "steward"
+    assert steward_env["AITELIER_DSH_MEMORY_USER"] == "owner"
+    assert "AITELIER_DSH_ROLE" not in director_env and "AITELIER_DSH_MEMORY_USER" not in director_env
+    per_driver = {"AITELIER_DRIVER_ID", "AITELIER_DRIVER_TOKEN", "AITELIER_DRIVER_TOKEN_FILE", "DSH_HOME",
+                  "AITELIER_DSH_PROJECT", "AITELIER_DSH_SESSION", "AITELIER_DSH_MODEL", "AITELIER_DSH_STATE_DIR"}
+    assert ({k: v for k, v in steward_env.items() if k not in per_driver}
+            == {**{k: v for k, v in director_env.items() if k not in per_driver},
+                "AITELIER_DSH_ROLE": "steward", "AITELIER_DSH_MEMORY_USER": "owner"})
+
+
+def test_start_defaults_the_steward_to_its_own_route_and_directors_to_theirs(runtime, roles_file):
+    async def go():
+        try:
+            await runtime.start(STEWARD_PROJECT, actor="fixture")
+            await runtime.start("alpha", actor="fixture")
+        finally:
+            await runtime.close()
+    asyncio.run(go())
+    assert runtime.get(STEWARD_PROJECT)["model"] == "steward-route"
+    assert runtime.get("alpha")["model"] == load_roles()["director"]["route"]

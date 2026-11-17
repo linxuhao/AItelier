@@ -206,12 +206,16 @@ def pwmcp_driver_ports(value=None):
     return ports
 
 
-# The director/worker role table. integrations/dsh-driver/roles.mjs parses the
-# same file with the same rules (a test compares both parses and both refusals);
-# unknown keys are refused at every level.
+# The director/worker/steward role table. integrations/dsh-driver/roles.mjs parses
+# the same file with the same rules (a test compares both parses and both
+# refusals); unknown keys are refused at every level. `steward` is optional: a
+# table without it is the director/worker table it always was.
 ROLES_FILE = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "roles.json"
-ROLE_NAMES = ("director", "worker")
+ROLE_NAMES = ("director", "worker", "steward")
+_REQUIRED_ROLES = ("director", "worker")
 _ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", "forbidden")
+# Optional in every role: true refuses any tool the role does not present.
+_OPTIONAL_ROLE_KEYS = ("presented_only",)
 _COMPACTION_KEYS = ("thresholdRatio", "retainTokens")
 _EFFORTS = ("off", "low", "high", "max")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_]+")
@@ -244,12 +248,14 @@ def _tool_names(value, where):
 
 def validate_roles(table):
     """Validate a parsed role table; returns it unchanged."""
-    _exact_keys(table, ("version",) + ROLE_NAMES, "table")
+    _exact_keys(table, ("version",) + ROLE_NAMES, "table", ("version",) + _REQUIRED_ROLES)
     if not _is_number(table["version"]) or table["version"] != 1:
         raise ValueError("roles: version must be 1")
     for role in ROLE_NAMES:
+        if role not in table:
+            continue  # only an optional role can be absent: _exact_keys required the others
         value = table[role]
-        _exact_keys(value, _ROLE_KEYS, role)
+        _exact_keys(value, _ROLE_KEYS + _OPTIONAL_ROLE_KEYS, role, _ROLE_KEYS)
         if not isinstance(value["route"], str) or not value["route"]:
             raise ValueError(f"roles: {role}.route must be a non-empty string")
         if value["reasoning_effort"] not in _EFFORTS:
@@ -269,6 +275,8 @@ def validate_roles(table):
         both = [name for name in presented if name in forbidden]
         if both:
             raise ValueError(f"roles: {role} both presents and forbids {', '.join(both)}")
+        if "presented_only" in value and not isinstance(value["presented_only"], bool):
+            raise ValueError(f"roles: {role}.presented_only must be a boolean")
     return table
 
 
@@ -276,6 +284,29 @@ def load_roles(path=None):
     """Load and validate roles.json (read on every call: it is small, and a host
     restart must pick up the committed table)."""
     return validate_roles(json.loads(Path(path or ROLES_FILE).read_text()))
+
+
+# State projects whose driver runs as a role other than `director`. The steward
+# (plugin step 12) is bound to the one reserved project; every other project's
+# driver is a director, exactly as before.
+RESERVED_ROLES = {"aitelier-home": "steward"}
+# The memory owner the steward's runtime is started for (AITELIER_DSH_MEMORY_USER).
+STEWARD_MEMORY_USER = "owner"
+
+
+def role_for_project(project_id):
+    """The role a project's root session runs as: reserved ids by the table above,
+    every other project `director`."""
+    return RESERVED_ROLES.get(project_id, "director")
+
+
+def _root_entry(table, project_id):
+    """The roles.json entry for a project's root session. A reserved project whose
+    role the table lacks is refused: it never falls back to the director entry."""
+    role = role_for_project(project_id)
+    if role not in table:
+        raise ValueError(f"roles: project {project_id} runs as {role}, and roles.json has no {role} entry")
+    return table[role]
 
 
 @functools.lru_cache(maxsize=1)
@@ -289,26 +320,29 @@ def _serving_roles():
 def completion_route(row, session_id, roles=None):
     """The model route a completion for `session_id` asks for.
 
-    The root session is the director: the project row's model (the owner's
-    per-project choice) overrides the table's director route. Every other
-    session is a worker and gets the table's worker route - never anything the
-    row says."""
+    The root session is the project's role (the director, or the steward for its
+    reserved project): the project row's model (the owner's per-project choice)
+    overrides that role's route in the table. Every other session is a worker and
+    gets the table's worker route - never anything the row says."""
     table = roles or _serving_roles()
     if session_id == row["session_id"]:
-        return row["model"] or table["director"]["route"]
+        return row["model"] or _root_entry(table, row.get("project_id"))["route"]
     return table["worker"]["route"]
 
 
 def compaction_config(row, roles=None):
     """compaction-basic config: one policy per role, values from the table.
 
-    AITELIER_DSH_COMPACT_RATIO still overrides the director's ratio (clamped).
+    The root policy is the project's role's (the director's, or the steward's for
+    its reserved project). AITELIER_DSH_COMPACT_RATIO still overrides the root
+    ratio (clamped).
     The worker policy keys on the native subagents' provider/route; the top-level
     ratio (any other route) is the worker's too. When the director's own route IS
     the worker route, only the director policy is written: DSH refuses duplicate
     provider/model policies at load, and the director's applied there before."""
     table = roles or load_roles()
-    director, worker = table["director"]["compaction"], table["worker"]["compaction"]
+    root = _root_entry(table, row.get("project_id"))
+    director, worker = root["compaction"], table["worker"]["compaction"]
     ratio = os.environ.get("AITELIER_DSH_COMPACT_RATIO", str(director["thresholdRatio"])).strip()
     try:
         ratio = min(0.8, max(0.2, float(ratio)))
@@ -316,7 +350,7 @@ def compaction_config(row, roles=None):
         ratio = director["thresholdRatio"]
     # The same model the completion route uses for the director: the row's, or the
     # table's director route when the row names none (never a null model here).
-    model = row["model"] or table["director"]["route"]
+    model = row["model"] or root["route"]
     policies = [{"provider": row["provider"], "model": model, **director, "thresholdRatio": ratio}]
     worker_target = (SUBAGENT_PROVIDER, table["worker"]["route"])
     if (row["provider"], model) != worker_target:
@@ -464,8 +498,12 @@ class DshDrivers:
         driver_id = "dsh-" + uuid.uuid4().hex[:20]
         directory = self.root / driver_id
         directory.mkdir(parents=True, mode=0o700)
+        # `role` is what the server-side steward restriction reads
+        # (core/state_commands.execute, api/authz.write_denial_reason).
         registered = self.registry.register(driver_id, f"DSH · {project_id}"[:200],
-                                            capabilities={"runtime": "dsh", "project_id": project_id}, actor=actor)
+                                            capabilities={"runtime": "dsh", "project_id": project_id,
+                                                          "role": role_for_project(project_id)},
+                                            actor=actor)
         token = directory / "token"
         fd = os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -551,6 +589,7 @@ class DshDrivers:
         # previous policy (half the window, DSH's default 16% verbatim tail), now
         # written as their own policy rather than left to the default.
         roles = load_roles()
+        role = role_for_project(row["project_id"])
         # dsh-base's tool-result-pruner runs first at pressure and trims old tool
         # outputs in place. Measured 2026-11-06 (wuxia-myth, 253k): a 21.5k trim
         # brought the context back under the trigger, so the summary never ran,
@@ -573,20 +612,22 @@ class DshDrivers:
             *[{"id": plugin, "disabled": True} for plugin in UNUSED_BUILTIN_TOOL_PLUGINS],
             # dsh-director (the generic director plugin) first, then this adapter,
             # which provides its `directorHost` service (plugin design step 2, MF1).
+            # The steward has no State MCP wiring: its adapter and runtime use HTTP
+            # only, and its token is refused at /mcp anyway (api/authz.py).
             {"insert": [{"id": "dsh-director", "name": str(director_source)},
-                {"id": "aitelier-driver", "name": str(source)},
+                {"id": "aitelier-driver", "name": str(source)}] + ([] if role == "steward" else [
                 {"id": "mcp-aitelier", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": "aitelier", "transport": "streamable-http",
                     "url": self.base_url.rstrip("/") + "/mcp",
                     "headers": {"X-AItelier-Driver-Token": "__DRIVER_TOKEN__"},
-                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}] + extra},
+                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}]) + extra},
         ]
         import yaml
         (profile / "cordis.patch.yml").write_text(yaml.safe_dump(patches, sort_keys=False).replace(
             "__DRIVER_TOKEN__", "!!js process.env.AITELIER_DRIVER_TOKEN"))
         env = dict(os.environ)
         for name in ("AITELIER_ADMIN_TOKEN", "AITELIER_DRIVER_TOKEN", "AITELIER_DRIVER_ID",
-                     "AITELIER_DRIVER_TOKEN_FILE", "DSH_HOME"):
+                     "AITELIER_DRIVER_TOKEN_FILE", "DSH_HOME", "AITELIER_DSH_ROLE", "AITELIER_DSH_MEMORY_USER"):
             env.pop(name, None)
         env.update(DSH_HOME=str(directory / "home"), AITELIER_DRIVER_ID=row["driver_id"],
                    AITELIER_DRIVER_TOKEN=read_token_file(token),
@@ -600,13 +641,21 @@ class DshDrivers:
                    AITELIER_TODO_PYTHON=sys.executable,
                    AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV,
                    AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS))
+        if role == "steward":
+            # The plugin's root role (HostConfig.rootRole); a director gets no
+            # variable at all. The memory owner is the one owner for now.
+            env.update(AITELIER_DSH_ROLE=role, AITELIER_DSH_MEMORY_USER=STEWARD_MEMORY_USER)
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))
         return env
 
     async def start(self, project_id, *, provider="aitelier", model=None, actor):
-        model = model or load_roles()["director"]["route"]
+        # Before anything is provisioned: a reserved project whose role roles.json
+        # lacks is refused here (ValueError -> 422), never started as a director,
+        # whether or not the caller named a model.
+        root = _root_entry(load_roles(), project_id)
+        model = model or root["route"]
         async with self.lock:
             if self.closing:
                 raise ValueError("driver manager is shutting down")

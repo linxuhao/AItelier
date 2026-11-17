@@ -49,6 +49,13 @@ test('BM25 cuts a run at the script boundary: a Latin word glued to Chinese is o
 });
 
 test('BM25 keeps the kana prolonged sound mark inside the CJK segment: トー and ーク survive', () => {
+  // The sample without the mark first: plain kana segmentation is what it was before the change
+  // (identical at ed5237edba and 7967e64a74), so the mark is the only difference below.
+  const plain = 'カタカナ';
+  const plainTokens = documentTokens(plain);
+  console.log('documentTokens(' + JSON.stringify(plain) + ') =', JSON.stringify(plainTokens));
+  assert.deepEqual(plainTokens, ['\u0001カ', '\u0001タ', '\u0001カ', '\u0001ナ', 'カタ', 'タカ', 'カナ'],
+    'without the mark: one CJK segment, every character a unigram, every adjacent pair a bigram');
   const sample = 'カタカナトーク';
   const tokens = documentTokens(sample);
   console.log('documentTokens(' + JSON.stringify(sample) + ') =', JSON.stringify(tokens));

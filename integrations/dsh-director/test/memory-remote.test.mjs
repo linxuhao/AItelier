@@ -73,6 +73,12 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   assert.equal(meaning.ranked.hits[0].id, 't-t9-1');
   assert.equal(meaning.ranked.hits[0].also_in_grep, undefined, 'not in grep, so not marked');
   assert.equal((await store.read([meaning.ranked.hits[0].id])).entries[0].text, '预算表要能导出');
+  // Identical texts: the newest entry by time, whatever order the entries were loaded in.
+  await store.recordTurn('t5', [{ role: 'owner', text: '先说别的', at: '2026-11-17T05:00:00Z' }, { role: 'owner', text: '同意', at: '2026-11-17T05:00:01Z' }]);
+  await store.recordTurn('t4', [{ role: 'owner', text: '同意', at: '2026-11-17T04:00:00Z' }]);
+  srv.data = () => [{ id: 'r5', content: '同意', score: 0.6 }];
+  assert.equal((await store.search('记账', 5)).ranked.hits[0].id, 't-t5-1', 'the newest of two identical texts, though written last is the older');
+  srv.data = () => [{ id: 'r9', content: '预算表要能导出', score: 0.7 }];
   // A forgotten local twin gives no id: its text is not readable.
   await store.forget(['t-t9-1'], { reason: 'asked', by: 'owner' });
   assert.equal((await store.search('记账', 5)).ranked.hits[0].id, undefined);

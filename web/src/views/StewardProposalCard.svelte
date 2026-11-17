@@ -74,7 +74,7 @@
     {#if proposal.payload?.goal}<dt>{t('steward.goal')}</dt><dd>{proposal.payload.goal}</dd>{/if}
     {#if Array.isArray(proposal.payload?.seed_nodes) && proposal.payload.seed_nodes.length}
       <dt>{t('steward.seedNodes')}</dt>
-      <dd><ul>{#each proposal.payload.seed_nodes as node, i (i)}<li>{node.title ?? node.node_key ?? show(node)}</li>{/each}</ul></dd>
+      <dd><ul>{#each proposal.payload.seed_nodes as node, i (i)}<li>{node.key ? `${node.key}: ${node.goal ?? ''}` : node.title ?? node.node_key ?? show(node)}</li>{/each}</ul></dd>
     {/if}
     {#if proposal.reason}<dt>{t('steward.reason')}</dt><dd>{proposal.reason}</dd>{/if}
   </dl>

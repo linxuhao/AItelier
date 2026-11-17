@@ -701,11 +701,15 @@ export class MemoryStore {
     // also gets that entry's id, which memory_read takes. One pass over the entries, only
     // on a remote search that returned hits.
     const localTexts = new Map();
-    if (this.remote && ranked.hits?.length) for (const e of this.entries.values()) localTexts.set(e.text, e.id);
+    // Identical texts: the newest entry by `at` (its turn is the one with_turn brings).
+    if (this.remote && ranked.hits?.length) for (const e of this.entries.values()) {
+      const seen = localTexts.get(e.text);
+      if (!seen || e.at >= seen.at) localTexts.set(e.text, e);
+    }
     if (ranked.hits) {
       const rankedIds = new Set();
       for (const h of ranked.hits) {
-        const id = this.remote ? localTexts.get(h.text) : h.ref;
+        const id = this.remote ? localTexts.get(h.text)?.id : h.ref;
         if (this.remote && id) h.id = id;
         if (id && grepIds.has(id)) { h.also_in_grep = true; rankedIds.add(id); }
       }

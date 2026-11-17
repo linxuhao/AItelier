@@ -252,6 +252,12 @@ describe('a proposal card', () => {
     expect(api.declineStewardProposal).toHaveBeenCalledWith('p1', 3);
   });
 
+  it('create_project: lists the seed nodes in the shape the backend takes (key: goal)', () => {
+    const view = render(StewardProposalCard, props(proposal({kind: 'create_project',
+      payload: {project_id: 'ledger', title: 'Ledger', goal: 'a small ledger', seed_nodes: [{key: 'n1', goal: 'list needs', acceptance: 'a list'}]}})));
+    expect(view.container.textContent).toContain('n1: list needs');
+  });
+
   it('executing: a spinner and no buttons', () => {
     const view = render(StewardProposalCard, props(proposal({status: 'executing'})));
     expect(view.container.querySelector('[aria-busy="true"]')?.textContent).toBe('Executing…');

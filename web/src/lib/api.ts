@@ -373,22 +373,6 @@ export function deleteUser(email: string): Promise<Record<string, unknown>> {
 }
 
 // ═════════════════════════════════════════════════════════════════════
-//  Chat
-// ═════════════════════════════════════════════════════════════════════
-
-export function sendChatMessage(
-  projectId: string,
-  message: string,
-): Promise<Record<string, unknown>> {
-  return _post('/api/agent/chat/message', {
-    session_id: '',
-    project_id: projectId,
-    role: 'user',
-    content: message,
-  });
-}
-
-// ═════════════════════════════════════════════════════════════════════
 //  Trace
 // ═════════════════════════════════════════════════════════════════════
 

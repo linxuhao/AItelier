@@ -88,11 +88,12 @@ async def test_duplicate_call_relays_the_existing_run_and_launches_nothing(monke
 
 
 # ── The poll must not outlive the turn that is waiting on it ──────────────────
-# Three timeouts disagreed: the CLI kills a silent turn at 420s
-# (cli/tui/chat.py `_STALL_RELEASE_SECONDS`), the server's SSE guard fires at 600s
-# (`api/agent_routers.py:_STREAM_IDLE_TIMEOUT`), and this poll waited up to 1800s
-# emitting nothing. A 22-minute generation therefore always ended with the user
-# reading "the turn looks dead" while the run was perfectly healthy.
+# Two timeouts disagreed: the CLI kills a silent turn at 420s
+# (cli/tui/chat.py `_STALL_RELEASE_SECONDS`) while this poll waited up to 1800s
+# emitting nothing, so a 22-minute generation ended with the user reading "the
+# turn looks dead" while the run was perfectly healthy. A third number used to
+# bound it from the server side; that guard retired on 2026-11-17 along with the
+# streaming chat backend it protected, so only the CLI budget is compared here.
 
 def _source_constant(rel_path: str, pattern: str) -> int:
     """Read a timeout literal straight from the source.
@@ -113,13 +114,6 @@ def test_the_poll_budget_stays_under_the_cli_watchdog():
     stall_release = _source_constant("cli/tui/chat.py",
                                      r"_STALL_RELEASE_SECONDS\s*=\s*(\d+)")
     assert MetaAgent._POLL_BUDGET_S < stall_release
-
-
-def test_the_poll_budget_stays_under_the_server_sse_guard():
-    sse_idle = _source_constant(
-        "api/agent_routers.py",
-        r'_STREAM_IDLE_TIMEOUT\s*=\s*int\(os\.getenv\([^,]+,\s*"(\d+)"\)\)')
-    assert MetaAgent._POLL_BUDGET_S < sse_idle
 
 
 @pytest.mark.asyncio

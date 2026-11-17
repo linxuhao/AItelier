@@ -167,8 +167,9 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     # Same reasoning, different infrastructure file. `trace.db` sits in the DPS
     # root and is the workspace's own bookkeeping: system prompts, tool calls,
-    # tool results. That is exactly the content the /api/agent lock was added to
-    # protect, reachable through a second door, as a 8MB binary decoded with
+    # tool results. That is exactly the material a writer-only reader exists to
+    # guard — a transcript carrying it is never a public read — and here it was
+    # reachable through a second door, as a 8MB binary decoded with
     # errors="replace" (90% of it comes out printable). It is not project
     # content and this reader has no business serving it.
     if target.suffix.lower() in _WORKSPACE_HIDDEN_SUFFIXES:

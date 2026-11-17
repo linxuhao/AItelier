@@ -34,7 +34,8 @@ class AItelierApp(App):
         self.server_url = server_url or _DEFAULT_URL
         self._first_prompt = first_prompt
         # Shared async HTTP client — all components reuse this. Carry the admin
-        # token so butler chat (/api/agent/*) passes the server write-gate.
+        # token so the mutating calls the TUI makes (checkpoint approve/reject,
+        # project submit, scheduler settings) pass the server write-gate.
         from cli.client import _auth_headers
         self.http = httpx.AsyncClient(
             base_url=self.server_url.rstrip("/"), timeout=30.0,

@@ -33,7 +33,6 @@ from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
 from api.meta_routers import router as meta_router
-from api.agent_routers import router as agent_router
 from api.run_routers import router as run_router
 from api.run_history_routers import router as run_history_router
 from api.config_routers import router as config_router
@@ -325,7 +324,6 @@ app.include_router(tasks_router)
 app.include_router(projects_router)
 app.include_router(settings_router)
 app.include_router(meta_router)
-app.include_router(agent_router)
 app.include_router(run_router)
 app.include_router(run_history_router)
 app.include_router(config_router)

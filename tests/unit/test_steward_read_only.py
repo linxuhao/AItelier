@@ -50,6 +50,11 @@ def _refusal(action):
     return f"steward_read_only: {action} is not available to the steward role"
 
 
+def _own_inbox_refusal(action):
+    return (f"steward_read_only: {action} may only settle a delivery addressed to "
+            "this steward's own project")
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     table = copy.deepcopy(load_roles())
@@ -96,6 +101,12 @@ REFUSED = {
     "claim_node": {"project_id": "alpha", "node_key": "n1"},
     "start_attempt": {"project_id": "alpha", "node_key": "n1"},
     "create_project": {"project_id": "gamma", "title": "Gamma"},
+    # The steward's one inbox write is acknowledge_director_message; resolve (even of its
+    # OWN delivery) and the private driver inbox's acknowledgement stay closed.
+    "resolve_director_message": {"project_id": HOME, "delivery_id": "0" * 36,
+                                 "expected_version": 1, "request_key": "resolve"},
+    "acknowledge_driver_message": {"delivery_id": "0" * 36, "expected_version": 1,
+                                   "request_key": "ack-driver"},
 }
 
 
@@ -105,6 +116,95 @@ def test_the_steward_is_refused_every_write_outside_the_whitelist(world, action)
         execute(world.service(world.steward), action, REFUSED[action], allow_write=True)
     assert str(refused.value) == _refusal(action)
     assert "gamma" not in _project_ids(world)
+
+
+def test_the_steward_write_whitelist_is_exactly_these_actions():
+    """Enumerated, not derived: the one inbox write is named here and nothing else moved."""
+    from core.state_commands import STEWARD_WRITE_ACTIONS
+    assert STEWARD_WRITE_ACTIONS == {
+        "send_user_message", "withdraw_user_question", "send_director_message",
+        "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
+        "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
+        "acknowledge_director_message"}
+    assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
+    assert "resolve_director_message" not in STEWARD_WRITE_ACTIONS
+
+
+def test_every_other_state_write_is_still_refused(world):
+    """Not just the four sampled above: EVERY write action outside the whitelist is
+    refused by the steward gate, with the named reason, whatever its arguments."""
+    from core.state_commands import RETIRED_ACTIONS, STEWARD_WRITE_ACTIONS, WRITE_REQUESTS
+    others = sorted(set(WRITE_REQUESTS) - STEWARD_WRITE_ACTIONS - set(RETIRED_ACTIONS))
+    assert {"record_evidence", "verify_node", "add_nodes", "resolve_issue"} <= set(others)
+    steward = world.service(world.steward)
+    for action in others:
+        with pytest.raises(StateGraphError) as refused:
+            execute(steward, action, {}, allow_write=True)
+        assert str(refused.value) == _refusal(action), action
+
+
+def _delivery(world, sender, target, key):
+    """One director-message delivery, sent by the owner fixture into `target`."""
+    sent = execute(world.owner, "send_director_message", {
+        "sender_project_id": sender, "target_project_id": target, "director_identity": "fixture",
+        "request_key": key, "subject": "notice", "body": "work", "protocol_version": "v3"},
+        allow_write=True)
+    return sent["result"]["deliveries"][0]
+
+
+def test_the_steward_acknowledges_a_delivery_in_its_own_project_inbox(world):
+    own = _delivery(world, "beta", HOME, "own-notice")
+    steward = world.service(world.steward)
+    arguments = {"project_id": HOME, "delivery_id": own["delivery_id"],
+                 "expected_version": own["version"], "request_key": "steward-ack:own",
+                 "protocol_version": "v3"}
+    acked = execute(steward, "acknowledge_director_message", arguments, allow_write=True)
+    assert acked["result"]["delivery"]["status"] == "resolved", \
+        "quorum 1 of a transient delivery: the acknowledgement settles it"
+    assert acked["result"]["delivery"]["version"] == 2
+    assert acked["result"]["acked_by_me"] is True
+    # The same request is State's replay, not a second acknowledgement.
+    replay = execute(steward, "acknowledge_director_message", arguments, allow_write=True)
+    assert replay["result"]["replayed"] is True
+    assert replay["result"]["delivery"]["version"] == 2
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_director_delivery_acks "
+                            "WHERE delivery_id=?", (own["delivery_id"],)).fetchone()[0] == 1
+
+
+def test_the_steward_cannot_settle_another_projects_delivery(world):
+    foreign = _delivery(world, "beta", "alpha", "foreign-notice")
+    steward = world.service(world.steward)
+    attempts = (
+        # The foreign project's mailbox named directly.
+        {"project_id": "alpha", "delivery_id": foreign["delivery_id"],
+         "expected_version": 1, "request_key": "foreign-ack"},
+        # No project_id at all: a write is never defaulted into the steward's inbox.
+        {"delivery_id": foreign["delivery_id"], "expected_version": 1,
+         "request_key": "foreign-ack-no-project"},
+    )
+    for arguments in attempts:
+        with pytest.raises(StateGraphError) as refused:
+            execute(steward, "acknowledge_director_message", arguments, allow_write=True)
+        assert str(refused.value) == _own_inbox_refusal("acknowledge_director_message")
+    # Naming its own project does not reach a foreign delivery either: State's transition
+    # refuses a delivery whose target is not that project, as an unknown delivery.
+    smuggled = execute(steward, "acknowledge_director_message", {
+        "project_id": HOME, "delivery_id": foreign["delivery_id"], "expected_version": 1,
+        "request_key": "smuggle"}, allow_write=True)
+    assert smuggled["code"] == "unknown_delivery"
+    # And an id that names nothing is a named refusal, never a silent success.
+    unknown = execute(steward, "acknowledge_director_message", {
+        "project_id": HOME, "delivery_id": "0" * 36, "expected_version": 1,
+        "request_key": "unknown"}, allow_write=True)
+    assert unknown["code"] == "unknown_delivery"
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT status, version FROM state_director_deliveries "
+                           "WHERE delivery_id=?", (foreign["delivery_id"],)).fetchone()
+        assert tuple(row) == ("unread", 1), "a refused acknowledgement wrote nothing"
+        assert conn.execute("SELECT COUNT(*) FROM state_director_delivery_acks "
+                            "WHERE delivery_id=?", (foreign["delivery_id"],)).fetchone()[0] == 0
+
 
 
 def test_the_whitelisted_writes_pass_the_steward_gate(world):
@@ -368,6 +468,22 @@ def test_whitelisted_commands_work_over_http_and_refused_ones_do_not(world, clie
     for action in sorted(REFUSED):
         r = client.post(f"/api/state/commands/{action}", json=REFUSED[action], headers=headers)
         assert r.status_code == 422 and r.json()["detail"] == _refusal(action), (action, r.text)
+
+
+def test_the_steward_acknowledges_over_http_and_is_refused_another_inbox(world, client):
+    headers = _headers(world, "steward")
+    own = _delivery(world, "beta", HOME, "own-http")
+    r = client.post("/api/state/commands/acknowledge_director_message", headers=headers, json={
+        "project_id": HOME, "delivery_id": own["delivery_id"], "expected_version": own["version"],
+        "request_key": "steward-ack:own-http", "protocol_version": "v3"})
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["delivery"]["status"] == "resolved", r.text
+    foreign = _delivery(world, "beta", "alpha", "foreign-http")
+    r = client.post("/api/state/commands/acknowledge_director_message", headers=headers, json={
+        "project_id": "alpha", "delivery_id": foreign["delivery_id"], "expected_version": 1,
+        "request_key": "steward-ack:foreign-http"})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == _own_inbox_refusal("acknowledge_director_message"), r.text
 
 
 def test_the_home_driver_without_its_role_is_refused_over_http(world, client):

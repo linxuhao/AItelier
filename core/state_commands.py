@@ -1738,12 +1738,24 @@ def _driver_defaults(service, action, arguments):
 # else a steward-role driver writes is refused. create_steward_proposal and
 # withdraw_steward_proposal are step 13's; complete_steward_memory_request is
 # step 14's, called by the steward's runtime code, never by its model.
+# acknowledge_director_message is the one delivery write: a wake re-injects every
+# unread delivery of its own inbox, so the steward's acknowledgement is what stops
+# the same letters coming back. It is NOT a grant to the project mailbox at large:
+# _STEWARD_OWN_INBOX_WRITES bounds it to the project the steward is bound to.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
-    "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request"})
+    "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
+    "acknowledge_director_message"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
+# Settling a delivery is the steward's only inbox write. A delivery's target is
+# its project (state_director_deliveries.target_project_id, which the transition
+# itself checks against the named project), so requiring the named project to be
+# the steward's bound project keeps every other inbox out of reach. resolve is
+# deliberately absent: an acknowledgement already withholds the body from later
+# wakes, and dismissing standing guidance stays the project's decision.
+_STEWARD_OWN_INBOX_WRITES = frozenset({"acknowledge_director_message"})
 
 
 def _refuse_steward_write(service, action, arguments) -> None:
@@ -1755,7 +1767,8 @@ def _refuse_steward_write(service, action, arguments) -> None:
     is refused (`steward_role_missing`), so a registration that lost its role
     never makes the steward an ordinary writer. A steward may write only the
     whitelist above, its notebook writes only into its OWN notebooks (its private
-    one, or its bound project's). Any other driver is unchanged.
+    one, or its bound project's), and its one delivery write only into its OWN
+    project's inbox. Any other driver is unchanged.
     """
     driver_id = getattr(service, "driver_id", None)
     if not driver_id:
@@ -1792,6 +1805,15 @@ def _refuse_steward_write(service, action, arguments) -> None:
         target = arguments if isinstance(arguments, dict) else {}
         allowed = ((target.get("driver_id") == driver_id and not target.get("project_id"))
                    or (bound is not None and target.get("project_id") == bound and not target.get("driver_id")))
+    if allowed and action in _STEWARD_OWN_INBOX_WRITES:
+        # The project named here IS the delivery's target: the transition refuses a
+        # delivery whose row targets another project (unknown_delivery). A missing
+        # project_id is not defaulted into a write here, so nothing ambient widens it.
+        target = arguments if isinstance(arguments, dict) else {}
+        if bound is None or target.get("project_id") != bound:
+            raise StateGraphError(
+                f"steward_read_only: {action} may only settle a delivery addressed to "
+                "this steward's own project")
     if not allowed:
         raise StateGraphError(f"steward_read_only: {action} is not available to the steward role")
 

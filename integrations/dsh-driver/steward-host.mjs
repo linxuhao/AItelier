@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
- *  and the handoff, all over State reads and two State writes the steward is allowed
- *  (send_user_message is runtime.mjs's tool; send_director_message is the handoff).
+ *  and the handoff, all over State reads and three State writes the steward is allowed
+ *  (send_user_message is runtime.mjs's tool; send_director_message is the handoff;
+ *  acknowledge_director_message settles a delivery in its own inbox).
  *
  *  `request(path, body, signal)` is the runtime's authenticated State caller. */
 
@@ -113,6 +114,37 @@ export function stewardOps({ request, project, me }) {
       },
       conversation: (projectId, cursor, signal) => list('/api/state/query/list_user_conversation',
         { project_id: projectId, limit: 30, ...(cursor ? { cursor } : {}) }, signal),
+      /** Acknowledge ONE delivery of this steward's OWN inbox: the wake states each
+       *  delivery's id and version (projectInboxDigest), and State records the ack under
+       *  this steward's own driver id, so an acknowledged delivery's body is withheld
+       *  from later wakes. Bounded by construction: the only project named is this
+       *  steward's own (the server refuses any other), and every field the caller could
+       *  widen is checked here first. One write; the request key is derived from the
+       *  delivery identity, so a retry is State's replay, not a second acknowledgement.
+       *  resolve is not offered: dismissing standing guidance is not the steward's call. */
+      async acknowledge({ deliveryId, version } = {}, signal) {
+        if (typeof deliveryId !== 'string' || !deliveryId.trim()) {
+          return { refused: 'invalid_delivery', reason: 'delivery_id must name a delivery in your own inbox' };
+        }
+        if (!Number.isInteger(version) || version < 1) {
+          return { refused: 'invalid_version', reason: 'version must be the delivery version you were shown (1 or more)' };
+        }
+        let response;
+        try {
+          response = await request('/api/state/commands/acknowledge_director_message', {
+            project_id: project, protocol_version: 'v3', delivery_id: deliveryId,
+            expected_version: version, request_key: `steward-ack:${deliveryId}:${version}` }, signal);
+        } catch (error) {
+          return refusedBy(error);
+        }
+        // The director-messaging contract answers a refusal as an envelope with `code`
+        // (e.g. unknown_delivery), not an HTTP error: say so, never return it as success.
+        if (response?.code) {
+          return { refused: 'state_refused', code: String(response.code),
+            reason: String(response.detail?.message ?? response.code).slice(0, 500) };
+        }
+        return response?.result ?? response;
+      },
     },
     /** Plugin step 13: one open proposal row and nothing more; the owner decides, the backend
      *  executes the version approved and wakes the steward with the result. The request key

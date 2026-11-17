@@ -24,6 +24,7 @@ import * as core from '../dsh-director/lib/core.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, rename } from 'node:fs/promises';
+import { writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -781,9 +782,87 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   };
 }
 
+/** How much of a cause this runtime's own exit line carries, in characters. It is
+ *  one journal line and it is read by a person: the message's first line, capped. */
+const EXIT_LINE_LIMIT = 300;
+// A cause can quote a token from the environment or a rejected request. The same
+// shape the supervisor's own record redacts: the label stays, the value goes.
+const EXIT_BEARER = /(\bbearer\s+)[A-Za-z0-9._~+/=-]{6,}/gi;
+const EXIT_LABELLED = /(\b(?:token|secret|password|passwd|passphrase|api[_-]?key|apikey|authorization)\s*[=:]\s*["']?)[A-Za-z0-9._~+/:@=-]{6,}/gi;
+
+/** `AItelier DSH exit: <kind>[: <first line of the cause>]`, one bounded line. */
+function exitLine(kind, detail = '') {
+  const first = String(detail ?? '').split('\n')[0].trim();
+  const named = first
+    ? `: ${first.replace(EXIT_BEARER, '$1<redacted>').replace(EXIT_LABELLED, '$1<redacted>')}`
+    : '';
+  return `AItelier DSH exit: ${kind}${named}`.slice(0, EXIT_LINE_LIMIT);
+}
+
+/** The first line of whatever was thrown, with its class when it has one. */
+function causeOf(value) {
+  return (value && typeof value === 'object' && typeof value.stack === 'string') ? value.stack : value;
+}
+
+const diagnosed = new WeakSet();
+
+/**
+ * Name this process's own death on stderr, before it ends, exactly once per cause.
+ *
+ * Measured 2026-11-16/17 (iss-10bb7c78d636411d): two director runtimes exited with
+ * code 1 after 7.1 h and 7.8 h of uptime, and the crashing incarnation appended 0
+ * bytes to its runtime.log - so the supervisor had nothing to record and the death
+ * had no cause anywhere. Node ends a process non-zero for three different reasons,
+ * and only two of them leave a trace: an uncaught exception and an unhandled
+ * rejection print a stack (which nothing here kept), while a deliberate `exit(1)`
+ * says "stop" and nothing else. This names all three in one bounded,
+ * credential-free line each, and changes nothing about how any of them ends:
+ *
+ *  - `uncaughtExceptionMonitor` is an OBSERVER: Node still prints its own stack and
+ *    still exits 1. It fires for an unhandled rejection too - Node ends one as an
+ *    uncaught exception and passes `origin: 'unhandledRejection'`, which is the only
+ *    reason there is no listener on 'unhandledRejection': that would REPLACE Node's
+ *    crash path, and a runtime that survives a rejection today must keep surviving it.
+ *  - the line is written as soon as the cause is known, so it lands ABOVE Node's own
+ *    report, which is flushed afterwards (measured: with both streams in one file, as
+ *    the host spawns the runtime, the report is the last thing in it). That is the
+ *    order to prefer: the stack is still there for a reader, and the cause - one line,
+ *    capped, credentials redacted - does not depend on the report's length.
+ *  - 'exit' covers the third shape, the deliberate non-zero exit and `process.exitCode`,
+ *    which leave no trace at all. It is the only hook that runs once the event loop is
+ *    gone, so it writes with `writeSync`, and it says nothing when a cause was already
+ *    named above: one death is still one line.
+ *
+ * Installed by `apply()`, so it covers the runtime process and nothing else - and it
+ * is NOT exported, because this file's export surface is pinned and neither that pin
+ * nor the suite's file list is this change's to move. A second call for the same
+ * process is a no-op.
+ */
+function installExitDiagnosis(target = process) {
+  if (diagnosed.has(target)) return false;
+  diagnosed.add(target);
+  let spoke = false;
+  // A write that fails here must not become the process's last act: it is already over.
+  const speak = (kind, detail) => {
+    spoke = true;
+    try { writeSync(2, exitLine(kind, detail) + '\n'); } catch { /* the process is ending */ }
+  };
+  target.on('uncaughtExceptionMonitor', (error, origin) => {
+    if (!spoke) {
+      speak(origin === 'unhandledRejection' ? 'unhandled rejection' : 'uncaught exception',
+        causeOf(error));
+    }
+  });
+  target.on('exit', code => {
+    if (!spoke && code) speak(`exit code ${code}`);  // a clean exit says nothing
+  });
+  return true;
+}
+
 export function apply(ctx) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
+  installExitDiagnosis(process);
   ctx.provide('directorHost', aitelierHost(process.env));
 }
 

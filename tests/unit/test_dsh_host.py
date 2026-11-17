@@ -1,7 +1,11 @@
 """Real host supervision against the backend's shared desired-state storage."""
 import asyncio
 import json
+import os
+import pathlib
 import re
+import shutil
+import subprocess
 import sys
 import time
 from types import SimpleNamespace
@@ -9,7 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from core.dsh_driver import DshDrivers
-from core.dsh_host import last_startup_error, record_startup_failure, supervise
+from core.dsh_host import (EXIT_LOG_LINES, EXIT_RECORD_LIMIT, STARTUP_ERROR_LIMIT, exit_cause,
+                           last_startup_error, record_startup_failure, runtime_log_tail, supervise)
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_service import StateService
@@ -743,3 +748,257 @@ async def test_a_driver_this_supervisor_stopped_is_recorded_as_stopped(runtimes,
         stopped.set(); await task
     text += capsys.readouterr().out
     assert len(exit_lines(text, row['driver_id'])) == 1, text
+
+
+@pytest.fixture
+def serving_exit(tmp_path):
+    """`alpha`'s child serves, then dies with exit code 1, leaving its own log.
+
+    The same shape as `serves_then_exits`, with the code the two runtimes actually
+    died with on 2026-11-16/17 (1, after 7.1 h and 7.8 h). Two seconds is long
+    enough for the supervisor to read the serving phase - and for a test to write
+    into, or remove, the runtime.log the dying driver leaves behind before the
+    exit it records.
+    """
+    script = tmp_path / 'child.py'
+    script.write_text("import sys, time\ntime.sleep(2)\nsys.exit(1)\n")
+    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+    StateService(db, actor='fixture', project_read_trusted=True).store.create_project(
+        'alpha', 'Alpha')
+    registry = DriverRegistry(db, 'host-fixture-pepper-' * 3)
+    registry.seed('fixture-owner')
+    root = tmp_path / 'drivers'; root.mkdir()
+    (root / 'runtime.json').write_text('{"mode":"host"}')
+    backend = DshDrivers(db, registry, root)
+    host = DshDrivers(db, registry, root, host_controller=True,
+                      command=[sys.executable, str(script)])
+    return backend, host
+
+
+async def serving_cause(capsys, row, *, seconds=20):
+    """The exit record's cause line for this driver, drained as it is printed."""
+    marker = f'DSH host alpha: {row["driver_id"]} exit cause: '
+    text = await journal(capsys, lambda out: marker in out, seconds)
+    causes = [line for line in text.splitlines() if marker in line]
+    return causes, text
+
+
+async def test_a_serving_exit_record_carries_what_the_driver_said_before_dying(
+        serving_exit, capsys):
+    """The exit code was the whole record; the cause was on disk and never read.
+
+    Measured 2026-11-16/17: two runtimes died with code 1 after 7.1 h and 7.8 h,
+    each leaving one journal line naming nothing, so neither death was
+    diagnosable afterwards. The host already redirects the child's streams into
+    runtime.log, so the record now carries the tail of it - the child's own last
+    words, through the same redaction and the same bound as the startup record.
+    """
+    backend, host = serving_exit
+    row = await backend.start('alpha', actor='fixture')
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        backend.update('alpha', phase='running')  # what the runtime reports when it serves
+        await asyncio.sleep(0.1)  # the loop reads that phase before the child dies
+        (host.root / row['driver_id'] / 'runtime.log').write_text(
+            'loading the driver profile\n'
+            'AItelier DSH exit: uncaught exception: Error: session log is corrupt '
+            'token=deadbeef1234\n')
+        causes, text = await serving_cause(capsys, row)
+        assert len(causes) == 1, text  # ONE cause, once, for one exit
+        cause = causes[0]
+        assert 'uncaught exception: Error: session log is corrupt' in cause, cause
+        # The same bounds as the startup text: the value goes, the label stays.
+        assert 'deadbeef1234' not in cause, cause
+        assert '<redacted>' in cause, cause
+        # The status line is unchanged, and still there: the cause is added, not swapped in.
+        assert 'exited with exit code 1' in text, text
+        assert 'supervisor_stopped=false' in text, text
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_serving_exit_record_names_an_absent_log_instead_of_an_empty_field(
+        serving_exit, capsys):
+    """A driver that wrote nothing is a diagnosis, not a blank.
+
+    The crashed incarnation on 2026-11-17 appended 0 bytes, which is exactly the
+    case a record must spell out: "missing" says the file is gone (or was never
+    written), "no output" says it exists and is empty, and neither is silence.
+    The fixture has no session log either, so that absence is named the same way.
+    """
+    backend, host = serving_exit
+    row = await backend.start('alpha', actor='fixture')
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        backend.update('alpha', phase='running')
+        await asyncio.sleep(0.1)
+        (host.root / row['driver_id'] / 'runtime.log').unlink()  # the 0-byte death
+        causes, text = await serving_cause(capsys, row)
+        assert len(causes) == 1, text
+        cause = causes[0]
+        assert 'runtime.log missing' in cause, cause
+        assert 'session log missing' in cause, cause
+        assert 'exited with exit code 1' in text, text
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_serving_exit_record_bounds_a_log_far_longer_than_the_cap(
+        serving_exit, capsys):
+    """A journal entry is read by a person: the record is capped, not the log.
+
+    The newest line is the one that names the cause, so the cut takes the OLD end:
+    a log thousands of characters long still yields the marker the driver died on.
+    """
+    backend, host = serving_exit
+    row = await backend.start('alpha', actor='fixture')
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        backend.update('alpha', phase='running')
+        await asyncio.sleep(0.1)
+        (host.root / row['driver_id'] / 'runtime.log').write_text(
+            ''.join(f'line {number} ' + 'x' * 120 + '\n' for number in range(400))
+            + 'AItelier DSH exit: unhandled rejection: Error: the marker\n')
+        causes, text = await serving_cause(capsys, row)
+        assert len(causes) == 1, text
+        cause = causes[0]
+        assert 'the marker' in cause, cause  # the newest line survives the cut
+        assert len(cause) <= EXIT_RECORD_LIMIT, len(cause)
+        assert 'line 0 ' not in cause, cause  # the oldest end is what goes
+        assert 'exited with exit code 1' in text, text
+    finally:
+        stopped.set(); await task
+
+
+def test_the_exit_log_tail_keeps_the_newest_lines_and_names_an_absent_log(tmp_path):
+    """Bounded twice: the last EXIT_LOG_LINES lines, each redacted and capped."""
+    runtime = SimpleNamespace(root=tmp_path)
+    directory = tmp_path / 'dsh-tail'; directory.mkdir()
+    log = directory / 'runtime.log'
+    assert runtime_log_tail(runtime, 'dsh-tail') == 'runtime.log missing'
+    log.write_text('')
+    assert runtime_log_tail(runtime, 'dsh-tail') == 'runtime.log has no output'
+    log.write_text(''.join(f'line {number}\n' for number in range(100)))
+    tail = runtime_log_tail(runtime, 'dsh-tail')
+    lines = tail.split(' | ')
+    assert len(lines) == EXIT_LOG_LINES, lines
+    assert lines[-1] == 'line 99' and lines[0] == f'line {100 - EXIT_LOG_LINES}', lines
+    # A log line longer than the record's own bound is still one bounded line.
+    log.write_text('Error: ' + 'y' * 5000 + '\n')
+    assert len(runtime_log_tail(runtime, 'dsh-tail')) <= STARTUP_ERROR_LIMIT
+
+
+def test_the_exit_cause_carries_the_last_event_of_the_session_log(tmp_path):
+    """The other half of what a dying runtime leaves: how far its session got.
+
+    A session whose last event is a `job/registered` with no result, or a
+    `step/end` with no `turn/end`, is the difference between "died mid-turn" and
+    "died idle" - and it is the only thing a later reader can measure the lost
+    work by. The log is zstd-framed JSONL, about one frame per event, so only the
+    tail is decompressed: the 178 MB session measured on 2026-11-17 costs a
+    record 0.05 s.
+    """
+    # Imported, not skipped: zstandard is a declared dependency (pyproject) and the
+    # suite runs where it is installed, so its absence is a RED row, not a blind one.
+    import zstandard
+    runtime = SimpleNamespace(root=tmp_path)
+    row = {'driver_id': 'dsh-session', 'project_id': 'alpha', 'session_id': 'session-1'}
+    directory = tmp_path / 'dsh-session' / 'home' / 'sessions' / 'workspace' / 'session-1'
+    directory.mkdir(parents=True)
+    frame = zstandard.ZstdCompressor().compress
+    (directory / 'session.v4.jsonl.zstd').write_bytes(
+        frame(b'{"seq":1,"type":"turn/start"}\n')
+        + frame(b'{"seq":2,"type":"job/registered","data":{"id":"b9ad"}}\n'))
+    cause = exit_cause(runtime, row)
+    assert 'runtime.log missing' in cause, cause
+    assert 'session session-1 last event:' in cause, cause
+    assert '"type":"job/registered"' in cause, cause
+    assert 'turn/start' not in cause, cause  # the LAST event, not the first
+    # The session the row names is the one read, never merely the newest one there.
+    other = tmp_path / 'dsh-session' / 'home' / 'sessions' / 'workspace' / 'session-2'
+    other.mkdir()
+    (other / 'session.v4.jsonl.zstd').write_bytes(frame(b'{"seq":9,"type":"other"}\n'))
+    assert '"type":"other"' not in exit_cause(runtime, row)
+    # An empty log is named, not reported as an event.
+    (directory / 'session.v4.jsonl.zstd').write_bytes(b'')
+    assert 'session log has no events' in exit_cause(runtime, row)
+
+
+# The runtime half of the same fix (`runtime.mjs`): the exit record can only carry
+# the cause if the runtime prints one. Its module cannot be imported in isolation -
+# it is a DSH plugin - so the witness spawns it the way the driver's node suite
+# does, from `integrations/dsh-driver`, and reads what it left in one file:
+# the host spawns it with `stdout=log, stderr=log` (core/dsh_driver.py), and a PIPE
+# would misorder the report node writes through the stream against the diagnosis,
+# which is written with writeSync.
+DRIVER = pathlib.Path(__file__).resolve().parents[2] / 'integrations' / 'dsh-driver'
+
+
+def runtime_exit(tmp_path, body):
+    """Run the runtime's own `apply()` in a child node; return (exit code, its log)."""
+    node = shutil.which('node')
+    if node is None:
+        pytest.fail(
+            'missing capability: `node` is not on PATH, so the runtime\'s own exit line '
+            'cannot be witnessed. This row expects the shipped image aitelier:latest '
+            f'(node at /usr/local/bin/node); PATH={os.environ.get("PATH", "")!r}.')
+    script = tmp_path / 'exit.mjs'
+    script.write_text(
+        f'import {{ apply }} from {json.dumps((DRIVER / "runtime.mjs").as_uri())};\n'
+        'apply({ provide() {} });\n' + body + '\n')
+    log = tmp_path / 'exit.log'
+    with log.open('ab') as handle:
+        result = subprocess.run([node, str(script)], cwd=DRIVER, stdin=subprocess.DEVNULL,
+                                stdout=handle, stderr=handle, timeout=120)
+    return result.returncode, log.read_text()
+
+
+@pytest.mark.parametrize(('body', 'code', 'expected', 'stack'), [
+    # An unhandled rejection is the shape node ends as an uncaught exception.
+    ('Promise.reject(new Error("the session log is corrupt"));', 1,
+     'AItelier DSH exit: unhandled rejection: Error: the session log is corrupt', True),
+    ('setTimeout(() => { throw new Error("kaboom"); }, 0);', 1,
+     'AItelier DSH exit: uncaught exception: Error: kaboom', True),
+    # The shape that left 0 bytes in runtime.log on 2026-11-17: it says "stop"
+    # and nothing else, so the line is the only trace the death could have.
+    ('process.exit(5);', 5, 'AItelier DSH exit: exit code 5', False),
+    ('setTimeout(() => {}, 0);', 0, None, False),  # a clean exit says nothing
+])
+def test_the_runtime_names_its_own_death_before_it_exits(tmp_path, body, code, expected,
+                                                         stack):
+    """Exit 1 with no cause anywhere is what this change exists to end.
+
+    Two director runtimes died that way on 2026-11-16/17 (iss-10bb7c78d636411d) and
+    the crashing incarnation appended nothing to runtime.log, so no traceback
+    survived. Each of node's three non-zero endings now names itself in one line -
+    and observing them changes nothing about how they end: the status stays what it
+    was and node still prints its own stack.
+    """
+    status, text = runtime_exit(tmp_path, body)
+    assert status == code, text
+    named = [line for line in text.splitlines() if line.startswith('AItelier DSH exit: ')]
+    assert named == ([] if expected is None else [expected]), text
+    if stack:  # the monitor only observes: node's own report is still printed
+        assert 'Node.js v' in text, text
+
+
+def test_the_runtime_exit_line_is_bounded_and_credential_free(tmp_path):
+    """One line, capped, with the value gone and the label kept - as the record is."""
+    status, text = runtime_exit(
+        tmp_path,
+        'Promise.reject(new Error("token=deadbeef1234 " + "x".repeat(5000)'
+        ' + "\\nsecond line"));')
+    assert status == 1, text
+    named = [line for line in text.splitlines() if line.startswith('AItelier DSH exit: ')]
+    assert len(named) == 1, text
+    line = named[0]
+    assert len(line) <= 300, line
+    assert 'token=<redacted>' in line, line
+    assert 'deadbeef1234' not in line, line
+    assert 'second line' not in line, line

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import io
 import json
 import os
 import re
@@ -53,6 +54,30 @@ SERVING_PHASES = frozenset({"running", "waiting", "dormant"})
 STARTUP_LOG_TAIL_BYTES = 4096
 STARTUP_ERROR_LIMIT = 500
 
+# A SERVING driver's exit record keeps what its own log last said. How much the
+# child's last words may cost it is bounded twice over: forty lines, because that is
+# a failure's worth of text and the newest line names the cause; read from a larger
+# tail than a startup failure is, because a serving driver's log is a whole session's
+# chatter and its last line can be a long way from the top; and the whole record text
+# at EXIT_RECORD_LIMIT characters, cut from the OLD end. Characters bind first:
+# forty lines that fit beat forty that do not.
+EXIT_LOG_TAIL_BYTES = 16384
+EXIT_LOG_LINES = 40
+EXIT_RECORD_LIMIT = 1200
+
+# The session log is zstd-framed JSONL, about one frame per event, and a busy
+# director's grew to 178 MB (measured 2026-11-17). The exit record reads a tail
+# window of frames and decompresses only what is in it, so the cost of the record
+# does not grow with the session.
+SESSION_LOG_TAIL_BYTES = 65536
+_ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
+
+# How much of the session's last event line the record keeps. One event carries a
+# whole payload and the record needs its identity, not its body: `seq` and `type`
+# are the first keys DSH writes, so the head of the line is the part that says how
+# far the session got.
+SESSION_EVENT_LIMIT = 300
+
 # The line that names an error, when the child wrote one. A Node crash prints
 # `Error: ...` and then stack frames: the frames are not the error, and the LAST
 # match in the tail is the newest attempt's error, because the log is appended to
@@ -87,33 +112,211 @@ def startup_failure_path(runtime, driver_id):
     return runtime.root / driver_id / "startup-failures.json"
 
 
+def _log_tail(runtime, driver_id, limit=STARTUP_LOG_TAIL_BYTES):
+    """The last `limit` bytes of the driver's own log, decoded.
+
+    Raises OSError when it cannot be read: the two readers below name that in their
+    own words, because a start that never served and a driver that had been serving
+    for hours are different diagnoses. Only the tail is read either way - the file
+    grows with every attempt and every turn.
+    """
+    path = runtime.root / driver_id / "runtime.log"
+    with path.open("rb") as log:
+        log.seek(0, os.SEEK_END)
+        log.seek(max(0, log.tell() - limit))
+        return log.read().decode("utf-8", "replace")
+
+
 def last_startup_error(runtime, driver_id):
     """The first line of the driver's last startup error, from the tail of its log.
 
     The host already redirects both of the child's streams into the driver
     directory's runtime.log, so the diagnosis needs no second channel - and a
-    child that dies before it can answer anything else still leaves it. Only the
-    tail is read: the file grows with every attempt.
+    child that dies before it can answer anything else still leaves it.
 
     Never raises for a log that is missing or unreadable. That is a diagnosis
     too, and a failed read must cost the record its detail, not the supervisor
     the loop.
     """
-    path = runtime.root / driver_id / "runtime.log"
     try:
-        with path.open("rb") as log:
-            log.seek(0, os.SEEK_END)
-            log.seek(max(0, log.tell() - STARTUP_LOG_TAIL_BYTES))
-            lines = log.read().decode("utf-8", "replace").splitlines()
+        text = _log_tail(runtime, driver_id)
     except OSError as exc:
         return f"runtime.log unreadable: {exc.strerror or exc}"
-    lines = [line.strip() for line in lines if line.strip()]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "runtime.log has no output"
     for line in reversed(lines):
         if _ERROR_LINE.search(line):
             return line
     return lines[-1]
+
+
+def runtime_log_tail(runtime, driver_id):
+    """The newest lines of a serving driver's own log, or the reason there are none.
+
+    The same file `last_startup_error` reads - the host redirects both of the
+    child's streams into it - so the exit record needs no second channel. It is a
+    DIFFERENT question though: a startup reader wants the one line that names why a
+    boot failed, while a driver that had been serving for hours died with its whole
+    session in there, and the last thing it said is the only evidence left.
+
+    A driver that wrote nothing is a diagnosis as much as one that wrote a
+    traceback: "missing" and "no output" are named here rather than reaching the
+    record as an empty field somebody has to interpret.
+    """
+    try:
+        lines = [line.strip() for line in
+                 _log_tail(runtime, driver_id, EXIT_LOG_TAIL_BYTES).splitlines()]
+    except FileNotFoundError:
+        return "runtime.log missing"
+    except OSError as exc:
+        return f"runtime.log unreadable: {exc.strerror or exc}"
+    lines = [line for line in lines if line]
+    if not lines:
+        return "runtime.log has no output"
+    # Same bounds as the startup text: one redacted, capped line each.
+    return " | ".join(_bounded(line) for line in lines[-EXIT_LOG_LINES:])
+
+
+def _session_log(runtime, driver_id, session_id):
+    """This driver's and this session's zstd log, or None.
+
+    The sessions root holds one directory per workspace and one per session id, so
+    the session the ROW names is looked for - never merely the newest file under
+    there, which can belong to a session this driver has already left.
+    """
+    root = runtime.root / driver_id / "home" / "sessions"
+    try:
+        workspaces = list(root.glob("*"))
+    except OSError:
+        return None
+    for workspace in workspaces:
+        candidate = workspace / str(session_id) / "session.v4.jsonl.zstd"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _last_zstd_line(window):
+    """The last complete event line in `window`, a tail of zstd frames, or None.
+
+    Frames are independent, so decompression can start at any frame header: the
+    window's own first frame is usually cut, and the magic scan finds the first
+    boundary after it. A candidate that is not a boundary decodes to nothing that
+    parses as an event and the next one is tried; a frame the stopped runtime was
+    still appending ends the read, and what decoded before it is what there is.
+
+    An event is a JSON object with an integer `seq`, which is the same test DSH's
+    own reader applies - a fragment of a line is not an event and must not be
+    reported as the last one.
+    """
+    import zstandard
+    starts, at = [], window.find(_ZSTD_FRAME_MAGIC)
+    while at != -1:
+        starts.append(at)
+        at = window.find(_ZSTD_FRAME_MAGIC, at + 1)
+    for start in starts:
+        raw = bytearray()
+        reader = zstandard.ZstdDecompressor().stream_reader(
+            io.BytesIO(window[start:]), read_across_frames=True)
+        try:
+            while True:
+                chunk = reader.read(65536)
+                if not chunk:
+                    break
+                raw += chunk
+        except zstandard.ZstdError:
+            pass
+        finally:
+            reader.close()
+        for line in reversed(bytes(raw).decode("utf-8", "replace").splitlines()):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and isinstance(event.get("seq"), int):
+                return line
+    return None
+
+
+def last_session_event(runtime, row):
+    """The last event line this driver's session log holds, bounded and redacted.
+
+    The record of a crash needs both halves of what the process left behind: what
+    its stderr said, and how far its session got. A session that ends on a
+    `job/registered` with no result, or a `step/end` with no `turn/end`, is the
+    difference between "the process died mid-turn" and "the process died idle".
+
+    Never raises. A session log that is absent, unreadable or empty is named the
+    same way a missing runtime.log is.
+    """
+    session_id = row.get("session_id")
+    if not session_id:
+        # A row without a session id is not a session log that is missing: saying so
+        # is the difference between "this driver never got a session" and "the file
+        # went away", and the record reads the absence rather than raising on it.
+        return "session id missing from the driver row"
+    path = _session_log(runtime, row["driver_id"], session_id)
+    if path is None:
+        return "session log missing"
+    try:
+        with path.open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - SESSION_LOG_TAIL_BYTES))
+            window = log.read()
+    except OSError as exc:
+        return f"session log unreadable: {exc.strerror or exc}"
+    try:
+        line = _last_zstd_line(window)
+    except ImportError:  # zstandard is a declared dependency; a diagnosis if it is gone
+        return "session log unreadable: zstandard is not installed"
+    if line is None:
+        return "session log has no events"
+    return f"session {session_id} last event: {_bounded(line)[:SESSION_EVENT_LIMIT]}"
+
+
+def _capped(text, limit):
+    """`text` at most `limit` characters long, cut from the START with a marker.
+
+    The END is what a diagnosis needs - the newest log line is the one that names
+    the cause - so the oldest text is what goes. Nothing is cut when it fits, and a
+    limit of zero is an empty field rather than an exception.
+    """
+    if limit <= 0:
+        return ""
+    return text if len(text) <= limit else "… " + text[len(text) - limit + 2:]
+
+
+def exit_cause(runtime, row):
+    """What a serving driver left behind when it died, as the exit record keeps it.
+
+    Three facts and one bound. The last lines of the driver's own log, the last
+    event of its session log, and - when either is absent - the absence named.
+    The whole text is capped at EXIT_RECORD_LIMIT characters. The LOG gives way
+    first (it is the only part that is unbounded by construction) and it is cut
+    from the OLD end, because the newest line is the one that names the cause;
+    the labels and the session event are what a reader needs to interpret the rest.
+
+    Only called for an exit this supervisor watched, so it is not on a hot path;
+    each field is read once, from the files the driver itself left.
+    """
+    project = _bounded(str(row["project_id"]))
+    driver_id = _bounded(str(row["driver_id"]))
+    head = f"DSH host {project}: {driver_id} exit cause: "
+    room = EXIT_RECORD_LIMIT - len(head)
+    session = last_session_event(runtime, row)
+    # The readers open by the id the ROW holds, never by the bounded text that goes
+    # into the record: a name too long to print is still a name a file is found by.
+    log = runtime_log_tail(runtime, row["driver_id"])
+    body = f"runtime.log: {log}; {session}"
+    if len(body) > room:
+        keep = room - len(f"runtime.log: ; {session}")
+        body = (f"runtime.log: {_capped(log, keep)}; {session}" if keep > 4
+                else _capped(body, room))
+    return head + body
 
 
 def _bounded(error):
@@ -205,8 +408,8 @@ def _overwritten_by_runtime_exit(text):
     return str(text or "").startswith(RUNTIME_EXIT_NOTICE)
 
 
-def record_exit(row, watched, uptime, *, supervisor_stopped):
-    """The ONE line a driver's exit leaves in the unit journal, and nothing else.
+def record_exit(runtime, row, watched, uptime, *, supervisor_stopped):
+    """The record a driver's exit leaves in the unit journal, and the cause with it.
 
     A driver that had been SERVING used to leave no trace at all when it went:
     `DshDrivers._observe` writes `DSH exited with code N` into `last_error`, and
@@ -215,15 +418,25 @@ def record_exit(row, watched, uptime, *, supervisor_stopped):
     and the in-flight turn's children are the only evidence - gone with them.
 
     The journal is the sink that outlives the process (the unit's StandardOutput
-    is journald), and one bounded line is what an operator can afford per exit.
-    It carries the driver id, the pid, the STATUS as the code or - for a negative
-    returncode - the signal, the uptime, and whether this supervisor is why the
-    child is gone. It carries no log text, so it cannot echo a credential.
+    is journald), and it used to be given an exit code and an uptime: measured
+    2026-11-16/17, two runtimes died after 7.1 h and 7.8 h with code 1 and one
+    line each, and neither death was diagnosable afterwards. So the record now
+    carries the second half of the same fact - what the driver itself left behind:
+    the newest lines of its own `runtime.log` and the last event of its session log
+    (`exit_cause`), from the same files the startup reader already uses, redacted
+    and bounded the same way, and with an absent log NAMED rather than left blank.
+
+    Two physical lines: the status, then the cause. The status keeps its shape -
+    the driver id, the pid, the code or - for a negative returncode - the signal,
+    the uptime and whether this supervisor is why the child is gone - because that
+    is what a reader greps for, and the cause is what was missing.
 
     Only an exit this loop watched is recorded: a spawn that never reached a
     serving phase has its own line (the failed-start one, which is untouched by
     this) and a second line for one death would read as two events. Nothing is
     claimed that was not seen - no returncode, no line, and no signal invented.
+    A cause that cannot be read costs the record its detail, never its status line
+    or the loop: every reader here answers an absence instead of raising.
     """
     proc = watched["proc"]
     if not watched["served"] or proc.returncode is None:
@@ -234,6 +447,12 @@ def record_exit(row, watched, uptime, *, supervisor_stopped):
           f"{_bounded(str(row['driver_id']))} pid {proc.pid} exited with {status} "
           f"after {uptime:.1f}s uptime, supervisor_stopped="
           f"{'true' if supervisor_stopped else 'false'}", flush=True)
+    try:
+        cause = exit_cause(runtime, row)
+    except Exception as exc:  # a diagnosis must never be why the record is lost
+        cause = (f"DSH host {_bounded(str(row['project_id']))}: "
+                 f"{_bounded(str(row['driver_id']))} exit cause unavailable: {_bounded(str(exc))}")
+    print(cause, flush=True)
     return True
 
 
@@ -261,10 +480,12 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
 
     A SERVING driver's exit is a different event with its own record: one line in
     the journal (`record_exit`), written for the child this loop spawned, naming
-    the driver, the pid, the exit code or signal, the uptime and whether this
-    supervisor asked for the stop. It changes nothing about the failed-start
-    machinery above - a serving death still counts nothing, writes no record and
-    stamps no row text.
+    the driver, the pid, the exit code or signal, the uptime, whether this
+    supervisor asked for the stop - and, on the line under it, the cause the
+    driver itself left (`exit_cause`: the tail of its runtime.log and the last
+    event of its session log, redacted and bounded). It changes nothing about the
+    failed-start machinery above - a serving death still counts nothing, writes no
+    record and stamps no row text.
     """
     runtime.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (runtime.root / "host-supervisor.lock").open("a") as lock:
@@ -306,7 +527,8 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                             # exactly once: the entry goes with the record.
                             # Nothing below is changed by it.
                             children.pop(project, None)
-                            record_exit(row, watched, time.monotonic() - watched["started"],
+                            record_exit(runtime, row, watched,
+                                        time.monotonic() - watched["started"],
                                         supervisor_stopped=False)
                         if not row["enabled"]:
                             retry_at.pop(project, None)
@@ -321,7 +543,7 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 # stopped here is not a failed start either.
                                 child = children.pop(project, None)
                                 if child is not None:
-                                    record_exit(row, child,
+                                    record_exit(runtime, row, child,
                                                 time.monotonic() - child["started"],
                                                 supervisor_stopped=True)
                         else:
@@ -454,7 +676,7 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                 publish(runtime, row)
                 child = children.pop(row["project_id"], None)
                 if child is not None:
-                    record_exit(row, child, time.monotonic() - child["started"],
+                    record_exit(runtime, row, child, time.monotonic() - child["started"],
                                 supervisor_stopped=row["project_id"] in stopping)
 
 

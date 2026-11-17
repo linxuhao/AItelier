@@ -1582,3 +1582,73 @@ async def test_recorded_session_identity_is_driver_scoped_and_never_anonymous(ru
             assert alpha['session_id'] not in theirs.text
     finally:
         await runtime.close()
+
+
+async def test_a_recovery_start_cannot_re_enable_a_row_a_stop_disabled_since_the_snapshot(tmp_path):
+    """A supervisor snapshot read before a stop must not resurrect the driver.
+
+    Measured on the deployed host runtime (2026-11-17, image 635461ae20f2): a
+    driver was started, stopped a second later, and six seconds after that its
+    row read enabled=1 / phase=running with a live runtime process, on a project
+    that had also been closed. The mechanism is an ordering, not a lost write.
+    The supervisor takes its snapshot once at the top of a tick
+    (`rows = runtime.rows()` in core/dsh_host.py) and its recovery arm calls
+    `runtime.start(project, actor="dsh-host-recovery")` later in the same tick
+    body, so a stop that lands in between is committed to the database but absent
+    from the snapshot the arm acts on - and `start()` wrote enabled=1 over the
+    user's stop and spawned a process nobody asked for.
+
+    That interleaving is replayed here in its real shape against one shared
+    installation: a row snapshot read while enabled=1, the stop, then the
+    recovery start the tick would issue. The row must be left exactly as the stop
+    left it. The last arm is the contrast the fix must not lose: THE SAME
+    disabled row, started by an explicit user action, does enable and spawn.
+    """
+    db = StateDatabase(str(tmp_path / "race.sqlite"))
+    StateService(db, actor="fixture", project_read_trusted=True).store.create_project("alpha", "Alpha")
+    registry = DriverRegistry(db, "dsh-race-pepper-" * 3)
+    registry.seed("fixture-owner-token")
+    root = tmp_path / "drivers"
+    root.mkdir()
+    (root / "runtime.json").write_text('{"mode":"host"}')
+    # Two managers on ONE installation, as deployed: the backend (external host -
+    # it records desired state only) and the host supervisor (its own children).
+    backend = DshDrivers(db, registry, root)
+    host = DshDrivers(db, registry, root, host_controller=True,
+                      command=[sys.executable, "-c", "import time; time.sleep(90)"])
+    try:
+        row = await backend.start("alpha", actor="fixture")
+        assert row["enabled"] and row["phase"] == "starting"
+        marker = root / row["driver_id"] / "host-process.json"
+
+        # The tick's snapshot, taken while the user's start was still the truth.
+        snapshot = host.rows()
+        assert [r["project_id"] for r in snapshot] == ["alpha"] and snapshot[0]["enabled"]
+
+        # The user's stop lands after that read and before the recovery arm runs.
+        await backend.stop("alpha")
+        stopped = backend.get("alpha")
+        assert not stopped["enabled"] and stopped["phase"] == "stopped"
+        assert not marker.exists()
+
+        # The recovery arm of that same tick: start is asked for a row the
+        # snapshot called enabled. A recovery start is not a user action, so it
+        # may continue a driver but never re-enable one.
+        recovered = await host.start("alpha", actor="dsh-host-recovery")
+        assert not recovered["enabled"], "a recovery start re-enabled a row the user stopped"
+        assert recovered["phase"] == "stopped", "a recovery start rewrote the phase the stop wrote"
+        assert host.processes == {}, "a recovery start spawned a runtime nobody asked for"
+        current = backend.get("alpha")
+        assert not current["enabled"] and current["phase"] == "stopped"
+        assert current["updated_at"] == stopped["updated_at"], (
+            "the recovery start stamped a row it was not allowed to change")
+        assert not marker.exists(), "no host process marker may appear for a stopped driver"
+
+        # The same disabled row, started by an explicit user request, still
+        # starts: the guard is about WHO asks, never about what the row allows.
+        user = await host.start("alpha", actor="owner:someone@example.com")
+        assert user["enabled"] and user["phase"] == "starting"
+        assert host.processes["alpha"].returncode is None
+    finally:
+        await host.close()
+        await backend.close()

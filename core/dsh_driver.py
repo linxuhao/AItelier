@@ -133,6 +133,13 @@ MAX_ACTIVE_SUBAGENTS = 8
 # The provider the runtime registers for its completion bridge (model.mjs); native
 # subagents ask it for the worker route.
 SUBAGENT_PROVIDER = "aitelier"
+# The actors that start a driver on the RUNTIME's own initiative rather than on a
+# user's: boot recovery (`resume`) and the host supervisor's retry arm
+# (core/dsh_host.py). Both act on a row they read earlier, so neither may turn a
+# row the owner disabled in the meantime back on - see `DshDrivers.start`. A
+# request actor is derived from an identity (`owner:...`, `driver:...`), so no
+# user request can name one of these.
+RECOVERY_ACTORS = frozenset({"dsh-host-recovery", "dsh-runtime-recovery"})
 
 DSH_EXTRA_MCP_DEFAULTS = {
     "devmcp": "http://127.0.0.1:7676/mcp",
@@ -603,6 +610,20 @@ class DshDrivers:
         async with self.lock:
             if self.closing:
                 raise ValueError("driver manager is shutting down")
+            # Only an explicit user action may ENABLE a driver. A recovery start
+            # continues a row its owner left enabled; it is not consent to enable
+            # one. The host supervisor reads every row once per tick and calls
+            # back here from that snapshot (core/dsh_host.py), so a stop that lands
+            # in between arrives as an enabled=0 row - and writing enabled=1 over
+            # it would silently undo the user's stop and spawn a process nobody
+            # asked for (measured 2026-11-17 on the deployed host runtime). The row
+            # is therefore re-read here, under the same lock `stop` writes under,
+            # and a disabled row is handed back exactly as it stands: no
+            # enabled=1, no phase rewrite, no spawn.
+            if actor in RECOVERY_ACTORS:
+                current = self.get(project_id)
+                if current is not None and not current["enabled"]:
+                    return self.public(current)
             if self.external_host:
                 row = self._provision(project_id, provider, model, actor)
                 if not row["enabled"]:

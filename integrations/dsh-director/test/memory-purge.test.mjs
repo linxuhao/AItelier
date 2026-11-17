@@ -345,6 +345,7 @@ test('f7: an interrupted purge\'s notice survives restarts and rides in the snap
   store = await open(root); // a second boot: nothing left to recover, the notice is still there
   assert.match(store.statusLine().notices?.[0] ?? '', /已回退/);
   assert.match(await profileSection({ store }), /Memory notices - tell your owner:\n- 上次彻底删除/);
+  assert.equal(store.statusLine().notices.length, 1, 'the notice is kept once, not once per boot');
   store.acknowledgeNotices();
   assert.equal(store.statusLine().notices, undefined);
   await store.close();

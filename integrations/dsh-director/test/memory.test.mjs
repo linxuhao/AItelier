@@ -302,6 +302,23 @@ test('f6: a live takeover between our judgement and our rename is put back, and 
   } finally { sleeper.kill(); }
 });
 
+test('f6: the put-back never replaces a lock a third process made meanwhile', async () => {
+  const root = newRoot();
+  const second = spawn('sleep', ['30']), third = spawn('sleep', ['30']);
+  try {
+    const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim();
+    mkdirSync(root, { recursive: true });
+    const lock = join(root, USER + '.lock');
+    writeFileSync(lock, dead);
+    // A second process takes the stale lock over; after we moved it aside, a third makes its own.
+    const faults = { beforeLockTakeover: () => { unlinkSync(lock); writeFileSync(lock, String(second.pid)); },
+      afterLockAside: () => writeFileSync(lock, String(third.pid)) };
+    await assert.rejects(open(root, { faults }), new RegExp(`locked by process ${second.pid}`));
+    assert.equal(readFileSync(lock, 'utf8'), String(third.pid), 'the third process\'s lock was not replaced');
+    assert.deepEqual(readdirSync(root).filter(n => n.includes('.stale-')), []);
+  } finally { second.kill(); third.kill(); }
+});
+
 test('f6: close() leaves alone a lock that no longer names this process', async () => {
   const root = newRoot(); const store = await open(root);
   const sleeper = spawn('sleep', ['30']);
@@ -337,13 +354,13 @@ test('iss-a81f: a crossed budget line is logged once and stays on status.over_bu
   const root = newRoot();
   const lines = [];
   let store = await open(root, { budget: { writeP95Ms: -1 }, logger: (event, fields) => lines.push([event, fields]) });
-  for (let i = 0; i < 20; i++) await store.recordTurn('t' + i, [{ role: 'owner', text: 'entry ' + i }]);
-  await store.flush();
+  // 40 writes: the p95 is evaluated from the 20th on, so 21 evaluations - "once" means once.
+  for (let i = 0; i < 40; i++) { await store.recordTurn('t' + i, [{ role: 'owner', text: 'entry ' + i }]); await store.flush(); }
   assert.ok(store.statusLine().over_budget?.some(l => /^write p95 \d+ ms > -1 ms/.test(l)), JSON.stringify(store.statusLine()));
   assert.equal(lines.filter(([e, f]) => e === 'memory/over-budget' && f.kind === 'write_p95').length, 1, 'logged once, not per write');
   await store.close();
   store = await open(root, { budget: { entries: 5 }, logger: (event, fields) => lines.push([event, fields]) });
-  assert.ok((await store.search('entry')).status.over_budget?.some(l => /^20 entries > 5/.test(l)));
+  assert.ok((await store.search('entry')).status.over_budget?.some(l => /^40 entries > 5/.test(l)));
   await store.close();
   store = await open(root);
   assert.equal(store.statusLine().over_budget, undefined, 'within the real budget nothing is reported');

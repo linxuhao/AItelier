@@ -20,7 +20,7 @@
  *  name entry ids and lengths, never memory text. */
 import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync,
-  rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync } from 'node:fs';
+  rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Bm25Index, bm25Ranked } from './bm25.mjs';
 import { git, gitOk } from './git.mjs';
@@ -88,17 +88,14 @@ function occurrences(text, needle) {
   return n;
 }
 
-/** Occurrences of `needle` inside lines that are a JSON row (optionally after a diff
- *  marker) naming one of `ids`. */
-function occurrencesInLinesOf(text, needle, ids) {
-  let n = 0;
-  for (const line of text.split('\n')) {
-    if (!line.includes(needle)) continue;
+/** `text` without the lines that are a JSON row (optionally after a diff marker) naming
+ *  one of `ids`. */
+function withoutLinesNaming(text, ids) {
+  return text.split('\n').filter(line => {
     const i = line.indexOf('{');
-    if (i < 0) continue;
-    try { if (ids.has(JSON.parse(line.slice(i)).id)) n += occurrences(line, needle); } catch {}
-  }
-  return n;
+    if (i < 0 || ![...ids].some(id => line.includes(id))) return true;
+    try { return !ids.has(JSON.parse(line.slice(i)).id); } catch { return true; }
+  }).join('\n');
 }
 
 function pidAlive(pid) {
@@ -167,7 +164,9 @@ export class MemoryStore {
     const notice = await this.#recoverPurge();
     // f7: the notice outlives this process: it is kept beside the repository until the
     // owner acknowledges it, shown on status and in every snapshot meanwhile.
-    if (notice) appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
+    // A boot that recovers the same purge again (a crash loop) adds no second copy.
+    if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
+      appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
     this.notices = parseLines(this.noticesFile).map(n => n.text);
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
@@ -203,10 +202,13 @@ export class MemoryStore {
       const aside = `${this.lockFile}.stale-${process.pid}-${attempt}`;
       try { renameSync(this.lockFile, aside); }
       catch (error) { if (error.code === 'ENOENT') continue; throw error; } // another process took it first
+      this.faults?.afterLockAside?.();
       const moved = readHolder(aside);
       if (moved !== holder) {
-        // Not the stale lock we judged: a live takeover happened in between. Put it back.
-        try { renameSync(aside, this.lockFile); } catch {}
+        // Not the stale lock we judged: a live takeover happened in between. Put it back -
+        // with link, which fails rather than replace a lock a third process made meanwhile.
+        try { linkSync(aside, this.lockFile); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+        unlinkSync(aside);
         throw new MemoryUnavailable(`memory: locked by process ${moved}`);
       }
       unlinkSync(aside);
@@ -875,18 +877,20 @@ export class MemoryStore {
     // iss-e4eb: the id check alone is blind to a text that lost its id. So the text itself is
     // counted too: outside lines naming a purged id, the new repository may hold it only as
     // often as the old one did (the same words said in another entry, the profile, an id).
-    const oldLogp = (await git(oldDir, ['log', '-p', '--all', '--format='])).stdout.toString('utf8');
-    const oldAll = (await git(oldDir, ['cat-file', '--batch-all-objects', '--batch'])).stdout.toString('utf8');
-    const newLogp = logp.stdout.toString('utf8'), newAll = all.stdout.toString('utf8');
+    // Each side is split once: the lines still naming a purged id are the id check's
+    // business (they carry no text, or the id check already failed) and are set aside.
+    const outside = text => withoutLinesNaming(text, ids);
+    const sides = [
+      ['git log -p --all', outside((await git(oldDir, ['log', '-p', '--all', '--format='])).stdout.toString('utf8')), outside(logp.stdout.toString('utf8'))],
+      ['cat-file --batch-all-objects', outside((await git(oldDir, ['cat-file', '--batch-all-objects', '--batch'])).stdout.toString('utf8')), outside(all.stdout.toString('utf8'))],
+    ];
     for (const id of ids) {
       const e = await this.#fromHistory(id, undefined, oldDir);
       if (!e) continue; // never committed: nothing of it can be in history
       const forms = [...new Set([e.text, JSON.stringify(e.text).slice(1, -1)])];
-      for (const [name, before, after] of [['git log -p --all', oldLogp, newLogp], ['cat-file --batch-all-objects', oldAll, newAll]]) {
-        const allowed = forms.reduce((n, f) => n + occurrences(before, f) - occurrencesInLinesOf(before, f, ids), 0);
-        // A line still naming the id is the id check's business (it carries no text, or the
-        // id check already failed); only text that escaped its id counts here.
-        const found = forms.reduce((n, f) => n + occurrences(after, f) - occurrencesInLinesOf(after, f, ids), 0);
+      for (const [name, before, after] of sides) {
+        const allowed = forms.reduce((n, f) => n + occurrences(before, f), 0);
+        const found = forms.reduce((n, f) => n + occurrences(after, f), 0);
         if (found > allowed) failures.push(`${name} still holds the text of ${id} (${found} times, ${allowed} outside purged lines)`);
       }
     }

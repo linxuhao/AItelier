@@ -1,34 +1,49 @@
 /** The built-in ranked index (plugin step 11, design 3.5): BM25 over the local memory log.
  *
- * Tokens: runs of Latin letters/digits are words, lower-cased; a run of CJK characters
- * gives its adjacent pairs (bigrams), and every CJK character also gives a unigram token,
- * which only a single-character query uses. Punctuation is dropped. k1 = 1.2, b = 0.75;
- * equal scores order newest first. The inverted index lives in memory. */
+ * Tokens: a run of letters/digits is cut at the script boundary first, so a Latin word glued
+ * to Chinese stays one word (`用memory系统` gives `memory`); a non-CJK segment is a word,
+ * lower-cased; a CJK segment gives its adjacent pairs (bigrams), and every CJK character also
+ * gives a unigram token, which only a single-character query uses. Punctuation is dropped.
+ * k1 = 1.2, b = 0.75; equal scores order newest first. The inverted index lives in memory. */
 
-const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+|[\p{L}\p{N}]+/gu;
+// `\p{L}` contains Han, so a run may mix scripts: the two capture groups below cut it into
+// maximal CJK and maximal non-CJK segments, and the group that matched says which it is.
+// Classifying a whole run by "contains any CJK" would swallow a glued Latin word.
+const WORD = /[\p{L}\p{N}]+/gu;
+const SEGMENT = /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+)|([^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+)/gu;
 const UNI = '\u0001'; // marks a CJK unigram token, so it never equals a word
+
+/** One letter/digit run as [segment, isCjk] pairs: maximal CJK and maximal non-CJK pieces. */
+function segments(run) {
+  const parts = [];
+  for (const m of run.matchAll(SEGMENT)) parts.push(m[1] !== undefined ? [m[1], true] : [m[2], false]);
+  return parts;
+}
 
 /** Tokens of a document: words, CJK bigrams and CJK unigrams. */
 export function documentTokens(text) {
   const out = [];
-  for (const run of String(text).toLowerCase().match(RUN) ?? []) {
-    if (!CJK.test(run)) { out.push(run); continue; }
-    const chars = [...run];
-    for (const ch of chars) out.push(UNI + ch);
-    for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+  for (const run of String(text).toLowerCase().match(WORD) ?? []) {
+    for (const [segment, cjk] of segments(run)) {
+      if (!cjk) { out.push(segment); continue; }
+      const chars = [...segment];
+      for (const ch of chars) out.push(UNI + ch);
+      for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+    }
   }
   return out;
 }
 
-/** Tokens of a query: words, CJK bigrams; a CJK run of one character asks for its unigram. */
+/** Tokens of a query: words, CJK bigrams; a CJK segment of one character asks for its unigram. */
 export function queryTokens(text) {
   const out = [];
-  for (const run of String(text).toLowerCase().match(RUN) ?? []) {
-    if (!CJK.test(run)) { out.push(run); continue; }
-    const chars = [...run];
-    if (chars.length === 1) { out.push(UNI + chars[0]); continue; }
-    for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+  for (const run of String(text).toLowerCase().match(WORD) ?? []) {
+    for (const [segment, cjk] of segments(run)) {
+      if (!cjk) { out.push(segment); continue; }
+      const chars = [...segment];
+      if (chars.length === 1) { out.push(UNI + chars[0]); continue; }
+      for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1]);
+    }
   }
   return [...new Set(out)];
 }

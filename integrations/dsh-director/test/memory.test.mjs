@@ -29,6 +29,25 @@ test('BM25 tokens: words lower-cased, CJK bigrams plus unigrams; a one-character
   assert.deepEqual(queryTokens('记账本'), ['记账', '账本']);
 });
 
+test('BM25 cuts a run at the script boundary: a Latin word glued to Chinese is one word, as when spaced off', () => {
+  const glued = '用memory系统记住这条规则';
+  const spaced = '用 memory 系统记住这条规则';
+  const gluedTokens = documentTokens(glued);
+  const spacedTokens = documentTokens(spaced);
+  console.log('documentTokens(' + JSON.stringify(glued) + ') =', JSON.stringify(gluedTokens));
+  console.log('documentTokens(' + JSON.stringify(spaced) + ') =', JSON.stringify(spacedTokens));
+  const index = new Bm25Index();
+  index.add('glued', glued, '2026-11-01');
+  index.add('spaced', spaced, '2026-11-02');
+  const ids = q => index.search(q, 10).map(h => h.id).sort();
+  const hits = ids('memory');
+  console.log('search("memory") =', JSON.stringify(hits));
+  // The two spellings of one sentence are one token list, so the same query reaches both.
+  assert.deepEqual(gluedTokens, spacedTokens);
+  assert.ok(gluedTokens.includes('memory'), 'the glued Latin word is still a word');
+  assert.deepEqual(hits, ['glued', 'spaced']);
+});
+
 test('BM25 ranks mixed and pure-Chinese queries, newest first on a tie', () => {
   const index = new Bm25Index();
   index.add('a', '我想做个记账小工具', '2026-11-01');

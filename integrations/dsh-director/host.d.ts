@@ -43,6 +43,14 @@ export interface HostConfig {
   dormantMinuteMs?: number | string;
   watchIntervalMs?: number | string;
   dormantCompactMinTokens?: number | string;
+  /** v1.2, plugin step 11: the owner's memory (design-steward 3). Absent: no memory and no
+   *  memory tools. The repository lives at `<root>/<userId>/` (root default
+   *  ~/.local/share/dsh-director/memory; keep it outside anything mounted into containers).
+   *  `remote` (off by default) is an Agent Memory Leaderboard endpoint used as the ranked
+   *  index instead of the built-in BM25; `amiIds` lets it trace ActiveMemoryIndex hits back to
+   *  turns. Every remote call may cost money. */
+  memory?: { userId: string; root?: string; grepTimeoutMs?: number; backupRemote?: string;
+    remote?: { url: string; name: string; tokenFile?: string; userId?: string; sessionId?: string; amiIds?: boolean } };
 }
 
 /** What the director hands the host (host-scoped and director-scoped hooks, events). */
@@ -69,6 +77,11 @@ export interface DirectorApi {
   setHostError(message: string): Promise<void>;
   clearHostError(): Promise<void>;
   isDisposed(): boolean;
+  /** v1.2: the owner's memory store when config.memory is set (lib/memory/store.mjs), else
+   *  undefined. A host records each owner/steward turn with memory.recordTurn(turnId,
+   *  [{role: 'owner'|'steward', text}]) and runs the owner's own operations (forget,
+   *  restore, purge, profile edits) through it - purge exists only here, never as a tool. */
+  readonly memory?: unknown;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -77,7 +90,7 @@ export interface DirectorHost {
   /** semver; the director accepts ^1. */
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
-  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention'>;
+  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'>;
   config: HostConfig;
 
   // ---- required ----
@@ -119,6 +132,9 @@ export interface DirectorHost {
     close(close: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
     list(signal?: AbortSignal): Promise<Array<{ id: string; text: string }>>;
   };
+  /** v1.2, plugin step 11: whether `id` names a message the owner wrote; memory_forget
+   *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses]. */
+  memory?: { ownerMessage(id: string, signal?: AbortSignal): Promise<boolean> };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */

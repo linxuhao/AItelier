@@ -27,6 +27,7 @@ import { Outbox } from './lib/outbox.mjs';
 import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from './lib/capacity.mjs';
 import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
+import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -123,6 +124,10 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     void refusals.add(describeDispatch(exec.arguments), 'dsh').catch(warn);
   });
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
+  // Plugin step 11: the owner's memory, only when the host config asks for it. A memory
+  // that cannot start is {error}: its tools answer that, everything else runs.
+  const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId,
+    logger: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) }) : undefined;
   // The plans, and what the host says about the work item each one is named after.
   // The two are read together because every view of "unfinished work" needs both: a
   // plan whose work has settled is not work, and one whose work the host could not
@@ -270,6 +275,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // member exists; `agent` reads undefined and notify refuses until the session exists.
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
     liveSessions, planWork, todoPlans, batchRedispatch, notify: notifyEvent, eventMessage, report, currentPhase,
+    memory: memory?.store,
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
     isDisposed: () => disposed };
@@ -320,7 +326,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   }));
   // The host's context source, read for every startup / post-compaction snapshot.
   let contextText = '';
-  const contextSource = { refresh: async () => { contextText = await host.context('director'); }, render: () => contextText };
+  const contextSource = { refresh: async () => {
+    contextText = await host.context('director') + (memory ? await profileSection(memory) : ''); }, render: () => contextText };
   const setup = async (scope, subject) => {
     agentCtx = scope;
     // The host's director-scope pieces come first: its sections, model selection,
@@ -542,6 +549,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
         finally { observation[Symbol.dispose](); }
       },
     }));
+    if (memory) registerMemoryTools(scope, { defineTool, jsonOutput, memory,
+      ownerMessage: host.memory ? (id, signal) => host.memory.ownerMessage(id, signal) : undefined });
   };
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;
@@ -699,6 +708,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     await handle.dispose();
     await ctx.sessionPersistence.flush();
     await activity.catch(() => {});
+    await memory?.store?.close().catch(() => {});
   };
   ctx.on('dispose', close);
   await report('running');

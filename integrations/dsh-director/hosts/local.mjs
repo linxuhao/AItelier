@@ -77,6 +77,8 @@ export function localHost(options = {}) {
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
       dormantCompactMinTokens: options.dormantCompactMinTokens,
       maxActiveSubagents: options.maxActiveSubagents, reservedSlots: options.reservedSlots,
+      // Plugin step 11: the owner's memory, passed through as given (absent: none).
+      ...(options.memory ? { memory: options.memory } : {}),
     },
     /** The startup / post-compaction snapshot: the work items and the notes. */
     async context() {

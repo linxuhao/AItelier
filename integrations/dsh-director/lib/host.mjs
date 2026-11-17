@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
-export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention'];
+export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory'];
 /** The states a work item can be in (aligned with MCP Tasks / A2A task states). */
 export const WORK_STATES = ['working', 'input_required', 'completed', 'failed', 'cancelled', 'unknown'];
 /** States after which nothing of the work item may run again. */
@@ -73,6 +73,18 @@ export function validateHost(host) {
       problems.push('config: reservedSlots must be an integer from 1 to maxActiveSubagents - 1 when given (one slot stays reserved for resuming a worker)');
     for (const key of ['sessionEnv', 'projectId', 'permissionPreset'])
       if (config[key] !== undefined && !isText(config[key])) problems.push(`config: ${key} must be a non-empty string when given`);
+    // v1.2 (plugin step 11): the owner's memory; absent, no memory and no memory tools.
+    const memory = config.memory;
+    if (memory !== undefined) {
+      if (!memory || typeof memory !== 'object' || Array.isArray(memory)) problems.push('config: memory must be an object when given');
+      else {
+        if (!isText(memory.userId)) problems.push('config: memory.userId must be a non-empty string');
+        for (const key of ['root', 'backupRemote']) if (memory[key] !== undefined && !isText(memory[key])) problems.push(`config: memory.${key} must be a non-empty string when given`);
+        const remote = memory.remote;
+        if (remote !== undefined && (!remote || typeof remote !== 'object' || !isText(remote.url) || !isText(remote.name)))
+          problems.push('config: memory.remote must be an object with url and name when given');
+      }
+    }
   } else if (config !== undefined && config !== null && typeof config !== 'function') {
     problems.push('config: must be an object');
   }
@@ -90,6 +102,7 @@ export function validateHost(host) {
   for (const op of declared) {
     if (!OPTIONAL_OPS.includes(op)) problems.push(`unknown capability: ${op}`);
     else if (op === 'attention' ? !['ask', 'close', 'list'].every(name => typeof host.attention?.[name] === 'function')
+      : op === 'memory' ? typeof host.memory?.ownerMessage !== 'function'
       : op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
       problems.push(`capability declared but not implemented: ${op}${op === 'attention' ? ' (ask, close and list must all be functions)' : ''}`);
   }
@@ -108,6 +121,7 @@ export const optionalDefaults = Object.freeze({
   install: async () => {},             // no host-scoped tools or sections of its own
   setup: async () => {},               // no director-scope tools, sections or hooks of its own
   attention: undefined,                // no question channel: ask_owner / close_question refuse
+  memory: undefined,                   // no owner-message check: memory_forget refuses (the owner can still forget)
 });
 
 /** Whether a work state means nothing of that work may run again. */

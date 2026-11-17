@@ -87,14 +87,14 @@ describe('the project button carries its own driver facts', () => {
     expect(fact(view.container, 'hot', 'drivers')).toBe('2/3');
     expect(fact(view.container, 'hot', 'subagents')).toBe('4');
     expect(fact(view.container, 'hot', 'pipelines')).toBe('2');
-    expect(card(view.container, 'hot').querySelector('.driver-state')?.textContent).toBe('Running');
+    expect(card(view.container, 'hot').querySelector('.driver-state')?.textContent).toBe('Busy');
 
     // Idle project: one known driver, nothing running. The numbers follow the
     // project, so they are not the global 9/5 in the same payload.
     expect(fact(view.container, 'cold', 'drivers')).toBe('0/1');
     expect(fact(view.container, 'cold', 'subagents')).toBe('0');
     expect(fact(view.container, 'cold', 'pipelines')).toBe('0');
-    expect(card(view.container, 'cold').querySelector('.driver-state')?.textContent).toBe('Idle');
+    expect(card(view.container, 'cold').querySelector('.driver-state')?.textContent).toBe('Ready');
     expect(view.container.textContent).not.toContain('9/5');
 
     // The labels name the numbers instead of leaving four bare digits.

@@ -96,17 +96,17 @@ describe('driver state on the State DAG list', () => {
     await waitFor(() => expect(view.container.querySelector('.unread')).toBeTruthy());
     const card = (id: string) => [...view.container.querySelectorAll('.project-card')]
       .find(c => c.querySelector('h2')?.textContent === id)!;
-    expect(card('running-old').querySelector('.driver-state')?.textContent).toBe('Running');
-    expect(card('idle-recent').querySelector('.driver-state')?.textContent).toBe('Idle');
+    expect(card('running-old').querySelector('.driver-state')?.textContent).toBe('Busy');
+    expect(card('idle-recent').querySelector('.driver-state')?.textContent).toBe('Ready');
     expect(card('stopped-new').querySelector('.driver-state')?.textContent).toBe('Stopped');
-    // Each state carries its icon beside the label (the label text itself is unchanged).
-    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u25B6\uFE0E');
-    expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-icon')).toBe('\u23F8\uFE0E');
+    // Each state carries its animated mark beside the label (hidden from screen readers).
+    expect(card('running-old').querySelector('.driver-state .driver-state-mark')?.getAttribute('aria-hidden')).toBe('true');
+    expect(card('idle-recent').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('ready');
     // The badge is read from the unread endpoint, not counted in the browser.
     expect(card('running-old').querySelector('.unread')?.textContent).toBe('2 unread');
     expect(card('idle-recent').querySelector('.unread')).toBeNull();
     // A DAG with no driver row at all still reads as stopped rather than blank.
-    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('running');
+    expect(card('running-old').querySelector('.driver-state')?.getAttribute('data-phase')).toBe('busy');
   });
 });
 

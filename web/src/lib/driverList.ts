@@ -5,8 +5,8 @@
  *  Tie-break: the most recently updated driver row (State's own `updated_at`),
  *  then the project's catalog `created_at`, then the project id.
  *
- *  The phase labels are the user's states (running/idle/dormant/stopped) plus the
- *  transitional ones the runtime really reports. `dormant` is an idle driver that
+ *  The phase labels are the user's states (busy/ready/dormant/stopped) plus the
+ *  transitional ones the runtime really reports. `dormant` is a ready driver that
  *  called idle_dormant: alive, but asleep until input or its chosen wake time. A project with no driver row
  *  at all ranks below `stopped`: it was never started, so it is the least
  *  active thing in the list.
@@ -20,13 +20,14 @@ export function driverPhaseRank(phase: string | null | undefined): number {
   return (phase && DRIVER_PHASE_RANK[phase]) ?? NO_DRIVER_RANK;
 }
 
-export type DriverState = 'running' | 'idle' | 'dormant' | 'starting' | 'stopping' | 'failed' | 'stopped';
+export type DriverState = 'busy' | 'ready' | 'dormant' | 'starting' | 'stopping' | 'failed' | 'stopped';
 
-/** `waiting` is a live driver with nothing to do: the user's "idle". */
+/** The runtime's `running` is the user's "busy" (working a turn); `waiting` is a live
+ *  driver with nothing to do, ready for input: the user's "ready". */
 export function driverState(phase: string | null | undefined): DriverState {
   switch (phase) {
-    case 'running': return 'running';
-    case 'waiting': return 'idle';
+    case 'running': return 'busy';
+    case 'waiting': return 'ready';
     case 'dormant': return 'dormant';
     case 'starting': return 'starting';
     case 'stopping': return 'stopping';
@@ -36,23 +37,12 @@ export function driverState(phase: string | null | undefined): DriverState {
 }
 
 const LABEL_KEYS: Record<DriverState, string> = {
-  running: 'driverStateRunning', idle: 'driverStateIdle', dormant: 'driverStateDormant', starting: 'driverStateStarting',
+  busy: 'driverStateBusy', ready: 'driverStateReady', dormant: 'driverStateDormant', starting: 'driverStateStarting',
   stopping: 'driverStateStopping', failed: 'driverStateFailed', stopped: 'driverStateStopped',
 };
 
 export function driverStateLabelKey(phase: string | null | undefined): string {
   return LABEL_KEYS[driverState(phase)];
-}
-
-/** One distinct glyph per state, shown before the label (text presentation, so it
- *  takes the state's colour instead of rendering as an emoji). */
-export const DRIVER_STATE_ICONS: Record<DriverState, string> = {
-  running: '\u25B6\uFE0E', idle: '\u23F8\uFE0E', dormant: '\u263E', starting: '\u21BB',
-  stopping: '\u23F9\uFE0E', failed: '\u26A0\uFE0E', stopped: '\u25A0',
-};
-
-export function driverStateIcon(phase: string | null | undefined): string {
-  return DRIVER_STATE_ICONS[driverState(phase)];
 }
 
 export interface DriverTableRow {

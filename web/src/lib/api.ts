@@ -825,6 +825,13 @@ export function sendDriverConversationMessage(projectId: string, body: string,
 export function markDriverConversationRead(projectId: string, messageId: string): Promise<unknown> {
   return _post('/api/state/commands/mark_user_conversation_read', {project_id: projectId, message_id: messageId});
 }
+/** Create a State project with the signed-in owner's session (plugin step 10).
+ *  It is NOT published: opening it stays the separate open_project decision. */
+export function createStateProject(projectId: string, title: string, sourceProjectId?: string): Promise<unknown> {
+  const args: Record<string, unknown> = {project_id: projectId, title};
+  if (sourceProjectId) args.source_project_id = sourceProjectId;
+  return _post('/api/state/commands/create_project', args);
+}
 export function startDshDriver(projectId: string): Promise<unknown> {
   return _post('/api/dsh-drivers/' + encodeURIComponent(projectId) + '/start', {});
 }

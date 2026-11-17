@@ -7,6 +7,7 @@
   import { driverState, driverStateIcon, driverStateLabelKey, sortDagRows } from '../lib/driverList';
   import { st } from '../lib/stateI18n.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
+  import NewStateProject from './NewStateProject.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
@@ -77,6 +78,7 @@
     <a class="repository-link" href="#/repos">{st('dashboard')} ↗</a></header>
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
+    {#if $authStore.canWrite}<NewStateProject oncreated={(id) => { paneSelection = id; rememberProject(id); retry++; void loadDriverState(); }} />{/if}
     <div class="project-filters">{@render projectFilters()}</div>
     <div class="mobile-project-controls">
       <label>{st('currentProject')}<select value={paneSelection} onchange={(event) => {paneSelection = event.currentTarget.value; rememberProject(paneSelection);}}>

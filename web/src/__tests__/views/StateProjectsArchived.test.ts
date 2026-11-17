@@ -61,3 +61,21 @@ describe('archived state projects',()=>{
     expect(api.stateOverview).not.toHaveBeenCalledWith('old-canary');
   });
 });
+
+describe('new project entry (plugin step 10)',()=>{
+  it('offers "New project" to a writer on the home dashboard and the project list',async()=>{
+    let view=render(ProjectDashboard);await view.findByRole('heading',{name:'live'});
+    expect(view.getByRole('button',{name:'New project'})).toBeTruthy();
+    cleanup();
+    view=render(StateProjects);await view.findByRole('heading',{name:'live'});
+    expect(view.getByRole('button',{name:'New project'})).toBeTruthy();
+  });
+  it('does not offer it to a reader who cannot write',async()=>{
+    authStore.set({canWrite:false,permissionResolved:true,email:null});
+    let view=render(ProjectDashboard);await view.findByRole('heading',{name:'live'});
+    expect(view.queryByRole('button',{name:'New project'})).toBeNull();
+    cleanup();
+    view=render(StateProjects);await view.findByRole('heading',{name:'live'});
+    expect(view.queryByRole('button',{name:'New project'})).toBeNull();
+  });
+});

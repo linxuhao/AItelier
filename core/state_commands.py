@@ -1746,7 +1746,10 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
     "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
-    "acknowledge_director_message"})
+    "acknowledge_director_message",
+    # Owner 2026-11-17 ("state dag的inbox和导演的私人inbox都要能回复"): the steward may answer a
+    # letter in its private inbox - only as a reply, to that letter's sender (below).
+    "send_driver_message"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery is the steward's only inbox write. A delivery's target is
@@ -1814,6 +1817,23 @@ def _refuse_steward_write(service, action, arguments) -> None:
             raise StateGraphError(
                 f"steward_read_only: {action} may only settle a delivery addressed to "
                 "this steward's own project")
+    if allowed and action == "send_driver_message":
+        # Only an answer to a delivery addressed to the steward, to one driver: never a
+        # message of its own, never to a whole project's members.
+        # The reply goes back to whoever sent the cited delivery to the steward.
+        target = arguments if isinstance(arguments, dict) else {}
+        cited = target.get("reply_to_delivery_id")
+        sender = None
+        if isinstance(cited, str) and cited and not target.get("project_members"):
+            try:
+                with service.db.get_connection() as conn:
+                    hit = conn.execute(
+                        "SELECT m.sender_driver_id FROM driver_inbox_deliveries d JOIN driver_inbox_messages m "
+                        "USING(message_id) WHERE d.delivery_id=? AND d.target_driver_id=?", (cited, driver_id)).fetchone()
+            except sqlite3.Error:
+                hit = None
+            sender = hit[0] if hit is not None else None
+        allowed = sender is not None and target.get("target_driver_id") == sender
     if not allowed:
         raise StateGraphError(f"steward_read_only: {action} is not available to the steward role")
 

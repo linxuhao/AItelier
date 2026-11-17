@@ -13,7 +13,8 @@ import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
-import { conversationTurns, stewardOps, syncConversation } from './steward-host.mjs';
+import { conversationTurns, stewardOps, syncConversation, replyToLetter, unansweredOwnerMessages,
+  turnWatcher, forwardFinalText, stewardTexts } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -47,7 +48,9 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
 
 test('presented_only: the steward has exactly its presented tools; everything else is refused, however it is called', () => {
   const steward = aitelierRoles(table).steward;
-  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message'], 'the adapter adds only the owner message');
+  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director'],
+    'the adapter adds only the owner message and the letter reply');
+  assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
   // The inbox reader is the steward's own and nobody else's.
   assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
   assert.equal(refusal(steward, exec('portfolio_inbox')), undefined);
@@ -392,4 +395,109 @@ test('inbox acknowledgement: the registered tool writes ONE acknowledge for the 
   const readOnly = collectPortfolio({ portfolio: { projects: async () => ({}), project: async () => ({}),
     conversation: async () => ({}) } });
   assert.equal(readOnly.has('portfolio_inbox_acknowledge'), false);
+});
+
+/** A fake State holding one letter in each inbox and recording every write. */
+function letters() {
+  const writes = [];
+  const request = async (path, body) => {
+    if (path.endsWith('/list_director_messages')) return { result: { items: [{ message: { message_id: 'm1', subject: 'Steward boot',
+      sender_project_id: 'aitelier' }, delivery: { delivery_id: 'd-proj', version: 2, status: 'unread', delivery_seq: 1 } }], has_more: false } };
+    if (path.endsWith('/list_driver_messages')) return { driver_id: 'drv-home', truncated: false, next_after: 1,
+      messages: [{ delivery_id: 'd-priv', version: 1, status: 'unread', subject: 'ping', sender_driver_id: 'drv-plat' }] };
+    writes.push([path.split('/').at(-1), body]);
+    return { result: { ok: true } };
+  };
+  return { request, writes, base: { request, project: 'aitelier-home', me: 'drv-home' } };
+}
+
+test('letters (owner 2026-11-17): a reply goes back to the sender in either inbox, threaded on the cited delivery', async () => {
+  const { writes, base } = letters();
+  assert.deepEqual(await replyToLetter({ ...base, inbox: 'project', deliveryId: 'd-proj', text: '收到，已读完整封信' }),
+    { replied: true, inbox: 'project', to: 'aitelier', ok: true });
+  assert.deepEqual(writes[0][0], 'send_director_message');
+  assert.deepEqual({ ...writes[0][1], request_key: undefined }, { protocol_version: 'v3', sender_project_id: 'aitelier-home',
+    director_identity: 'drv-home', request_key: undefined, subject: 'Re: Steward boot', body: '收到，已读完整封信',
+    target_project_id: 'aitelier', reply_to_delivery_id: 'd-proj' });
+  await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted' });
+  assert.deepEqual(writes[1], ['send_driver_message', { request_key: writes[1][1].request_key, subject: 'Re: ping', body: 'noted',
+    target_driver_id: 'drv-plat', reply_to_delivery_id: 'd-priv' }]);
+  assert.match(writes[1][1].request_key, /^reply:d-priv:[0-9a-f]{16}$/);
+  // Refused before anything is written: an unknown letter, another inbox name, no text.
+  assert.equal((await replyToLetter({ ...base, inbox: 'private', deliveryId: 'nope', text: 'x' })).refused, 'unknown_delivery');
+  assert.equal((await replyToLetter({ ...base, inbox: 'email', deliveryId: 'd-proj', text: 'x' })).refused, 'unknown_inbox');
+  assert.equal((await replyToLetter({ ...base, inbox: 'project', deliveryId: 'd-proj', text: ' ' })).refused, 'empty_text');
+  assert.equal(writes.length, 2);
+});
+
+test('every owner message gets an answer: the unanswered ones; the last words of a finished turn go to the owner; dormancy is held', async () => {
+  const conversation = [owner('o1', '2026-11-17T10:00:00Z', 'first'), mine('s1', '2026-11-17T10:01:00Z', 'answer'),
+    owner('o2', '2026-11-17T10:02:00Z', 'second'), owner('o3', '2026-11-17T10:03:00Z', 'third')];
+  const sent = [];
+  let conflict = false;
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (conflict) throw new Error('AItelier send_user_message: HTTP 409 {"code":"idempotency_conflict"}');
+    sent.push(body); return { result: { message_id: 'r1' } };
+  };
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['o2', 'o3']);
+  // A turn: what it was given, tool-call text first, the final words last; only a completed turn forwards.
+  const said = [];
+  const watch = turnWatcher((text, input) => said.push([text, input]));
+  const assistant = text => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } });
+  const given = text => ({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
+  for (const e of [{ type: 'turn/start' }, given('AItelier runtime event: {"driver_inbox":[{"message_id":"o3"}]}'), assistant('I will look first'),
+    assistant('Both done: the ledger is set up.'), { type: 'turn/end', data: { reason: { kind: 'completed' } } }]) watch(e);
+  for (const e of [{ type: 'turn/start' }, assistant('half a thought'), { type: 'turn/end', data: { reason: { kind: 'interrupted' } } }]) watch(e);
+  assert.equal(said.length, 1);
+  assert.equal(said[0][0], 'Both done: the ledger is set up.');
+  // F3a: a turn that was not given the waiting owner message (a director's letter woke it) sends nothing.
+  assert.deepEqual(await forwardFinalText({ ...base, text: 'about the director letter', input: 'Pending project inbox: d-1' }), { forwarded: false });
+  assert.equal(sent.length, 0);
+  const forwarded = await forwardFinalText({ ...base, text: said[0][0], input: said[0][1] });
+  assert.deepEqual(forwarded, { forwarded: true, reply_to: 'o3', message_id: 'r1' });
+  assert.deepEqual(sent[0], { request_key: 'auto-reply:o3', project_id: 'aitelier-home', subject: 'Re: ',
+    body: 'Both done: the ledger is set up.', reply_to_message_id: 'o3' }, 'one key per owner message, whatever the text');
+  // F3c: a second automatic reply to the same message (other words, after a lost answer) is refused, not sent twice.
+  conflict = true;
+  assert.deepEqual(await forwardFinalText({ ...base, text: 'other words', input: 'o3' }), { forwarded: false, already_replied: 'o3' });
+  conflict = false;
+  conversation.push(mine('s2', '2026-11-17T10:04:00Z', 'Both done', 'o3'));
+  assert.deepEqual(await forwardFinalText({ ...base, text: 'more', input: 'o2 o3' }), { forwarded: false }, 'nobody waiting: nothing is sent');
+  assert.equal(sent.length, 1);
+  // The steward host's held work is exactly the unanswered owner messages (idle_dormant refuses on it).
+  conversation.push(owner('o4', '2026-11-17T10:05:00Z', 'fourth'));
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }), { request });
+  assert.deepEqual(await host.heldWork(), [{ node_key: 'owner message o4' }]);
+  assert.equal(host.texts.heldWork, stewardTexts.heldWork);
+  assert.equal(host.texts.tools.idle_dormant, stewardTexts.idleDormant);
+  assert.notEqual(aitelierHost(env(), { request }).texts.heldWork, stewardTexts.heldWork, 'a director keeps its wording');
+});
+
+test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the director\'s are byte-for-byte today\'s', async () => {
+  const directorTexts = await import('./aitelier-texts.mjs');
+  const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' })).texts, director = aitelierHost(env()).texts;
+  // The director is unchanged: the module's own constants, byte for byte.
+  assert.equal(director, directorTexts.texts);
+  const effective = aitelierRoles(table);
+  const presented = new Set(effective.steward.presented);
+  const anyTool = new Set(['director', 'worker', 'steward'].flatMap(role => [...effective[role].presented, ...effective[role].forbidden])
+    .concat(['state_read', 'list_user_questions', 'project_work', 'watch_process', 'todo_plan']));
+  const lines = { continuationQuestion: steward.continuationQuestion, reviewInstruction: steward.reviewInstruction,
+    askTheUser: steward.askTheUser, heldWork: steward.heldWork, ...Object.fromEntries(['idle_dormant', 'ask_owner', 'close_question']
+      .map(name => ['tools.' + name, steward.tools[name]])) };
+  for (const [key, text] of Object.entries(lines)) {
+    assert.equal(typeof text, 'string', key);
+    for (const phrase of ['ready work items', 'ready frontier nodes', 'open issues', 'worker capacity', 'watch_process', 'State claim',
+      'list_user_questions', 'Director only', 'todo plan', 'live child'])
+      assert.ok(!text.includes(phrase), `${key} names "${phrase}"`);
+    const named = (text.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? []).filter(word => anyTool.has(word));
+    assert.deepEqual(named.filter(word => !presented.has(word)), [], `${key} names a tool the steward does not have`);
+  }
+  // It asks the steward for what it can do.
+  for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox_acknowledge', 'handoff', 'ask_owner'])
+    assert.ok(steward.continuationQuestion.includes(tool) || steward.askTheUser.includes(tool), tool);
+  assert.match(steward.tools.idle_dormant, /Nothing is expected of you until your owner or a director writes/);
+  assert.notEqual(director.tools.idle_dormant, steward.tools.idle_dormant);
 });

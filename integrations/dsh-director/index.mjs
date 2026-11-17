@@ -64,6 +64,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // Plugin step 12: the root session's role - the director, or the steward when the host
   // says so (validateHost checked the name; the table must have that role).
   const rootRole = config.rootRole ?? 'director';
+  // The root's own tools say "Director only." to a director; a steward is told no such thing.
+  const rootOnly = rootRole === 'director' ? 'Director only. ' : '';
   if (!roles[rootRole]) throw new Error(`directorHost refused: config.rootRole is ${rootRole} but the role table has no ${rootRole}`);
   const promptDir = dirname(config.rolesFile);
   const runtimeSkill = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
@@ -473,7 +475,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     const questionId = /^[A-Za-z0-9._:-]{1,64}$/;
     const noChannel = { refused: 'no_question_channel', reason: 'this host has no channel to its owner (no attention capability)' };
     scope.tools.register(defineTool({ name: 'ask_owner',
-      description: texts.tools.ask_owner ?? 'Director only. Ask your owner ONE concrete question that only they can decide (a ruling, an authorization, a choice). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry and asks nothing new; the same id with another question is refused, so give every question its own id. context is optional background shown with it. The answer comes back to you as an event (whether it names question_id depends on the host: the built-in host names it; a host may instead carry the citation on the answering message). Anything you wait on from your owner must be asked this way. Use close_question when it no longer needs an answer.',
+      description: texts.tools.ask_owner ?? rootOnly + 'Ask your owner ONE concrete question that only they can decide (a ruling, an authorization, a choice). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry and asks nothing new; the same id with another question is refused, so give every question its own id. context is optional background shown with it. The answer comes back to you as an event (whether it names question_id depends on the host: the built-in host names it; a host may instead carry the citation on the answering message). Anything you wait on from your owner must be asked this way. Use close_question when it no longer needs an answer.',
       parameters: { question_id: { type: 'string', required: true }, question: { type: 'string', required: true }, context: { type: 'string' } }, output: jsonOutput,
       async execute(args, exec) {
         if (!attention) return noChannel;
@@ -484,7 +486,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       },
     }));
     scope.tools.register(defineTool({ name: 'close_question',
-      description: texts.tools.close_question ?? 'Director only. Take back one of your own questions that no longer needs an answer (resolved another way, overtaken, asked wrongly), with the reason. It stays visible to your owner as withdrawn, with your reason. A question your owner already answered cannot be closed; closing twice changes nothing.',
+      description: texts.tools.close_question ?? rootOnly + 'Take back one of your own questions that no longer needs an answer (resolved another way, overtaken, asked wrongly), with the reason. It stays visible to your owner as withdrawn, with your reason. A question your owner already answered cannot be closed; closing twice changes nothing.',
       parameters: { question_id: { type: 'string', required: true }, reason: { type: 'string', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         if (!attention) return noChannel;
@@ -495,7 +497,7 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
       },
     }));
     scope.tools.register(defineTool({ name: 'idle_dormant',
-      description: texts.tools.idle_dormant ?? `Director only. Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. wake_after_minutes (${DORMANT_MIN_MINUTES}-${DORMANT_MAX_MINUTES}) is how long you choose to sleep: when it runs out with no input you get one review, so pick it from when something you wait on could have changed. You stay subscribed: any host event, owner message or child message wakes you earlier and the review resumes. Before calling it, every decision you wait on from your user must already be an open question. Refused while you have a live child, held work or an unfinished todo plan whose work item has not settled.`,
+      description: texts.tools.idle_dormant ?? `${rootOnly}Call when no authorized work is available and nothing is in flight: stops the 15-minute idle review (no model turns while nothing happens) and compacts a large context once. wake_after_minutes (${DORMANT_MIN_MINUTES}-${DORMANT_MAX_MINUTES}) is how long you choose to sleep: when it runs out with no input you get one review, so pick it from when something you wait on could have changed. You stay subscribed: any host event, owner message or child message wakes you earlier and the review resumes. Before calling it, every decision you wait on from your user must already be an open question. Refused while you have a live child, held work or an unfinished todo plan whose work item has not settled.`,
       parameters: { reason: { type: 'string', required: true }, wake_after_minutes: { type: 'integer', required: true } }, output: jsonOutput,
       async execute(args, exec) {
         const reason = typeof args.reason === 'string' ? args.reason.trim() : '';

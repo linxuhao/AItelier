@@ -116,6 +116,132 @@ export async function openProposals(request, signal) {
   return (listed.result ?? listed).proposals ?? [];
 }
 
+// ---- letters: replying to a director and marking a letter read (owner 2026-11-17) ----
+
+const digest = text => createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+
+/** A delivery addressed to the steward, with what a reply needs: in its project inbox
+ *  (`project`, State director messages) or its private driver inbox (`private`). */
+export async function findLetter({ request, project, me, inbox, deliveryId, signal }) {
+  let after = 0;
+  for (let page = 0; page < 10; page++) {
+    const listed = inbox === 'private'
+      ? await request('/api/state/query/list_driver_messages', { driver_id: me, after, limit: 100 }, signal)
+      : await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
+        statuses: ['unread', 'acknowledged', 'resolved'], after, limit: 100 }, signal);
+    const result = listed.result ?? listed;
+    if (inbox === 'private') {
+      const row = (result.messages ?? []).find(m => m.delivery_id === deliveryId);
+      if (row) return { deliveryId, version: row.version, status: row.status, subject: row.subject, sender: row.sender_driver_id };
+      if (!result.truncated) return undefined;
+      after = result.next_after;
+    } else {
+      const item = (result.items ?? []).find(i => i.delivery?.delivery_id === deliveryId);
+      if (item) return { deliveryId, version: item.delivery.version, status: item.delivery.status,
+        subject: item.message?.subject, sender: item.message?.sender_project_id };
+      if (!result.has_more || !(result.items ?? []).length) return undefined;
+      after = result.next_after;
+    }
+  }
+  return undefined;
+}
+
+/** Reply to one letter addressed to the steward: back to its sender (the sending project,
+ *  or the sending director privately), threaded on that delivery. The server allows the
+ *  steward a private message only as such a reply. */
+export async function replyToLetter({ request, project, me, inbox, deliveryId, text, signal }) {
+  if (!['project', 'private'].includes(inbox)) return { refused: 'unknown_inbox', inboxes: ['project', 'private'] };
+  if (typeof text !== 'string' || !text.trim()) return { refused: 'empty_text' };
+  const letter = await findLetter({ request, project, me, inbox, deliveryId, signal });
+  if (!letter || !letter.sender) return { refused: 'unknown_delivery', reason: `no ${inbox} letter ${deliveryId} addressed to you` };
+  const subject = ('Re: ' + (letter.subject ?? '')).slice(0, 200);
+  const key = `reply:${deliveryId}:${digest(text)}`;
+  const answer = inbox === 'private'
+    ? request('/api/state/commands/send_driver_message', { request_key: key, subject, body: text.trim(),
+      target_driver_id: letter.sender, reply_to_delivery_id: deliveryId }, signal)
+    : request('/api/state/commands/send_director_message', { protocol_version: 'v3', sender_project_id: project,
+      director_identity: me, request_key: key, subject, body: text.trim(), target_project_id: letter.sender,
+      reply_to_delivery_id: deliveryId }, signal);
+  return answer.then(r => ({ replied: true, inbox, to: letter.sender, ...(r.result ?? r) }), refusedBy);
+}
+
+// ---- every owner message gets an answer (owner 2026-11-17: 管家需要事事有回应) ----
+
+/** The owner's messages after the steward's last message in its own conversation: the ones
+ *  not answered yet, oldest first (the newest page; a reply answers what came before it). */
+export async function unansweredOwnerMessages({ request, project, me, signal }) {
+  const listed = await request('/api/state/query/list_user_conversation', { project_id: project, limit: 30 }, signal);
+  const newest = [...((listed.result ?? listed).messages ?? [])].sort(older).reverse();
+  const unanswered = [];
+  for (const m of newest) {
+    if (m.sender_kind === 'driver' && m.sender_driver_id === me) break;
+    if (m.sender_kind === 'user') unanswered.push(m);
+  }
+  return unanswered.reverse();
+}
+
+const blockText = message => (message?.content ?? []).filter(b => b?.type === 'text').map(b => b.text ?? '').join('');
+
+/** Watches the steward's session events and calls `onFinalText(text, input)` when a turn
+ *  ends normally: the last thing the steward said in it, and everything the turn was given
+ *  (its user/message inputs: the wakes, the snapshots). */
+export function turnWatcher(onFinalText) {
+  let last = '', input = '';
+  return event => {
+    if (event?.type === 'turn/start') { last = ''; input = ''; }
+    else if (event?.type === 'user/message') input += blockText(event.data?.message ?? event.data) + '\n';
+    else if (event?.type === 'assistant/message') {
+      const text = blockText(event.data?.message).trim();
+      if (text) last = text;
+    } else if (event?.type === 'turn/end') {
+      const text = last, given = input; last = ''; input = '';
+      if (text && event.data?.reason?.kind === 'completed') onFinalText(text, given);
+    }
+  };
+}
+
+/** A turn that was given an owner message ended with that message still unanswered: what
+ *  the steward said last goes to the owner as the answer to the newest such message (the
+ *  steward's words reach the owner only as a sent message). Not sent when the turn was not
+ *  given an unanswered owner message (a turn woken by a director's letter answers nobody).
+ *  One automatic reply per owner message: the request key is the message id alone, so a
+ *  retry after a lost answer is State's replay and a second, different text is refused
+ *  (idempotency_conflict) instead of becoming a second reply. */
+export async function forwardFinalText({ request, project, me, text, input = '', signal }) {
+  const waiting = (await unansweredOwnerMessages({ request, project, me, signal }))
+    .filter(m => input.includes(m.message_id));
+  if (!waiting.length) return { forwarded: false };
+  const newest = waiting.at(-1);
+  const body = text.length > 8000 ? text.slice(0, 7990) + '\n[…]' : text;
+  try {
+    const result = await request('/api/state/commands/send_user_message', { request_key: `auto-reply:${newest.message_id}`,
+      project_id: project, subject: ('Re: ' + (newest.subject ?? '')).slice(0, 200), body, reply_to_message_id: newest.message_id }, signal);
+    return { forwarded: true, reply_to: newest.message_id, message_id: (result.result ?? result).message_id };
+  } catch (error) {
+    if (/idempotency_conflict/.test(String(error?.message ?? error))) return { forwarded: false, already_replied: newest.message_id };
+    throw error;
+  }
+}
+
+/** The steward's wording where the director's would mislead it (the director's names State
+ *  claims, frontier nodes and workers the steward does not have). */
+const stewardAsk = 'Anything you wait on from your owner (a decision, an approval) must be a question they can see: ask it with ask_owner before you go dormant.';
+export const stewardTexts = Object.freeze({
+  heldWork: 'your owner has messages you have not answered: answer each with send_user_message first',
+  idleDormant: 'Call when nothing is waiting for you: your owner\'s messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.',
+  askOwner: 'Ask your owner ONE concrete question only they can decide (a choice, an approval). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry; another question under that id is refused. context is optional background shown with it. The answer comes back to you as a message from your owner. Use close_question when it no longer needs an answer.',
+  closeQuestion: 'Take back one of your own questions to your owner that no longer needs an answer, with the reason; it stays visible as withdrawn. An answered question cannot be closed; closing twice changes nothing.',
+  continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, and read ones marked with portfolio_inbox_acknowledge? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
+  reviewInstruction: 'Look again at your owner\'s conversation, your inbox (portfolio_inbox) and your open proposals: answer what waits on you, pass on what your owner asked you to pass on, and tell your owner what changed for them. ' + stewardAsk + ' If nothing waits, reply with one line that starts with NOTHING_LEFT: and call idle_dormant.',
+});
+
+/** The host texts the steward runs with: the director's, with every line that names a
+ *  director-only capability replaced. */
+export const stewardHostTexts = texts => ({ ...texts, askTheUser: stewardAsk, heldWork: stewardTexts.heldWork,
+  continuationQuestion: stewardTexts.continuationQuestion, reviewInstruction: stewardTexts.reviewInstruction,
+  reviewDue: 'AItelier steward review due:\n',
+  tools: { ...texts.tools, idle_dormant: stewardTexts.idleDormant, ask_owner: stewardTexts.askOwner, close_question: stewardTexts.closeQuestion } });
+
 /** The directorHost v1.2 operations the steward runs with on AItelier. */
 export function stewardOps({ request, project, me }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);

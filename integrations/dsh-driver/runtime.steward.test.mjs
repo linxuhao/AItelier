@@ -32,7 +32,8 @@ export function apply(ctx) {
     async *stream(options) {
       const text = JSON.stringify(options.messages);
       await post('/test/request', { session: options.sessionId, purpose: options.purpose ?? null,
-        tools: (options.tools ?? []).map(t => t.name), system: systemText(options.messages) });
+        tools: (options.tools ?? []).map(t => t.name), descriptions: (options.tools ?? []).map(t => [t.name, t.description ?? '']),
+        system: systemText(options.messages) });
       let block;
       if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: nothing in flight.' };
       else if (!options.tools?.length || options.sessionId !== 'stw-root') block = { type: 'text', text: 'Fixture session' };
@@ -84,7 +85,7 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
     while (!met() && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(met(), what + '\n' + JSON.stringify(events.map(e => [e.type, e.data?.message?.toolCallId ?? ''])) + '\n' + output.slice(-3000));
   };
-  const expected = ['ask_owner', 'close_question', 'idle_dormant', 'memory_forget', 'memory_note', 'memory_profile_update', 'memory_read', 'memory_search'];
+  const expected = ['ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'memory_forget', 'memory_note', 'memory_profile_update', 'memory_read', 'memory_search'];
   const rootRequests = () => requests.filter(r => r.session === 'stw-root' && r.purpose !== 'compaction' && r.tools.length);
   try {
     await mkdir(join(root, 'inbox'), { recursive: true });
@@ -115,6 +116,8 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
         assert.deepEqual([...r.tools].sort(), expected, `boot ${boot}: the steward's tool list`);
         assert.ok(r.system.includes(stewardSkill.trim()), `boot ${boot}: the steward's system prompt lacks steward.md`);
         assert.ok(!r.system.includes(directorSkill.split('\n')[0]), `boot ${boot}: the steward's system prompt carries director.md`);
+        for (const [name, description] of r.descriptions)
+          assert.ok(!description.startsWith('Director only'), `boot ${boot}: the steward is shown ${name} as "Director only"`);
       }
     };
 

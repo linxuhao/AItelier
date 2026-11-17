@@ -17,7 +17,8 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { openProposals, stewardOps, syncConversation } from './steward-host.mjs';
+import { forwardFinalText, openProposals, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
+  turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
@@ -25,7 +26,7 @@ import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSourc
 import * as core from '../dsh-director/lib/core.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, appendFile } from 'node:fs/promises';
 import { writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -502,7 +503,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
         ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}) } } : {}) },
     labels,
-    texts,
+    // The steward's held work is an unanswered owner message, not a State claim.
+    texts: steward ? stewardHostTexts(texts) : texts,
     /** The effective table: roles.json plus AItelier's State additions. */
     roles: table => aitelierRoles(table),
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
@@ -598,6 +600,19 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           return request('/api/state/query/' + encodeURIComponent(args.action), arguments_, exec.signal);
         },
       }));
+      // The steward answers the letters directors send it, in its project inbox and its
+      // private inbox (owner 2026-11-17); it never starts a private message itself.
+      // Marking a project letter read is portfolio_inbox_acknowledge (steward-host.mjs).
+      if (steward) {
+        const json = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
+        const inbox = { type: 'string', required: true, enum: ['project', 'private'] };
+        const me = env.AITELIER_DRIVER_ID;
+        scope.tools.register(defineTool({ name: 'reply_to_director',
+          description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox. delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
+          parameters: { inbox, delivery_id: { type: 'string', required: true }, text: { type: 'string', required: true } }, output: json,
+          execute: (args, exec) => replyToLetter({ request, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal }),
+        }));
+      }
       scope.tools.register(defineTool({ name: 'send_user_message',
         description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
         parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
@@ -660,6 +675,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     async workState(id, signal) { return attemptWorkState(await request('/api/state/query/get_attempt', { attempt_id: id }, signal)); },
     /** This driver's live State claims (idle_dormant refuses while any exist). */
     async heldWork(signal) {
+      // The steward holds no claims; what it must not sleep on is its owner waiting for an answer.
+      if (steward) return (await unansweredOwnerMessages({ request, project, me: env.AITELIER_DRIVER_ID, signal }))
+        .map(m => ({ node_key: `owner message ${m.message_id}` }));
       const listed = await request('/api/state/query/list_claims', { project_id: project, driver_id: env.AITELIER_DRIVER_ID, limit: 100 },
         signal);
       return ((listed.result ?? listed).claims ?? []).filter(c => c.status === 'live' && c.driver_id === env.AITELIER_DRIVER_ID);
@@ -730,6 +748,21 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         .catch(error => ctx.logger.warn('memory requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       await sync();
       await ownerRequests();
+      // Every owner message gets an answer: when a turn ends with the owner still waiting,
+      // the steward's last words go to them as the reply (owner 2026-11-17).
+      if (steward) {
+        // Each automatic reply is recorded (log line + auto-replies.jsonl in the state dir).
+        const record = async sent => {
+          if (!sent.forwarded && !sent.already_replied) return;
+          ctx.logger.info('auto-reply ' + JSON.stringify(sent));
+          await appendFile(join(env.AITELIER_DSH_STATE_DIR, 'auto-replies.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...sent }) + '\n', { mode: 0o600 });
+          if (sent.forwarded) await sync();
+        };
+        const watch = turnWatcher((text, input) => void forwardFinalText({ request, project, me: env.AITELIER_DRIVER_ID, text, input })
+          .then(record)
+          .catch(error => ctx.logger.warn('auto-reply: ' + String(error?.message ?? error).slice(0, 300))));
+        ctx.on('session/event', (session, event) => { if (session === agent.session) watch(event); });
+      }
       // Bounded and self-describing: the newest page of the matches, projected (see
       // listProjectInbox / projectInboxDigest). An injection is re-sent on every
       // director-message wake, so it must not grow with project history - and it must

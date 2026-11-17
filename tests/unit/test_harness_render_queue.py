@@ -26,6 +26,18 @@ import pytest
 HARNESS = Path(__file__).resolve().parents[2] / "docker" / "godot" / "godot_harness.py"
 RENDER_ROUTES = ("/playtest", "/script", "/x11_input_smoke")
 
+# How long a stand-in render body that must stay in flight holds. This is a VALVE
+# for a wedged test, not the premise: the tests that hold a render drive a whole
+# sequence of queue waits behind it, and the holder has to outlast all of them.
+# Each reader declares render_queue_wait_sec(TOOL_TIMEOUT) = TOOL_TIMEOUT / 2 = 5 s,
+# and the live-holder test drives five of them, measured at 25.8-26.3 s per param
+# on 2026-11-17. The 30 s it used to be left a 1 s margin under eight CPU hogs and
+# flipped to red in a whole-tree suite, which reads as "a queued request rendered"
+# although the product never let one through. The valve therefore sits far above
+# that sequence, and a held body that does run out is recorded and named by the
+# test's own instrument assertion instead of surfacing as a product failure.
+HOLDER_HOLD_SEC = 600.0
+
 
 def _load(tmp_path, monkeypatch):
     monkeypatch.setenv("GODOT_LIFECYCLE_DB", str(tmp_path / "owners.sqlite3"))
@@ -50,6 +62,10 @@ class _Rig:
         self.entered: dict[str, threading.Event] = {}
         self.rendered: list[tuple[str, str | None]] = []
         self.rendered_ts: list[float] = []
+        # A held body that returned on its own valve, i.e. before the test let it
+        # go. Empty is the premise of every "still queued, therefore not rendered"
+        # assertion; see HOLDER_HOLD_SEC.
+        self.held_bodies_returned: list[tuple[str, str | None]] = []
         self.queued = threading.Event()
         self.waits: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -63,7 +79,9 @@ class _Rig:
                     self.rendered_ts.append(time.monotonic())
                     self.entered.setdefault(op, threading.Event()).set()
                 if op in self.blocking or self.block_all:
-                    self.release.wait(30)
+                    self.release.wait(HOLDER_HOLD_SEC)
+                    with self._lock:
+                        self.held_bodies_returned.append((route, op))
                 report = {"passed": True, "route": route}
                 if route == "/playtest":
                     report["timing"] = {"report_serialize_sec": 0.0}
@@ -1022,6 +1040,13 @@ def test_a_queue_wait_that_outlasts_the_callers_timeout_is_not_a_product_failure
         # Reader C above.
         ret_f = focused_check(kind="godot_scenario", scenario="s1",
                               project_root=str(proj), timeout_seconds=10)
+        # The stand-in must still be holding while every reader above is queued. A
+        # holder whose own valve closed hands the lock to the next reader, and the
+        # "a queued request rendered" assertion below would then report the
+        # instrument expiring as if the product had let a request through.
+        assert not rig.held_bodies_returned, (
+            "the holder's stand-in window closed before the test released it, so the "
+            f"readers below were no longer queued behind it; rendered={rig.rendered}")
     finally:
         if fence is not None:
             _lift(fence)

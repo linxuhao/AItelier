@@ -8,15 +8,18 @@
  *     aitelier-roles.mjs adds (with and without its MCP prefix), that MCP prefix,
  *     and the source kinds and section prefix of aitelier-texts.mjs. None of them
  *     may appear in any byte of any file the plugin's boundary walk visits.
- *  3. Holds the plugin's own `npm test` script to the rule this adapter's
- *     suite-composition.test.mjs holds its own script to, and to no second list: the
- *     declared files are read from integrations/dsh-director/package.json, and which
- *     of them run HERE is read from this file's own import statements. A test file
- *     the plugin's runner names but this suite never imports is a file the repository
- *     gate never runs - it fails the test below by name. */
+ *  3. Holds the plugin's own `npm test` script to this adapter's rule for script shape -
+ *     one `node --test` invocation, no chain, no glob - with one difference the plugin's
+ *     tree forces: the script must NAME its test files, because bare `node --test` in
+ *     integrations/dsh-director also discovers test/fixtures/memory-crash.mjs, a fixture
+ *     that is SIGKILLed, not a test. The declared files are read from
+ *     integrations/dsh-director/package.json, and which of them run HERE is read from
+ *     this file's own import statements. A test file the plugin's runner names but this
+ *     suite never imports is a file the repository gate never runs - it fails the test
+ *     below by name. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../dsh-director/test/host.test.mjs';
@@ -59,17 +62,21 @@ const declaredScript = () => {
   return String(pkg.scripts?.test ?? '').trim();
 };
 
-/** The shapes integrations/dsh-driver/suite-composition.test.mjs accepts for this
- *  adapter's own script, applied to the plugin's: bare `node --test` (discovery) or an
- *  explicit enumeration of files. A chained command and a glob are REFUSED, and the
- *  refusal says what to write instead - a glob runs fewer files than it looks like, and
- *  a chain can exit 0 while a test failed. Returns the named files (empty = discovery). */
+/** The rule integrations/dsh-driver/suite-composition.test.mjs applies to this adapter's
+ *  own script, applied to the plugin's with one difference the plugin's tree forces: the
+ *  plugin's script must NAME its test files. A chained command and a glob are REFUSED
+ *  because a chain can exit 0 while a test failed and a glob runs fewer files than it
+ *  looks like. Bare discovery is REFUSED as well, and for the same kind of reason: node's
+ *  discovery runs everything under a directory named test/, which here includes
+ *  test/fixtures/memory-crash.mjs - a fixture that is SIGKILLed, not a test. Returns the
+ *  named files. */
 const checkScriptShape = script => {
-  assert.ok(!/[;&|]/.test(script), `the plugin's test script chains commands or swallows failures (${script}). Write one bare \`node --test <files>\` invocation: a chain can exit 0 while a test failed.`);
+  assert.ok(!/[;&|]/.test(script), `the plugin's test script chains commands or swallows failures (${script}). Write one bare \`node --test test/<file>.mjs ...\` invocation: a chain can exit 0 while a test failed.`);
   assert.ok(/^node\s+--test(\s|$)/.test(script), `the plugin's test script must be a \`node --test\` invocation (${script}). Write \`node --test test/<file>.mjs ...\`, naming every test file.`);
   const args = script.replace(/^node\s+--test\s*/, '').trim().split(/\s+/).filter(Boolean);
+  assert.notDeepEqual(args, [], `the plugin's test script uses bare \`node --test\` discovery (${script}). Node's discovery runs every file under a directory named test/, which here includes test/fixtures/memory-crash.mjs - a fixture that is SIGKILLed, not a test: name every test file explicitly, \`node --test test/<file>.mjs ...\`.`);
   const globs = args.filter(arg => /[*?[\]]/.test(arg));
-  assert.deepEqual(globs, [], `the plugin's test script passes a glob (${globs.join(', ')}). A partial glob runs fewer files than it looks like: name every test file explicitly, or use bare \`node --test\` to discover them.`);
+  assert.deepEqual(globs, [], `the plugin's test script passes a glob (${globs.join(', ')}). A partial glob runs fewer files than it looks like: name every test file explicitly, \`node --test test/<file>.mjs ...\`.`);
   return args;
 };
 
@@ -87,37 +94,10 @@ const executedByThisSuite = () => {
     .map(specifier => relative(pluginRoot, fileURLToPath(new URL(specifier, import.meta.url)))));
 };
 
-/** Node's discovery, written from its rules rather than from this plugin's file names:
- *  everything under a directory named test/ at any depth, plus the *.test.*, *.spec.*,
- *  *-test.*, *_test.*, test-* and test.* names anywhere. It is wider than it looks,
- *  which is why the plugin's script is an explicit list: bare `node --test` there also
- *  picks up test/fixtures/memory-crash.mjs, a fixture that is SIGKILLed, not a test. */
-const isDiscoveredTest = rel => {
-  const parts = rel.split(/[/\\]/);
-  const base = parts.at(-1).toLowerCase();
-  if (!/\.(mjs|cjs|js)$/.test(base)) return false;
-  if (parts.slice(0, -1).some(segment => segment.toLowerCase() === 'test')) return true;
-  return base.includes('.test.') || base.includes('.spec.') || base.includes('-test.')
-    || base.includes('_test.') || base.startsWith('test-')
-    || base === 'test.js' || base === 'test.mjs' || base === 'test.cjs';
-};
-
-const discoveredTests = (dir = pluginRoot, out = []) => {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) { if (entry.name !== 'node_modules') discoveredTests(path, out); }
-    else if (entry.isFile() && isDiscoveredTest(relative(pluginRoot, path))) out.push(relative(pluginRoot, path));
-  }
-  return out;
-};
-
 test('every test file the plugin\'s own script names is executed by this suite', () => {
   const declared = checkScriptShape(declaredScript());
   const executed = executedByThisSuite();
-  const named = declared.length === 0
-    ? discoveredTests() // bare `node --test`: discovery decides, so discovery is the list
-    : declared.map(arg => relative(pluginRoot, resolve(pluginRoot, arg)));
+  const named = declared.map(arg => relative(pluginRoot, resolve(pluginRoot, arg)));
   const missing = named.filter(file => !executed.has(file)).sort();
-  assert.deepEqual(missing, [], `integrations/dsh-director/package.json's "test" script declares files this suite does not execute: ${missing.join(', ')}. A file the plugin's own runner names and the repository gate never runs is a file whose failures nobody sees: add one side-effect import line at the top of integrations/dsh-driver/plugin-boundary.test.mjs for each file above${declared.length === 0 ? ', or name the test files explicitly in that script (bare `node --test` discovers non-test fixtures too)' : ''}.`);
-  assert.notDeepEqual(named, [], 'the plugin\'s test script declares no test files at all - the runner is broken, not the suite');
+  assert.deepEqual(missing, [], `integrations/dsh-director/package.json's "test" script declares files this suite does not execute: ${missing.join(', ')}. A file the plugin's own runner names and the repository gate never runs is a file whose failures nobody sees: add one side-effect import line at the top of integrations/dsh-driver/plugin-boundary.test.mjs for each file above.`);
 });

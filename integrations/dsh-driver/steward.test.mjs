@@ -48,7 +48,8 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
 
 test('presented_only: the steward has exactly its presented tools; everything else is refused, however it is called', () => {
   const steward = aitelierRoles(table).steward;
-  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director'],
+  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director',
+    'schedule_list', 'schedule_set', 'schedule_delete'],
     'the adapter adds only the owner message and the letter reply');
   assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
   // The inbox reader is the steward's own and nobody else's.

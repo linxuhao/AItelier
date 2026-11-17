@@ -20,6 +20,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { forwardFinalText, openProposals, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
   turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
+import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
@@ -486,6 +487,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
   let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
+  // Step 16: the steward's reminder clock (created in events(), refreshed by the tools).
+  let scheduleTimer;
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
@@ -607,6 +610,26 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         const json = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
         const inbox = { type: 'string', required: true, enum: ['project', 'private'] };
         const me = env.AITELIER_DRIVER_ID;
+        // Step 16: the steward's scheduled reminders (design §7.4). The backend computes every
+        // time; these only read and change rows, and the clock is re-read after each change.
+        const changed = result => { void scheduleTimer?.refresh(); return result; };
+        const scheduleShape = { type: 'object', additionalProperties: true, description: '{"kind":"cron","expr":"0 9 * * 1-5"} (5-field cron: minute hour day month weekday) or {"kind":"once","at":"<ISO time>"}' };
+        scope.tools.register(defineTool({ name: 'schedule_list',
+          description: 'Your reminders: each one\'s id, version, title, instruction, schedule, timezone, whether it is on, next and last run, and who created or last changed it (your owner can change them too).',
+          parameters: {}, output: json,
+          execute: (_args, exec) => listSchedules(request, exec.signal).then(schedules => ({ schedules })),
+        }));
+        scope.tools.register(defineTool({ name: 'schedule_set',
+          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner.',
+          parameters: { schedule_id: { type: 'string' }, expected_version: { type: 'integer' }, title: { type: 'string' }, instruction: { type: 'string' },
+            schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' } }, output: json,
+          execute: (args, exec) => setSchedule(request, args, exec.signal).then(changed),
+        }));
+        scope.tools.register(defineTool({ name: 'schedule_delete',
+          description: 'Delete one reminder (schedule_id with the expected_version schedule_list showed).',
+          parameters: { schedule_id: { type: 'string', required: true }, expected_version: { type: 'integer', required: true } }, output: json,
+          execute: (args, exec) => deleteSchedule(request, args, exec.signal).then(changed),
+        }));
         scope.tools.register(defineTool({ name: 'reply_to_director',
           description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox. delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
           parameters: { inbox, delivery_id: { type: 'string', required: true }, text: { type: 'string', required: true } }, output: json,
@@ -668,7 +691,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // The steward's snapshot also names its open proposals (plugin step 13): after a
       // compaction it must still know what its owner has yet to decide.
       const proposals = await openProposals(request).catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
-      return runtime.render() + '\n\nYour open proposals:\n' + JSON.stringify(proposals);
+      const schedules = await listSchedules(request).then(rows => rows.filter(r => r.enabled)
+        .map(r => ({ schedule_id: r.schedule_id, title: r.title, schedule: r.schedule, tz: r.tz, next_run_at: r.next_run_at })))
+        .catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
+      return runtime.render() + '\n\nYour open proposals:\n' + JSON.stringify(proposals) + '\n\nYour reminders (on):\n' + JSON.stringify(schedules);
     },
     progress: body => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`, body),
     /** One get_attempt per plan attempt (see settledAttempts). */
@@ -748,6 +774,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         .catch(error => ctx.logger.warn('memory requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       await sync();
       await ownerRequests();
+      // Step 16: the reminder clock. Each wake it gives is delivered once per (row, due time).
+      if (steward) {
+        scheduleTimer = new ScheduleTimer({ request, log: line => ctx.logger.warn(line),
+          deliver: (text, id) => notify(text, { id }) });
+        await scheduleTimer.refresh();
+      }
       // Every owner message gets an answer: when a turn ends with the owner still waiting,
       // the steward's last words go to them as the reply (owner 2026-11-17).
       if (steward) {
@@ -779,7 +811,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // drop their events from what the steward is woken with.
         const memoryRequest = steward && raw.events?.some(e => MEMORY_REQUEST_EVENTS.has(e.event_type));
         if (memoryRequest) await ownerRequests();
-        const result = memoryRequest ? { ...raw, events: raw.events.filter(e => !MEMORY_REQUEST_EVENTS.has(e.event_type)) } : raw;
+        // Schedule changes re-arm the clock and are no model turn either (step 16).
+        if (steward) void scheduleTimer?.refresh();
+        const quiet = steward ? new Set([...MEMORY_REQUEST_EVENTS, ...SCHEDULE_EVENTS]) : MEMORY_REQUEST_EVENTS;
+        const result = steward && raw.events?.some(e => quiet.has(e.event_type))
+          ? { ...raw, events: raw.events.filter(e => !quiet.has(e.event_type)) } : raw;
         // Steering starts an idle agent or queues input at the next active step.
         // Queue into the durable DSH inbox before committing the State cursor. An
         // interrupted delivery is replayed, never silently skipped.
@@ -846,7 +882,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       }
       await ctx.sessionPersistence.flush();
       if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();
-      return { done: runtime.pump(), stop: () => runtime.close() };
+      return { done: runtime.pump(), stop: () => { scheduleTimer?.close(); runtime.close(); } };
     },
   };
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a

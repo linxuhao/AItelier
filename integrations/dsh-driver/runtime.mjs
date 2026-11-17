@@ -17,7 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { stewardOps, syncConversation } from './steward-host.mjs';
+import { openProposals, stewardOps, syncConversation } from './steward-host.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
@@ -487,7 +487,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff'] : [])],
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -646,7 +646,14 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       }));
     },
     /** The startup / post-compaction State snapshot. */
-    async context() { await runtime.refresh(); return runtime.render(); },
+    async context() {
+      await runtime.refresh();
+      if (!steward) return runtime.render();
+      // The steward's snapshot also names its open proposals (plugin step 13): after a
+      // compaction it must still know what its owner has yet to decide.
+      const proposals = await openProposals(request).catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
+      return runtime.render() + '\n\nYour open proposals:\n' + JSON.stringify(proposals);
+    },
     progress: body => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`, body),
     /** One get_attempt per plan attempt (see settledAttempts). */
     async workState(id, signal) { return attemptWorkState(await request('/api/state/query/get_attempt', { attempt_id: id }, signal)); },

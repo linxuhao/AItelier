@@ -94,7 +94,7 @@ export interface DirectorHost {
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
   capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
-    | 'portfolio' | 'handoff'>;
+    | 'portfolio' | 'handoff' | 'proposals'>;
   config: HostConfig;
 
   // ---- required ----
@@ -155,6 +155,16 @@ export interface DirectorHost {
    *  handoff tool [none: not registered]. The host checks that citesUserMessageId is a
    *  message the owner wrote (refusing otherwise) and quotes it to the director. */
   handoff?(handoff: { projectId: string; text: string; citesUserMessageId: string }, signal?: AbortSignal): Promise<object>;
+  /** v1.2, plugin step 13: the steward's proposals, behind propose / withdraw_proposal
+   *  [none: not registered]. propose records an OPEN proposal and nothing else - the owner
+   *  approves or declines it through the host, the host executes the approved version and
+   *  delivers each result to the steward through events(). kind: create_project |
+   *  start_driver | stop_driver; supersedes names the steward's own open proposal it replaces.
+   *  withdraw takes back the steward's own open proposal, as a record. */
+  proposals?: {
+    propose(proposal: { kind: string; payload: object; reason: string; supersedes?: string }, signal?: AbortSignal): Promise<object>;
+    withdraw(withdrawal: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
+  };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */

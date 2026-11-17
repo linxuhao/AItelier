@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
  *  and the handoff, all over State reads and two State writes the steward is allowed
@@ -72,6 +74,15 @@ async function ownerMessageById({ request, project, id, signal }) {
   return undefined;
 }
 
+/** A State refusal as a tool answer: the error text, bounded. */
+const refusedBy = error => ({ refused: 'state_refused', reason: String(error?.message ?? error).slice(0, 500) });
+
+/** The steward's open proposals, for its snapshot. */
+export async function openProposals(request, signal) {
+  const listed = await request('/api/state/query/list_steward_proposals', { status: 'open', limit: 50 }, signal);
+  return (listed.result ?? listed).proposals ?? [];
+}
+
 /** The directorHost v1.2 operations the steward runs with on AItelier. */
 export function stewardOps({ request, project, me }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
@@ -102,6 +113,19 @@ export function stewardOps({ request, project, me }) {
       },
       conversation: (projectId, cursor, signal) => list('/api/state/query/list_user_conversation',
         { project_id: projectId, limit: 30, ...(cursor ? { cursor } : {}) }, signal),
+    },
+    /** Plugin step 13: one open proposal row and nothing more; the owner decides, the backend
+     *  executes the version approved and wakes the steward with the result. The request key
+     *  is the proposal's digest, so a retried call is State's replay, not a second card. */
+    proposals: {
+      async propose({ kind, payload, reason, supersedes }, signal) {
+        const body = { kind, payload, reason, ...(supersedes ? { supersedes } : {}) };
+        const key = 'proposal:' + createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 40);
+        return request('/api/state/commands/create_steward_proposal', { request_key: key, ...body }, signal)
+          .then(r => r.result ?? r, refusedBy);
+      },
+      withdraw: ({ id, reason }, signal) => request('/api/state/commands/withdraw_steward_proposal',
+        { request_key: `withdraw-proposal:${id}`, proposal_id: id, reason }, signal).then(r => r.result ?? r, refusedBy),
     },
     async handoff({ projectId, text, citesUserMessageId }, signal) {
       if (typeof projectId !== 'string' || !projectId || projectId === project) return { refused: 'invalid_project', reason: 'name another project' };

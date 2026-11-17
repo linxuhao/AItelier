@@ -60,14 +60,14 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(steward.config.rootRole, 'steward');
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
-  assert.deepEqual(steward.capabilities.slice(-3), ['memory', 'portfolio', 'handoff']);
+  assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
   assert.doesNotThrow(() => validateHost(steward));
   const director = aitelierHost(env());
   assert.equal(director.config.rootRole, undefined);
   assert.equal(director.config.memory, undefined);
   assert.equal(director.config.permissionPreset, 'danger-full-access');
   assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention']);
-  for (const op of ['memory', 'portfolio', 'handoff']) assert.equal(director[op], undefined, op);
+  for (const op of ['memory', 'portfolio', 'handoff', 'proposals']) assert.equal(director[op], undefined, op);
   assert.doesNotThrow(() => validateHost(director));
   // A root role the table does not have is refused when the host is loaded.
   const rolesFile = join(mkdtempSync(join(tmpdir(), 'roles-')), 'roles.json');
@@ -184,4 +184,26 @@ test('portfolio: every other project with its director and open questions; one p
   assert.deepEqual(Object.keys(one), ['project_id', 'overview', 'open_issues', 'open_questions']);
   assert.deepEqual((await ops.portfolio.conversation('wuxia', 'c-1')).body, { project_id: 'wuxia', limit: 30, cursor: 'c-1' });
   assert.ok(calls.every(([path]) => path.startsWith('/api/state/query/') || path === '/api/dsh-drivers'), 'reads only');
+});
+
+test('proposals (step 13): propose records one open proposal under a digest key; withdraw names the proposal; a refusal is an answer', async () => {
+  const calls = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (body.proposal_id === 'p-gone') throw new Error('AItelier withdraw_steward_proposal: HTTP 409 {"code":"proposal_not_open"}');
+    return path.endsWith('create_steward_proposal') ? { result: { proposal_id: 'p-1', version: 1, status: 'open' } } : { result: { withdrawn: true } };
+  };
+  const { proposals } = stewardOps({ request, project: 'aitelier-home', me: 'drv-home' });
+  const proposal = { kind: 'start_driver', payload: { project_id: 'wuxia' }, reason: 'your owner wants wuxia running again' };
+  assert.deepEqual(await proposals.propose(proposal), { proposal_id: 'p-1', version: 1, status: 'open' });
+  await proposals.propose(proposal);
+  assert.equal(calls[0][1].request_key, calls[1][1].request_key, 'the same proposal is the same request: a replay, not a second card');
+  assert.match(calls[0][1].request_key, /^proposal:[0-9a-f]{40}$/);
+  assert.deepEqual({ ...calls[0][1], request_key: undefined }, { request_key: undefined, ...proposal });
+  await proposals.propose({ ...proposal, reason: 'other words' });
+  assert.notEqual(calls[2][1].request_key, calls[0][1].request_key);
+  assert.deepEqual(await proposals.withdraw({ id: 'p-1', reason: 'owner changed their mind' }), { withdrawn: true });
+  assert.deepEqual(calls[3], ['/api/state/commands/withdraw_steward_proposal', { request_key: 'withdraw-proposal:p-1', proposal_id: 'p-1', reason: 'owner changed their mind' }]);
+  assert.equal((await proposals.withdraw({ id: 'p-gone', reason: 'x' })).refused, 'state_refused');
+  assert.ok(calls.every(([path]) => /\/(create|withdraw)_steward_proposal$/.test(path)), 'nothing but the two steward writes');
 });

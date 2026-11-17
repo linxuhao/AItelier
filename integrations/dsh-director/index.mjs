@@ -29,6 +29,7 @@ import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from
 import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
+import { registerProposalTools } from './lib/proposals.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -559,6 +560,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
     // Plugin step 12: the steward's read-only view of every project and its handoff to a
     // project's director, when the host provides them (which role sees them is roles.json's).
     if (host.portfolio || host.handoff) registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio: host.portfolio, handoff: host.handoff });
+    // Plugin step 13: proposals the owner decides on.
+    if (host.proposals) registerProposalTools(scope, { defineTool, jsonOutput, proposals: host.proposals });
   };
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;

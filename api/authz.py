@@ -23,6 +23,8 @@ ADMIN_TOKEN = os.getenv("AITELIER_ADMIN_TOKEN", "").strip()
 WRITE_DENIED_NOT_AUTHENTICATED = "write_denied_not_authenticated"
 WRITE_DENIED_NOT_A_WRITER = "write_denied_not_a_writer"
 WRITE_DENIED_BAD_ADMIN_TOKEN = "write_denied_bad_admin_token"
+# A steward driver (plugin step 12) on a path outside its write whitelist.
+STEWARD_READ_ONLY = "steward_read_only"
 
 # Read-side siblings. A read that is still writer-only must be refused with a
 # READ message: the write codes above say "to make changes", and answering a
@@ -41,6 +43,8 @@ DENIAL_MESSAGES = {
         "Your account has no write permission — this session is read-only.",
     WRITE_DENIED_BAD_ADMIN_TOKEN:
         "The admin token is missing or invalid.",
+    STEWARD_READ_ONLY:
+        "steward_read_only: the steward role may not make this request.",
     READ_DENIED_NOT_AUTHENTICATED:
         "Not signed in — this State DAG record is private; sign in with an "
         "authorized account to read it.",
@@ -57,6 +61,9 @@ _READ_DENIAL_CODES = {
     WRITE_DENIED_NOT_AUTHENTICATED: READ_DENIED_NOT_AUTHENTICATED,
     WRITE_DENIED_NOT_A_WRITER: READ_DENIED_NOT_A_WRITER,
     WRITE_DENIED_BAD_ADMIN_TOKEN: READ_DENIED_BAD_ADMIN_TOKEN,
+    # Only a non-GET/HEAD request outside the steward's whitelist gets it; the
+    # refusal is the same whichever guard reports it.
+    STEWARD_READ_ONLY: STEWARD_READ_ONLY,
 }
 
 
@@ -229,6 +236,33 @@ def require_admin(request: Request) -> None:
                         headers={"X-AItelier-Denial": ADMIN_REQUIRED})
 
 
+# The only non-GET/HEAD paths a steward token may use (design step 12): the State
+# command and query families (core.state_commands.execute judges the command
+# again against the steward's write whitelist), and its OWN project's runtime
+# endpoints, which `owned()` in api/dsh_driver_routers.py also pins to its token.
+_STEWARD_STATE_PREFIXES = ("/api/state/commands/", "/api/state/query/")
+_STEWARD_RUNTIME_ENDPOINTS = ("completion", "heartbeat", "activity")
+
+
+def _steward_denial(request, row) -> str | None:
+    """STEWARD_READ_ONLY when `row` (the token's driver) is a steward and the
+    request is a non-GET/HEAD one outside its whitelist; else None (unchanged)."""
+    capabilities = row.get("capabilities")
+    if not isinstance(capabilities, dict) or capabilities.get("role") != "steward":
+        return None
+    if getattr(request, "method", None) in ("GET", "HEAD"):
+        return None
+    path = request.url.path
+    if path.startswith(_STEWARD_STATE_PREFIXES):
+        return None
+    parts = path.split("/")
+    if (len(parts) == 5 and parts[:3] == ["", "api", "dsh-drivers"]
+            and parts[4] in _STEWARD_RUNTIME_ENDPOINTS
+            and parts[3] == capabilities.get("project_id")):
+        return None
+    return STEWARD_READ_ONLY
+
+
 def write_denial_reason(request: Request) -> str | None:
     """Why a request may NOT write — None means it may.
 
@@ -239,13 +273,23 @@ def write_denial_reason(request: Request) -> str | None:
 
     On denial the distinguishable cases are reported separately, so the caller
     learns whether to sign in, ask for write rights, or fix its admin token.
+
+    A steward driver's token is the one narrowing: outside its whitelist a
+    non-GET/HEAD request is refused with STEWARD_READ_ONLY (`_steward_denial`).
     """
     if not gate_enabled():
         return None
     via_cloudflare = is_via_cloudflare(request)
     token = presented_token(request)
-    if not via_cloudflare and token and _token_authorizes(request, token):
-        return None
+    if not via_cloudflare and token:
+        registry = driver_registry()
+        if registry is None:
+            if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
+                return None
+        else:
+            row = registry.lookup_token(token)
+            if row is not None:
+                return _steward_denial(request, row)
     email = cf_access.email_from_request_headers(request.headers, request.cookies)
     if email:
         return None if email in WRITERS else WRITE_DENIED_NOT_A_WRITER

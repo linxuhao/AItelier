@@ -70,6 +70,17 @@ def _variant(edit):
     return table
 
 
+# A valid steward entry (plugin step 12), for the tables that carry one.
+STEWARD = {"route": "driver", "reasoning_effort": "high",
+           "compaction": {"thresholdRatio": 0.4, "retainTokens": 0}, "prompt": "steward.md",
+           "presented": ["ask_owner", "close_question", "idle_dormant"],
+           "forbidden": ["bash", "subagent", "todo_plan"], "presented_only": True}
+
+
+def _with_steward(table, **changes):
+    table["steward"] = {**copy.deepcopy(STEWARD), **changes}
+
+
 MALFORMED = {
     "unknown top-level key": lambda t: t.update(extra=1),
     "unknown role key": lambda t: t["worker"].update(models=[]),
@@ -87,6 +98,13 @@ MALFORMED = {
     "duplicate tool": lambda t: t["worker"]["presented"].append("bash"),
     "presented and forbidden": lambda t: t["worker"]["presented"].append("subagent"),
     "bad tool name": lambda t: t["worker"]["forbidden"].append("not a name"),
+    "unknown steward key": lambda t: _with_steward(t, models=[]),
+    "missing steward key": lambda t: (_with_steward(t), t["steward"].pop("prompt")),
+    "steward presents and forbids": lambda t: _with_steward(t, forbidden=["ask_owner"]),
+    "non-boolean steward presented_only": lambda t: _with_steward(t, presented_only="yes"),
+    "non-boolean director presented_only": lambda t: t["director"].update(presented_only=1),
+    "null worker presented_only": lambda t: t["worker"].update(presented_only=None),
+    "missing director": lambda t: t.pop("director"),
 }
 
 
@@ -128,6 +146,29 @@ def test_python_and_node_refuse_the_same_tables(tmp_path, name):
 def test_python_and_node_agree_on_an_accepted_variant(tmp_path):
     table = _variant(lambda t: (t["worker"].update(route="w-x", reasoning_effort="low"),
                                 t["director"]["compaction"].update(retainTokens=7)))
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(table))
+    assert _python_parse(path) == _node_parse(path) == ("ok", table)
+
+
+def test_steward_and_presented_only_are_optional_and_accepted_when_well_formed():
+    """No steward: the repository table as it is (asserted above). With one, and
+    `presented_only` on any role, the table parses unchanged."""
+    without = _variant(lambda t: t.pop("steward", None))
+    assert validate_roles(copy.deepcopy(without)) == without
+    with_steward = _variant(lambda t: (_with_steward(t), t["worker"].update(presented_only=False),
+                                       t["director"].update(presented_only=True)))
+    assert validate_roles(copy.deepcopy(with_steward)) == with_steward
+    assert with_steward["steward"] == STEWARD
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")
+@pytest.mark.parametrize("name", ["with steward", "without steward"])
+def test_python_and_node_agree_on_steward_tables(tmp_path, name):
+    if name == "with steward":
+        table = _variant(lambda t: (_with_steward(t), t["director"].update(presented_only=False)))
+    else:
+        table = _variant(lambda t: t.pop("steward", None))
     path = tmp_path / "roles.json"
     path.write_text(json.dumps(table))
     assert _python_parse(path) == _node_parse(path) == ("ok", table)

@@ -2,13 +2,45 @@ import { createHash } from 'node:crypto';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
- *  and the handoff, all over State reads and two State writes the steward is allowed
- *  (send_user_message is runtime.mjs's tool; send_director_message is the handoff).
+ *  (which includes the steward's own inbox page, read whole) and the handoff, all over
+ *  State reads and two State writes the steward is allowed (send_user_message is
+ *  runtime.mjs's tool; send_director_message is the handoff).
  *
  *  `request(path, body, signal)` is the runtime's authenticated State caller. */
 
 /** How many conversation pages a sync or an owner-message check reads at most. */
 const PAGE = 100, MAX_PAGES = 10, OWNER_CHECK_PAGES = 5;
+
+/** The bounds of the steward's inbox reader (`portfolio.inbox`), stated in its tool
+ *  description by the plugin (dsh-director/lib/portfolio.mjs) and echoed in every answer
+ *  as `limits`. They exist because a wake injects only the first 240 characters of each
+ *  body (runtime.mjs): one call must be able to read a long message whole without letting
+ *  a page of long messages flood the steward's context. A body past `body_chars` comes
+ *  back clipped and flagged with its true size; a page past `items_per_page`, or one whose
+ *  bodies would pass `answer_chars`, is cut and counted. */
+export const INBOX_LIMITS = Object.freeze({ items_per_page: 5, body_chars: 8000, answer_chars: 24000 });
+
+/** One delivery of the steward's inbox: its delivery identity and the whole stored body,
+ *  the way `list_director_messages` carries it. The body is clipped only past the per-body
+ *  bound, and then it says its true `body_chars` and `body_truncated`. */
+function inboxItem(row) {
+  const message = row?.message ?? {}, delivery = row?.delivery ?? {};
+  const body = typeof message.body === 'string' ? message.body : message.body == null ? '' : String(message.body);
+  const seq = Number(delivery.delivery_seq);
+  return {
+    delivery_id: delivery.delivery_id ?? null,
+    delivery_seq: Number.isFinite(seq) ? seq : null,
+    message_id: message.message_id ?? null,
+    subject: message.subject ?? null,
+    sender_project_id: message.sender_project_id ?? null,
+    created_at: message.created_at ?? null,
+    status: delivery.status ?? null,
+    version: delivery.version ?? null,
+    body_chars: body.length,
+    ...(body.length > INBOX_LIMITS.body_chars ? { body_truncated: true } : {}),
+    body: body.length > INBOX_LIMITS.body_chars ? body.slice(0, INBOX_LIMITS.body_chars) : body,
+  };
+}
 
 const textOf = message => [message.body, ...(message.segments ?? []).map(s => s.text)]
   .filter(t => typeof t === 'string' && t.trim()).join('\n\n');
@@ -113,6 +145,37 @@ export function stewardOps({ request, project, me }) {
       },
       conversation: (projectId, cursor, signal) => list('/api/state/query/list_user_conversation',
         { project_id: projectId, limit: 30, ...(cursor ? { cursor } : {}) }, signal),
+      /** This steward's OWN inbox, one bounded page, bodies whole: the wake injection of a
+       *  delivery carries only its first 240 characters, so a longer message is unread until
+       *  it is fetched here. Read-only: the same query the director reads, no acknowledgement
+       *  and no write. `after` is the last delivery_seq read; the answer says where the next
+       *  page starts (`next_after`) and what it did not show (`items_omitted`,
+       *  `body_truncated`, `has_more`) instead of clipping silently. */
+      async inbox({ after, limit } = {}, signal) {
+        const start = Number.isFinite(Number(after)) ? Math.max(0, Math.trunc(Number(after))) : 0;
+        const want = Number.isFinite(Number(limit))
+          ? Math.min(Math.max(Math.trunc(Number(limit)), 1), INBOX_LIMITS.items_per_page) : INBOX_LIMITS.items_per_page;
+        const page = await list('/api/state/query/list_director_messages', { project_id: project,
+          protocol_version: 'v3', statuses: ['unread', 'acknowledged'], after: start, limit: want }, signal);
+        const rows = (Array.isArray(page.items) ? page.items : []).slice(0, want);
+        // What this cursor has left: the query counts the deliveries after it, so its
+        // matched_total is a remainder, not the size of the whole inbox.
+        const matched = Number.isInteger(page.matched_total)
+          ? Math.max(page.matched_total, rows.length) : rows.length + (page.has_more === true ? 1 : 0);
+        const items = rows.map(inboxItem);
+        const answer = (kept, omitted = 0) => ({ project_id: project, items: kept, matched_total: matched,
+          has_more: matched > kept.length,
+          next_after: matched > kept.length ? kept.at(-1)?.delivery_seq ?? null : null,
+          items_omitted: omitted, limits: { ...INBOX_LIMITS } });
+        let kept = items, built = answer(kept);
+        // One call must not flood the steward's context: keep the oldest deliveries of the
+        // page that fit the answer bound, and let the cursor say where the next call resumes.
+        while (JSON.stringify(built).length > INBOX_LIMITS.answer_chars && kept.length > 1) {
+          kept = kept.slice(0, -1);
+          built = answer(kept, items.length - kept.length);
+        }
+        return built;
+      },
     },
     /** Plugin step 13: one open proposal row and nothing more; the owner decides, the backend
      *  executes the version approved and wakes the steward with the result. The request key

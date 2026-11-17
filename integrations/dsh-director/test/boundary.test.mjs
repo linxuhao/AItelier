@@ -17,6 +17,8 @@
  *  IMPORTS: in every walked file, whatever its extension, an import-from,
  *  export-from, side-effect import, import() or require() whose literal specifier
  *  names the adapter directory.
+ *  RUNNER: the `test` script in package.json names every `*.test.mjs` in test/ and
+ *  nothing that is not there, so the documented runner cannot silently skip a file.
  *  NOT covered: text or specifiers assembled at run time from pieces (this file
  *  assembles its own tokens that way), and names the backend uses that are not in
  *  this list - the adapter side checks the plugin against the tool names it really
@@ -123,6 +125,16 @@ test('no byte of any shipped plugin file carries the backend, and no code import
   const found = [];
   for (const file of walk()) for (const hit of scan(readFileSync(file, 'utf8'), file)) found.push(`${relative(root, file)}:${hit}`);
   assert.deepEqual(found, []);
+});
+
+test('the documented runner names every test file in test/, and every file it names exists', () => {
+  const script = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts?.test ?? '';
+  const named = [...new Set([...script.matchAll(/(?:^|\s)(test\/[^\s/]+\.test\.mjs)(?=\s|$)/g)].map(match => match[1]))].sort();
+  const onDisk = readdirSync(join(root, 'test')).filter(entry => entry.endsWith('.test.mjs')).map(entry => 'test/' + entry).sort();
+  const unlisted = onDisk.filter(file => !named.includes(file));
+  const absent = named.filter(file => !onDisk.includes(file));
+  assert.deepEqual(unlisted, [], 'test files not named in the package.json test script, so `npm test` skips them: ' + unlisted.join(', '));
+  assert.deepEqual(absent, [], 'files named in the package.json test script that do not exist: ' + absent.join(', '));
 });
 
 test('the gate refuses one sample of every shape its header says it covers', () => {

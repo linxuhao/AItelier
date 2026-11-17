@@ -11,7 +11,6 @@
   import StateProjects from './views/StateProjects.svelte';
   import StateProject from './views/StateProject.svelte';
   import StateRun from './views/StateRun.svelte';
-  import Chat from './views/Chat.svelte';
   import Trace from './views/Trace.svelte';
   import Tracking from './views/Tracking.svelte';
   import NotificationPanel from './views/NotificationPanel.svelte';
@@ -39,7 +38,6 @@
     '/state-projects/:id/nodes/:nodeKey': StateProject,
     '/state-projects/:id': StateProject,
     '/state-runs/:runId': StateRun,
-    '/chat': Chat, // the butler is standalone — the ONLY chat entry
     '/projects/:id': Project,
     // Project-level trace: no runId -> Trace targets the project id (the
     // backend's _resolve_run accepts project ids as run identifiers).

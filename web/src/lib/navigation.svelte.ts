@@ -53,10 +53,9 @@ export function readLastProject(): string { try { return localStorage.getItem(LA
 export function rememberProject(id:string): void { try { localStorage.setItem(LAST_PROJECT,id); } catch { /* preference only */ } }
 
 
-export function navArea(hash:string): 'projects'|'runs'|'pipelines'|'chat'|'' {
+export function navArea(hash:string): 'projects'|'runs'|'pipelines'|'' {
   const path=hash.replace(/^#/,'') || '/';
   if(path==='/pipelines')return 'pipelines';
   if(path.startsWith('/runs') || path.startsWith('/state-runs/') || path.startsWith('/repos') || /^\/projects\/.+/.test(path))return 'runs';
-  if(path==='/chat')return 'chat';
   return path==='/' || path==='/projects' || path.startsWith('/state-projects')?'projects':'';
 }

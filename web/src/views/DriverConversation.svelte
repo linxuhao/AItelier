@@ -7,12 +7,15 @@
   import { renderMarkdown } from '../lib/markdown';
   import type { ConversationDraft } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts }: {
+  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null }: {
     projectId: string; projectTitle?: string; driverId?: string;
     // Only a host that can actually dismiss the thread passes `onclose`: the
     // dashboard pane always shows it, so it passes nothing and gets no close
     // button (the one it had closed nothing there).
     onclose?: () => void; onread?: () => void; drafts?: Map<string, ConversationDraft>;
+    // Text the host puts into the composer (the steward's "change it"): each new
+    // object replaces the draft and focuses the input; nothing is sent.
+    prefill?: {text: string} | null;
   } = $props();
   // How often an open thread re-reads its newest page: the same bounded cadence
   // the DAG list polls driver status with, so one tick of latency is the floor.
@@ -360,6 +363,11 @@
       stopTimer();
       document.removeEventListener('visibilitychange', onVisibility);
     };
+  });
+  $effect(() => {
+    if (!prefill) return;
+    text = prefill.text; replyTo = null; answering = null; sendError = '';
+    void tick().then(focusComposer);
   });
 </script>
 <!-- The message viewport, question sidebar and composer own separate grid areas. -->

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { st } from '../lib/stateI18n.svelte';
   import { readLastProject, rememberProject } from '../lib/navigation.svelte';
   import { startDshDriver, stopDshDriver, type DriverStatusResponse } from '../lib/api';
@@ -8,11 +9,14 @@
   import DriverConversation from './DriverConversation.svelte';
   import DriverRunLog from './DriverRunLog.svelte';
   let { projects = [], status = null, onread = () => {}, onrefresh = () => {},
-    selected = $bindable('') }: {
+    selected = $bindable(''), mode = $bindable('conversation'), tabs = [], panel, prefill = null }: {
     projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     onread?: () => void; onrefresh?: () => void; selected?: string;
+    // A host may add its own tabs after the two built-in ones (the steward's
+    // proposals, questions and profile); `panel` renders the chosen one.
+    mode?: string; tabs?: {id: string; label: string}[]; panel?: Snippet<[string]>;
+    prefill?: {text: string} | null;
   } = $props();
-  let mode = $state<'conversation' | 'run'>('conversation');
   let visitedRun = $state(false);
   let busy = $state(false), controlError = $state('');
   // Session-local: switching projects retains text and exact reply citations;
@@ -38,7 +42,7 @@
     } catch (e) { controlError = String(e instanceof Error ? e.message : e); }
     finally { busy = false; }
   }
-  function chooseMode(next: 'conversation' | 'run') {
+  function chooseMode(next: string) {
     mode = next;
     if (next === 'run') visitedRun = true;
   }
@@ -66,6 +70,10 @@
         aria-controls="driver-conversation-panel" onclick={() => chooseMode('conversation')}>{st('driverConversation')}</button>
       <button id="driver-run-tab" type="button" role="tab" class:active={mode === 'run'} aria-selected={mode === 'run'}
         aria-controls="driver-run-panel" onclick={() => chooseMode('run')}>{st('driverHistory')}</button>
+      {#each tabs as tab (tab.id)}
+        <button id="driver-{tab.id}-tab" type="button" role="tab" class:active={mode === tab.id} aria-selected={mode === tab.id}
+          aria-controls="driver-{tab.id}-panel" onclick={() => chooseMode(tab.id)}>{tab.label}</button>
+      {/each}
     </div>
     <a href={stateProjectHref(selected)}>{st('graph')} ↗</a>
   </nav>
@@ -76,7 +84,7 @@
         <div id="driver-conversation-panel" class="pane-panel" data-mode-panel="conversation" role="tabpanel"
           aria-labelledby="driver-conversation-tab" hidden={mode !== 'conversation'}>
           <DriverConversation projectId={selected} projectTitle={current?.title ?? selected}
-            driverId={driver?.driver_id ?? ''} onread={onread} {drafts} />
+            driverId={driver?.driver_id ?? ''} onread={onread} {drafts} {prefill} />
         </div>
         <div id="driver-run-panel" class="pane-panel scroll" data-mode-panel="run" role="tabpanel"
           aria-labelledby="driver-run-tab" hidden={mode !== 'run'}>
@@ -87,6 +95,12 @@
             {:else}<p class="identity">{st('driverHistoryEmpty')}</p>{/if}
           {/if}
         </div>
+        {#each tabs as tab (tab.id)}
+          {#if mode === tab.id}
+            <div id="driver-{tab.id}-panel" class="pane-panel scroll" data-mode-panel={tab.id} role="tabpanel"
+              aria-labelledby="driver-{tab.id}-tab">{@render panel?.(tab.id)}</div>
+          {/if}
+        {/each}
       {/key}
     {/if}
   </div>

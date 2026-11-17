@@ -65,7 +65,6 @@
       <li><a data-nav="projects" href="#/" aria-current={navArea(route)==='projects'?'page':undefined}>{nt('projects')}</a></li>
       <li><a data-nav="runs" href="#/runs" aria-current={navArea(route)==='runs'?'page':undefined}>{nt('runs')}</a></li>
       <li><a data-nav="pipelines" href="#/pipelines" aria-current={navArea(route)==='pipelines'?'page':undefined}>{nt('pipelines')}</a></li>
-      <li><a data-nav="chat" href="#/chat" aria-current={navArea(route)==='chat'?'page':undefined}>{t('appbar.chat')}</a></li>
       {#if $authStore.canWrite}<li><a href="#/tracking">{t('appbar.tracking')}</a></li>{/if}
     </ul>
     <ul>

@@ -7,6 +7,7 @@
   import StateProject from './StateProject.svelte';
   import DriverStatus from './DriverStatus.svelte';
   import NewStateProject from './NewStateProject.svelte';
+  import { isStewardProject } from '../lib/steward';
   // Reading the project list is a public read (`project_catalog`); writing is
   // not. `canWrite` no longer decides whether the graph may be loaded — that
   // conflation is what hid the whole dashboard from a reader.
@@ -20,7 +21,8 @@
     if(!permitted) return;
     stateProjects().then(result=>{
       if(version!==generation)return;
-      projects=result.projects.filter(p=>!isArchived(p));   // archived ones stay reachable from "All projects"
+      // archived ones stay reachable from "All projects"; the steward's project has its own pinned card there
+      projects=result.projects.filter(p=>!isArchived(p)&&!isStewardProject(p.project_id,null));
       const prior=readLastProject();
       selected=projects.some(p=>p.project_id===prior)?prior:(projects[0]?.project_id??'');
     }).catch(e=>{if(version===generation)error=String(e.message??e);})

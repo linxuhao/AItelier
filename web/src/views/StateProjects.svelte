@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { authStore } from '../stores/auth';
-  import { driverStatus, dshDriverConversationUnread, stateProjects, type DriverStatusResponse } from '../lib/api';
+  import { driverStatus, dshDriverConversationUnread, listStewardProposals, stateProjects, type DriverStatusResponse } from '../lib/api';
   import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { rememberProject } from '../lib/navigation.svelte';
   import { sortDagRows } from '../lib/driverList';
@@ -9,6 +9,9 @@
   import { st } from '../lib/stateI18n.svelte';
   import DriverConversationPane from './DriverConversationPane.svelte';
   import NewStateProject from './NewStateProject.svelte';
+  import StewardPane from './StewardPane.svelte';
+  import { busyDriverCount, driverRole, isStewardProject, stewardProjectId, totalOpenQuestions } from '../lib/steward';
+  import { t } from '../lib/i18n.svelte';
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
@@ -16,14 +19,22 @@
   // The project catalog is a public read; only the write affordances need
   // `canWrite`.
   const canRead = $derived($authStore.permissionResolved);
-  const visible = $derived(showArchived ? rows : rows.filter(p => !isArchived(p)));
-  const archivedHidden = $derived(rows.length - visible.length);
+  // The steward's project is pinned as its own card above the list, never one of
+  // the ordinary projects; a direct link to it still opens it (StateProject).
+  const ordinary = $derived(rows.filter(p => !isStewardProject(p.project_id, drivers)));
+  const visible = $derived(showArchived ? ordinary : ordinary.filter(p => !isArchived(p)));
+  const archivedHidden = $derived(ordinary.length - visible.length);
   const filtered = $derived(visible.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   // Per-DAG driver state and the two persisted badges: unread driver messages,
   // and the open questions no reply has answered yet. Read from State and then
   // ordered by the SAME running-first rule the driver table uses.
   let drivers = $state<DriverStatusResponse | null>(null), unread = $state<Record<string, number>>({});
   let questions = $state<Record<string, number>>({});
+  // The steward card: pending proposals are read on the same tick as the badges.
+  let pendingProposals = $state<number | null>(null), stewardOpen = $state(false);
+  const stewardId = $derived(stewardProjectId(drivers));
+  const hasSteward = $derived($authStore.canWrite &&
+    (driverRole(drivers, stewardId) === 'steward' || rows.some(p => p.project_id === stewardId)));
   // Which DAG the conversation pane is about. The list sets it; the pane shows it.
   let paneSelection = $state('');
   let mobileFiltersOpen = $state(false);
@@ -37,7 +48,12 @@
       if (!driverMounted) return;
       drivers = table; unread = badge.projects ?? {}; questions = badge.questions ?? {};
     } catch { /* badges are additive: a failed poll never hides the DAG list */ }
+    try {
+      const open = await listStewardProposals('open', 100);
+      if (driverMounted) pendingProposals = open.length;
+    } catch { if (driverMounted) pendingProposals = null; }
   }
+  function openProject(id: string) { stewardOpen = false; paneSelection = id; rememberProject(id); }
   $effect(() => { if ($authStore.permissionResolved && $authStore.canWrite && driverMounted) void loadDriverState(); });
   $effect(() => {
     const permitted = canRead, repo = params.repoPath; void retry;
@@ -52,7 +68,7 @@
       .finally(() => { if (version === generation) loading = false; });
     return () => { generation++; };
   });
-  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) { drivers = null; unread = {}; questions = {}; } });
+  $effect(() => { if ($authStore.permissionResolved && !$authStore.canWrite) { drivers = null; unread = {}; questions = {}; pendingProposals = null; stewardOpen = false; } });
   onMount(() => {
     driverMounted = true;
     void loadDriverState();
@@ -73,16 +89,16 @@
     <label>{st('projectSearch')}<input type="search" bind:value={query} placeholder={st('projectSearch')} /></label>
     <label class="archived-toggle"><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
 {/snippet}
-<div class="dag-split" class:workbench={$authStore.canWrite && canRead && visible.length > 0}>
+<div class="dag-split" class:workbench={$authStore.canWrite && canRead && (visible.length > 0 || (hasSteward && stewardOpen))}>
 <section class="state-projects">
   <header><div><h1>{st($authStore.canWrite ? 'projectList' : 'projects')}</h1></div>
     <a class="repository-link" href="#/repos">{st('dashboard')} ↗</a></header>
   {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
-    {#if $authStore.canWrite}<NewStateProject oncreated={(id) => { paneSelection = id; rememberProject(id); retry++; void loadDriverState(); }} />{/if}
+    {#if $authStore.canWrite}<NewStateProject oncreated={(id) => { openProject(id); retry++; void loadDriverState(); }} />{/if}
     <div class="project-filters">{@render projectFilters()}</div>
     <div class="mobile-project-controls">
-      <label>{st('currentProject')}<select value={paneSelection} onchange={(event) => {paneSelection = event.currentTarget.value; rememberProject(paneSelection);}}>
+      <label>{st('currentProject')}<select value={paneSelection} onchange={(event) => openProject(event.currentTarget.value)}>
         {#if paneSelection && !ordered.some(project => project.project_id === paneSelection)}
           <option value={paneSelection}>{selectable.find(project => project.project_id === paneSelection)?.title ?? paneSelection}</option>
         {/if}
@@ -94,14 +110,26 @@
     {#if error}<div role="alert"><p>{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button></div>{/if}
     {#if loading && !rows.length}<p aria-live="polite">{st('loading')}</p>
     {:else if !rows.length && !error}<article><p>{st('empty')}</p></article>{/if}
+    {#if hasSteward}
+      <!-- Pinned first: the steward is not one of the projects, it looks after them. -->
+      <button type="button" class="project-card steward-card" data-steward-card aria-pressed={stewardOpen}
+        aria-label={t('steward.open')} onclick={() => { stewardOpen = true; }}>
+        <h2>{t('steward.name')}</h2>
+        <span class="driver-facts steward-facts">
+          <span class="fact"><strong data-steward-fact="busy">{busyDriverCount(drivers)}</strong> {t('steward.busyDrivers')}</span>
+          <span class="fact"><strong data-steward-fact="questions">{totalOpenQuestions(questions)}</strong> {t('steward.openQuestions')}</span>
+          <span class="fact"><strong data-steward-fact="proposals">{pendingProposals ?? '–'}</strong> {t('steward.pendingProposals')}</span>
+        </span>
+      </button>
+    {/if}
     <div class="project-grid">
       {#each ordered as project (project.project_id)}
         {@const phase = drivers?.projects[project.project_id]?.managed?.phase}
         {@const activity = drivers?.projects[project.project_id]}
-        <button type="button" class="project-card" aria-pressed={paneSelection === project.project_id}
+        <button type="button" class="project-card" aria-pressed={!stewardOpen && paneSelection === project.project_id}
           onclick={() => {
             if (!$authStore.canWrite) { window.location.hash = stateProjectHref(project.project_id).slice(1); return; }
-            paneSelection = project.project_id; rememberProject(paneSelection);
+            openProject(project.project_id);
           }}>
           <div class="card-top"><span>{project.project_id}</span><span class:held={project.policy.dispatch !== 'active'}>{project.policy.dispatch}</span></div>
           <h2>{project.title}</h2>
@@ -134,7 +162,10 @@
     {#if next}<button class="outline" disabled={loading} onclick={more}>{st('more')}</button>{/if}
   {/if}
 </section>
-{#if $authStore.canWrite && canRead && visible.length}
+{#if $authStore.canWrite && canRead && hasSteward && stewardOpen}
+  <StewardPane projectId={stewardId} projects={rows} status={drivers} {questions}
+    onread={loadDriverState} onrefresh={() => void loadDriverState()} onanswer={openProject} />
+{:else if $authStore.canWrite && canRead && visible.length}
   <DriverConversationPane projects={selectable} status={drivers} bind:selected={paneSelection}
     onread={loadDriverState} onrefresh={() => void loadDriverState()} />
 {/if}
@@ -156,6 +187,8 @@
   .workbench .project-card{padding:10px;border-color:transparent;background:transparent;}
   .project-card:hover,.project-card:focus-visible{border-color:var(--pico-primary);}
   .project-card[aria-pressed=true]{border-color:var(--pico-primary);background:color-mix(in srgb,var(--workbench-accent) 8%,var(--workbench-surface));}
+  .steward-card{margin:0 0 10px;border-color:var(--pico-primary);}
+  .workbench .steward-card{border-color:var(--pico-primary);}
   .card-top{display:flex;justify-content:space-between;gap:6px;color:var(--pico-muted-color);font-size:11px;}
   .workbench .card-top{display:none;}
   h2{font-size:14px;line-height:1.5;margin:0 0 6px;}
@@ -181,5 +214,6 @@
     .workbench header{margin-bottom:8px;}.workbench label:not(.archived-toggle){margin-bottom:8px;}
     .workbench .project-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));}
     .workbench .driver-facts{display:none;}.workbench .archived-toggle{margin-bottom:8px;}
+    .workbench .steward-facts{display:flex;}
   }
 </style>

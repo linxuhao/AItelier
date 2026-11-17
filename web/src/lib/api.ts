@@ -33,11 +33,15 @@ export class ApiError extends Error {
    *  never got an answer (network failure / timeout) — that, and only that,
    *  is a connection problem. */
   public code: string | null;
+  /** The body's `detail` as the server sent it. A 409 from the steward's
+   *  proposal endpoints carries the CURRENT row here, not a sentence. */
+  public detail: unknown;
 
-  constructor(status: number, message: string, code: string | null = null) {
+  constructor(status: number, message: string, code: string | null = null, detail: unknown = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.detail = detail;
     this.name = 'ApiError';
   }
 }
@@ -82,11 +86,11 @@ export async function errorFromResponse(response: Response): Promise<ApiError> {
     // Non-JSON error body — fall back to the status line.
   }
   const message =
-    (data?.detail as string) ||
+    (typeof data?.detail === 'string' ? data.detail : '') ||
     (data?.message as string) ||
     response.statusText ||
     'Request failed';
-  return new ApiError(response.status, String(message), (data?.code as string) || null);
+  return new ApiError(response.status, String(message), (data?.code as string) || null, data?.detail ?? null);
 }
 
 
@@ -384,77 +388,6 @@ export function sendChatMessage(
   });
 }
 
-/**
- * Coding Mode: the session's own working tree (NOT Source) and its governing
- * plan. The server resolves the tree from the session's sealed binding; a
- * run id passed back is only a fence that says the view moved.
- */
-export function codingView(sessionId: string): Promise<Record<string, any>> {
-  return _get('/api/agent/coding/view?session_id=' + encodeURIComponent(sessionId));
-}
-
-export function codingTree(sessionId: string, runId?: string): Promise<Record<string, any>> {
-  return _get('/api/agent/coding/tree?session_id=' + encodeURIComponent(sessionId)
-    + (runId ? '&run_id=' + encodeURIComponent(runId) : ''));
-}
-
-export function codingFile(sessionId: string, path: string, runId?: string): Promise<Record<string, any>> {
-  return _get('/api/agent/coding/file?session_id=' + encodeURIComponent(sessionId)
-    + '&path=' + encodeURIComponent(path)
-    + (runId ? '&run_id=' + encodeURIComponent(runId) : ''));
-}
-
-/** The user's decision on the governing plan, bound to the exact rendered token. */
-export function codingPlanDecision(body: {
-  session_id: string;
-  decision: 'approve' | 'reject' | 'dismiss';
-  expected_checkpoint?: Record<string, unknown>;
-  decision_id?: string;
-  feedback?: string;
-}): Promise<Record<string, any>> {
-  return _post('/api/agent/coding/plan-decision', body);
-}
-
-/**
- * Create a new chat session and return its ID.
- * POST /api/agent/session/create
- */
-export function createSession(): Promise<{ session_id: string }> {
-  return _post('/api/agent/session/create');
-}
-
-/**
- * Get the full message history for a session (oldest-first).
- * GET /api/agent/chat/history?session_id=...
- */
-export function getChatHistory(
-  sessionId: string,
-): Promise<{ session_id: string; messages: Record<string, unknown>[] }> {
-  return _get(
-    '/api/agent/chat/history?session_id=' + encodeURIComponent(sessionId),
-  );
-}
-
-/**
- * List chat sessions with message count and preview.
- * GET /api/agent/sessions?limit=...&offset=...&project_id=...
- *
- * @param projectId — optional project_id filter (pass null for all sessions)
- * @param limit — max sessions to return (default 10)
- * @param offset — pagination offset (default 0)
- */
-export function listSessions(
-  projectId?: string | null,
-  limit: number = 10,
-  offset: number = 0,
-): Promise<{ sessions: Record<string, unknown>[] }> {
-  let path = `/api/agent/sessions?limit=${limit}&offset=${offset}`;
-  if (projectId) {
-    path += '&project_id=' + encodeURIComponent(projectId);
-  }
-  return _get(path);
-}
-
 // ═════════════════════════════════════════════════════════════════════
 //  Trace
 // ═════════════════════════════════════════════════════════════════════
@@ -723,7 +656,9 @@ export function stateProjects(repoPath?: string, after = ''): Promise<{projects:
 }
 export interface DriverActivity {
   total: number; online: number; running_subagents: number; running_pipelines: number;
-  managed?: {driver_id: string; enabled: number; phase: string; last_error: string; model: string};
+  /** `role` is "steward" for the owner's steward (the driver of `aitelier-home`)
+   *  and "director" for every other project; a row without it is a director. */
+  managed?: {driver_id: string; enabled: number; phase: string; last_error: string; model: string; role?: 'steward' | 'director'};
 }
 export interface DriverStatusResponse {
   total: number; online: number; projects: Record<string, DriverActivity>;
@@ -886,4 +821,52 @@ export function runHistory(options: {q?:string;status?:string;workflow?:string;s
 
 export function stateRunSummary(projectId:string):Promise<import('./stateGraph').ProjectRunSummary> {
   return _get(`/api/state/projects/${encodeURIComponent(projectId)}/run-summary`);
+}
+
+
+// ═════════════════════════════════════════════════════════════════════
+//  The owner's steward (plugin step 14): proposals and memory requests
+// ═════════════════════════════════════════════════════════════════════
+
+export type StewardProposalStatus = 'open' | 'executing' | 'done' | 'failed' | 'declined' | 'withdrawn' | 'superseded';
+export interface StewardProposal {
+  proposal_id: string; version: number; kind: 'create_project' | 'start_driver' | 'stop_driver';
+  payload: Record<string, any>; reason: string; status: StewardProposalStatus;
+  created_at: string; decided_at: string | null; decided_by: string | null; result: unknown;
+}
+/** What stopping a driver would interrupt. */
+export interface StewardImpact {
+  running_subagents: {session_id: string; [key: string]: unknown}[];
+  unsettled_attempts: {attempt_id: string; [key: string]: unknown}[];
+}
+export function listStewardProposals(status: 'open' | 'all' = 'open', limit = 50): Promise<StewardProposal[]> {
+  return _post<{proposals?: StewardProposal[]; result?: {proposals?: StewardProposal[]}}>(
+    '/api/state/query/list_steward_proposals', {status, limit})
+    .then(r => (r.result ?? r).proposals ?? []);
+}
+/** Approve exactly the version the owner is looking at; 409 carries the current row in `detail`. */
+export function approveStewardProposal(id: string, expectedVersion: number, confirmInterrupt = false): Promise<StewardProposal> {
+  const body: Record<string, unknown> = {expected_version: expectedVersion};
+  if (confirmInterrupt) body.confirm_interrupt = true;
+  return _post('/api/steward/proposals/' + encodeURIComponent(id) + '/approve', body);
+}
+export function declineStewardProposal(id: string, expectedVersion: number, reason?: string): Promise<StewardProposal> {
+  const body: Record<string, unknown> = {expected_version: expectedVersion};
+  if (reason) body.reason = reason;
+  return _post('/api/steward/proposals/' + encodeURIComponent(id) + '/decline', body);
+}
+export function stewardProposalImpact(id: string): Promise<StewardImpact> {
+  return _get('/api/steward/proposals/' + encodeURIComponent(id) + '/impact');
+}
+export type StewardMemoryKind = 'profile_read' | 'profile_update' | 'forgotten_list' | 'forget' | 'restore' | 'purge';
+export interface StewardMemoryRequest {
+  request_id: string; kind?: StewardMemoryKind; status: 'pending' | 'done'; result?: Record<string, any>;
+}
+/** The owner's memory operations run in the steward's host, so each one is a request the
+ *  steward completes; poll `stewardMemoryRequest` for its result. */
+export function createStewardMemoryRequest(kind: StewardMemoryKind, payload: Record<string, unknown> = {}): Promise<StewardMemoryRequest> {
+  return _post('/api/steward/memory-requests', {kind, payload});
+}
+export function stewardMemoryRequest(requestId: string): Promise<StewardMemoryRequest> {
+  return _get('/api/steward/memory-requests/' + encodeURIComponent(requestId));
 }

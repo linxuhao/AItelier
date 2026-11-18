@@ -149,7 +149,7 @@ export interface DirectorHost {
   portfolio?: {
     projects(signal?: AbortSignal): Promise<object>;
     /** `page` (v1.2+, optional): the cursors a previous answer gave, passed back as the model gave them. */
-    project(projectId: string, signal?: AbortSignal, page?: { openAfter?: number; issuesAfter?: number }): Promise<object>;
+    project(projectId: string, signal?: AbortSignal, page?: { openAfter?: string; issuesAfter?: number }): Promise<object>;
     conversation(projectId: string, cursor?: string, signal?: AbortSignal): Promise<object>;
   };
   /** v1.2, plugin step 12: pass the owner's words to a project's director, behind the

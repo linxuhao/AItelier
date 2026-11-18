@@ -397,10 +397,14 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
  *  - the counts, whole;
  *  - the RECENT_CLOSED most recently closed nodes, always (they are what "progress" is
  *    read from, so the bound never spends them first);
- *  - the open work - not-closed nodes and open issue work items in one list, newest change
- *    first - one PAGE at a time: as many as fit under NODES_CHARS, then `open_next_after`
- *    to pass back as `open_after` for the next page, so the oldest (often the stuck ones)
- *    are reachable, never cut off;
+ *  - the open work - not-closed nodes and open issue work items in one list - one PAGE at a
+ *    time: as many as fit under NODES_CHARS, then `open_next_after` to pass back as
+ *    `open_after`. The order is the node key and the cursor is the last key shown (a
+ *    keyset, review 360): the list is read afresh for every page, so a position would
+ *    skip or repeat items when one closes or changes between two reads; a key cannot.
+ *    Every item open at both reads is shown exactly once; one opened mid-walk with a key
+ *    before the cursor is on the next walk's pages, and every line carries its own change
+ *    time, so "what moved last" is read from the lines and from recently_closed_nodes;
  *  - no field cut silently: titles are kept as the overview gives them (its first goal
  *    line, at most 180 chars); a hold reason longer than HOLD_CHARS is cut and says so
  *    (held_reason_truncated, held_reason_chars), and a long blocked_by list keeps its total.
@@ -422,29 +426,36 @@ function openLine(n) {
     ...(n.latest_attempt ? { latest_attempt: { status: n.latest_attempt.status, updated_at: n.latest_attempt.updated_at } } : {}),
     ...(n.latest_evidence && Object.keys(n.latest_evidence).length ? { latest_evidence: n.latest_evidence } : {}),
     ...(n.open_issue_count ? { open_issue_count: n.open_issue_count } : {}),
-    ...(n.claims?.length ? { live_claims: n.claims.length } : {}) };
+    ...(n.claims?.length ? { live_claims: n.claims.map(c => ({ driver_id: c.driver_id ?? null, ...(c.subagent ? { subagent: c.subagent } : {}),
+      lease_expires_at: c.lease_expires_at ?? null })) } : {}) };
 }
 const closedLine = n => ({ node_key: n.node_key, title: n.title, status: n.status,
   ...(n.latest_attempt ? { updated_at: n.latest_attempt.updated_at } : {}) });
-export function projectSummary(overview, { openAfter = 0, limit = NODES_CHARS } = {}) {
+export function projectSummary(overview, { openAfter, limit = NODES_CHARS } = {}) {
   if (!overview || !Array.isArray(overview.nodes)) {
     // Not the shape this summary knows: say so instead of passing an unbounded value on.
     return { unrecognised_overview: true, chars: JSON.stringify(overview ?? null).length };
   }
+  // A cursor is the node key a previous page ended on; anything else is refused by name,
+  // never read as "start again" (review 360).
+  if (openAfter !== undefined && openAfter !== null && (typeof openAfter !== 'string' || !openAfter))
+    return { refused: 'invalid_open_after', reason: 'open_after is the open_next_after string a previous answer gave' };
+  const byKey = (a, b) => (String(a.node_key) < String(b.node_key) ? -1 : String(a.node_key) > String(b.node_key) ? 1 : 0);
   const work = [...overview.nodes, ...(overview.issue_work ?? [])];
-  const open = work.filter(n => !CLOSED_NODE.has(n.status)).sort(byChange);
+  const open = work.filter(n => !CLOSED_NODE.has(n.status)).sort(byKey);
   const closed = overview.nodes.filter(n => CLOSED_NODE.has(n.status)).sort(byChange);
-  const from = Number.isInteger(openAfter) && openAfter > 0 ? Math.min(openAfter, open.length) : 0;
+  const rest = openAfter ? open.filter(n => String(n.node_key) > openAfter) : open;
   const base = { project: overview.project, counts: overview.counts, readiness_counts: overview.readiness_counts,
     ready_action_counts: overview.ready_action_counts, issue_counts: overview.issue_counts,
     issue_work_counts: overview.issue_work_counts, observed_at: overview.observed_at,
     recently_closed_nodes: closed.slice(0, RECENT_CLOSED).map(closedLine), open_work: [] };
-  const shown = () => ({ open_after: from, open: base.open_work.length, open_total: open.length,
-    open_next_after: from + base.open_work.length < open.length ? from + base.open_work.length : null,
+  const shown = () => ({ open_after: openAfter ?? null, open: base.open_work.length, open_total: open.length,
+    open_remaining_after_page: rest.length - base.open_work.length,
+    open_next_after: base.open_work.length < rest.length ? base.open_work[base.open_work.length - 1].node_key : null,
     recently_closed: base.recently_closed_nodes.length, closed_total: closed.length, all_total: work.length });
-  // One page: add open work newest first while the whole summary still fits; at least one
-  // line per page, so paging always moves forward.
-  for (const n of open.slice(from)) {
+  // One page: add open work in key order while the whole summary still fits; at least one
+  // line per page, so a walk always moves forward.
+  for (const n of rest) {
     base.open_work.push(openLine(n));
     if (base.open_work.length > 1 && JSON.stringify({ ...base, nodes_shown: shown() }).length > limit) { base.open_work.pop(); break; }
   }
@@ -485,6 +496,10 @@ export function stewardOps({ request, project, me, stateDir }) {
         })) };
       },
       async project(projectId, signal, { openAfter, issuesAfter } = {}) {
+        // A cursor that is not one a previous answer gave is refused by name, never read as
+        // "the first page" (review 360).
+        if (issuesAfter !== undefined && issuesAfter !== null && !(Number.isInteger(issuesAfter) && issuesAfter >= 0))
+          return { refused: 'invalid_issues_after', reason: 'issues_after is the issues_next_after integer a previous answer gave' };
         const [overview, issues, questions] = await Promise.all([
           list('/api/state/query/project_overview', { project_id: projectId }, signal),
           list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: ISSUES_PAGE,

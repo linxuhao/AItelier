@@ -15,7 +15,7 @@ const exec = { signal: AbortSignal.timeout(5000) };
 
 test('portfolio, the inbox reader and handoff: registered for what the host provides, the call passed through', async () => {
   const calls = [];
-  const portfolio = { projects: async () => (calls.push(['projects']), 'P'), project: async id => (calls.push(['project', id]), 'O'),
+  const portfolio = { projects: async () => (calls.push(['projects']), 'P'), project: async (id, _signal, page) => (calls.push(['project', id, page]), 'O'),
     conversation: async (id, cursor) => (calls.push(['conversation', id, cursor]), 'C'),
     inbox: async page => (calls.push(['inbox', page]), 'I') };
   const handoff = async h => (calls.push(['handoff', h]), 'H');
@@ -29,10 +29,13 @@ test('portfolio, the inbox reader and handoff: registered for what the host prov
   const tools = collect(registerPortfolioTools, { portfolio, handoff });
   assert.equal(await tools.get('portfolio_projects').execute({}, exec), 'P');
   assert.equal(await tools.get('portfolio_project').execute({ project_id: 'w' }, exec), 'O');
+  // The page cursors are passed to the host as given (review 360: nothing witnessed it).
+  assert.equal(await tools.get('portfolio_project').execute({ project_id: 'w', open_after: 'k', issues_after: 9 }, exec), 'O');
   assert.equal(await tools.get('portfolio_conversation').execute({ project_id: 'w', cursor: 'c' }, exec), 'C');
   assert.equal(await tools.get('portfolio_inbox').execute({ after: 2, limit: 3 }, exec), 'I');
   assert.equal(await tools.get('handoff').execute({ project_id: 'w', text: 't', cites_user_message_id: 'm' }, exec), 'H');
-  assert.deepEqual(calls, [['projects'], ['project', 'w'], ['conversation', 'w', 'c'], ['inbox', { after: 2, limit: 3 }],
+  assert.deepEqual(calls, [['projects'], ['project', 'w', { openAfter: undefined, issuesAfter: undefined }],
+    ['project', 'w', { openAfter: 'k', issuesAfter: 9 }], ['conversation', 'w', 'c'], ['inbox', { after: 2, limit: 3 }],
     ['handoff', { projectId: 'w', text: 't', citesUserMessageId: 'm' }]]);
   // Its bounds are in the description, where the model reads them, not only in the answer.
   const description = tools.get('portfolio_inbox').description;

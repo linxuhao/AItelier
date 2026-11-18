@@ -25,6 +25,12 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
+# Re-exported: the covered file list lived in this module before the rule moved
+# to core/source_identity.py, and readers still ask api.main which files the
+# digest covers (the noqa below is for that re-export). The capture itself is
+# the shared implementation.
+from core.source_identity import (SOURCE_IDENTITY_MODULES,  # noqa: F401
+                                  capture as _capture_source_identity)
 from api import _read_cache
 from api import authz
 from starlette.routing import Route as _StarletteRoute
@@ -537,75 +543,14 @@ def _gate_harness_identity() -> dict:
     return {"path": str(path), "sha256": digest, "reason": None}
 
 
-# The repository modules the `source_identity` digest covers: the entry module
-# that serves /health, the write gate, the read cache and the Cloudflare Access
-# identity. All four are imported by THIS module at import time, so a process
-# able to answer /health necessarily loaded their code. Written out and fixed on
-# purpose - a set discovered at run time (walking the tree, or reading
-# sys.modules) would differ between two processes of the same commit and make
-# the digest incomparable, which is the only thing it is good for.
-SOURCE_IDENTITY_MODULES = ("api/main.py", "api/authz.py", "api/_read_cache.py",
-                           "core/cf_access.py")
-
-
-def _source_identity() -> dict:
-    """Which source bytes this process loaded: root, digest, and the moment.
-
-    Called ONCE, at import (``_SOURCE_IDENTITY`` below), because that is the only
-    moment where the code the interpreter runs and the bytes on disk are known to
-    be the same thing. Everything here is computed from that one reading and then
-    reported verbatim, never re-read per request.
-
-    `root` is the checkout this module was imported from - the directory the
-    `api` and `core` packages it belongs to live in - so the digest's file names
-    are repo-relative to it.
-
-    The digest covers exactly the files in SOURCE_IDENTITY_MODULES, in that
-    order, and nothing else. Each file contributes its own repo-relative path, a
-    NUL byte, the lowercase hex SHA-256 of its bytes and a newline, fed in that
-    order into one SHA-256; the reported `digest` is that outer hash, lowercase
-    hex. A reader recomputes it from any tree thus (root taken from the answer):
-
-        h = hashlib.sha256()
-        for rel in answer["files"]:
-            h.update(rel.encode() + b"\\0")
-            h.update(hashlib.sha256((root / rel).read_bytes()).hexdigest().encode() + b"\\n")
-        assert h.hexdigest() == answer["digest"]
-
-    What a reader compares it WITH: a digest computed the same way from the
-    commit they meant to deploy. A process started before a merge keeps
-    reporting the OLD digest after the disk holds the new bytes - that is the
-    witness this field exists to give, and the one thing `gate_harness` cannot
-    say, since that field is re-read per request and so follows the disk.
-    `process.started_at` says from when to compare.
-
-    A missing or unreadable file is DECLARED (null digest plus a reason naming
-    the path) and never raised: this runs at import, where raising would take the
-    whole backend down over a cosmetic field.
-    """
-    root = _Path(__file__).resolve().parent.parent
-    files = tuple(SOURCE_IDENTITY_MODULES)
-    captured_at = _datetime.fromtimestamp(
-        _time.time(), _timezone.utc).isoformat(timespec="milliseconds")
-    hasher = _hashlib.sha256()
-    for rel in files:
-        path = root / rel
-        try:
-            file_digest = _hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as exc:
-            return {"root": str(root), "digest": None, "captured_at": captured_at,
-                    "files": files,
-                    "reason": f"could not read {path}: {type(exc).__name__}"}
-        hasher.update(rel.encode() + b"\0")
-        hasher.update(file_digest.encode() + b"\n")
-    return {"root": str(root), "digest": hasher.hexdigest(),
-            "captured_at": captured_at, "files": files, "reason": None}
-
-
-# Captured at import, ONCE. This is the witness: a merge changes the files on
-# disk, but this value can only change by restarting the process, so a probe can
-# tell "the disk says X" (gate_harness) from "the process is running X" (here).
-_SOURCE_IDENTITY = _source_identity()
+# The `source_identity` digest is CAPTURED at import, ONCE, by core.source_identity
+# - the one implementation of the rule, which deploy/loaded_source.py also
+# recomputes with (the covered file list lives there too). This value is the
+# witness: a merge changes the files on disk, but this value can only change by
+# restarting the process, so a probe can tell "the disk says X" (gate_harness)
+# from "the process is running X" (here).
+_SOURCE_IDENTITY = _capture_source_identity(
+    _Path(__file__).resolve().parent.parent)
 
 
 def _process_age() -> dict:
@@ -677,8 +622,8 @@ def health_check() -> dict:
 
     `source_identity` reports the source this process actually IMPORTED - the
     checkout root, a digest over the modules' files captured at import, and when
-    (see _source_identity, which names the covered files and how the digest is
-    ordered). It is deliberately NOT read fresh: that is what makes it a witness.
+    (see core.source_identity, which owns the covered file list and the digest
+    rule). It is deliberately NOT read fresh: that is what makes it a witness.
     `gate_harness` follows the disk and therefore moves at a merge; this field
     does not move until the process restarts, so a reader compares the TWO to
     tell "the bytes on disk changed" from "the loaded code changed", and compares

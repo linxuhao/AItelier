@@ -17,8 +17,8 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { forwardFinalText, openProposals, openThreads, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
-  turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
+import { autoReplyBody, forwardFinalText, openProposals, openThreads, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
+  textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
@@ -492,7 +492,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals'] : [])],
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -576,7 +576,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     },
     /** Director scope: the goal and protocol sections, model selection, the hidden
      *  waits, state_read and send_user_message - in their old order. */
-    async setup(scope, subject, { ctx, defineTool, runtimeSection, contextHooks, memory }) {
+    async setup(scope, subject, { ctx, defineTool, runtimeSection, contextHooks, memory, ownerMessageSent }) {
       // The director's goal, its driver protocol and the State protocol are a director's
       // mandate and tools; the steward has neither (its prompt is steward.md).
       if (!steward) scope.systemPrompt.section({ name: 'aitelier:driver-goal', order: 10, interpolate: false,
@@ -679,6 +679,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           const result = await request('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);
+          // The steward's message also goes to the owner's chat channel it answers (or the
+          // default one), in the background: the plugin sends it once and records it (step 19).
+          if (steward) void ownerMessageSent((result.result ?? result).message_id, textOf(body), body.reply_to_message_id);
           // The steward's reply joins its owner's turn in memory (a failure is logged, the reply stands).
           if (steward && memory) await syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory, signal: exec.signal })
             .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300)));
@@ -770,7 +773,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
@@ -796,7 +799,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           if (sent.forwarded) await sync();
         };
         const watch = turnWatcher((text, input) => void forwardFinalText({ request, project, me: env.AITELIER_DRIVER_ID, text, input })
-          .then(record)
+          // An automatic reply is the steward's message too: it goes where the answered message came from.
+          .then(sent => { if (sent.forwarded) void ownerMessageSent(sent.message_id, autoReplyBody(text), sent.reply_to); return record(sent); })
           .catch(error => ctx.logger.warn('auto-reply: ' + String(error?.message ?? error).slice(0, 300))));
         ctx.on('session/event', (session, event) => { if (session === agent.session) watch(event); });
       }

@@ -17,15 +17,26 @@ is replaced by `{"expired": true}` once the owner has read it, or
 `RESULT_TTL_SECONDS` after completion, whichever comes first (lazily, on every
 read and write of the table - no daemon). The payload is cleared on completion.
 
-Both tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
+Schedules (design-steward 7.4, step 16). A reminder hands the steward an
+instruction at a time (`once`) or on a 5-field cron expression, in its own time
+zone, by the wall clock. The backend is the only place `next_run_at` is computed,
+and `fire_schedule` the only place it advances: the steward's host fires a due row
+with the `next_run_at` it saw, and exactly one such fire succeeds. A fire time
+crossed while nobody fired is fired once, the next run counted from now, the
+skipped runs reported as `missed`. Every change emits `steward_schedule_changed`
+on the steward's project; the payload names the row only.
+
+All three tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, key, now, text
 from core.state_privacy import UntrustedDatabase, writer_only_read
@@ -47,6 +58,18 @@ CREATE TABLE IF NOT EXISTS state_steward_memory_requests (
  status TEXT NOT NULL CHECK(status IN ('pending','done')),
  result_json TEXT, created_at TEXT NOT NULL, completed_at TEXT, created_by TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS state_steward_memory_requests_status ON state_steward_memory_requests(status,created_at);
+CREATE TABLE IF NOT EXISTS state_steward_schedules (
+ schedule_id TEXT PRIMARY KEY,
+ version INTEGER NOT NULL CHECK(version>0),
+ title TEXT NOT NULL, instruction TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('once','cron')),
+ at TEXT, expr TEXT, tz TEXT NOT NULL,
+ enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+ next_run_at TEXT, last_run_at TEXT, last_missed INTEGER NOT NULL DEFAULT 0,
+ created_by TEXT NOT NULL CHECK(created_by IN ('owner','steward')),
+ updated_by TEXT NOT NULL CHECK(updated_by IN ('owner','steward')),
+ last_fired_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
+CREATE INDEX IF NOT EXISTS state_steward_schedules_next ON state_steward_schedules(deleted_at,next_run_at);
 """
 
 KINDS = ("create_project", "start_driver", "stop_driver")
@@ -125,6 +148,186 @@ class ProposalConflict(StateConflict):
     def __init__(self, row: dict):
         super().__init__("proposal_changed")
         self.row = row
+
+
+# ---------------------------------------------------------------- schedules: time
+SCHEDULE_FLOOR = timedelta(minutes=15)
+PREVIEW_RUNS = 5
+# Counting the runs a long outage skipped stops here (inside a write transaction).
+MISSED_CAP = 10000
+
+
+def _now() -> datetime:
+    """The schedules' clock (aware UTC); tests replace it."""
+    return datetime.now(timezone.utc)
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def default_tz() -> str:
+    """The zone of a schedule the steward creates without naming one."""
+    return os.environ.get("AITELIER_OWNER_TZ") or "Europe/Paris"
+
+
+class ScheduleInvalid(StateGraphError):
+    """A schedule that cannot be saved: `code` is invalid_schedule, invalid_timezone,
+    invalid_cron, too_frequent or at_in_past."""
+
+    def __init__(self, code, reason):
+        super().__init__(f"{code}: {reason}")
+        self.code, self.reason = code, reason
+
+
+class ScheduleConflict(StateConflict):
+    """`expected_version` is not the row's; carries the current row (also in the
+    message, which is all a State caller receives)."""
+
+    def __init__(self, row: dict):
+        super().__init__("version_conflict: " + canonical(row))
+        self.row = row
+
+
+def _zone(tz):
+    try:
+        return ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError, TypeError, OSError):
+        raise ScheduleInvalid("invalid_timezone", f"{tz!r} is not an IANA time zone") from None
+
+
+_DAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def _weekdays(field):
+    """A standard cron weekday field (0 and 7 are Sunday) as day names.
+    APScheduler's from_crontab passes numbers through as ITS weekdays, where 0 is
+    Monday, so `1-5` would run Tuesday to Saturday; names mean the same to both."""
+    def day(token):
+        if token in _DAYS:
+            return _DAYS.index(token)
+        if token.isdigit() and int(token) <= 7:
+            return int(token)
+        raise ScheduleInvalid("invalid_cron", f"weekday {token!r} is not 0-7 or sun-sat")
+    days = set()
+    for part in field.lower().split(","):
+        span, _, step = part.partition("/")
+        if span == "*":
+            low, high = 0, 6
+        elif "-" in span:
+            low, high = (day(t) for t in span.split("-", 1))
+        else:
+            low = high = day(span)
+            high = 7 if step else high
+        if low > high or (step and not (step.isdigit() and int(step) > 0)):
+            raise ScheduleInvalid("invalid_cron", f"weekday {part!r} is not a valid range or step")
+        days |= {d % 7 for d in range(low, high + 1, int(step) if step else 1)}
+    return ",".join(_DAYS[d] for d in sorted(days))
+
+
+def _cron(expr):
+    """The expression's trigger over the WALL CLOCK (naive local times carried as
+    UTC); `_cron_after` maps a wall time to its instant."""
+    from apscheduler.triggers.cron import CronTrigger
+    if not isinstance(expr, str):
+        raise ScheduleInvalid("invalid_cron", "expr must be a string")
+    fields = expr.split()
+    if len(fields) == 5 and fields[4] != "*":
+        if fields[2] != "*":
+            # Standard cron runs on EITHER restricted day field; APScheduler on both.
+            raise ScheduleInvalid("invalid_cron", "day of month and day of week are both restricted; "
+                                  "standard cron would run on either, so restrict only one")
+        fields[4] = _weekdays(fields[4])
+    try:
+        return CronTrigger.from_crontab(" ".join(fields), timezone=timezone.utc)
+    except ValueError as exc:
+        raise ScheduleInvalid("invalid_cron", str(exc)) from None
+
+
+def _cron_after(trigger, zone, after):
+    """The expression's first run strictly after `after`, by the wall clock in `zone`.
+
+    A wall time that does not exist (spring forward) maps with the offset before the
+    change, as APScheduler does: `30 2 * * *` on 2027-03-28 in Europe/Paris runs at
+    01:30Z (03:30 summer time). A wall time that occurs twice (fall back) runs once,
+    at its first occurrence; a wall time whose first occurrence is not after `after`
+    is past. (APScheduler's own zone-aware trigger answers a time at or before its
+    start inside the repeated hour, so the wall clock is walked here.)"""
+    wall = after.astimezone(zone).replace(tzinfo=None)
+    while True:
+        found = trigger.get_next_fire_time(None, (wall + timedelta(microseconds=1)).replace(tzinfo=timezone.utc))
+        if found is None:
+            return None
+        wall = found.replace(tzinfo=None)
+        moment = wall.replace(tzinfo=zone).astimezone(timezone.utc)
+        if moment > after:
+            return moment
+
+
+def _cron_runs(trigger, zone, after, count):
+    runs = []
+    while len(runs) < count:
+        run = _cron_after(trigger, zone, runs[-1] if runs else after)
+        if run is None:
+            break
+        runs.append(run)
+    return runs
+
+
+def _shape(schedule, zone):
+    """(kind, at, expr) of a schedule object, `at` as an ISO UTC string. A naive
+    `at` is a wall time in the schedule's zone."""
+    if not isinstance(schedule, dict) or schedule.get("kind") not in ("once", "cron"):
+        raise ScheduleInvalid("invalid_schedule", "schedule must be {kind: 'once', at} or {kind: 'cron', expr}")
+    if schedule["kind"] == "cron":
+        if set(schedule) != {"kind", "expr"}:
+            raise ScheduleInvalid("invalid_schedule", "a cron schedule is {kind: 'cron', expr}")
+        _cron(schedule["expr"])
+        return "cron", None, schedule["expr"].strip()
+    if set(schedule) != {"kind", "at"} or not isinstance(schedule["at"], str):
+        raise ScheduleInvalid("invalid_schedule", "a once schedule is {kind: 'once', at: ISO time}")
+    try:
+        at = datetime.fromisoformat(schedule["at"])
+    except ValueError:
+        raise ScheduleInvalid("invalid_schedule", "at must be an ISO 8601 time") from None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=zone)
+    return "once", _iso(at.replace(microsecond=0)), None
+
+
+def _upcoming(kind, at, expr, zone, moment):
+    """The next runs from `moment` of a schedule about to be saved, enforcing
+    at_in_past, a cron that runs at all, and the 15-minute floor (checked over the
+    next `PREVIEW_RUNS` runs only: a boundary, not a proof)."""
+    if kind == "once":
+        run = datetime.fromisoformat(at)
+        if run <= moment:
+            raise ScheduleInvalid("at_in_past", f"{at} is not in the future")
+        return [run]
+    runs = _cron_runs(_cron(expr), zone, moment, PREVIEW_RUNS)
+    if not runs:
+        raise ScheduleInvalid("invalid_cron", "the expression never runs")
+    for earlier, later in zip(runs, runs[1:]):
+        if later - earlier < SCHEDULE_FLOOR:
+            raise ScheduleInvalid("too_frequent", f"runs at {_iso(earlier)} and {_iso(later)} are less than "
+                                  f"{int(SCHEDULE_FLOOR.total_seconds() // 60)} minutes apart")
+    return runs
+
+
+def preview_schedule(schedule, tz) -> dict:
+    """The next runs a schedule would have if saved now, in its own zone."""
+    zone = _zone(tz)
+    kind, at, expr = _shape(schedule, zone)
+    return {"next_runs": [run.astimezone(zone).isoformat() for run in _upcoming(kind, at, expr, zone, _now())]}
+
+
+def _schedule(row) -> dict:
+    schedule = {"kind": "once", "at": row["at"]} if row["kind"] == "once" else {"kind": "cron", "expr": row["expr"]}
+    return {"schedule_id": row["schedule_id"], "version": row["version"], "title": row["title"],
+            "instruction": row["instruction"], "schedule": schedule, "tz": row["tz"],
+            "enabled": bool(row["enabled"]), "next_run_at": row["next_run_at"], "last_run_at": row["last_run_at"],
+            "last_missed": row["last_missed"], "created_by": row["created_by"], "updated_by": row["updated_by"],
+            "last_fired_by": row["last_fired_by"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
 
 class StateSteward:
@@ -527,3 +730,167 @@ class StateSteward:
             self._expire(conn)
             return self._record(conn, "complete_steward_memory_request", request_key, request_hash,
                                 {"request_id": request_id, "status": "done"})
+
+    # ---------------------------------------------------------------- schedules
+    # The steward writes through its State commands (request_key, its own project);
+    # the owner through the HTTP routes (as_owner=True, the owner-session check).
+    def _author(self, conn, project_id, as_owner):
+        if as_owner:
+            self._owner()
+            return "owner"
+        self._steward(conn, project_id)
+        return "steward"
+
+    def _keyed(self, conn, operation, request_key, request_hash):
+        return self._replay(conn, operation, request_key, request_hash) if request_key is not None else None
+
+    def _done(self, conn, operation, request_key, request_hash, schedule_id, result):
+        """Emit the change on the steward's project, then record the result."""
+        home = steward_project()
+        if conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (home,)).fetchone():
+            self.store._event(conn, home, None, "steward_schedule_changed", {"schedule_id": schedule_id})
+        return self._record(conn, operation, request_key, request_hash, result) if request_key is not None else result
+
+    @staticmethod
+    def _schedule_row(conn, schedule_id):
+        row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=? AND deleted_at IS NULL",
+                           (schedule_id,)).fetchone()
+        if row is None:
+            raise StateNotFound("unknown_schedule")
+        return row
+
+    @writer_only_read("list_steward_schedules")
+    def list_schedules(self, include_disabled=True):
+        """Every live schedule, soonest first (no next run last). The owner's session
+        or the steward only."""
+        where = "" if include_disabled else " AND enabled=1"
+        with self.store.transaction() as conn:
+            if not self.is_owner_session():
+                self._steward(conn)
+            rows = conn.execute("SELECT * FROM state_steward_schedules WHERE deleted_at IS NULL" + where +
+                                " ORDER BY next_run_at IS NULL, next_run_at, created_at, schedule_id").fetchall()
+        return {"schedules": [_schedule(r) for r in rows]}
+
+    def create_schedule(self, title, instruction, schedule, tz=None, enabled=True, project_id=None,
+                        request_key=None, as_owner=False):
+        title, instruction = text(title, "title", 200), text(instruction, "instruction", 2000)
+        tz = tz or default_tz()
+        zone = _zone(tz)
+        kind, at, expr = _shape(schedule, zone)
+        request_hash = _hash(["create", title, instruction, schedule, tz, enabled])
+        with self.store.transaction(write=True) as conn:
+            by = self._author(conn, project_id, as_owner)
+            replay = self._keyed(conn, "create_steward_schedule", request_key, request_hash)
+            if replay is not None:
+                return replay
+            moment = _now()
+            runs = _upcoming(kind, at, expr, zone, moment)
+            schedule_id, stamp = "sch-" + uuid4().hex[:12], _iso(moment)
+            conn.execute("INSERT INTO state_steward_schedules(schedule_id,version,title,instruction,kind,at,expr,tz,"
+                         "enabled,next_run_at,created_by,updated_by,created_at,updated_at) "
+                         "VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (schedule_id, title, instruction, kind, at, expr, tz, int(bool(enabled)),
+                          _iso(runs[0]) if enabled else None, by, by, stamp, stamp))
+            out = self._done(conn, "create_steward_schedule", request_key, request_hash, schedule_id,
+                             _schedule(self._schedule_row(conn, schedule_id)))
+        self._notify()
+        return out
+
+    def update_schedule(self, schedule_id, expected_version, title=None, instruction=None, schedule=None, tz=None,
+                        enabled=None, project_id=None, request_key=None, as_owner=False):
+        """Change what is given. A new schedule or zone, or enabling, recomputes the
+        next run from now; disabling clears it; otherwise it is kept."""
+        request_hash = _hash(["update", schedule_id, expected_version, title, instruction, schedule, tz, enabled])
+        with self.store.transaction(write=True) as conn:
+            by = self._author(conn, project_id, as_owner)
+            replay = self._keyed(conn, "update_steward_schedule", request_key, request_hash)
+            if replay is not None:
+                return replay
+            row = self._schedule_row(conn, schedule_id)
+            if row["version"] != expected_version:
+                raise ScheduleConflict(_schedule(row))
+            current = _schedule(row)
+            title = text(title, "title", 200) if title is not None else row["title"]
+            instruction = text(instruction, "instruction", 2000) if instruction is not None else row["instruction"]
+            tz = tz if tz is not None else row["tz"]
+            zone = _zone(tz)
+            kind, at, expr = _shape(schedule if schedule is not None else current["schedule"], zone)
+            enabled = bool(row["enabled"]) if enabled is None else enabled
+            moment = _now()
+            if (kind, at, expr, tz) != (row["kind"], row["at"], row["expr"], row["tz"]) or (
+                    enabled and not row["enabled"]):
+                upcoming = _upcoming(kind, at, expr, zone, moment)[0]
+                next_run = _iso(upcoming) if enabled else None
+            else:
+                next_run = row["next_run_at"] if enabled else None
+            conn.execute("UPDATE state_steward_schedules SET version=version+1,title=?,instruction=?,kind=?,at=?,"
+                         "expr=?,tz=?,enabled=?,next_run_at=?,updated_by=?,updated_at=? WHERE schedule_id=?",
+                         (title, instruction, kind, at, expr, tz, int(enabled), next_run, by, _iso(moment),
+                          schedule_id))
+            out = self._done(conn, "update_steward_schedule", request_key, request_hash, schedule_id,
+                             _schedule(self._schedule_row(conn, schedule_id)))
+        self._notify()
+        return out
+
+    def delete_schedule(self, schedule_id, expected_version, project_id=None, request_key=None, as_owner=False):
+        """Soft delete: the row is never listed and never fires again."""
+        request_hash = _hash(["delete", schedule_id, expected_version])
+        with self.store.transaction(write=True) as conn:
+            by = self._author(conn, project_id, as_owner)
+            replay = self._keyed(conn, "delete_steward_schedule", request_key, request_hash)
+            if replay is not None:
+                return replay
+            row = self._schedule_row(conn, schedule_id)
+            if row["version"] != expected_version:
+                raise ScheduleConflict(_schedule(row))
+            stamp = _iso(_now())
+            conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,"
+                         "updated_by=?,updated_at=?,deleted_at=? WHERE schedule_id=?", (by, stamp, stamp, schedule_id))
+            out = self._done(conn, "delete_steward_schedule", request_key, request_hash, schedule_id,
+                             {"deleted": True, "schedule_id": schedule_id})
+        self._notify()
+        return out
+
+    def fire_schedule(self, schedule_id, expected_next_run_at, project_id=None, request_key=None):
+        """The steward's host fires a due row: in ONE transaction the row must be live,
+        enabled, its next_run_at the one the host saw, and due. Exactly one fire of a
+        given next_run_at succeeds; any other answers fired: false with the row."""
+        try:
+            expected = datetime.fromisoformat(expected_next_run_at)
+        except (TypeError, ValueError):
+            raise StateGraphError("expected_next_run_at must be an ISO 8601 time") from None
+        if expected.tzinfo is None:
+            raise StateGraphError("expected_next_run_at must carry its UTC offset")
+        request_hash = _hash(["fire", schedule_id, expected_next_run_at])
+        with self.store.transaction(write=True) as conn:
+            self._steward(conn, project_id)
+            replay = self._keyed(conn, "fire_steward_schedule", request_key, request_hash)
+            if replay is not None:
+                return replay
+            row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=? AND deleted_at IS NULL",
+                               (schedule_id,)).fetchone()
+            moment = _now()
+            if (row is None or not row["enabled"] or row["next_run_at"] is None
+                    or datetime.fromisoformat(row["next_run_at"]) != expected or expected > moment):
+                result = {"fired": False, "schedule": _schedule(row) if row is not None else None}
+                return self._record(conn, "fire_steward_schedule", request_key, request_hash, result) \
+                    if request_key is not None else result
+            missed, next_run = 0, None
+            if row["kind"] == "cron":
+                trigger, zone, cursor = _cron(row["expr"]), _zone(row["tz"]), expected
+                while missed < MISSED_CAP:
+                    cursor = _cron_after(trigger, zone, cursor)
+                    if cursor is None or cursor > moment:
+                        break
+                    missed += 1
+                upcoming = _cron_after(trigger, zone, moment)
+                next_run = _iso(upcoming) if upcoming is not None else None
+            conn.execute("UPDATE state_steward_schedules SET version=version+1,last_run_at=?,last_missed=?,"
+                         "next_run_at=?,enabled=?,last_fired_by=? WHERE schedule_id=?",
+                         (_iso(moment), missed, next_run, int(next_run is not None), self.driver_id, schedule_id))
+            out = self._done(conn, "fire_steward_schedule", request_key, request_hash, schedule_id, {
+                "fired": True, "schedule": _schedule(self._schedule_row(conn, schedule_id)),
+                "due_at": row["next_run_at"], "late_seconds": int((moment - expected).total_seconds()),
+                "missed": missed})
+        self._notify()
+        return out

@@ -91,6 +91,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # decision and their results, and the owner's memory requests, whose results
     # can carry the owner's profile text. No projection: never public.
     "state_steward_proposals", "state_steward_memory_requests",
+    # Step 16: the steward's scheduled reminders. A row's instruction is the
+    # owner's (or the steward's) standing order. No projection: never public.
+    "state_steward_schedules",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

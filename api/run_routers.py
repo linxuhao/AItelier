@@ -5,6 +5,7 @@ from core.checkpoint_observation import observe_checkpoint, checkpoint_phase
 # Bridges skillflow's run/trace query APIs to HTTP.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from pydantic import BaseModel
 from api import _read_cache
@@ -112,41 +113,131 @@ def start_run(
 
 # ── Run listing (all configs) ────────────────────────────────────────
 
+# How far back the default run list reaches. The dashboard's page shows the
+# window; the archive is one explicit request away (`?include_all=true`).
+# Measured on the state DB 2026-11-18T16:05Z: 1545 rows in the project mirror,
+# 243 of them updated inside 30 days. One pass over all 1545 costs 8.9-28.1 s of
+# this process's single core — see `list_all_runs`'s docstring for why that
+# number is the whole problem.
+RUNS_WINDOW_DAYS = 30
+
+
+def _runs_now() -> datetime:
+    """The one clock the window cutoff reads. A seam for tests, nothing else."""
+    return datetime.now(timezone.utc)
+
+
+def _window_cutoff() -> datetime:
+    """The oldest `updated_at` still inside the window, from ONE clock read.
+
+    Called once per REQUEST, before the read cache is consulted, so the cutoff
+    belongs to the request rather than to whichever rebuild filled the entry.
+    """
+    return _runs_now() - timedelta(days=RUNS_WINDOW_DAYS)
+
+
+def _parse_utc(value) -> datetime | None:
+    """Read a mirror-row timestamp as an aware UTC datetime, or None if unreadable.
+
+    SQLite writes `runs.updated_at` with CURRENT_TIMESTAMP — "YYYY-MM-DD HH:MM:SS",
+    UTC and naive — so a naive value is read as UTC. ISO forms with `T`, `Z` or an
+    offset are accepted too; anything else is None, because "I cannot date this
+    row" is not evidence that it moved recently.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _inside_window(row: dict, cutoff: datetime) -> bool:
+    """Whether this row's own `updated_at` is at or after `cutoff`.
+
+    A missing, empty or unreadable `updated_at` is OUTSIDE the window: the window
+    is a claim about when the row last moved, and a row that cannot prove it moved
+    recently is an old row by definition. `?include_all=true` still returns it.
+    """
+    updated = _parse_utc(row.get("updated_at"))
+    return updated is not None and updated >= cutoff
+
+
 @router.get("/runs")
 def list_all_runs(
     config_name: Optional[str] = Query(None, description="Filter by config name"),
     status: Optional[str] = Query(None, description="Filter by status prefix (e.g. running)"),
+    include_all: bool = Query(
+        False,
+        description=f"Include runs whose last update is older than the "
+                    f"{RUNS_WINDOW_DAYS}-day window (the archive)"),
     request: Request = None,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     registry=Depends(get_config_registry),
 ):
-    """List config runs across all configs (newest first), with config label and
-    step labels attached so any config renders generically.
+    """List recent config runs across all configs (newest first), with config
+    label and step labels attached so any config renders generically.
+
+    The list is WINDOWED to the last `RUNS_WINDOW_DAYS` (30) days, and that is a
+    cost decision, not a display one. Measured on the state DB 2026-11-18T16:05Z:
+    the project mirror holds 1545 rows, of which 243 were updated inside 30 days —
+    exactly what the dashboard page shows. Enriching the mirror is not free per
+    row: one `list_runs` for every row, a trace query for every non-terminal run,
+    one cache-stats batch over every run id — measured at 8.9-28.1 s for one pass
+    over all 1545 (the same cost model `api/_read_cache.py` records: this backend
+    is ONE uvicorn process, one interpreter, one GIL, shared with the scheduler
+    driving live pipeline runs, so a pass is not spread over the box's idle cores).
+    The window is therefore applied in `_list_all_runs_uncached` BEFORE that pass,
+    so a request costs the 243 rows it can show, not the 1545-row archive.
+
+    Older rows are still one explicit request away: `?include_all=true` returns
+    them unchanged — the flag decides WHICH rows are enriched, never what a row
+    says. The response names both counts: `total_count` is every row the mirror
+    returned, `returned_count` is the length of `runs`, so a page can show "showing
+    N of M" without a second call, and `window_days` says what N means.
 
     Cached for a few seconds (api/_read_cache) — see the note in `list_repos`.
-    The cache key carries `owner`, because this list IS owner-filtered and a key
-    that dropped it would serve one identity's runs to another.
     """
     owner = owner_filter(user, request)
-    # The key carries the OWNER and nothing else. It used to carry `config_name`
-    # and `status` too, which are free-form query params an anonymous caller
-    # picks: `?status=<random>` was a fresh key every time, so it never hit and
-    # paid the full ~0.5s uncached kernel — the same amplifier the cache was
-    # added to remove, one query param away. Worse, once `_read_cache` grew a
-    # key cap, ~512 such requests EVICTED the legitimate entries and pushed
-    # every real dashboard tab back onto the uncached path.
+    # ONE clock read per request, and it happens here rather than inside the
+    # cached builder so the cutoff is the request's even when the entry hits.
+    cutoff = _window_cutoff()
+    # The key carries the OWNER and one boolean. It used to carry `config_name`
+    # and `status`, which are free-form query params an anonymous caller picks:
+    # `?status=<random>` was a fresh key every time, so it never hit and paid the
+    # full uncached pass — the same amplifier the cache was added to remove, one
+    # query param away. Worse, once `_read_cache` grew a key cap, ~512 such
+    # requests EVICTED the legitimate entries and pushed every real dashboard tab
+    # back onto the uncached path.
     #
-    # So: cache the unfiltered list, and filter the cached copy. The filters are
-    # a list comprehension over ~20 rows; the expensive part is what is now
-    # shared. Nothing an attacker types reaches the key.
-    rows = _read_cache.cached(("runs", owner),
-                              lambda: _list_all_runs_uncached(owner, db, registry))
+    # `include_all` is a BOOLEAN, so it is not that hazard again: FastAPI parses
+    # it into exactly two values and rejects anything else with a 422, which means
+    # a caller-chosen STRING can never mint a cache key. The key space here is
+    # two entries per identity, by construction.
+    #
+    # So: cache the windowed-but-unfiltered list, and filter the cached copy. The
+    # filters are a list comprehension over ~20 rows; the expensive part is what
+    # is now shared. Nothing an attacker types reaches the key.
+    cached = _read_cache.cached(
+        ("runs", owner, bool(include_all)),
+        lambda: _list_all_runs_uncached(owner, db, registry,
+                                        cutoff=None if include_all else cutoff),
+    )
+    rows = cached["runs"]
     if config_name:
         rows = [r for r in rows if (r.get("config_name") or "dpe_default_v2") == config_name]
     if status:
         rows = [r for r in rows if (r.get("status") or "").split(":")[0] == status]
-    return {"runs": [execution_progress(request, row) for row in rows]}
+    return {
+        "runs": [execution_progress(request, row) for row in rows],
+        "window_days": RUNS_WINDOW_DAYS,
+        "total_count": cached["total_count"],
+        "returned_count": len(rows),
+    }
 
 
 _LIVENESS_TERMINAL_STATUSES = {"completed", "failed", "paused"}
@@ -180,8 +271,24 @@ def _attach_liveness(rows: list[dict], pid_to_runs: dict[str, list[dict]], sf) -
                   "stalled": live["stalled"]})
 
 
-def _list_all_runs_uncached(owner, db, registry):
+def _list_all_runs_uncached(owner, db, registry, *, cutoff):
+    """Enrich the rows inside the window, and report how many rows exist.
+
+    `cutoff` is the oldest `updated_at` the caller will show (`None` = no window,
+    i.e. `?include_all=true`). The filter runs BEFORE the enrichment envelope on
+    purpose: what costs seconds is the per-row work (one `list_runs` per row, one
+    trace read per non-terminal run, one cache-stats batch over the collected run
+    ids), and that must cost the window rather than the archive — see
+    `list_all_runs`'s docstring for the measured numbers.
+
+    Returns `{"runs": [...], "total_count": n}`, where `total_count` counts every
+    row the mirror returned, windowed out or not, so the caller can say
+    `returned_count < total_count` without a second query.
+    """
     rows = db.list_projects_with_stats(owner_email=owner)
+    total_count = len(rows)
+    if cutoff is not None:
+        rows = [r for r in rows if _inside_window(r, cutoff)]
     out = []
     for r in rows:
         cfg = r.get("config_name") or "dpe_default_v2"
@@ -243,7 +350,7 @@ def _list_all_runs_uncached(owner, db, registry):
         for r in out:
             r["cache_stats"] = None
 
-    return out
+    return {"runs": out, "total_count": total_count}
 
 
 # ── Run listing (per project) ────────────────────────────────────────

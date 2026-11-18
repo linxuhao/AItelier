@@ -301,11 +301,18 @@ class TestTheReadCache:
         amplifier the cache was added to remove, one parameter away. After the
         cache grew a key cap it was worse: ~512 such requests evicted the real
         entries and pushed every dashboard tab back onto the slow path.
+
+        The third element is `include_all`, and it does not reopen that hole: it
+        is a BOOLEAN query param, so FastAPI accepts exactly two values and 422s
+        anything else — the key space is two entries per identity, by
+        construction, whatever string a caller types.
         """
         import api.run_routers as rr
         src = inspect.getsource(rr.list_all_runs)
-        assert '("runs", owner)' in src
-        key_line = next(l for l in src.splitlines() if '("runs", owner)' in l)
+        assert '("runs", owner, bool(include_all))' in src, (
+            "the run list's cache key must be (owner, the one boolean)")
+        key_line = next(l for l in src.splitlines()
+                        if '("runs", owner, bool(include_all))' in l)
         for caller_supplied in ("config_name", "status"):
             assert caller_supplied not in key_line, (
                 f"{caller_supplied} is caller-controlled; keying on it makes the "

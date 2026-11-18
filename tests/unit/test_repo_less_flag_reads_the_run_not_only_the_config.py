@@ -56,13 +56,19 @@ class _SF:
 
 
 def _flag(monkeypatch, repo_mode, repo_path):
-    """Run the real listing and return the single row's `repo_less`."""
+    """Run the real listing and return the single row's `repo_less`.
+
+    `cutoff=None` is the NO-WINDOW call (`?include_all=true`): these rows carry no
+    `updated_at` at all, and a row the window cannot date is outside it. The flag
+    under test is independent of the window.
+    """
     monkeypatch.setattr(rr, "get_skillflow", lambda: _SF())
     monkeypatch.setattr(rr, "enrich_project_status", lambda r: r)
     row = {"project_id": "p1", "config_name": "code_review",
            "repo_path": repo_path}
-    out = rr._list_all_runs_uncached("o@e", _DB([row]), _Registry(repo_mode))
-    return out[0]["repo_less"]
+    out = rr._list_all_runs_uncached("o@e", _DB([row]), _Registry(repo_mode),
+                                     cutoff=None)
+    return out["runs"][0]["repo_less"]
 
 
 def test_a_repoless_config_with_no_repository_is_repo_less(monkeypatch):

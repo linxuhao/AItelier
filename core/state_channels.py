@@ -30,7 +30,13 @@ connected or not, a short detail, and the WeChat login QR as an SVG while a scan
 needed) into `state_owner_channel_status`, one row per channel, which only the owner's
 dashboard reads. Neither the detail nor the QR is ever logged.
 
-All four tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
+A binding attempt that names its channel message is remembered by that message
+(`state_owner_channel_bind_attempts`: who, which message, bound or the refusal), so a
+channel that delivers it again - the WeChat plugin replays the bridge's last minutes
+after a restart - neither counts a refused guess twice nor relays a code that already
+bound its sender as an owner message: bind and relay both answer it as a duplicate.
+
+All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
 
@@ -77,6 +83,12 @@ DROP INDEX IF EXISTS state_message_sources_inbound;
 CREATE UNIQUE INDEX IF NOT EXISTS state_message_sources_inbound_by_sender
  ON state_message_sources(channel,sender_ref,channel_message_ref) WHERE direction='in';
 CREATE INDEX IF NOT EXISTS state_message_sources_rate ON state_message_sources(channel,direction,at);
+CREATE TABLE IF NOT EXISTS state_owner_channel_bind_attempts (
+ channel TEXT NOT NULL CHECK(channel IN ('slack','wechat')),
+ sender_ref TEXT NOT NULL CHECK(sender_ref<>''),
+ channel_message_ref TEXT NOT NULL CHECK(channel_message_ref<>''),
+ outcome TEXT NOT NULL, at TEXT NOT NULL,
+ PRIMARY KEY(channel, sender_ref, channel_message_ref));
 CREATE TABLE IF NOT EXISTS state_owner_channel_status (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
  connected INTEGER NOT NULL CHECK(connected IN (0,1)),
@@ -213,6 +225,16 @@ def _require_utf8(field, value, code="invalid_request"):
             raise StateGraphError(f"{code}: {field} is not valid Unicode text") from None
 
 
+def _bind_attempt(conn, channel, sender_ref, channel_message_ref):
+    """How an earlier binding attempt by this channel message ended ('bound' or its
+    refusal code), or None when it was not one."""
+    if channel_message_ref is None:
+        return None
+    row = conn.execute("SELECT outcome FROM state_owner_channel_bind_attempts WHERE channel=? AND sender_ref=? "
+                       "AND channel_message_ref=?", (channel, sender_ref, channel_message_ref)).fetchone()
+    return row[0] if row is not None else None
+
+
 def _refusal(exc) -> str:
     return str(exc).split(":", 1)[0]
 
@@ -270,6 +292,11 @@ class StateChannels:
                                      "AND request_key=?", (self.actor, "relay_owner_message:ref", ref_key)).fetchone()
                 return {**(json.loads(first[0]) if first else {"message_id": seen[0], "approval": None}),
                         "duplicate": True}
+            # A binding message delivered again after it bound its sender: the sender is
+            # bound now, so the host relays it - it was never an owner message, and it
+            # neither lands in the conversation nor wakes the steward.
+            if _bind_attempt(conn, channel, sender_ref, channel_message_ref) is not None:
+                return {"message_id": None, "duplicate": True, "approval": None}
             moment = _now()
             per_minute, per_hour = rate_limits()
             for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
@@ -315,16 +342,24 @@ class StateChannels:
         log.warning("owner channel message refused: %s channel=%s sender_ref=%s at=%s bytes=%d",
                     code, channel, sender_ref, now(), size)
 
-    def bind_owner_channel(self, project_id, request_key, channel, sender_ref, code):
+    def bind_owner_channel(self, project_id, request_key, channel, sender_ref, code, channel_message_ref=None):
         """Bind `sender_ref` as the channel's owner account with an unexpired, unused
         code issued for that channel. A previous binding of the channel is replaced.
         Every refused attempt while the channel has a live code counts against that
         code; the BIND_FAILURES_MAX-th retires it (code_retired, even for the right
-        code, until the owner issues a new one)."""
+        code, until the owner issues a new one). An attempt that names its channel
+        message is answered once: a second delivery of it (under any request_key)
+        answers {bound, duplicate: true} and counts nothing."""
         request_hash = _hash([channel, sender_ref, code])
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
+            # Before the request_key replay: a bind that succeeded long ago and was
+            # replaced since must not be answered "bound" again.
+            first = _bind_attempt(conn, channel, sender_ref, channel_message_ref)
+            if first is not None:
+                return {"bound": first == "bound", "channel": channel, "sender_ref": sender_ref, "duplicate": True,
+                        **({} if first == "bound" else {"refusal": first})}
             replay = self.steward._replay(conn, "bind_owner_channel", request_key, request_hash)
             if replay is not None:
                 return replay
@@ -345,6 +380,10 @@ class StateChannels:
                 refusal = "code_used"
             elif datetime.fromisoformat(row["expires_at"]) <= moment:
                 refusal = "code_expired"
+            if channel_message_ref is not None:
+                conn.execute("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,"
+                             "outcome,at) VALUES(?,?,?,?,?)",
+                             (channel, sender_ref, channel_message_ref, refusal or "bound", moment.isoformat()))
             if refusal is not None:
                 if live is not None and live["retired_at"] is None:
                     failed = live["failed_attempts"] + 1

@@ -107,6 +107,28 @@ test('six digits from an unbound sender bind it, and that sender is told in one 
   assert.ok(!s.slack.sent[0].text.includes('654321') && !s.slack.sent[0].text.includes('code_expired'));
 });
 
+test('a binding message delivered again (a channel replaying after a restart) is the host\'s duplicate: no second line, no owner message', async () => {
+  // A fresh process: nothing here remembers the first delivery; only the host does.
+  const s = setup({ bindings: {} });
+  s.host.bindResult = { bound: false, channel: 'slack', sender_ref: 'U-STRANGER', duplicate: true, refusal: 'invalid_code' };
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'g-1', text: '111111' }),
+    { accepted: false, duplicate: true, reason: 'invalid_code' });
+  s.host.bindResult = { bound: true, channel: 'wechat', sender_ref: 'wx-old', duplicate: true };
+  assert.deepEqual(await s.inbound({ channel: 'wechat', senderRef: 'wx-old', messageRef: 'w-1', text: '222222' }),
+    { accepted: true, duplicate: true });
+  assert.deepEqual(only(s.calls, 'bind').map(call => call.messageRef), ['g-1', 'w-1'], 'the host gets the channel message to know it by');
+  assert.equal(s.slack.sent.length + s.wechat.sent.length, 0, 'a duplicate is not answered');
+  assert.ok(s.logs.some(([event]) => event === 'channel_bind_duplicate'));
+  // The owner's code replayed after it bound: the owner is bound now, so it is relayed, and the
+  // host answers it as a duplicate (it never was an owner message) - nothing is said either.
+  const o = setup();
+  o.host.next = { message_id: null, duplicate: true, approval: null };
+  assert.deepEqual(await o.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-code', text: '123456' }),
+    { accepted: true, duplicate: true });
+  assert.equal(only(o.calls, 'relay').length, 1);
+  assert.equal(o.slack.sent.length, 0);
+});
+
 test('six digits from the bound owner are an ordinary message; anything but exactly six ASCII digits is too', async () => {
   const s = setup();
   await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: '123456' });

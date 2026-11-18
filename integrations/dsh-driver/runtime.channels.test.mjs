@@ -182,7 +182,8 @@ test('real pinned DSH, the steward: a channel plugin loads, its messages reach r
     assert.deepEqual({ ...relay, request_key: undefined }, { request_key: undefined, channel: 'slack', sender_ref: 'U-OWNER',
       channel_message_ref: 'ts-1', body: 'hello from slack' });
     assert.match(relay.request_key, /^relay:slack:[0-9a-f]{16}$/);
-    assert.deepEqual(command('bind_owner_channel').map(({ request_key, ...rest }) => rest), [{ channel: 'slack', sender_ref: 'U-STRANGER', code: '123456' }]);
+    assert.deepEqual(command('bind_owner_channel').map(({ request_key, ...rest }) => rest),
+      [{ channel: 'slack', sender_ref: 'U-STRANGER', code: '123456', channel_message_ref: 'ts-2' }]);
     // The stranger gets one line about its own binding attempt, addressed to it alone.
     await r.until('the binding answer was not sent', () => seen.sends.length >= 1);
     assert.deepEqual(seen.sends[0].options, { replyToRef: 'ts-2', to: 'U-STRANGER' });

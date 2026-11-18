@@ -174,6 +174,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (attempt && (await binding(channel))?.sender_ref !== senderRef) {
         const result = await host.bind({ channel, senderRef, code: trimmed, messageRef });
         const bound = result?.bound === true;
+        // A binding message delivered again (a channel replaying after a restart) was
+        // answered the first time: no second line, whatever this process remembers.
+        if (result?.duplicate) {
+          log('channel_bind_duplicate', seen);
+          return { accepted: bound, duplicate: true, ...(bound ? {} : { reason: String(result?.refusal ?? 'refused') }) };
+        }
         log(bound ? 'channel_bound' : 'channel_bind_refused', { ...seen, ...(bound ? {} : { reason: result?.refused ?? 'refused' }) });
         await answer(channel, bound ? replies.bound : replies.bindRefused, { replyToRef: messageRef, to: senderRef });
         return bound ? { accepted: true } : { accepted: false, reason: String(result?.refused ?? 'refused') };

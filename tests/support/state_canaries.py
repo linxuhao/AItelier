@@ -199,6 +199,11 @@ def _plan():
              "VALUES(?,'in','slack',?,?,?,?)"),
             (CHANNEL_MESSAGE, c("state_message_sources"), c("state_message_sources"), now,
              c("state_message_sources"))),
+        # A remembered binding attempt: the canary as its sender and channel message.
+        "state_owner_channel_bind_attempts": (
+            ("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,outcome,at) "
+             "VALUES('slack',?,?,'invalid_code',?)"),
+            (c("state_owner_channel_bind_attempts"), c("state_owner_channel_bind_attempts"), now)),
         # The WeChat status as the host reported it: the canary in the detail and the QR.
         "state_owner_channel_status": (
             ("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) "

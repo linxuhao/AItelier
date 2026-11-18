@@ -187,6 +187,53 @@ def test_four_refused_attempts_leave_the_code_live_and_none_count_without_one(wo
                    allow_write=True)["bound"]
 
 
+def bind_message(world, code, ref, key=None, channel="slack", sender=SLACK_USER):
+    """A binding attempt as the host sends it: with the channel message it came in."""
+    return execute(world.steward, "bind_owner_channel",
+                   {"request_key": key or f"bind-{ref}", "channel": channel, "sender_ref": sender, "code": code,
+                    "channel_message_ref": ref}, allow_write=True)
+
+
+def test_a_binding_message_delivered_again_after_it_bound_is_a_duplicate_not_an_owner_message(world):
+    """A WeChat plugin restart replays the bridge's last 10 minutes. The owner's binding
+    message is then from a BOUND sender, so the host relays it: it used to land in the
+    steward's conversation as an owner message and wake the steward."""
+    code = world.owner.channels.issue_code("slack")["code"]
+    assert bind_message(world, code, "ts-code") == {"bound": True, "channel": "slack", "sender_ref": SLACK_USER}
+    replayed = relay(world, code, "ts-code", key="after-restart")
+    assert replayed == {"message_id": None, "duplicate": True, "approval": None}
+    assert conversation(world) == []
+    assert execute(world.steward, "list_driver_messages", {})["messages"] == [], "the steward is not woken"
+    # The bind itself delivered again (any request_key) is a duplicate too, and binds nothing again.
+    assert bind_message(world, code, "ts-code", key="other") == {"bound": True, "channel": "slack",
+                                                                 "sender_ref": SLACK_USER, "duplicate": True}
+    # The owner's next message is an ordinary one.
+    assert relay(world, "hello", "ts-next")["duplicate"] is False and len(conversation(world)) == 1
+    # Another sender's message with that ref is its own message (refused: not bound).
+    refused(lambda: relay(world, code, "ts-code", key="stranger", sender="U-STRANGER"), "channel_sender_not_bound")
+
+
+def test_a_refused_guess_delivered_again_is_not_counted_again(world):
+    """Refusals used to be recorded nowhere, so each redelivery of a stranger's wrong
+    guess counted again and a replay could retire the owner's live code."""
+    code = world.owner.channels.issue_code("slack")["code"]
+    wrong = f"{(int(code) + 1) % 10 ** 6:06d}"
+    for i in range(state_channels.BIND_FAILURES_MAX - 1):
+        refused(lambda: bind_message(world, wrong, f"guess-{i}", sender="U-STRANGER"), "invalid_code")
+    for replay in range(3):
+        for i in range(state_channels.BIND_FAILURES_MAX - 1):
+            again = bind_message(world, wrong, f"guess-{i}", key=f"replay-{replay}-{i}", sender="U-STRANGER")
+            assert again == {"bound": False, "channel": "slack", "sender_ref": "U-STRANGER", "duplicate": True,
+                             "refusal": "invalid_code"}
+            # ... and relayed (past the host's binding throttle) it is a duplicate, never an owner message.
+            assert relay(world, wrong, f"guess-{i}", key=f"relay-{replay}-{i}", sender="U-STRANGER")["duplicate"]
+    with world.db.get_connection() as conn:
+        assert tuple(conn.execute("SELECT failed_attempts, retired_at FROM state_owner_channel_codes "
+                                  "WHERE used_at IS NULL").fetchone()) == (state_channels.BIND_FAILURES_MAX - 1, None)
+    assert bind_message(world, code, "ts-owner")["bound"], "the live code still binds the owner"
+    assert conversation(world) == []
+
+
 def test_a_new_code_retires_the_unused_one_and_a_rebind_replaces_the_account(world):
     first = world.owner.channels.issue_code("slack")["code"]
     world.owner.channels.issue_code("slack")

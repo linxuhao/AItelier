@@ -660,10 +660,11 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # and delivers neither canary. Step 16 adds state_steward_schedules: its list
 # query and the owner's schedule routes. Step 19 adds the three channel tables:
 # both channel queries, the owner's channel routes and the steward's channel commands;
-# and the channels' status table: the owner's channel list with status, and the report.
+# and the channels' status table: the owner's channel list with status, and the report;
+# and the remembered binding attempts, read by the steward's bind and relay commands.
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
                   "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
-                  "state_owner_channel_status")
+                  "state_owner_channel_status", "state_owner_channel_bind_attempts")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -769,6 +770,15 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/commands/bind_owner_channel",
              {"project_id": steward_project(), "request_key": "b", "channel": "wechat", "sender_ref": "x",
               "code": "123456"}),
+            # The canary's own remembered attempt, delivered again (bind and relay read it).
+            ("POST", "/api/state/commands/bind_owner_channel",
+             {"project_id": steward_project(), "request_key": "b2", "channel": "slack",
+              "sender_ref": C.canary("state_owner_channel_bind_attempts"), "code": "123456",
+              "channel_message_ref": C.canary("state_owner_channel_bind_attempts")}),
+            ("POST", "/api/state/commands/relay_owner_message",
+             {"project_id": steward_project(), "request_key": "r2", "channel": "slack", "body": "123456",
+              "sender_ref": C.canary("state_owner_channel_bind_attempts"),
+              "channel_message_ref": C.canary("state_owner_channel_bind_attempts")}),
             ("POST", "/api/state/commands/record_channel_delivery",
              {"project_id": steward_project(), "request_key": "d", "channel": "slack",
               "message_id": C.CHANNEL_MESSAGE}),
@@ -805,6 +815,8 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert [tuple(r) for r in conn.execute("SELECT channel, connected, detail FROM "
                                                    "state_owner_channel_status")] \
                 == [("wechat", 0, C.canary("state_owner_channel_status"))]
+            assert [tuple(r) for r in conn.execute("SELECT outcome FROM state_owner_channel_bind_attempts")] \
+                == [("invalid_code",)]
 
 
 def _trusted_db(anonymous):

@@ -102,6 +102,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # The channels' status as the steward's host reports it; the WeChat row can hold
     # the login QR (a live login token while it is shown). No projection.
     "state_owner_channel_status",
+    # Each binding attempt by its channel message (who sent it, bound or refused), so
+    # a redelivered attempt is answered once. No projection.
+    "state_owner_channel_bind_attempts",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

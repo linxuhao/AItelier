@@ -529,7 +529,8 @@ export function channelOps(request) {
       request_key: `relay:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
       body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
     bind: ({ channel, senderRef, code, messageRef }, signal) => request('/api/state/commands/bind_owner_channel', {
-      request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code }, signal)
+      request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code,
+      channel_message_ref: messageRef }, signal)
       .then(answered, refused),
     async sourceOf(messageId, signal) {
       const listed = await request('/api/state/query/message_sources', { message_ids: [messageId] }, signal);

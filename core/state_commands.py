@@ -1244,6 +1244,8 @@ class BindOwnerChannel(Project):
     channel: _CHANNEL
     sender_ref: str = Field(min_length=1, max_length=200)
     code: str = Field(min_length=1, max_length=32)
+    # The channel message the code came in: a redelivery of it is answered once.
+    channel_message_ref: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RecordChannelDelivery(Project):

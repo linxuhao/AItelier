@@ -635,7 +635,8 @@ test('chat channels (step 19): each plugin call is one State request; the reques
     "another sender's message with the same ref is its own request, never a replay of the owner's");
   answer = { bound: true, channel: 'wechat', sender_ref: 'wx' };
   assert.deepEqual(await channels.bind({ channel: 'wechat', senderRef: 'wx', code: '123456', messageRef: 'w-1' }), answer);
-  assert.deepEqual({ ...calls[3][1], request_key: undefined }, { request_key: undefined, channel: 'wechat', sender_ref: 'wx', code: '123456' });
+  assert.deepEqual({ ...calls[3][1], request_key: undefined }, { request_key: undefined, channel: 'wechat', sender_ref: 'wx', code: '123456',
+    channel_message_ref: 'w-1' }, 'the channel message goes along: the host answers a redelivered binding message once');
   assert.ok(!calls[3][1].request_key.includes('123456'), 'the code is not in the request key');
   answer = { result: { recorded: true } };
   await channels.recordDelivery({ messageId: 'm-9', channel: 'slack', channelMessageRef: 'ts-out' });

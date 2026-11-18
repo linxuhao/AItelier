@@ -193,6 +193,9 @@ export interface DirectorHost {
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
    *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
    *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).
+   *    Idempotent by (channel, senderRef, messageRef): the same binding message delivered
+   *    again answers {bound, duplicate: true, refusal?} and counts nothing; relayed (its
+   *    sender is bound now) it answers {message_id: null, duplicate: true} and writes nothing.
    *  - sourceOf: where a message came from or went to: null for the dashboard, else
    *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
    *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
@@ -204,10 +207,10 @@ export interface DirectorHost {
  *    {refused: code} when the host will not take it. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
-      Promise<{ message_id: string; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
+      Promise<{ message_id: string | null; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
         outcome: 'executed' | 'refused'; refusal?: string; result?: object } } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
-      Promise<{ bound: true; channel: string; sender_ref: string } | { refused: string; reason?: string }>;
+      Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;
     sourceOf(messageId: string, signal?: AbortSignal): Promise<null | { direction: 'in' | 'out'; channel: 'slack' | 'wechat';
       sender_ref: string | null; channel_message_ref: string | null; at: string; error: string | null }>;
     recordDelivery(delivery: { messageId: string; channel: 'slack' | 'wechat'; channelMessageRef?: string; error?: string },

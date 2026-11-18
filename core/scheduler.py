@@ -1226,7 +1226,27 @@ async def _run_skillflow_tick(project_id: str, loop):
         return
     sf = get_skillflow()
     try:
-        run_id = _get_or_create_skillflow_run(project_id)
+        # OFF THE EVENT LOOP. Every read in this prologue is synchronous SQLite —
+        # `db.get_project` (the dump's `scheduler.py:467 → db_manager.py:877`),
+        # skillflow's own `skillflow_runs` lookup, and the guards' queries — and
+        # `tick_log`/`get_or_create_run`/`ensure_for_run` behind them are plain
+        # blocking calls. On the loop thread that silence is the WHOLE server:
+        # HTTP requests, SSE and /health all wait for the query. The watchdog
+        # 4 of its 20 dumps of 2026-11-17 name `_get_or_create_skillflow_run`
+        # here (3 of them with `db_manager.py:877 get_project` beneath it), and 6
+        # more name `poll_and_execute` → `db.get_active_projects` → `list_runs`.
+        #
+        # Thread affinity: `DBManager.get_connection` opens a FRESH connection
+        # per operation and decides `check_same_thread` by asking whether the
+        # CALLER runs a loop (`core.off_loop_sqlite.on_event_loop`), so a call
+        # made here opens, uses and closes its connection on one worker thread —
+        # no connection is shared across threads, and this is strictly safer
+        # than the loop-thread open that needed `check_same_thread=False` in
+        # order to hand its close to the closer thread. skillflow's connection is
+        # already `check_same_thread=False` and guarded by its own lock, which is
+        # the same boundary `_advance_off_the_loop` has used for agent steps all
+        # along (sqlite3.threadsafety == 3 here, so the module serializes).
+        run_id = await asyncio.to_thread(_get_or_create_skillflow_run, project_id)
     except Exception as e:
         # A run that dies inside create_run has no run row, so no trace and no
         # failed status to enrich — the project just sits at 'planning' forever
@@ -1262,7 +1282,15 @@ async def _run_skillflow_tick(project_id: str, loop):
     # Concurrent ticks for one project are prevented by the per-project lock
     # (taken at dispatch in `poll_and_execute`, or by `_execute_skillflow_tick`).
     # This is a safety net for edge cases.
-    if _has_active_claim(sf, run_id):
+    #
+    # Off the loop, like the two reads around it: it is a `skillflow_steps`
+    # query, a `/proc` probe of the claim's owner and a resolver lookup, and the
+    # loop-stack dumps of 2026-11-17 name exactly this run of reads on the
+    # watched-loop thread (`_get_or_create_skillflow_run` → `db.get_project`,
+    # then `_parked_checkpoint` → `sf.get_steps`). See
+    # `_get_or_create_skillflow_run`'s call site for the rule and the engine's
+    # own connection settings that make it safe.
+    if await asyncio.to_thread(_has_active_claim, sf, run_id):
         tick_log(project_id, "active_claim", run=run_id[:8])
         return
 
@@ -1290,7 +1318,13 @@ async def _run_skillflow_tick(project_id: str, loop):
     # raises for it, and that failure still lands on the tick surface
     # (`outcome=tick_error`) where it is actionable. This reports a wait; it
     # does not forgive a broken tree.
-    parked = _parked_checkpoint(sf, run_id)
+    # Off the loop: `_parked_checkpoint` reads the run row and then EVERY step
+    # instance of the run (`sf.get_steps`), which is where the watchdog caught
+    # the loop silent for seconds (`scheduler.py:1204 _parked_checkpoint` →
+    # `skillflow/core.py:1883 get_steps` in 4 of the 20 dumps of 2026-11-17).
+    # It is a pure read whose result decides nothing but which line this tick
+    # logs, so the thread it runs on changes nothing else.
+    parked = await asyncio.to_thread(_parked_checkpoint, sf, run_id)
     if parked is not None:
         tick_log(project_id, "terminal", run=run_id[:8], status="paused",
                  step=parked["step"] or None,
@@ -2945,6 +2979,55 @@ async def settle_scheduler_maintenance(*, exit_error: BaseException | None = Non
             "lease sweep failed during lifespan exit", exc_info=True)
 
 
+async def _active_projects_off_the_loop(**query) -> list:
+    """``db.get_active_projects`` in a worker thread — off the event loop.
+
+    This one call is the longest silence the poller ever imposes on the server,
+    because of what is underneath it: the query is not a local ``runs`` scan
+    only, it first asks skillflow for every ACTIVE run in four separate
+    ``list_runs`` sweeps (running/paused, then completed/failed), each of which
+    is a synchronous ``SELECT * FROM skillflow_runs`` on a table that grows with
+    every run this host has ever executed. On the loop thread the process
+    answers nothing until it returns: HTTP, SSE, /health, all of it.
+
+    That is measured, not theoretical. The container's own watchdog
+    (`core/loop_stack_watchdog.py`) captured 20 stall dumps on 2026-11-17T23:05:18Z-23:40:56Z
+    in ``~/.AItelier/logs/loop-stack-dumps/``, the longest
+    ``watched loop silent for 6.939s`` — and 6 of the 20 name this exact chain
+    in the watched-loop section::
+
+        apscheduler/executors/base.py:181 run_coroutine_job
+        core/scheduler.py:2990 poll_and_execute
+        core/db_manager.py:1170 get_active_projects
+        skillflow/core.py:1836 list_runs -> .fetchall()
+
+    `poll_and_execute` is an ASYNC apscheduler job, so everything it does
+    synchronously is a stall of the whole backend; the tick's dispatch has
+    always been quick and the reads around it were the part nobody had moved.
+
+    Two things are deliberately NOT changed here:
+
+    * the QUERY. Same method, same keyword arguments, same rows, same order —
+      the caller passes them through untouched, so the selected project set is
+      byte-for-byte what it was. Nothing about `get_active_projects` itself is
+      touched; only the thread that calls it.
+    * the event-loop-only part. `_dispatch_detached_ticks` still runs on the
+      loop, because it takes per-project locks and creates asyncio tasks, and
+      its no-await atomicity is what keeps two pollers from ticketing one
+      project twice.
+
+    Thread affinity is the reason this is safe at all:
+    `DBManager.get_connection` opens a FRESH connection per operation and picks
+    `check_same_thread` from `core.off_loop_sqlite.on_event_loop()` — i.e. from
+    whether the caller is on a loop — so a call made from here opens, uses and
+    closes its connection on ONE worker thread, and no connection is ever shared
+    between threads. skillflow's connection is created with
+    `check_same_thread=False` and guarded by its own lock, which is the boundary
+    `_advance_off_the_loop` already crossed for agent steps.
+    """
+    return await asyncio.to_thread(db.get_active_projects, **query)
+
+
 async def poll_and_execute():
     """Start a tick for every free project the cap allows, then RETURN.
 
@@ -2987,7 +3070,7 @@ async def poll_and_execute():
 
     # Every in-flight project may be among the rows, so ask for enough to still
     # find a full cap's worth of free ones behind them.
-    projects = db.get_active_projects(
+    projects = await _active_projects_off_the_loop(
         limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:
         tick_log("", "idle")
@@ -3188,7 +3271,7 @@ async def poll_and_execute_demo():
 
     await _sweep_ended_leases_async(wait=False)
 
-    projects = db.get_active_projects(
+    projects = await _active_projects_off_the_loop(
         fifo=True, limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:
         return []
@@ -3208,7 +3291,7 @@ async def poll_and_execute_owner(owner_email: str):
 
     await _sweep_ended_leases_async(wait=False)
 
-    projects = db.get_active_projects(
+    projects = await _active_projects_off_the_loop(
         owner_email=owner_email,
         limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:

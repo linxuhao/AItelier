@@ -6,8 +6,9 @@
   import StewardProposals from './StewardProposals.svelte';
   import StewardQuestions from './StewardQuestions.svelte';
   import StewardProfile from './StewardProfile.svelte';
+  import StewardSchedules from './StewardSchedules.svelte';
   // The steward's pane is the ordinary conversation pane of its project, plus
-  // three tabs of its own: proposals, every project's open questions, profile.
+  // tabs of its own: proposals, every project's open questions, reminders, profile.
   const { projectId, projects = [], status = null, questions = {}, onread = () => {}, onrefresh = () => {}, onanswer }: {
     projectId: string; projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     questions?: Record<string, number>; onread?: () => void; onrefresh?: () => void;
@@ -20,6 +21,7 @@
   const tabs = $derived([
     {id: 'proposals', label: t('steward.tabProposals')},
     {id: 'questions', label: t('steward.tabQuestions')},
+    {id: 'schedules', label: t('steward.tabSchedules')},
     {id: 'profile', label: t('steward.tabProfile')},
   ]);
   // "Change it" is not an endpoint: the owner tells the steward in the
@@ -36,6 +38,7 @@
   {#snippet panel(tab: string)}
     {#if tab === 'proposals'}<StewardProposals onchange={onrefresh} onrevise={revise} />
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} onanswer={answer} />
+    {:else if tab === 'schedules'}<StewardSchedules />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}
 </DriverConversationPane>

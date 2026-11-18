@@ -159,7 +159,6 @@ async def _send(app: _Harness, pilot, text: str, until) -> None:
     await _pause_until(pilot, lambda: not zone._agent_streaming)
     # One more pass so widgets mounted by the turn's last read are in the log.
     await pilot.pause()
-    await pilot.pause()
 
 
 @pytest.fixture(autouse=True)

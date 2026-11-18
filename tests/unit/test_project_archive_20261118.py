@@ -464,7 +464,6 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
 
     # applying the same migration a second time is idempotent
     initialize_graph_schema(DBManager(str(path)))
-    initialize_graph_schema(DBManager(str(path)))
     assert counts(path) == before_counts
     assert project_rows(path) == before_rows
     with sqlite3.connect(path) as conn:

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -339,7 +340,7 @@ export async function forwardFinalText({ request, project, me, text, input = '',
 const stewardAsk = 'Anything you wait on from your owner (a decision, an approval) must be a question they can see: ask it with ask_owner before you go dormant.';
 export const stewardTexts = Object.freeze({
   heldWork: 'your owner has messages you have not answered: answer each with send_user_message first',
-  idleDormant: 'Call when nothing is waiting for you: your owner\'s messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.',
+  idleDormant: `Call when nothing is waiting for you: your owner's messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes (whole minutes, ${DORMANT_MIN_MINUTES}-${DORMANT_MAX_MINUTES}) is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.`,
   askOwner: 'Ask your owner ONE concrete question only they can decide (a choice, an approval). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry; another question under that id is refused. context is optional background shown with it. The answer comes back to you as a message from your owner. Use close_question when it no longer needs an answer.',
   closeQuestion: 'Take back one of your own questions to your owner that no longer needs an answer, with the reason; it stays visible as withdrawn. An answered question cannot be closed; closing twice changes nothing.',
   continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, read whole first with portfolio_inbox (a project letter) or private_inbox (a letter in your private inbox) when a wake showed you only its first 240 characters, and read ones marked with portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in your private inbox)? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
@@ -389,6 +390,61 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
   return threads;
 }
 
+/** What the steward is shown of one project's work items (owner 2026-11-18, the steward's
+ *  self-check): project_overview carries every node whole - 860 of them on aitelier, ~1.4 MB,
+ *  816 of them closed - and a result that size was spilled to a file the steward has no tool
+ *  to read. So: the counts the overview already has, the nodes that are not closed (most
+ *  recently changed first), and the most recently changed closed ones; each node in a few
+ *  fields. The node summary stays under SUMMARY_CHARS and the open issues under ISSUES_CHARS
+ *  (the harness spills a result above ~12500 tokens, and Chinese titles cost about a token
+ *  per character): lists are shortened
+ *  from their oldest end until it fits, and `nodes_shown` says how many of how many. */
+const SUMMARY_CHARS = 10000, ISSUES_CHARS = 5000, TITLE_CHARS = 120, HOLD_CHARS = 200, RECENT_NODES = 8;
+const CLOSED_NODE = new Set(['VERIFIED', 'SUPERSEDED']);
+const nodeChanged = n => n.latest_attempt?.updated_at ?? '';
+function nodeLine(n) {
+  return { node_key: n.node_key, title: String(n.title ?? '').slice(0, TITLE_CHARS), status: n.status, readiness: n.readiness,
+    ...(n.hold?.held || n.node_hold?.held ? { held: String(n.hold?.reason ?? n.node_hold?.reason ?? '').slice(0, HOLD_CHARS) } : {}),
+    ...(n.latest_attempt ? { latest_attempt: { status: n.latest_attempt.status, updated_at: n.latest_attempt.updated_at } } : {}),
+    ...(n.open_issue_count ? { open_issue_count: n.open_issue_count } : {}),
+    ...(n.issue_id ? { issue_id: n.issue_id } : {}) };
+}
+export function projectSummary(overview, limit = SUMMARY_CHARS) {
+  if (!overview || !Array.isArray(overview.nodes)) return overview;
+  const byChange = (a, b) => (nodeChanged(b) > nodeChanged(a) ? 1 : nodeChanged(b) < nodeChanged(a) ? -1 : 0);
+  const open = overview.nodes.filter(n => !CLOSED_NODE.has(n.status)).sort(byChange).map(nodeLine);
+  const closed = overview.nodes.filter(n => CLOSED_NODE.has(n.status)).sort(byChange).slice(0, RECENT_NODES).map(nodeLine);
+  const work = [...(overview.issue_work ?? [])].sort(byChange).map(nodeLine);
+  const shown = { open: open.length, recently_closed: closed.length, issue_work: work.length };
+  const build = () => ({ project: overview.project, counts: overview.counts, readiness_counts: overview.readiness_counts,
+    ready_action_counts: overview.ready_action_counts, issue_counts: overview.issue_counts,
+    issue_work_counts: overview.issue_work_counts, observed_at: overview.observed_at,
+    open_nodes: open.slice(0, shown.open), open_issue_work: work.slice(0, shown.issue_work),
+    recently_closed_nodes: closed.slice(0, shown.recently_closed),
+    nodes_shown: { open: shown.open, open_total: open.length, open_issue_work: shown.issue_work,
+      open_issue_work_total: work.length, recently_closed: shown.recently_closed, all_total: overview.nodes.length } });
+  // Shorten the longest list from its oldest end, one node at a time, until the summary fits.
+  let summary = build();
+  while (JSON.stringify(summary).length > limit && (shown.open || shown.issue_work || shown.recently_closed)) {
+    const key = shown.recently_closed ? 'recently_closed' : shown.open >= shown.issue_work ? 'open' : 'issue_work';
+    shown[key]--; summary = build();
+  }
+  return summary;
+}
+
+/** The open issues the same way: a few fields each, newest first, shortened until they fit. */
+export function issuesSummary(page, limit = ISSUES_CHARS) {
+  if (!page || !Array.isArray(page.issues)) return page;
+  const rows = [...page.issues].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+    .map(i => ({ issue_id: i.issue_id, kind: i.kind, title: String(i.title ?? '').slice(0, TITLE_CHARS), updated_at: i.updated_at }));
+  let n = rows.length;
+  const build = () => ({ issues: rows.slice(0, n), status_counts: page.status_counts,
+    issues_shown: n, issues_read: rows.length, has_more: page.has_more === true || n < rows.length });
+  let out = build();
+  while (n > 0 && JSON.stringify(out).length > limit) { n--; out = build(); }
+  return out;
+}
+
 export function stewardOps({ request, project, me, stateDir }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
   return {
@@ -414,7 +470,7 @@ export function stewardOps({ request, project, me, stateDir }) {
           list('/api/state/query/project_overview', { project_id: projectId }, signal),
           list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: 50 }, signal),
           list('/api/state/query/list_user_questions', { project_id: projectId, status: 'open', limit: 50 }, signal)]);
-        return { project_id: projectId, overview, open_issues: issues, open_questions: questions };
+        return { project_id: projectId, overview: projectSummary(overview), open_issues: issuesSummary(issues), open_questions: questions };
       },
       conversation: (projectId, cursor, signal) => list('/api/state/query/list_user_conversation',
         { project_id: projectId, limit: 30, ...(cursor ? { cursor } : {}) }, signal),

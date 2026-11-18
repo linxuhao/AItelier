@@ -13,7 +13,7 @@ import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
-import { conversationTurns, stewardOps, syncConversation, replyToLetter, unansweredOwnerMessages,
+import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
@@ -91,6 +91,44 @@ test('presented_only: the steward is shown no guidance for tools it cannot call'
   for (const name of ['mcp:agentmcp', 'mcp-resource-servers', discovery])
     assert.ok(presentSections(sections, open, discovery).some(s => s.name === name), name);
   assert.equal(presentSections(undefined, effective.steward, discovery), undefined, 'an assembly without sections is passed through');
+});
+
+test('portfolio_project is a bounded summary: a project of 900 work items fits inline, open ones first, nothing hidden silently', () => {
+  // Measured 2026-11-18: aitelier's whole overview was ~1.4 MB (860 nodes, 816 closed), and
+  // the harness spilled it to a file the steward has no tool to read.
+  const at = i => `2026-11-${String(1 + (i % 28)).padStart(2, '0')}T00:00:${String(i % 60).padStart(2, '0')}Z`;
+  const node = (i, status) => ({ node_key: `d.n${i}`, title: '很长的标题'.repeat(60), status, readiness: 'closed', revision: 1,
+    contract_hash: 'x'.repeat(64), dependencies: [], blocked_by: [], hold: null, node_hold: { held: 0, reason: '' }, claims: [],
+    latest_attempt: { status: 'candidate', updated_at: at(i), artifact_ref: 'y'.repeat(64) }, latest_evidence: { pass: 2 }, open_issue_count: 0 });
+  const nodes = [...Array.from({ length: 880 }, (_, i) => node(i, 'VERIFIED')), ...Array.from({ length: 20 }, (_, i) => node(1000 + i, 'CANDIDATE'))];
+  nodes[3].node_hold = { held: 1, reason: '等窗口' };
+  const overview = { project: { project_id: 'p' }, counts: { VERIFIED: 880, CANDIDATE: 20 }, readiness_counts: {}, nodes,
+    issue_work: [node(2000, 'OPEN')], issue_work_counts: { OPEN: 1 }, observed_at: 'now' };
+  const before = JSON.stringify(overview);
+  const summary = projectSummary(overview);
+  assert.equal(JSON.stringify(overview), before, 'the overview is not changed');
+  assert.ok(JSON.stringify(summary).length <= 10000, `summary is ${JSON.stringify(summary).length} chars`);
+  assert.deepEqual(summary.counts, overview.counts, 'the counts are whole');
+  assert.ok(summary.open_nodes.every(n => n.status === 'CANDIDATE'), 'open nodes are the not-closed ones');
+  assert.ok(summary.open_nodes.length > 0 && summary.open_nodes.length <= 20);
+  const shown = summary.nodes_shown;
+  assert.equal(shown.open, summary.open_nodes.length); assert.equal(shown.open_total, 20); assert.equal(shown.all_total, 900);
+  assert.equal(shown.recently_closed, summary.recently_closed_nodes.length);
+  assert.ok(summary.open_nodes[0].title.length <= 120, 'titles are cut');
+  for (let i = 1; i < summary.open_nodes.length; i++)
+    assert.ok(summary.open_nodes[i - 1].latest_attempt.updated_at >= summary.open_nodes[i].latest_attempt.updated_at, 'newest change first');
+  assert.equal(summary.open_issue_work[0].issue_id ?? null, null, 'an issue work item keeps its issue_id only when it has one');
+  // A small project is shown whole: every list, no shortening.
+  const small = projectSummary({ ...overview, nodes: nodes.slice(878, 882) });
+  assert.deepEqual(small.nodes_shown, { open: 2, open_total: 2, open_issue_work: 1, open_issue_work_total: 1, recently_closed: 2, all_total: 4 });
+  // Open issues: a few fields, newest first, within their own bound, saying how many.
+  const issues = { issues: Array.from({ length: 50 }, (_, i) => ({ issue_id: `iss-${i}`, kind: 'gap', title: '问题'.repeat(100),
+    status: 'open', nodes: [], contradicts_acceptance: [], work_item: null, updated_at: at(i) })), status_counts: { open: 50 }, has_more: false };
+  const brief = issuesSummary(issues);
+  assert.ok(JSON.stringify(brief).length <= 5000);
+  assert.equal(brief.issues_read, 50); assert.equal(brief.issues_shown, brief.issues.length); assert.equal(brief.has_more, true);
+  assert.deepEqual(Object.keys(brief.issues[0]), ['issue_id', 'kind', 'title', 'updated_at']);
+  assert.equal(projectSummary(undefined), undefined); assert.equal(issuesSummary({ error: 'x' }).error, 'x');
 });
 
 test('the steward prompt names the tools it has: both inbox readers where it explains the excerpt', () => {

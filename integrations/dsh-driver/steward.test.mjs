@@ -630,6 +630,9 @@ test('chat channels (step 19): each plugin call is one State request; the reques
     channel_message_ref: 'ts-1', body: '同意 proposal p-1' });
   assert.equal(calls[1][1].request_key, calls[0][1].request_key);
   assert.notEqual(calls[2][1].request_key, calls[0][1].request_key, 'the same ref on another channel is another message');
+  await channels.relay({ channel: 'slack', senderRef: 'U-OTHER', messageRef: 'ts-1', text: '同意 proposal p-1' });
+  assert.notEqual(calls.pop()[1].request_key, calls[0][1].request_key,
+    "another sender's message with the same ref is its own request, never a replay of the owner's");
   answer = { bound: true, channel: 'wechat', sender_ref: 'wx' };
   assert.deepEqual(await channels.bind({ channel: 'wechat', senderRef: 'wx', code: '123456', messageRef: 'w-1' }), answer);
   assert.deepEqual({ ...calls[3][1], request_key: undefined }, { request_key: undefined, channel: 'wechat', sender_ref: 'wx', code: '123456' });

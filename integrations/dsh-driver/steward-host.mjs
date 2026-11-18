@@ -500,8 +500,9 @@ export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'inval
  *  everything again - the binding, the bounds, the approval phrase, the QR image; this only
  *  maps the plugin's calls onto it. A refusal is {refused: code}; a failure that is not one
  *  (5xx, transport) is thrown for the plugin to log.
- *  Request keys derive from the channel's own message identity, so a redelivered channel
- *  message is State's replay, never a second owner message. A status report is called only
+ *  Request keys derive from the channel's own message identity (its sender and ref), so a
+ *  redelivered channel message is State's replay, never a second owner message, and another
+ *  sender's message with a colliding ref is its own request, judged on its own. A status report is called only
  *  on a change (the plugin's ownerChannels), so each gets its own key: a status that comes
  *  back later is a new report, not a replay of the first. Its detail and QR are never logged. */
 export function channelOps(request) {
@@ -516,7 +517,7 @@ export function channelOps(request) {
   };
   return {
     relay: ({ channel, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_owner_message', {
-      request_key: `relay:${channel}:${digest(messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
+      request_key: `relay:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
       body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
     bind: ({ channel, senderRef, code, messageRef }, signal) => request('/api/state/commands/bind_owner_channel', {
       request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code }, signal)

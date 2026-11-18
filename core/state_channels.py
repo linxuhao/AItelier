@@ -72,8 +72,9 @@ CREATE TABLE IF NOT EXISTS state_message_sources (
  sender_ref TEXT CHECK(sender_ref IS NULL OR sender_ref<>''),
  channel_message_ref TEXT CHECK(channel_message_ref IS NULL OR channel_message_ref<>''),
  at TEXT NOT NULL, error TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS state_message_sources_inbound ON state_message_sources(channel,channel_message_ref)
- WHERE direction='in';
+DROP INDEX IF EXISTS state_message_sources_inbound;
+CREATE UNIQUE INDEX IF NOT EXISTS state_message_sources_inbound_by_sender
+ ON state_message_sources(channel,sender_ref,channel_message_ref) WHERE direction='in';
 CREATE INDEX IF NOT EXISTS state_message_sources_rate ON state_message_sources(channel,direction,at);
 CREATE TABLE IF NOT EXISTS state_owner_channel_status (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
@@ -207,7 +208,10 @@ class StateChannels:
                             channel_at=None):
         """One owner message from a channel into the steward's conversation, then the
         chat approval check. Idempotent per request_key and per channel message: either
-        replay answers the first result with duplicate: true. `channel_at` is when the
+        replay answers the first result with duplicate: true. A channel message is the
+        sender's: the same ref from another sender is another message, which goes
+        through every check (an unbound sender is refused, never handed the owner's
+        first result). `channel_at` is when the
         channel says the message was written (else: now); it dates an approval phrase
         and is not part of the request's identity (a redelivery may stamp it anew)."""
         if channel not in CHANNELS:
@@ -226,6 +230,8 @@ class StateChannels:
         refuse_credential_body(body)
         written_at = _written_at(channel_at)
         request_hash = _hash([channel, sender_ref, channel_message_ref, body])
+        # The per-message record's key: the channel message of this sender.
+        ref_key = f"{channel}:{_hash([sender_ref, channel_message_ref])}"
         home = steward_project()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
@@ -233,11 +239,11 @@ class StateChannels:
             if replay is not None:
                 return {**replay, "duplicate": True}
             seen = conn.execute("SELECT message_id FROM state_message_sources WHERE direction='in' AND channel=? "
-                                "AND channel_message_ref=?", (channel, channel_message_ref)).fetchone()
+                                "AND sender_ref=? AND channel_message_ref=?",
+                                (channel, sender_ref, channel_message_ref)).fetchone()
             if seen is not None:
                 first = conn.execute("SELECT result_json FROM driver_inbox_requests WHERE actor=? AND operation=? "
-                                     "AND request_key=?", (self.actor, "relay_owner_message:ref",
-                                                           f"{channel}:{channel_message_ref}")).fetchone()
+                                     "AND request_key=?", (self.actor, "relay_owner_message:ref", ref_key)).fetchone()
                 return {**(json.loads(first[0]) if first else {"message_id": seen[0], "approval": None}),
                         "duplicate": True}
             moment = _now()
@@ -265,8 +271,7 @@ class StateChannels:
             self.steward._record(conn, "relay_owner_message", request_key, request_hash, result)
             # The per-message record: a second relay of this channel message (under any
             # request_key) answers the first result.
-            self.steward._record(conn, "relay_owner_message:ref", f"{channel}:{channel_message_ref}",
-                                 request_hash, result)
+            self.steward._record(conn, "relay_owner_message:ref", ref_key, request_hash, result)
         self.steward._notify()
         if matched is not None:
             carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
@@ -277,7 +282,7 @@ class StateChannels:
                 conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND "
                              "((operation='relay_owner_message' AND request_key=?) OR "
                              "(operation='relay_owner_message:ref' AND request_key=?))",
-                             (json.dumps(result), self.actor, request_key, f"{channel}:{channel_message_ref}"))
+                             (json.dumps(result), self.actor, request_key, ref_key))
         return result
 
     @staticmethod

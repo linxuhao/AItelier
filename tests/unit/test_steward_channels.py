@@ -266,6 +266,25 @@ def test_a_relay_is_idempotent_by_request_key_and_by_channel_message(world):
     assert len(conversation(world)) == 1
 
 
+def test_another_senders_message_with_the_owners_ref_is_judged_on_its_own(world):
+    """The duplicate-by-ref answer belongs to the sender of the first message: an unbound
+    sender relaying with the owner's channel_message_ref used to get the owner's first
+    result back (the executed proposal record included) as duplicate: true."""
+    bind(world)
+    plant_proposal(world)
+    first = relay(world, "同意 proposal p-1", "ts-1", key="owner")
+    assert first["approval"]["outcome"] == "executed"
+    refused(lambda: relay(world, "同意 proposal p-1", "ts-1", key="stranger", sender="U-STRANGER"),
+            "channel_sender_not_bound")
+    # The owner's own redelivery is still the first result.
+    assert relay(world, "同意 proposal p-1", "ts-1", key="again") == {**first, "duplicate": True}
+    # A new bound account's message that happens to carry the same ref is a new message.
+    bind(world, sender="U-NEW", key="bind-new")
+    second = relay(world, "hello", "ts-1", key="new", sender="U-NEW")
+    assert second["duplicate"] is False and second["message_id"] != first["message_id"]
+    assert len(conversation(world)) == 2
+
+
 @pytest.mark.parametrize("body,accepted", [
     ("a" * 4096, True), ("a" * 4097, False),
     ("汉" * 1365 + "a", True), ("汉" * 1366, False)])   # 4096 / 4098 UTF-8 bytes

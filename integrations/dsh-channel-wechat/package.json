@@ -1,0 +1,9 @@
+{
+  "name": "dsh-channel-wechat",
+  "private": true,
+  "type": "module",
+  "description": "The owner's WeChat as an ownerChannels channel (dsh-director), through the wechat-bridge process.",
+  "scripts": {
+    "test": "node --test index.test.mjs"
+  }
+}

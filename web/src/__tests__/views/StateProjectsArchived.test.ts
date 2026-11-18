@@ -138,11 +138,16 @@ describe('archiving and restoring from a project card (ticket owner-can-archive-
   it('issues the State archive write for the project, then the unarchive write for the hidden one',async()=>{
     catalog([row('live','active',false),row('paused','hold',false),archivedRow('old-canary')]);
     const view=render(StateProjects);await view.findByRole('heading',{name:'live'});
+    // Archiving is two taps (the owner asked for a confirmation): the first one
+    // stages the question and writes nothing, the second one writes.
     await fireEvent.click(view.getByRole('button',{name:'Archive live'}));
+    expect(api.stateProjectArchive).not.toHaveBeenCalled();
+    await fireEvent.click(view.getByRole('button',{name:'Yes, archive live'}));
     await waitFor(()=>expect(api.stateProjectArchive).toHaveBeenCalledTimes(1));
     expect(api.stateProjectArchive).toHaveBeenCalledWith('live',true);
     await fireEvent.click(view.getByLabelText(/Show archived/));
     await view.findByRole('heading',{name:'old-canary'});
+    // Restoring stays ONE tap: un-hiding is reversible.
     await fireEvent.click(view.getByRole('button',{name:'Restore old-canary'}));
     await waitFor(()=>expect(api.stateProjectArchive).toHaveBeenCalledWith('old-canary',false));
     expect(api.stateProjectArchive.mock.calls).toEqual([['live',true],['old-canary',false]]);
@@ -153,6 +158,7 @@ describe('archiving and restoring from a project card (ticket owner-can-archive-
     const view=render(StateProjects);await view.findByRole('heading',{name:'live'});
     const before=renderedCards(view);
     await fireEvent.click(view.getByRole('button',{name:'Archive live'}));
+    await fireEvent.click(view.getByRole('button',{name:'Yes, archive live'}));
     await waitFor(()=>expect(view.getByRole('alert').textContent).toContain('only an authenticated admin may archive_project'));
     // the refusal is the server's own sentence, and nothing was rewritten: the
     // project is still listed and the page did not pretend it had been archived

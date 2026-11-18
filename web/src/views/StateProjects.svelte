@@ -16,6 +16,13 @@
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
   let archiveError = $state(''), archiveBusy = $state('');
+  // The project whose ARCHIVE is staged for confirmation, by ID. The first tap
+  // names the row and writes nothing; only a second tap on that same row's
+  // confirm control performs the write. Held as the project ID rather than a
+  // boolean so a staged confirmation can never be confirmed from ANOTHER row,
+  // and cleared by every catalog re-read so it cannot outlive the list it was
+  // staged on. Restore is not staged: un-hiding a project is reversible.
+  let archiveConfirm = $state('');
   let generation = 0;
   // The project catalog is a public read; only the write affordances need
   // `canWrite`.
@@ -74,11 +81,37 @@
       archiveError = String(e instanceof Error ? e.message : e);
     } finally { archiveBusy = ''; }
   }
+  // What the card's own control does. Archiving hides the project from every
+  // list in one stray tap, so it stages instead: the confirmation names the
+  // project and the write waits for a second, deliberate tap on that row.
+  // Restoring is the opposite decision and stays one tap.
+  function requestArchive(project: StateProjectRow, archived: boolean) {
+    if (archiveBusy) return;
+    if (!archived) { archiveConfirm = project.project_id; return; }
+    void setArchived(project, false);
+  }
+  // The confirming tap: it only ever answers the confirmation staged for THIS
+  // project. A confirmation is spent the moment it is used, so one tap cannot
+  // write twice.
+  function confirmArchive(project: StateProjectRow) {
+    if (archiveConfirm !== project.project_id) return;
+    archiveConfirm = '';
+    void setArchived(project, true);
+  }
+  // Cancelling writes nothing at all: the row stays listed, unchanged, and the
+  // staged confirmation is dropped.
+  function cancelArchive(project: StateProjectRow) {
+    if (archiveConfirm === project.project_id) archiveConfirm = '';
+  }
   $effect(() => { if ($authStore.permissionResolved && $authStore.canWrite && driverMounted) void loadDriverState(); });
   $effect(() => {
     const permitted = canRead, repo = params.repoPath, withArchived = showArchived; void retry;
     const version = ++generation;
     rows = []; next = null; error = '';
+    // A re-read replaces the list the confirmation was staged on, so the
+    // confirmation goes with it: it can only ever be answered against the rows
+    // on screen when it was raised.
+    archiveConfirm = '';
     if (!permitted) { loading = false; return; }
     loading = true;
     stateProjects(repo, '', withArchived).then(result => {
@@ -194,10 +227,27 @@
         {#if $authStore.canWrite}
           <button type="button" class="outline archive-control" data-archive-control={project.project_id}
             disabled={archiveBusy === project.project_id}
+            aria-expanded={!archived && archiveConfirm === project.project_id}
             aria-label={(archived ? st('restoreProject') : st('archiveProject')) + ' ' + project.project_id}
-            onclick={() => void setArchived(project, !archived)}>
+            onclick={() => requestArchive(project, archived)}>
             {archived ? st('restoreProject') : st('archiveProject')}
           </button>
+          <!-- The confirmation, inline on the row it will hide and naming it:
+               the two taps that archive are the card's own control and this.
+               Nothing is sent until the confirming one, and cancelling sends
+               nothing at all. -->
+          {#if !archived && archiveConfirm === project.project_id}
+            <div class="archive-confirm" role="group" aria-label={st('archiveConfirm')} data-archive-confirm={project.project_id}>
+              <p>{st('archiveConfirm')} <strong data-archive-confirm-name={project.project_id}>{project.title}</strong> <code>{project.project_id}</code></p>
+              <button type="button" class="outline archive-confirm-yes" data-archive-confirm-yes={project.project_id}
+                disabled={archiveBusy === project.project_id}
+                aria-label={st('archiveConfirmYes') + ' ' + project.project_id}
+                onclick={() => confirmArchive(project)}>{st('archiveConfirmYes')}</button>
+              <button type="button" class="outline archive-confirm-no" data-archive-confirm-no={project.project_id}
+                aria-label={st('archiveConfirmCancel') + ' ' + project.project_id}
+                onclick={() => cancelArchive(project)}>{st('archiveConfirmCancel')}</button>
+            </div>
+          {/if}
         {/if}
         </div>
       {/each}
@@ -230,6 +280,10 @@
   .project-cell{display:flex;flex-direction:column;gap:4px;min-width:0;}
   .archive-control{align-self:flex-end;width:auto;margin:0;padding:2px 10px;font-size:11px;}
   .archive-error{margin:0 0 10px;padding:8px 10px;font-size:12px;}
+  .archive-confirm{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0;padding:6px 8px;border:1px solid var(--pico-muted-border-color);border-radius:6px;font-size:11px;}
+  .archive-confirm p{flex:1 1 100%;margin:0;font-size:11px;color:var(--pico-muted-color);}
+  .archive-confirm p strong{color:var(--pico-color);}
+  .archive-confirm button{width:auto;margin:0;padding:2px 8px;font-size:11px;}
   .archive-error button{width:auto;margin:4px 0 0;padding:2px 10px;font-size:11px;}
   .archived-badge{display:inline-block;padding:1px 6px;border-radius:5px;font-size:11px;line-height:1.5;background:light-dark(#eef0f3,#2f333a);color:var(--pico-muted-color);}
   .project-card{display:block;width:100%;min-width:0;margin:0;padding:14px;text-align:left;font:inherit;border:1px solid var(--pico-muted-border-color);border-radius:8px;background:var(--pico-card-background-color);color:inherit;box-shadow:none;overflow-wrap:anywhere;}

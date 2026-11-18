@@ -192,19 +192,61 @@ class ConfigManifest:
         }
 
 
-def _read_host_hints() -> dict[str, dict]:
-    """Read the ``x-aitelier:`` block from every host config (keyed by graph name).
+#: ``configs/*.yaml`` identity → the hints parsed from those exact files.
+#:
+#: The hints belong to a BUILD, not to a graph. `ConfigRegistry.build` reads them
+#: once, but every runtime registration goes through `register_one`, which had no
+#: dict to reuse and so re-read and re-`yaml.safe_load`ed the whole directory —
+#: measured 2026-11-18 in the live container: 178 ms per read, 64 reads of 14
+#: files (215 817 bytes) in one build, 63 of them from `register_one`, i.e. ~11.4 s
+#: of the 14 130 ms first `get_skillflow()`, paid on the event loop at start.
+#:
+#: Keyed on the IDENTITY of the files actually read — `(path, st_mtime_ns,
+#: st_size)` for every `configs/*.yaml` — never on call count or process start:
+#: the forge and the butler add and edit configs while the server runs, and a
+#: new or changed file must be seen on the next read rather than at the next
+#: restart. Any difference re-reads the directory (one 178 ms pass, not one per
+#: graph); an unchanged directory returns the SAME dict object.
+_HOST_HINT_CACHE: tuple[tuple[tuple[str, int, int], ...], dict[str, dict]] | None = None
 
-    skillflow strips unknown top-level keys on load and does not round-trip them
-    through ``skillflow_graphs.yaml_text``, so the declared hints must come from the
-    source files directly.
+
+def _configs_identity() -> tuple[tuple[str, int, int], ...]:
+    """``(path, st_mtime_ns, st_size)`` for every host config, in a stable order.
+
+    A file that cannot be stat()ed (removed between the glob and the stat) is
+    left out; the next call then sees a different identity and re-reads.
     """
+    try:
+        files = sorted(CONFIGS_DIR.glob("*.yaml"))
+    except OSError:
+        return ()
+    identity: list[tuple[str, int, int]] = []
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        identity.append((str(f), st.st_mtime_ns, st.st_size))
+    return tuple(identity)
+
+
+def _load_config_document(path: Path) -> Any:
+    """Parse one host config file.
+
+    The only place ``configs/*.yaml`` is parsed to build hints, so a test can
+    witness how many times each file was parsed instead of timing a wall clock.
+    """
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _parse_host_hints() -> dict[str, dict]:
+    """One full pass over ``configs/*.yaml`` → graph name → ``x-aitelier`` block."""
     hints: dict[str, dict] = {}
     if not CONFIGS_DIR.exists():
         return hints
     for f in sorted(CONFIGS_DIR.glob("*.yaml")):
         try:
-            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            data = _load_config_document(f) or {}
         except yaml.YAMLError:
             continue
         name = data.get("name")
@@ -212,6 +254,27 @@ def _read_host_hints() -> dict[str, dict]:
             block = data.get("x-aitelier") or {}
             if isinstance(block, dict):
                 hints[name] = block
+    return hints
+
+
+def _read_host_hints() -> dict[str, dict]:
+    """Read the ``x-aitelier:`` block from every host config (keyed by graph name).
+
+    skillflow strips unknown top-level keys on load and does not round-trip them
+    through ``skillflow_graphs.yaml_text``, so the declared hints must come from the
+    source files directly.
+
+    Cached per directory IDENTITY (see :data:`_HOST_HINT_CACHE`): an unchanged
+    directory costs one glob+stat pass and no parse, and every caller in one build
+    — `ConfigRegistry.build`, `register_one`, the boot scan — sees the same dict.
+    """
+    global _HOST_HINT_CACHE
+    identity = _configs_identity()
+    cached = _HOST_HINT_CACHE
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    hints = _parse_host_hints()
+    _HOST_HINT_CACHE = (identity, hints)
     return hints
 
 
@@ -301,8 +364,11 @@ class ConfigRegistry:
         graph registered at runtime (e.g. a generated ``gen_*`` pipeline) becomes
         runnable without rebuilding the registry or restarting. ``hint_overrides``
         lets the caller apply policy the registry shouldn't hard-code (the
-        generated-pipeline hints live in core.pipeline_registry). Idempotent.
-        Returns None if the graph doesn't resolve."""
+        generated-pipeline hints live in core.pipeline_registry). ``host_hints``
+        lets a caller that already holds the build's dict reuse it; omitted (the
+        boot scan's per-graph path) it comes from `_read_host_hints`, which serves
+        the same build-cached dict instead of re-parsing ``configs/*.yaml``.
+        Idempotent. Returns None if the graph doesn't resolve."""
         m = self._make_manifest(
             sf, name, host_hints if host_hints is not None else _read_host_hints(),
             hint_overrides=hint_overrides)

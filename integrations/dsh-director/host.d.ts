@@ -181,7 +181,8 @@ export interface DirectorHost {
    *  is and the conversation; the director only connects channel plugins to these:
    *  - relay: one channel message from `senderRef` into the owner's conversation, exactly
    *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
-   *    (channel, messageRef): a redelivery answers the first result with duplicate: true.
+   *    (channel, senderRef, messageRef): a redelivery answers the first result with
+   *    duplicate: true; the same messageRef from another sender is another message.
    *    The host refuses a sender that is not the channel's current binding
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as

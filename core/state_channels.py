@@ -359,8 +359,10 @@ class StateChannels:
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
-            # Before the request_key replay: a bind that succeeded long ago and was
-            # replaced since must not be answered "bound" again.
+            # Before the request_key replay: a binding message delivered again - also after
+            # the channel was bound to another account since - is answered as the duplicate
+            # it is ({bound: true, duplicate: true}, or its refusal), never as a fresh bind,
+            # and binds and counts nothing.
             first = _bind_attempt(conn, channel, sender_ref, channel_message_ref)
             if first is not None:
                 return {"bound": first == "bound", "channel": channel, "sender_ref": sender_ref, "duplicate": True,

@@ -76,59 +76,82 @@ test('presented_only: the steward is shown no guidance for tools it cannot call'
   const discovery = defaultDiscoveryTexts.sectionName;
   const names = ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot',
     'tool:bash', 'tool:read', 'tool:write', 'tool:edit', 'tool:jobs', 'tool:web_search', 'tool:web_fetch', 'tool:goal',
-    'tool:subagent', 'tool:session-query', 'tool:idle_dormant', 'mcp-resource-servers', 'mcp:agentmcp', 'mcp:devmcp', 'mcp:zvec',
-    discovery, 'deployment:persona-suffix'];
+    'tool:subagent', 'tool:subagent:depth', 'tool:session-query', 'tool:idle_dormant', 'tool:idle_dormant:detail',
+    'mcp-resource-servers', 'mcp:agentmcp', 'mcp:devmcp', 'mcp:zvec', discovery, 'deployment:persona-suffix'];
   const sections = names.map(name => ({ name, text: name }));
-  assert.deepEqual(presentSections(sections, effective.steward, discovery).map(s => s.name),
+  const steward = effective.steward;
+  assert.deepEqual(presentSections(sections, steward, discovery, steward.presented).map(s => s.name),
     ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot', 'tool:idle_dormant',
-      'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
-  // Every other role is shown every section, as before.
+      'tool:idle_dormant:detail', 'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
+  // Judged against the tools the request actually lists, not the role table: a presented
+  // tool missing from this request loses its section too.
+  assert.ok(!presentSections(sections, steward, discovery, ['memory_search']).some(s => s.name === 'tool:idle_dormant'));
+  // Every other role is shown every section, as before (the same array).
   for (const role of ['director', 'worker'])
-    assert.equal(presentSections(sections, effective[role], discovery), sections, role);
-  // The rule follows the role, not a list of names: a presented_only role that presents an
-  // MCP tool and search_tools keeps the MCP and discovery guidance.
-  const open = { ...effective.steward, presented: [...effective.steward.presented, 'search_tools', 'mcp__x__y'] };
-  for (const name of ['mcp:agentmcp', 'mcp-resource-servers', discovery])
-    assert.ok(presentSections(sections, open, discovery).some(s => s.name === name), name);
-  assert.equal(presentSections(undefined, effective.steward, discovery), undefined, 'an assembly without sections is passed through');
+    assert.equal(presentSections(sections, effective[role], discovery, ['bash']), sections, role);
+  // Per MCP server: a tool of one server brings back that server's section only.
+  const one = presentSections(sections, steward, discovery, [...steward.presented, 'mcp__agentmcp__ocr_image', 'search_tools']).map(s => s.name);
+  assert.ok(one.includes('mcp:agentmcp') && one.includes(discovery));
+  assert.ok(!one.includes('mcp:devmcp') && !one.includes('mcp:zvec') && !one.includes('mcp-resource-servers'));
+  assert.ok(presentSections(sections, steward, discovery, ['read_mcp_resource']).some(s => s.name === 'mcp-resource-servers'));
+  assert.equal(presentSections(undefined, steward, discovery), undefined, 'an assembly without sections is passed through');
 });
 
-test('portfolio_project is a bounded summary: a project of 900 work items fits inline, open ones first, nothing hidden silently', () => {
+test('portfolio_project is a bounded summary: open work in pages, recent closures always kept, nothing cut silently (review 357)', () => {
   // Measured 2026-11-18: aitelier's whole overview was ~1.4 MB (860 nodes, 816 closed), and
   // the harness spilled it to a file the steward has no tool to read.
-  const at = i => `2026-11-${String(1 + (i % 28)).padStart(2, '0')}T00:00:${String(i % 60).padStart(2, '0')}Z`;
-  const node = (i, status) => ({ node_key: `d.n${i}`, title: '很长的标题'.repeat(60), status, readiness: 'closed', revision: 1,
-    contract_hash: 'x'.repeat(64), dependencies: [], blocked_by: [], hold: null, node_hold: { held: 0, reason: '' }, claims: [],
-    latest_attempt: { status: 'candidate', updated_at: at(i), artifact_ref: 'y'.repeat(64) }, latest_evidence: { pass: 2 }, open_issue_count: 0 });
-  const nodes = [...Array.from({ length: 880 }, (_, i) => node(i, 'VERIFIED')), ...Array.from({ length: 20 }, (_, i) => node(1000 + i, 'CANDIDATE'))];
-  nodes[3].node_hold = { held: 1, reason: '等窗口' };
-  const overview = { project: { project_id: 'p' }, counts: { VERIFIED: 880, CANDIDATE: 20 }, readiness_counts: {}, nodes,
-    issue_work: [node(2000, 'OPEN')], issue_work_counts: { OPEN: 1 }, observed_at: 'now' };
-  const before = JSON.stringify(overview);
-  const summary = projectSummary(overview);
-  assert.equal(JSON.stringify(overview), before, 'the overview is not changed');
-  assert.ok(JSON.stringify(summary).length <= 10000, `summary is ${JSON.stringify(summary).length} chars`);
-  assert.deepEqual(summary.counts, overview.counts, 'the counts are whole');
-  assert.ok(summary.open_nodes.every(n => n.status === 'CANDIDATE'), 'open nodes are the not-closed ones');
-  assert.ok(summary.open_nodes.length > 0 && summary.open_nodes.length <= 20);
-  const shown = summary.nodes_shown;
-  assert.equal(shown.open, summary.open_nodes.length); assert.equal(shown.open_total, 20); assert.equal(shown.all_total, 900);
-  assert.equal(shown.recently_closed, summary.recently_closed_nodes.length);
-  assert.ok(summary.open_nodes[0].title.length <= 120, 'titles are cut');
-  for (let i = 1; i < summary.open_nodes.length; i++)
-    assert.ok(summary.open_nodes[i - 1].latest_attempt.updated_at >= summary.open_nodes[i].latest_attempt.updated_at, 'newest change first');
-  assert.equal(summary.open_issue_work[0].issue_id ?? null, null, 'an issue work item keeps its issue_id only when it has one');
-  // A small project is shown whole: every list, no shortening.
-  const small = projectSummary({ ...overview, nodes: nodes.slice(878, 882) });
-  assert.deepEqual(small.nodes_shown, { open: 2, open_total: 2, open_issue_work: 1, open_issue_work_total: 1, recently_closed: 2, all_total: 4 });
-  // Open issues: a few fields, newest first, within their own bound, saying how many.
-  const issues = { issues: Array.from({ length: 50 }, (_, i) => ({ issue_id: `iss-${i}`, kind: 'gap', title: '问题'.repeat(100),
-    status: 'open', nodes: [], contradicts_acceptance: [], work_item: null, updated_at: at(i) })), status_counts: { open: 50 }, has_more: false };
+  const at = i => new Date(Date.UTC(2026, 10, 1) + i * 60000).toISOString();
+  const node = (i, status, extra = {}) => ({ node_key: `d.n${String(i).padStart(4, '0')}`, title: '很长的标题'.repeat(36), status,
+    readiness: 'closed', revision: 1, contract_hash: 'x'.repeat(64), dependencies: [], blocked_by: [], hold: null,
+    node_hold: { held: 0, reason: '' }, claims: [], next_action: null,
+    latest_attempt: { status: 'candidate', updated_at: at(i), artifact_ref: 'y'.repeat(64) }, latest_evidence: { pass: 2 }, open_issue_count: 0, ...extra });
+  const shape = openCount => {
+    const nodes = [...Array.from({ length: 816 }, (_, i) => node(i, 'VERIFIED')),
+      ...Array.from({ length: openCount }, (_, i) => node(1000 + i, 'CANDIDATE'))];
+    return { project: { project_id: 'p' }, counts: { VERIFIED: 816, CANDIDATE: openCount }, readiness_counts: {}, nodes,
+      issue_work: [node(5000, 'OPEN', { issue_id: 'iss-1' })], issue_work_counts: { OPEN: 1 }, observed_at: 'now' };
+  };
+  for (const openCount of [44, 880]) {
+    const overview = shape(openCount), before = JSON.stringify(overview);
+    // M1: the recently closed are kept whatever the open count; M2: with their total.
+    const first = projectSummary(overview);
+    assert.equal(JSON.stringify(overview), before, 'the overview is not changed');
+    assert.ok(JSON.stringify(first).length <= 9000, `summary is ${JSON.stringify(first).length} chars`);
+    assert.equal(first.recently_closed_nodes.length, 8, `${openCount} open: recent closures kept`);
+    assert.equal(first.nodes_shown.closed_total, 816);
+    assert.deepEqual(first.counts, overview.counts, 'the counts are whole');
+    // The open work, issue work included, newest change first, paged until every item was shown once.
+    const seen = [];
+    let page = first;
+    for (let guard = 0; guard < 1000; guard++) {
+      assert.ok(page.open_work.length >= 1, 'a page always moves forward');
+      seen.push(...page.open_work.map(n => n.node_key));
+      if (page.nodes_shown.open_next_after === null) break;
+      page = projectSummary(overview, { openAfter: page.nodes_shown.open_next_after });
+    }
+    assert.equal(seen.length, openCount + 1, `${openCount} open: every open item reachable`);
+    assert.equal(new Set(seen).size, seen.length, 'no item twice');
+    assert.equal(seen[0], 'd.n5000', 'newest change first (the issue work item is the newest)');
+    assert.equal(seen[seen.length - 1], 'd.n1000', 'the oldest open item is on the last page, not cut off');
+    assert.equal(first.nodes_shown.open_total, openCount + 1); assert.equal(first.nodes_shown.all_total, 816 + openCount + 1);
+  }
+  // M4: no field cut silently - titles whole; a long hold reason says it was cut and how long it was.
+  const held = projectSummary({ nodes: [node(1, 'CANDIDATE', { node_hold: { held: 1, reason: 'r'.repeat(500), updated_at: 'then' },
+    blocked_by: Array.from({ length: 12 }, (_, i) => 'b' + i) })] }).open_work[0];
+  assert.equal(held.title.length, 180, 'the title is the overview\'s, uncut');
+  assert.deepEqual([held.held, held.held_since, held.held_reason.length, held.held_reason_truncated, held.held_reason_chars], [true, 'then', 300, true, 500]);
+  assert.deepEqual([held.blocked_by.length, held.blocked_by_total], [5, 12]);
+  // An overview of another shape is not passed through unbounded.
+  assert.deepEqual(Object.keys(projectSummary({ nodes: 'x'.repeat(300000) })), ['unrecognised_overview', 'chars']);
+  // M3: the open issues are the query's own page, whole, with its cursor while more follow.
+  const issues = { issues: Array.from({ length: 15 }, (_, i) => ({ issue_id: `iss-${i}`, kind: 'gap', title: '问题'.repeat(150),
+    status: 'open', nodes: [], contradicts_acceptance: [], work_item: null, updated_at: at(i) })), status_counts: { open: 40 }, has_more: true, next_after: 77 };
   const brief = issuesSummary(issues);
-  assert.ok(JSON.stringify(brief).length <= 5000);
-  assert.equal(brief.issues_read, 50); assert.equal(brief.issues_shown, brief.issues.length); assert.equal(brief.has_more, true);
+  assert.equal(brief.issues.length, 15); assert.equal(brief.issues_next_after, 77); assert.equal(brief.issues[0].title.length, 300);
   assert.deepEqual(Object.keys(brief.issues[0]), ['issue_id', 'kind', 'title', 'updated_at']);
-  assert.equal(projectSummary(undefined), undefined); assert.equal(issuesSummary({ error: 'x' }).error, 'x');
+  assert.equal('issues_next_after' in issuesSummary({ ...issues, has_more: false }), false, 'no cursor when nothing follows');
+  assert.ok(JSON.stringify(brief).length <= 6000, 'a full page of the longest titles stays small');
+  assert.equal(issuesSummary({ error: 'x' }).error, 'x');
 });
 
 test('the steward prompt names the tools it has: both inbox readers where it explains the excerpt', () => {
@@ -290,6 +313,12 @@ test('portfolio: every other project with its director and open questions; one p
     { project_id: 'idle', title: 'Idle', director: null, open_questions: '2+' }] });
   const one = await ops.portfolio.project('wuxia');
   assert.deepEqual(Object.keys(one), ['project_id', 'overview', 'open_issues', 'open_questions']);
+  // The issue cursor reaches the query; the open-work cursor is the summary's own.
+  calls.length = 0;
+  await ops.portfolio.project('wuxia', undefined, { openAfter: 3, issuesAfter: 41 });
+  const issueCall = calls.find(([path]) => path === '/api/state/query/list_issues');
+  assert.equal(issueCall[1].after, 41); assert.equal(issueCall[1].limit, 15);
+  assert.equal(calls.find(([path]) => path === '/api/state/query/list_user_questions')[1].limit, 20);
   assert.deepEqual((await ops.portfolio.conversation('wuxia', 'c-1')).body, { project_id: 'wuxia', limit: 30, cursor: 'c-1' });
   assert.ok(calls.every(([path]) => path.startsWith('/api/state/query/') || path === '/api/dsh-drivers'), 'reads only');
 });

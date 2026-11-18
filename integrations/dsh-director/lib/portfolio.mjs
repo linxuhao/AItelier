@@ -20,7 +20,7 @@
 
 export const PORTFOLIO_TOOLS = ['portfolio_projects', 'portfolio_project', 'portfolio_conversation', 'portfolio_inbox'];
 
-/** @param portfolio host.portfolio: { projects(signal), project(id, signal), conversation(id, cursor, signal),
+/** @param portfolio host.portfolio: { projects(signal), project(id, signal, page), conversation(id, cursor, signal),
  *    inbox(page, signal), privateInbox(page, signal), acknowledge({ deliveryId, version }, signal),
  *    acknowledgePrivate({ deliveryId, version }, signal) } - all optional; without `inbox`
  *    the project reader is not registered, without `privateInbox` neither is the private one,
@@ -35,10 +35,15 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
       parameters: {}, output: jsonOutput,
       execute: (_args, exec) => portfolio.projects(exec.signal),
     }));
+    // The page arguments are passed through as given; what a page holds and how it says what
+    // it did not show is the host's.
     scope.tools.register(defineTool({ name: 'portfolio_project',
-      description: 'One project in summary: how many work items it has in each state, every work item not yet closed and the most recently closed ones (a few fields each, newest change first), its open issues (newest first) and its open questions to your owner. A long list is shortened, never silently: nodes_shown and issues_shown say how many of how many you were shown. Read-only.',
-      parameters: { project_id: projectId }, output: jsonOutput,
-      execute: (args, exec) => portfolio.project(args.project_id, exec.signal),
+      description: 'One project in summary: how many work items it has in each state, its most recently closed work items, its open work (newest change first, one page at a time), its open issues (oldest first, one page at a time) and its open questions to your owner. Nothing is cut silently: nodes_shown says how many of how many you were shown; pass open_next_after back as open_after, or issues_next_after as issues_after, to read the next page. Read-only.',
+      parameters: { project_id: projectId,
+        open_after: { type: 'integer', description: 'the open_next_after a previous answer gave; omit for the first page' },
+        issues_after: { type: 'integer', description: 'the issues_next_after a previous answer gave; omit for the first page' } },
+      output: jsonOutput,
+      execute: (args, exec) => portfolio.project(args.project_id, exec.signal, { openAfter: args.open_after, issuesAfter: args.issues_after }),
     }));
     scope.tools.register(defineTool({ name: 'portfolio_conversation',
       description: 'One page of a project\'s conversation between your owner and its director, newest first; pass next_cursor to read older messages. Read-only.',

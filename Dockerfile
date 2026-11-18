@@ -76,6 +76,25 @@ RUN touch /opt/aitelier-gate-imports/docker/__init__.py \
 # rebuild + `up -d` is automatically live.
 COPY --from=frontend-build /app/web/dist /srv/web_dist
 ENV AITELIER_WEB_DIST=/srv/web_dist
+# The SPA's OWN test toolchain, reused from the frontend-build stage instead of a
+# second `npm ci` in this stage: the final image currently carries a node binary
+# (copied from dsh-runtime at line 50) and the built bundle, but NOT vitest/jsdom/
+# @testing-library/svelte. Without them `tests/integration/test_web_suite_in_image.py`
+# can only report the suite as UNMEASURED, and nothing in the Python gate executes
+# web/src at all - a red Svelte/TS test ships silently. Same lock-pinned tree that
+# `npm run build` above just used, so the gate and the build never disagree about
+# vitest's version. It lives OUTSIDE /app for the same reason /srv/web_dist does:
+# the .:/app live-source mount would shadow a repository-local node_modules, and
+# web/node_modules is gitignored so it is never in the build context either.
+# The tree is vendor-owned (uid 0) and the gate never writes into it: it stages the
+# sources elsewhere and links/reads packages from here.
+COPY --from=frontend-build /app/web/node_modules /opt/aitelier-web/node_modules
+# COPY keeps the mode each file had in the build context/stage, so a builder whose
+# umask is 077 hands the runtime a tree uid 1000 cannot read (measured for /app at
+# lines 93-110: 102 files came out 0600). Every path must stay other-readable and
+# every directory other-traversable, since the gate runs as uid 1000. `a+rX` is a
+# no-op where npm already wrote 0644/0755, so this layer normally changes nothing.
+RUN chmod -R a+rX /opt/aitelier-web
 # Install the exact reviewed public engine from PyPI, not a mutable host
 # checkout or an old image layer.
 # The versions come from requirements.lock, through `-c` (constraints), not

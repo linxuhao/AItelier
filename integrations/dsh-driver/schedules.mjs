@@ -41,14 +41,22 @@ export function deleteSchedule(request, { schedule_id, expected_version }, signa
 
 /** Fire every enabled row whose next_run_at has come; return the ones the backend says fired.
  *  The request key names the run, so a retried fire of the same run is State's replay. */
-export async function fireDue(request, rows, now = Date.now(), signal, max = WAKE_MAX) {
+export async function fireDue(request, rows, now = Date.now(), signal, max = WAKE_MAX, log = () => {}) {
   const fired = [];
   const due = rows.filter(r => r.enabled && r.next_run_at && Date.parse(r.next_run_at) <= now)
     .sort((a, b) => Date.parse(a.next_run_at) - Date.parse(b.next_run_at) || (a.schedule_id < b.schedule_id ? -1 : 1));
   for (const row of due) {
     if (fired.length >= max) break;
-    const answer = unwrap(await request('/api/state/commands/fire_steward_schedule', { request_key: `fire:${row.schedule_id}:${row.next_run_at}`,
-      schedule_id: row.schedule_id, expected_next_run_at: row.next_run_at }, signal));
+    // One row's failure (a 4xx, the network) never skips the others: it is logged and that
+    // row is looked at again on the next look (review 340 (b)).
+    let answer;
+    try {
+      answer = unwrap(await request('/api/state/commands/fire_steward_schedule', { request_key: `fire:${row.schedule_id}:${row.next_run_at}`,
+        schedule_id: row.schedule_id, expected_next_run_at: row.next_run_at }, signal));
+    } catch (error) {
+      log(`schedule ${row.schedule_id}: fire failed (${String(error?.message ?? error).slice(0, 200)})`);
+      continue;
+    }
     if (answer?.fired) fired.push({ ...answer, schedule: answer.schedule ?? row, due_at: answer.due_at ?? row.next_run_at });
   }
   return fired;
@@ -85,18 +93,25 @@ export class ScheduleTimer {
   }
   async #tick() {
     if (this.closed) return;
+    // Whatever happens below, the clock is armed again (review 340 (b)).
+    let wait = RECHECK_MS;
+    try { wait = await this.#look(); }
+    finally {
+      this.clearTimer(this.timer);
+      if (!this.closed) { this.timer = this.setTimer(() => void this.refresh(), wait); this.timer?.unref?.(); }
+    }
+    return { wait };
+  }
+  async #look() {
     const rows = await listSchedules(this.request);
-    const fired = await fireDue(this.request, rows, this.now());
+    const fired = await fireDue(this.request, rows, this.now(), undefined, WAKE_MAX, this.log);
     if (fired.length) {
       const id = 'schedule:' + fired.map(f => `${f.schedule.schedule_id}:${f.due_at}`).join(',');
       await this.deliver(wakeText(fired), id);
     }
     const next = (fired.length ? await listSchedules(this.request) : rows)
       .filter(r => r.enabled && r.next_run_at).map(r => Date.parse(r.next_run_at)).sort((a, b) => a - b)[0];
-    const wait = Math.max(1000, Math.min(RECHECK_MS, next === undefined ? RECHECK_MS : next - this.now()));
-    this.clearTimer(this.timer);
-    if (!this.closed) { this.timer = this.setTimer(() => void this.refresh(), wait); this.timer?.unref?.(); }
-    return { fired: fired.length, wait };
+    return Math.max(1000, Math.min(RECHECK_MS, next === undefined ? RECHECK_MS : next - this.now()));
   }
   close() { this.closed = true; this.clearTimer(this.timer); }
 }

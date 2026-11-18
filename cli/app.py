@@ -1282,6 +1282,9 @@ def _interactive_repl(first_prompt: str = None):
     with console.status("[bold cyan]Starting backend...[/bold cyan]"):
         try:
             ensure_server_running(server_url)
+        except CredentialError:
+            # A credential problem is the funnel's sentence, not a server failure.
+            raise
         except RuntimeError as e:
             console.print(f"[red]Could not start server: {e}[/red]")
             return
@@ -2971,6 +2974,9 @@ def _run_entrypoint():
         with console.status("[bold cyan]Starting backend...[/bold cyan]"):
             try:
                 ensure_server_running(_state["server_url"])
+            except CredentialError:
+                # A credential problem is the funnel's sentence, not a server failure.
+                raise
             except RuntimeError as e:
                 console.print(f"[red]Could not start server: {e}[/red]")
                 raise SystemExit(1)
@@ -2995,6 +3001,9 @@ def _run_entrypoint():
     with console.status("[bold cyan]Starting backend...[/bold cyan]"):
         try:
             ensure_server_running(_state["server_url"])
+        except CredentialError:
+            # A credential problem is the funnel's sentence, not a server failure.
+            raise
         except RuntimeError as e:
             console.print(f"[red]Could not start server: {e}[/red]")
             raise SystemExit(1)

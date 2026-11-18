@@ -61,7 +61,18 @@ def read_token_file(path: Path) -> str:
         raise CredentialError(f"driver token file {path} is not a regular file")
     if info.st_mode & 0o077:
         raise CredentialError(f"driver token file {path} must be mode 0600 (chmod 600 {path})")
-    token = path.read_text(encoding="utf-8").strip()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        # stat() succeeds on a file this process still cannot open (a root-owned
+        # 0600 token file, or one left write-only), so the refusal must also
+        # cover the read, not only the stat: otherwise a plain PermissionError
+        # escapes the CLI funnel as a traceback.
+        raise CredentialError(f"driver token file {path} is not readable ({type(exc).__name__})") from None
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise CredentialError(f"driver token file {path} is not UTF-8 text") from None
     if not token or "\n" in token:
         raise CredentialError(f"driver token file {path} must hold exactly one token line")
     return token

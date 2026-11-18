@@ -14,6 +14,7 @@ which runs before any request is sent.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -86,3 +87,63 @@ def test_the_funnel_is_the_installed_console_script():
     """If the script stops pointing at _entrypoint, the sentence stops appearing."""
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     assert 'aitelier = "cli.app:_entrypoint"' in pyproject.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a write-only file, so this shape does not exist for root")
+def test_a_write_only_token_file_is_a_sentence_not_a_permission_error(
+    oneshot, driver_environment, capsys,
+):
+    """stat() succeeds on this file; only the open fails, so the refusal must cover the read."""
+    secret = "s3cr3t-driver-token-value"
+    token_file = driver_environment / "dsh-bogus-no-file.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(secret + "\n", encoding="utf-8")
+    token_file.chmod(0o200)
+    assert token_file.stat().st_size > 0  # the metadata is readable, the content is not
+
+    with pytest.raises(SystemExit) as raised:
+        cli_app._entrypoint()
+
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "is not readable (PermissionError)" in captured.err, captured.err
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_a_token_file_that_is_not_text_is_a_sentence(oneshot, driver_environment, capsys):
+    token_file = driver_environment / "dsh-bogus-no-file.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_bytes(b"\xff\xfes3cr3t\x00\n")
+    token_file.chmod(0o600)
+
+    with pytest.raises(SystemExit) as raised:
+        cli_app._entrypoint()
+
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "is not UTF-8 text" in captured.err, captured.err
+
+
+def test_a_credential_error_from_the_server_start_is_not_reported_as_a_server_failure(
+    oneshot, driver_environment, capsys, monkeypatch,
+):
+    """CredentialError is a RuntimeError: the server-start handler must not eat the sentence."""
+    from core.driver_credentials import CredentialError
+
+    def refuse(url=None):
+        raise CredentialError("driver token file /nowhere.token is not readable")
+
+    monkeypatch.setattr("cli.server.ensure_server_running", refuse)
+
+    with pytest.raises(SystemExit) as raised:
+        cli_app._entrypoint()
+
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Error: driver token file /nowhere.token is not readable" in captured.err
+    assert "Could not start server" not in captured.err
+    assert "Could not start server" not in captured.out

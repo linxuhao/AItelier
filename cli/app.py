@@ -184,6 +184,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from core.driver_credentials import CredentialError
+
 console = Console()
 
 app = typer.Typer(
@@ -2924,6 +2926,23 @@ _KNOWN_COMMANDS = {"status", "rollback", "server"}
 
 
 def _entrypoint():
+    """Custom entrypoint with TUI-by-default and --oneshot override.
+
+    Every command enters through here (pyproject: ``aitelier = cli.app:_entrypoint``),
+    so this is the one place that can turn a credential that is configured but
+    unusable -- a driver id exported without its token file, a token file
+    readable by group/other -- into a sentence instead of a traceback. The
+    sentence is the exception's own message: it names the file to fix and never
+    holds the token.
+    """
+    try:
+        _run_entrypoint()
+    except CredentialError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
+def _run_entrypoint():
     """Custom entrypoint with TUI-by-default and --oneshot override."""
     args = sys.argv[1:]
 

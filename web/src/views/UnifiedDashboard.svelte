@@ -12,7 +12,7 @@
     listPipelines,
     pipelineStateFile,
   } from '../lib/api';
-  import type { RepoItem, RepoProjectSummary } from '../lib/api';
+  import type { RepoItem, RepoProjectSummary, RunsList } from '../lib/api';
   import { escapeHtml,
     formatTime,
     formatTokens,
@@ -62,6 +62,20 @@
   let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
   let isRefreshing = $state(false);
 
+  // ── Runs window ──
+  // GET /api/runs answers with a WINDOW of rows (the server's own last
+  // `window_days`) plus the counts describing what it left out. All three are
+  // stored from the response body: the page must state the window the SERVER
+  // applied and how many rows it is not showing, so neither the days nor the
+  // numbers may be a constant here.
+  let runsWindowDays = $state<number | null>(null);
+  let runsTotalCount = $state<number | null>(null);
+  let runsReturnedCount = $state<number | null>(null);
+  // ONE control with one meaning: false keeps the windowed list (and is what
+  // the timed poll always asks for), true is the reader asking for the whole
+  // archive — fetched because they asked, never on a timer.
+  let includeAllRuns = $state(false);
+
   // Search state
   let searchQuery = $state('');
   let manualExpandedRepos = $state<Set<string>>(new Set());
@@ -110,6 +124,16 @@
     !loading && !error && repos.length === 0 && repoLessCount === 0,
   );
 
+  // How many runs the windowed answer left out, from the RESPONSE's own counts
+  // (total_count - returned_count). Asking for everything hides nothing, so the
+  // count is only meaningful while the windowed list is what is on screen.
+  let runsHiddenCount = $derived(
+    includeAllRuns || runsTotalCount === null || runsReturnedCount === null
+      ? 0
+      : Math.max(0, runsTotalCount - runsReturnedCount),
+  );
+  let runsWindowShown = $derived(!repositoryOnly && !loading && runsWindowDays !== null);
+
   // Derived: when searching, auto-expand all matching repos.
   // When not searching, use the user-controlled expansion set.
   let expandedRepos = $derived<Set<string>>(
@@ -145,20 +169,49 @@
   /** Runs + catalog: independent of each other and of the repo list, so fetch
    *  them concurrently and let each fail on its own. Previously listPipelines()
    *  was nested inside the listAllRuns() try, so a slow/500 /api/runs skipped
-   *  the catalog entirely and the whole section vanished with no error. */
-  async function refreshRunsAndCatalog() {
+   *  the catalog entirely and the whole section vanished with no error.
+   *
+   *  `poll` marks a TIMED refresh. The poll asks for the windowed list only —
+   *  unconditionally, whatever the control is set to — so asking once for the
+   *  full archive cannot turn the 10 s poll into a full-archive poll. Because
+   *  that answer is windowed, a poll tick must not overwrite the archive a
+   *  reader is looking at: it refreshes the catalog and leaves the rows (and
+   *  the window counts they came with) alone until the reader toggles back. */
+  async function refreshRunsAndCatalog(opts: { poll?: boolean } = {}) {
     if (repositoryOnly) return;
+    const askAll = !opts.poll && includeAllRuns;
     const [runsRes, pipesRes] = await Promise.allSettled([
-      listAllRuns(),
+      listAllRuns(undefined, askAll),
       listPipelines(),
     ]);
     if (runsRes.status === 'fulfilled') {
-      const data = runsRes.value;
-      bucketRuns(((data as any)?.runs ?? data) as Record<string, unknown>[]);
+      const data = runsRes.value as unknown as RunsList | Record<string, unknown>[];
+      const body = (data as RunsList)?.runs !== undefined
+        ? (data as RunsList)
+        : { runs: data as unknown as Record<string, unknown>[] };
+      if (!(opts.poll && includeAllRuns)) {
+        bucketRuns(body.runs ?? []);
+        runsWindowDays = asCount(body.window_days);
+        runsTotalCount = asCount(body.total_count);
+        runsReturnedCount = asCount(body.returned_count);
+      }
     }
     if (pipesRes.status === 'fulfilled') {
       pipelines = ((pipesRes.value as any)?.pipelines ?? []) as Record<string, unknown>[];
     }
+  }
+
+  /** A count as the response reports it, or null when it did not report one
+   *  (an older server, a stubbed test): nothing is ever substituted for it. */
+  function asCount(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  /** The one control: ask for everything, or go back to the window. Either way
+   *  it fetches once — the timed poll keeps asking for the windowed list. */
+  async function toggleIncludeAllRuns(): Promise<void> {
+    includeAllRuns = !includeAllRuns;
+    await refreshRunsAndCatalog();
   }
 
   onMount(async () => {
@@ -169,7 +222,7 @@
       // Poll the run tables too: their status badges are the live data on this
       // page. Refreshing only the repo list made a running pipeline look stuck.
       refreshData();
-      refreshRunsAndCatalog();
+      refreshRunsAndCatalog({ poll: true });
     }, 10000);
   });
 
@@ -472,6 +525,46 @@
       {/if}
     </div>
   </header>
+
+  <!-- Runs window. The runs endpoint answers with the last `window_days` only,
+       so the page says which window it is showing and how many rows it left
+       out — both read from THAT response, never from a constant, so a server
+       changing its window changes the sentence. The single control asks for the
+       whole archive; the timed poll keeps asking for the windowed list. -->
+  {#if runsWindowShown}
+    <div
+      class="runs-window"
+      data-runs-window={String(runsWindowDays)}
+      data-runs-returned={String(runsReturnedCount ?? '')}
+      data-runs-total={String(runsTotalCount ?? '')}
+      data-runs-hidden={String(runsHiddenCount)}
+    >
+      <p class="runs-window-note">
+        {#if includeAllRuns}
+          {t('dashboard.runsWindowAll')
+            .replace('{days}', String(runsWindowDays))
+            .replace('{total}', String(runsTotalCount ?? ''))}
+        {:else}
+          {t('dashboard.runsWindowNote')
+            .replace('{days}', String(runsWindowDays))
+            .replace('{shown}', String(runsReturnedCount ?? ''))
+            .replace('{total}', String(runsTotalCount ?? ''))
+            .replace('{hidden}', String(runsHiddenCount))}
+        {/if}
+      </p>
+      <button
+        type="button"
+        class="outline"
+        data-runs-include-all
+        aria-pressed={includeAllRuns}
+        onclick={toggleIncludeAllRuns}
+      >
+        {includeAllRuns
+          ? t('dashboard.runsWindowShowWindow').replace('{days}', String(runsWindowDays))
+          : t('dashboard.runsWindowShowAll')}
+      </button>
+    </div>
+  {/if}
 
   <!-- Create project form -->
   {#if createFormVisible && canWrite}
@@ -1033,6 +1126,34 @@
 
   .search-input {
     min-width: 200px;
+  }
+
+  /* ── Runs window: which slice of the archive is on screen, and one control
+        that asks for all of it ── */
+  .runs-window {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: var(--pico-spacing, 0.75rem);
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--pico-muted-border-color, #e0e0e0);
+    border-radius: 0.4rem;
+    background: var(--pico-code-background-color, #f4f4f4);
+  }
+
+  .runs-window-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--pico-muted-color, #666);
+  }
+
+  .runs-window button {
+    margin: 0;
+    width: auto;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.78rem;
   }
 
   /* ── Repo section (details/summary accordion) ── */

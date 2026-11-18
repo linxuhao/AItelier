@@ -17,7 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { forwardFinalText, openProposals, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
+import { forwardFinalText, openProposals, openThreads, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
   turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -694,7 +694,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       const schedules = await listSchedules(request).then(rows => rows.filter(r => r.enabled)
         .map(r => ({ schedule_id: r.schedule_id, title: r.title, schedule: r.schedule, tz: r.tz, next_run_at: r.next_run_at })))
         .catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
-      return runtime.render() + '\n\nYour open proposals:\n' + JSON.stringify(proposals) + '\n\nYour reminders (on):\n' + JSON.stringify(schedules);
+      // Design-steward 7.3 layer 2: what is open, from data, not from the model's memory.
+      const threads = await openThreads({ request, project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR });
+      return runtime.render() + '\n\nOpen threads:\n' + JSON.stringify(threads) + '\n\nYour open proposals:\n' + JSON.stringify(proposals)
+        + '\n\nYour reminders (on):\n' + JSON.stringify(schedules);
     },
     progress: body => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`, body),
     /** One get_attempt per plan attempt (see settledAttempts). */
@@ -887,7 +890,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   };
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a
   // director's host does not have them (implemented-but-undeclared is refused).
-  if (steward) Object.assign(host, stewardOps({ request: (...args) => request(...args), project, me: env.AITELIER_DRIVER_ID }));
+  if (steward) Object.assign(host, stewardOps({ request: (...args) => request(...args), project, me: env.AITELIER_DRIVER_ID,
+    stateDir: env.AITELIER_DSH_STATE_DIR }));
   return host;
 }
 

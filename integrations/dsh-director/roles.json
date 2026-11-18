@@ -27,7 +27,7 @@
   "steward": {
     "route": "steward",
     "reasoning_effort": "high",
-    "compaction": {"thresholdRatio": 0.25, "retainTokens": 0},
+    "compaction": {"thresholdRatio": 0.5, "retainTokens": 12000},
     "prompt": "steward.md",
     "presented": ["memory_search", "memory_read", "memory_note", "memory_profile_update", "memory_forget",
                   "portfolio_projects", "portfolio_project", "portfolio_conversation", "portfolio_inbox",

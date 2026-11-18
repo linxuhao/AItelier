@@ -243,7 +243,42 @@ export const stewardHostTexts = texts => ({ ...texts, askTheUser: stewardAsk, he
   tools: { ...texts.tools, idle_dormant: stewardTexts.idleDormant, ask_owner: stewardTexts.askOwner, close_question: stewardTexts.closeQuestion } });
 
 /** The directorHost v1.2 operations the steward runs with on AItelier. */
-export function stewardOps({ request, project, me }) {
+/** Handoffs the steward sent, kept by the runtime for its open-threads view (7.3 layer 2). */
+export async function recordHandoff(stateDir, row) {
+  if (!stateDir) return;
+  const { appendFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  await appendFile(join(stateDir, 'handoffs.jsonl'), JSON.stringify(row) + '\n', { mode: 0o600 });
+}
+
+/** Design-steward 7.3 layer 2: what is open, computed from data each snapshot - the owner's
+ *  unanswered messages and the last 7 days of handoffs, each with whether its project wrote
+ *  back (a reply in the steward's inbox citing that handoff's delivery). Never throws. */
+export async function openThreads({ request, project, me, stateDir, now = Date.now(), signal }) {
+  const threads = {};
+  try {
+    threads.unanswered_owner_messages = (await unansweredOwnerMessages({ request, project, me, signal }))
+      .map(m => ({ message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300) }));
+  } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const since = new Date(now - 7 * 24 * 3600e3).toISOString();
+    const sent = (await readFile(join(stateDir, 'handoffs.jsonl'), 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; }))
+      .split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return undefined; } })
+      .filter(h => h && h.at >= since);
+    if (sent.length) {
+      const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
+        statuses: ['unread', 'acknowledged', 'resolved'], after: 0, limit: 100 }, signal);
+      const replied = new Set(((listed.result ?? listed).items ?? []).map(i => i.message?.reply_to_delivery_id).filter(Boolean));
+      threads.handoffs_last_7_days = sent.map(h => ({ at: h.at, project_id: h.project_id, cites_user_message_id: h.cites_user_message_id,
+        answered: (h.delivery_ids ?? []).some(id => replied.has(id)) }));
+    } else threads.handoffs_last_7_days = [];
+  } catch (error) { threads.handoffs_last_7_days = { error: String(error?.message ?? error).slice(0, 200) }; }
+  return threads;
+}
+
+export function stewardOps({ request, project, me, stateDir }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
   return {
     memory: { ownerMessage: async (id, signal) => Boolean(await ownerMessageById({ request, project, id, signal })) },
@@ -365,7 +400,11 @@ export function stewardOps({ request, project, me }) {
       if (result.error) return /idempotency_conflict/.test(result.error)
         ? { refused: 'already_handed_off', reason: `message ${citesUserMessageId} was already passed to ${projectId} with other words` }
         : { refused: 'state_refused', reason: String(result.error).slice(0, 500) };
-      return { handed_off: true, project_id: projectId, cites_user_message_id: citesUserMessageId, ...(result.result ?? result) };
+      const sent = result.result ?? result;
+      await recordHandoff(stateDir, { at: new Date().toISOString(), project_id: projectId, cites_user_message_id: citesUserMessageId,
+        message_id: sent.message?.message_id ?? null, delivery_ids: (sent.deliveries ?? []).map(d => d.delivery_id) })
+        .catch(() => {});
+      return { handed_off: true, project_id: projectId, cites_user_message_id: citesUserMessageId, ...sent };
     },
   };
 }

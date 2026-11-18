@@ -416,6 +416,24 @@ export class MemoryStore {
     return this.#writeEntries(entries, `turn ${turnId} (runtime)`);
   }
 
+  /** The most recent conversation turns, verbatim, oldest first (design-steward 7.3 layer 3):
+   *  up to `n` turns and `maxChars` characters, dropping whole turns from the oldest end; a
+   *  newest turn longer than the bound alone is kept with its oldest lines cut and says so. */
+  recentTurns(n = 10, maxChars = 12000) {
+    const turns = new Map();
+    for (const e of this.entries.values()) {
+      if (e.source !== 'conversation') continue;
+      if (!turns.has(e.batch)) turns.set(e.batch, []);
+      turns.get(e.batch).push(e);
+    }
+    const ordered = [...turns.values()].map(rows => rows.sort((a, b) => (a.at > b.at ? 1 : a.at < b.at ? -1 : a.id.localeCompare(b.id))))
+      .sort((a, b) => (a[0].at > b[0].at ? 1 : a[0].at < b[0].at ? -1 : 0)).slice(-n)
+      .map(rows => rows.map(e => `[${e.at}] ${e.role}: ${e.text}`).join('\n'));
+    while (ordered.length > 1 && ordered.join('\n\n').length > maxChars) ordered.shift();
+    if (ordered.length === 1 && ordered[0].length > maxChars) ordered[0] = '[…earlier part of this turn cut]\n' + ordered[0].slice(-maxChars);
+    return ordered;
+  }
+
   /** Whether an entry id was ever written here: live, forgotten or purged (none of those is
    *  written again). A host syncing a conversation stops paging at a message it knows. */
   known(id) { return this.entries.has(id) || this.forgotten.has(id); }

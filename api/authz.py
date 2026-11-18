@@ -136,6 +136,9 @@ def request_identity(request):
     Returns a `core.drivers.Identity`, or None for no recognised credential.
     Feature off: the pre-P0 actors (the Access email, else the shared
     `authorized-state-operator`) as kind 'legacy'.
+    Feature on: the owner's browser is 'owner', the local CLI's own env admin
+    token is 'cli_owner' (the owner's terminal, minted below), and a registered
+    driver token is 'driver'.
     """
     from core import drivers
     headers = getattr(request, "headers", None) if request is not None else None
@@ -156,6 +159,19 @@ def request_identity(request):
     if token and not is_via_cloudflare(request):
         row = registry.lookup_token(token)
         if row is not None:
+            if (row["driver_id"] == drivers.OWNER_CLI_DRIVER_ID
+                    and ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN)):
+                # The owner's OWN TERMINAL: the env admin token is the CLI's own
+                # credential, not one more registered driver (owner ruling
+                # 2026-11-18). `owner-cli`'s ROW still governs it - suspend the
+                # row, or rotate its token away, and this branch stops matching -
+                # but the identity is the owner at the terminal: no driver_id,
+                # driver-scoped pinning does not apply, and its actor is NOT an
+                # `owner:` one, so exactly the two conversation doors admit it
+                # (core.driver_inbox.DriverInbox._project_user) and every other
+                # owner-only surface keeps refusing this credential.
+                return drivers.Identity(drivers.CLI_OWNER_KIND, drivers.CLI_OWNER_ACTOR,
+                                        is_admin=bool(row["is_admin"]))
             return drivers.Identity("driver", "driver:" + row["driver_id"], row["driver_id"],
                                     is_admin=bool(row["is_admin"]))
     if is_via_tunnel(request):

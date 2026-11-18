@@ -1022,14 +1022,37 @@ async def _check_hung_claims():
       the warning scan still finds 'claimed' is under the reclaim threshold.
       - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
 
-    The host's OWN statement here — the claim scan (site :1035) — runs off the
-    loop, in `_claimed_step_row`, under `sf._lock` (`_sf_statement_lock`): its
-    text repeats on every firing, so it is one of the statements two threads
-    can be handed the same prepared copy of, and a lock the loop can block on is
-    the stall the tick prologue was moved off the loop to avoid. The engine's
+    EVERY ENGINE CALL IN THIS BODY RUNS IN A WORKER THREAD
+    (`asyncio.to_thread`), and that is the fix for 2026-11-18T11:25-11:52Z, not
+    a style preference. skillflow's store takes its own global lock on the way
+    into a read (`skillflow/core.py:662 _ro` -> `with self._lock:`), and a
+    WORKER thread holds it for the whole of its own engine call — one
+    `_sweep_ended_leases` -> `run_isolation.reconcile_all_leases` ->
+    `get_run` is enough. Calling the engine from here put the loop thread in
+    that un-timed wait: the watchdog dump
+    `loop-stack-20261118T114939.873511Z-p7-111.log` ends at
+    `scheduler.py:960 _check_hung_claims` -> `skillflow_host.py:582` ->
+    `skillflow/core.py:2146 audit_operation_owners` -> `_ro` -> `with
+    self._lock:`, and the loop served nothing for minutes (lag 165 s / 132 s /
+    83 s / 79 s / 72 s, `/health` timing out at 15 s, two driver children dead).
+    A 5 s supervisor may WAIT for the engine; it may not do it ON the loop.
+
+    The host's OWN statement in this body — the claim scan, issued in
+    `_claimed_step_row` — is the one call that also needs the statement lock:
+    its text repeats on every firing, so two threads can be handed the same
+    prepared copy of it. It takes `sf._lock` through `_sf_statement_lock`, on a
+    worker thread like everything else here, never on the loop. The engine's
     own calls below (`reconcile_active_operations`, `recover_stale_claims`,
-    `list_runs`) stay on this thread: they take the engine lock themselves and
-    are not the host's statements to move.
+    `list_runs`) take the engine lock themselves: that lock is theirs, and the
+    host's statements are not what it serializes.
+
+    Thread affinity: skillflow's connection is `check_same_thread=False` and
+    every statement is already serialized by the engine's own lock, which is
+    the same boundary `_advance_off_the_loop` has used for agent steps and the
+    three reads above this job already use (`_get_or_create_skillflow_run`,
+    `_has_active_claim`, `_parked_checkpoint`). Nothing about the order, the
+    try/except arms, the log sentences or the cadence changes — only the
+    thread each call waits on.
     """
     import time as _time
     import datetime as _dt
@@ -1045,10 +1068,11 @@ async def _check_hung_claims():
         # admitted while the old operation remains unsettled.
         try:
             if hasattr(sf, "reconcile_active_operations"):
-                _ops = sf.reconcile_active_operations(
+                _ops = await asyncio.to_thread(
+                    sf.reconcile_active_operations,
                     trigger="periodic_before_claim_recovery")
             else:
-                _ops = sf.audit_operation_owners()
+                _ops = await asyncio.to_thread(sf.audit_operation_owners)
         except Exception as e:                                   # noqa: BLE001
             logger.warning("operation-owner reconciliation failed; claim "
                            "recovery skipped: %s", e)
@@ -1058,7 +1082,8 @@ async def _check_hung_claims():
         # fixed interval (activity clock + the never-stale tool guard); it just
         # had nowhere to run FROM. Returns the run ids it reset to pending.
         try:
-            reclaimed = sf.recover_stale_claims(sf._stale_threshold) or []
+            reclaimed = await asyncio.to_thread(
+                sf.recover_stale_claims, sf._stale_threshold) or []
         except Exception as e:
             reclaimed = []
             logger.warning("stale-claim reclaim failed: %s", e)
@@ -1090,7 +1115,8 @@ async def _check_hung_claims():
                            ", ".join(_ops["unknown"]))
         for _rid in reclaimed:
             try:
-                _pid = (sf.get_run(_rid) or {}).get("project_id") or "unknown"
+                _pid = (await asyncio.to_thread(sf.get_run, _rid)
+                        or {}).get("project_id") or "unknown"
             except Exception:
                 _pid = "unknown"
             # Into the tick log next to the other outcomes: that file exists so
@@ -1103,7 +1129,7 @@ async def _check_hung_claims():
                 _pid, _rid)
 
         # Scan all running skillflow runs
-        runs = sf.list_runs(status="running")
+        runs = await asyncio.to_thread(sf.list_runs, status="running")
         if not runs:
             return
 
@@ -1135,7 +1161,8 @@ async def _check_hung_claims():
             # Look up the step node's configured timeout as the baseline
             window_s = 600  # default fallback
             try:
-                resolver = sf._get_resolver_for_run(run_id)
+                resolver = await asyncio.to_thread(
+                    sf._get_resolver_for_run, run_id)
                 node = resolver.get_node(row["step_id"])
                 if node and node.timeout_seconds > 0:
                     window_s = node.timeout_seconds
@@ -1383,6 +1410,20 @@ async def _run_skillflow_tick(project_id: str, loop):
         # already `check_same_thread=False` and guarded by its own lock, which is
         # the same boundary `_advance_off_the_loop` has used for agent steps all
         # along (sqlite3.threadsafety == 3 here, so the module serializes).
+        #
+        # The same rule applies to EVERY direct engine call in the rest of this
+        # function (`gate_deferral.observe_run`, `trace_query`, `fail_run`,
+        # `_get_resolver_for_run`, `get_run`, `claim_next_step`, `confirm_step`,
+        # `fail_step`): each one takes the engine's global lock
+        # (`skillflow/core.py:662 _ro` -> `with self._lock:`), and a worker
+        # thread holds that lock for the whole of ITS engine call, so calling it
+        # here parks the loop thread in an un-timed wait. That is the
+        # 2026-11-18 outage (see `_check_hung_claims`'s docstring): the loop
+        # served nothing for minutes while `_check_hung_claims` waited in that
+        # lock. The one exception is `release_claim_on_cancel` in the
+        # `CancelledError` arm below, which must stay synchronous: it runs while
+        # this task is being cancelled, and an await there would be re-cancelled
+        # before it could hand the claim back.
         run_id = await asyncio.to_thread(_get_or_create_skillflow_run, project_id)
     except Exception as e:
         import logging
@@ -1497,14 +1538,14 @@ async def _run_skillflow_tick(project_id: str, loop):
     # NAMING THE ABSENCE (`gate did not run: no verdict was measured`) and
     # never as a code failure. See core/gate_deferral.py for why the wall clock
     # bound and the accounting rule are not in conflict.
-    deferral = gate_deferral.observe_run(sf, run_id)
+    deferral = await asyncio.to_thread(gate_deferral.observe_run, sf, run_id)
     if deferral["state"] == "silent":
         tick_log(project_id, "gate_deferral_hold", run=run_id[:8],
                  gate=deferral.get("gate") or "",
                  remaining=f"{deferral['remaining']:.0f}s")
         return
     if deferral["state"] == "expired":
-        sf.fail_run(run_id, deferral["reason"])
+        await asyncio.to_thread(sf.fail_run, run_id, deferral["reason"])
         gate_deferral.LEDGER.clear(run_id)
         await _sync_status_off_the_loop(project_id)
         tick_log(project_id, "gate_absence_terminal", run=run_id[:8],
@@ -1528,15 +1569,18 @@ async def _run_skillflow_tick(project_id: str, loop):
     # existed), so a row-count guard never trips on exactly the loop it's meant
     # to catch.
     try:
-        rows = sf.trace_query(run_id,
+        rows = await asyncio.to_thread(
+            sf.trace_query, run_id,
             "SELECT COUNT(*) FROM skillflow_trace "
             "WHERE run_id = ? AND event = 'claimed'",
             (run_id,))
         n_exec = rows[0][0] if rows else 0
         if n_exec > _MAX_STEPS_PER_RUN:
-            sf.fail_run(run_id, f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
-                                f"executions ({n_exec}) — likely a non-converging "
-                                f"loop (e.g. a verify gate that never passes).")
+            await asyncio.to_thread(
+                sf.fail_run, run_id,
+                f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
+                f"executions ({n_exec}) — likely a non-converging "
+                f"loop (e.g. a verify gate that never passes).")
             await _sync_status_off_the_loop(project_id)
             return
         # …and bound re-execution of a SINGLE step instance, which trips far
@@ -1552,7 +1596,8 @@ async def _run_skillflow_tick(project_id: str, loop):
         # while every other instance in the run was claimed exactly once, and the
         # whole-run valve above finished 1 claim short of firing (301 vs 300)
         # when the 3-hour wall clock killed the task.
-        inst = sf.trace_query(run_id,
+        inst = await asyncio.to_thread(
+            sf.trace_query, run_id,
             "SELECT step_id, step_instance_id, COUNT(*) FROM skillflow_trace "
             "WHERE run_id = ? AND event = 'claimed' "
             "AND step_instance_id IS NOT NULL "
@@ -1560,10 +1605,11 @@ async def _run_skillflow_tick(project_id: str, loop):
             (run_id,))
         if inst and gate_deferral.guard_per_instance_valve(
                 inst[0][2], run_id, max_claims=_MAX_CLAIMS_PER_INSTANCE):
-            sf.fail_run(run_id,
-                        f"Aborted: step '{inst[0][0]}' (instance {inst[0][1]}) was "
-                        f"re-executed {inst[0][2]} times without the run advancing "
-                        f"— a terminal state is being resumed instead of ending.")
+            await asyncio.to_thread(
+                sf.fail_run, run_id,
+                f"Aborted: step '{inst[0][0]}' (instance {inst[0][1]}) was "
+                f"re-executed {inst[0][2]} times without the run advancing "
+                f"— a terminal state is being resumed instead of ending.")
             await _sync_status_off_the_loop(project_id)
             return
     except Exception:
@@ -1580,7 +1626,7 @@ async def _run_skillflow_tick(project_id: str, loop):
     # the host to re-enter advance_run so the fast-path executes it (see core.py
     # tool fast-path), so re-advance until the next node is not an inline tool.
     try:
-        _resolver = sf._get_resolver_for_run(run_id)
+        _resolver = await asyncio.to_thread(sf._get_resolver_for_run, run_id)
         _drain = 0
         while next_node is not None and _drain < 20 and _resolver.is_tool(next_node):
             next_node = await _advance_off_the_loop(sf, run_id, project_id)
@@ -1589,7 +1635,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         pass
 
     if next_node is None:
-        run = sf.get_run(run_id)
+        run = await asyncio.to_thread(sf.get_run, run_id)
         if run["status"] in ("paused", "completed", "failed"):
             # Handle terminal states.
             # Carry error_reason on a FAILED run. advance_run() ends a routing
@@ -1609,7 +1655,7 @@ async def _run_skillflow_tick(project_id: str, loop):
             # (butler + MCP) and a crash is caught by startup reconciliation.
             # The reconciler verifies both conditions itself and retains on any
             # doubt, so calling it here cannot release early.
-            _reconcile_lease(project_id, run_id)
+            await asyncio.to_thread(_reconcile_lease, project_id, run_id)
             return
 
         # NOT terminal: advance_run produced no next node while the run is still
@@ -1652,7 +1698,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         return
     _claim_retry_after.pop(retry_key, None)
     try:
-        claimed = sf.claim_next_step(run_id)
+        claimed = await asyncio.to_thread(sf.claim_next_step, run_id)
     except RequiredContextMissing as e:
         # TERMINAL, not retryable. claim_next_step resolves the same node's
         # context every tick, and the only thing that would ever write the
@@ -1662,9 +1708,11 @@ async def _run_skillflow_tick(project_id: str, loop):
         # predecessor, missing `finalize`, re-claiming every tick with nobody
         # watching. Fail the run so the reason reaches the dashboard and the
         # project stops being re-picked.
-        _record_tick_error(sf, run_id, project_id, e, "claim_failed")
+        await asyncio.to_thread(
+            _record_tick_error, sf, run_id, project_id, e, "claim_failed")
         try:
-            sf.fail_run(run_id, f"Missing required input: {e}")
+            await asyncio.to_thread(
+                sf.fail_run, run_id, f"Missing required input: {e}")
         except Exception:
             pass    # a fail_run failure must not mask the original error
         await _sync_status_off_the_loop(project_id)
@@ -1675,14 +1723,17 @@ async def _run_skillflow_tick(project_id: str, loop):
         # claim-precondition surface: calling it an agent/output failure sends
         # recovery to the wrong owner and hides the still-retained worktree.
         if _is_transient_claim_contention(e):
-            _record_tick_error(sf, run_id, project_id, e, "claim_contention")
+            await asyncio.to_thread(
+                _record_tick_error, sf, run_id, project_id, e,
+                "claim_contention")
             _claim_retry_after[retry_key] = (
                 _time.monotonic() + _CLAIM_CONTENTION_BACKOFF_S)
             tick_log(project_id, "claim_contention", run=run_id[:8],
                      retry_in=f"{_CLAIM_CONTENTION_BACKOFF_S:.1f}s",
                      error=str(e)[:160])
         else:
-            settled, count = _record_and_settle_claim_precondition(
+            settled, count = await asyncio.to_thread(
+                _record_and_settle_claim_precondition,
                 sf, run_id, project_id, e)
             tick_log(project_id,
                      "claim_precondition_terminal" if settled
@@ -1693,12 +1744,19 @@ async def _run_skillflow_tick(project_id: str, loop):
     except Exception as e:
         # Non-RuntimeError claim failures retain the historical retry behavior,
         # but stay visible. RequiredContextMissing is handled terminally above.
-        _record_tick_error(sf, run_id, project_id, e, "claim_failed")
+        await asyncio.to_thread(
+            _record_tick_error, sf, run_id, project_id, e, "claim_failed")
         await _sync_status_off_the_loop(project_id)
         tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
         return
     if claimed is None:
-        recovery = _record_unclaimable_successor(sf, run_id, project_id)
+        # Off the loop: `_record_unclaimable_successor` is a synchronous helper
+        # that reads the run row, the pinned resolver and two `sf._ro()` blocks
+        # — every one of them takes the engine's global lock — and `claimed is
+        # None` is the common "nothing ready yet" path, so on the loop it would
+        # freeze the server on every idle tick, not only on a wedge.
+        recovery = await asyncio.to_thread(
+            _record_unclaimable_successor, sf, run_id, project_id)
         if recovery is not None:
             tick_log(project_id,
                      "successor_claim_terminal" if recovery["failed"]
@@ -1710,7 +1768,8 @@ async def _run_skillflow_tick(project_id: str, loop):
             return
         tick_log(project_id, "no_claim", run=run_id[:8],
                  node=next_node if next_node is not None
-                 else (sf.get_run(run_id) or {}).get("current_node"))
+                 else (await asyncio.to_thread(sf.get_run, run_id)
+                       or {}).get("current_node"))
         await _sync_status_off_the_loop(project_id)
         return
 
@@ -1744,7 +1803,7 @@ async def _run_skillflow_tick(project_id: str, loop):
     _fenced = False
     try:
         result = await runner.execute(claimed)
-        sf.confirm_step(claimed.token, result)
+        await asyncio.to_thread(sf.confirm_step, claimed.token, result)
         _confirm_returned = True
 
         # Sync task manifest to DB when the PM step or its review completes.
@@ -1764,7 +1823,8 @@ async def _run_skillflow_tick(project_id: str, loop):
                  step=claimed.step_id, elapsed=f"{_time.time() - _t0:.1f}s",
                  reason=str(e)[:160])
     except MaxRetriesExceeded as e:
-        sf.fail_step(claimed.token, str(e), retryable=False)
+        await asyncio.to_thread(
+            sf.fail_step, claimed.token, str(e), retryable=False)
     except asyncio.CancelledError:
         # CancelledError is BaseException — NOT caught by `except Exception`
         # below — so without this neither confirm_step nor fail_step runs and
@@ -1793,7 +1853,8 @@ async def _run_skillflow_tick(project_id: str, loop):
             tick_log(project_id, "quota_exhausted", run=run_id[:8],
                      step=claimed.step_id,
                      hold=f"{_quota_hold_remaining():.0f}s")
-        sf.fail_step(claimed.token, str(e), retryable=True)
+        await asyncio.to_thread(
+            sf.fail_step, claimed.token, str(e), retryable=True)
 
     # Sync project status to DB after each tick
     await _sync_status_off_the_loop(project_id)
@@ -3166,6 +3227,28 @@ async def settle_scheduler_maintenance(*, exit_error: BaseException | None = Non
         # Preserve the original lifespan error without discarding worker failure.
         logging.getLogger("aitelier.scheduler").error(
             "lease sweep failed during lifespan exit", exc_info=True)
+
+
+async def _sync_status_off_the_loop(project_id: str) -> None:
+    """``_sync_project_status_to_db`` in a worker thread — off the event loop.
+
+    The mirror of `_active_projects_off_the_loop` below, for the same reason and
+    the same defect. `_sync_project_status_to_db` is called from eleven points
+    of the ASYNC tick, and it is not a local write: it reads the run through
+    skillflow (`get_run_by_project`, `list_runs`, `_get_resolver_for_run`) and
+    then `_sync_task_statuses` reads `skillflow_loop_state` on the engine's
+    shared connection. Every one of those takes the engine's global lock
+    (`skillflow/core.py:662 _ro` -> `with self._lock:`), which a worker thread
+    holds for the whole of ITS engine call — so a slow engine call here freezes
+    HTTP, SSE and `/health` along with it, exactly as measured on
+    2026-11-18T11:25-11:52Z (see `_check_hung_claims`'s docstring).
+
+    What does NOT change: the same function, the same arguments, the same order
+    relative to the tick's next statement — the tick awaits this — and the same
+    swallowing of its own failures (`_sync_project_status_to_db` already logs and
+    returns rather than raising into a tick). Only the thread changes.
+    """
+    await asyncio.to_thread(_sync_project_status_to_db, project_id)
 
 
 async def _active_projects_off_the_loop(**query) -> list:

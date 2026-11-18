@@ -65,7 +65,16 @@ def test_slow_actual_sweep_allows_control_work_and_real_hung_claim_check(mainten
                 await asyncio.sleep(0);progress.append('control-request')
                 await sc._check_hung_claims()
             await asyncio.wait_for(control(),0.5)
-            assert progress==['control-request'] and recovered==[threading.get_ident()]
+            # The REAL hung-claim check ran — once — and it ran OFF this thread.
+            # `recovered` records the thread that executed skillflow's reaper.
+            # This used to have to be `threading.get_ident()`, i.e. the loop
+            # thread; on 2026-11-18 exactly that is what froze the whole backend
+            # for minutes while a worker thread held the engine's global lock
+            # (`with self._lock:`). The requirement is now the opposite one — the
+            # supervisor may WAIT for the engine, never ON the loop — and
+            # tests/unit/test_scheduler_hung_claims_off_loop.py measures it
+            # directly. `progress` still proves the loop served control work.
+            assert progress==['control-request'] and len(recovered)==1 and recovered[0]!=threading.get_ident()
             row=sf._conn.execute('SELECT status,retry_count FROM skillflow_steps WHERE id=?',(claim.token.step_instance_id,)).fetchone()
             assert row['status']=='claimed' and row['retry_count']==0
             assert not finished.is_set() and calls[0]!=threading.get_ident()

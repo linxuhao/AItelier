@@ -22,8 +22,10 @@ export const inject = ['ownerChannels'];
 // Slack truncates a message's text past 40000 characters and renders long ones badly
 // well before that; 3500 keeps every part readable as one message (contract C).
 export const SLACK_TEXT_LIMIT = 3500;
-// How many inbound message refs are remembered to route a reply back to their sender.
-const REMEMBERED_REFS = 500;
+// Reconnect backoff: 1 s, doubling, at most 5 min between attempts. The SDK's own
+// reconnect is off (it leaves a rejected promise nobody handles when Slack refuses the
+// token, which would end the steward's process); this plugin reconnects instead.
+export const reconnectDelay = attempt => Math.min(5 * 60_000, 1000 * 2 ** attempt);
 
 /** The two tokens, or the reason there are none. Only the reason is ever printed. */
 export function readTokens(dir) {
@@ -63,24 +65,13 @@ export function splitText(text, limit = SLACK_TEXT_LIMIT) {
 }
 
 /** The channel itself, with the Slack clients passed in (fakes in tests). */
-export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClient, WebClient, logLevel, log, unavailable }) {
+export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClient, WebClient, logLevel, log, unavailable,
+  backoff = reconnectDelay }) {
   const configured = !unavailable && appToken && botToken && SocketModeClient && WebClient;
   let state = { connected: false, detail: configured ? 'connecting' : (unavailable ?? 'not configured') };
   let socket, web, stopped = false;
-  // messageRef -> sender, so a reply goes to whoever wrote the message it answers (that is
-  // also how a bind attempt from a not-yet-bound account gets its one-line answer).
-  const senders = new Map();
-  // The last sender the service accepted a message from: the bound owner, for messages
-  // that answer nothing. In memory only - after a restart it is known again once the
-  // owner writes; until then an unprompted send fails and the service records that.
-  let owner;
+  let connecting, retryTimer, failures = 0;
   const dms = new Map(); // user -> DM channel id
-
-  const remember = (ref, user) => {
-    senders.delete(ref);
-    senders.set(ref, user);
-    if (senders.size > REMEMBERED_REFS) senders.delete(senders.keys().next().value);
-  };
 
   async function onEnvelope({ ack, type, body }) {
     // Every envelope is acknowledged, first: Slack redelivers an unacknowledged one after
@@ -89,47 +80,73 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     const event = type === 'events_api' ? body?.event : undefined;
     if (!isOwnerDm(event)) return;
     const messageRef = event.client_msg_id || event.ts;
-    remember(messageRef, event.user);
     const at = Number.isFinite(Number(event.ts)) ? new Date(Number(event.ts) * 1000).toISOString() : undefined;
     try {
-      const result = await ownerChannels.inbound({ channel: 'slack', senderRef: event.user, messageRef,
+      await ownerChannels.inbound({ channel: 'slack', senderRef: event.user, messageRef,
         text: unescapeSlack(event.text), at });
-      if (result?.accepted) owner = event.user;
     } catch (error) {
       // Never the text: what a stranger sent is not logged (design 7.2 B3).
       log.warn(`slack: inbound from ${event.user} (${event.text.length} chars) failed: ${error?.message ?? error}`);
     }
   }
 
+  // One connection attempt at a time; every failure, now or after a drop, is caught here
+  // and becomes a later attempt, so nothing the socket does can reject into the process.
+  function connect() {
+    if (stopped || connecting) return connecting;
+    connecting = (async () => {
+      try {
+        await socket.start();
+        failures = 0;
+        // stop() ran while this attempt was in flight: close what it just opened.
+        if (stopped) await socket.disconnect();
+      } catch (error) {
+        if (stopped) return;
+        // Slack's error code (invalid_auth, ...) names the cause; the token is never in it.
+        const cause = error?.data?.error ?? error?.code ?? error?.message ?? 'connection closed';
+        state = { connected: false, detail: `disconnected: ${String(cause).slice(0, 200)}` };
+        log.warn(`slack: ${state.detail}`);
+        retry();
+      } finally {
+        connecting = undefined;
+      }
+    })();
+    return connecting;
+  }
+
+  function retry() {
+    if (stopped || retryTimer) return;
+    retryTimer = setTimeout(() => { retryTimer = undefined; void connect(); }, backoff(failures++));
+    retryTimer.unref?.();
+  }
+
   async function start() {
     if (!configured) return;
     web = new WebClient(botToken, { logLevel });
-    socket = new SocketModeClient({ appToken, logLevel });
-    socket.on('connected', () => { state = { connected: true }; });
-    socket.on('reconnecting', () => { state = { connected: false, detail: 'reconnecting' }; });
-    socket.on('disconnected', () => { state = { connected: false, detail: 'disconnected' }; });
+    socket = new SocketModeClient({ appToken, logLevel, autoReconnectEnabled: false });
+    socket.on('connected', () => { if (!stopped) state = { connected: true }; });
+    socket.on('disconnected', () => {
+      // A failed attempt is handled where it was made; a drop of a live socket starts a new one.
+      if (connecting && !stopped) return;
+      state = { connected: false, detail: 'disconnected' };
+      retry();
+    });
     socket.on('slack_event', envelope => { void onEnvelope(envelope); });
-    try {
-      await socket.start();
-    } catch (error) {
-      // Slack's error code (invalid_auth, ...) names the cause; the token is never in it.
-      const cause = error?.data?.error ?? error?.code ?? error?.message ?? String(error);
-      state = { connected: false, detail: `start failed: ${String(cause).slice(0, 200)}` };
-      log.warn(`slack: ${state.detail}`);
-    }
+    await connect();
   }
 
-  async function send(text, { replyToRef } = {}) {
+  // `to` is the bound account, given by the service on every send (it re-reads the binding
+  // each time); this plugin keeps no idea of its own about who the owner is.
+  async function send(text, { to } = {}) {
     if (!configured) throw new Error(`slack channel ${state.detail}`);
-    const user = (replyToRef && senders.get(replyToRef)) || owner;
-    if (!user) throw new Error('slack: no owner account to send to yet (it has not written since this process started)');
-    if (!dms.has(user)) {
-      const opened = await web.conversations.open({ users: user });
-      dms.set(user, opened.channel.id);
+    if (typeof to !== 'string' || to === '') throw new Error('slack: send needs the account to send to (options.to)');
+    if (!dms.has(to)) {
+      const opened = await web.conversations.open({ users: to });
+      dms.set(to, opened.channel.id);
     }
     const refs = [];
     for (const part of splitText(text)) {
-      const posted = await web.chat.postMessage({ channel: dms.get(user), text: escapeSlack(part) });
+      const posted = await web.chat.postMessage({ channel: dms.get(to), text: escapeSlack(part) });
       refs.push(posted.ts);
     }
     return { ref: refs[0] };
@@ -139,6 +156,9 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   const stop = async () => {
     if (stopped) return;
     stopped = true;
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+    state = { connected: false, detail: 'disconnected' };
     await socket?.disconnect?.().catch(error => log.warn(`slack: disconnect failed: ${error?.message ?? error}`));
   };
   return { start, stop, send, status, onEnvelope };

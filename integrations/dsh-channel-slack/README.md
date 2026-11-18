@@ -11,13 +11,18 @@ declares the `channels` capability). Design: step 19, §7.2.
   messageRef: <client_msg_id or ts>, text, at})`. Every Socket Mode envelope is
   acknowledged, whatever it is. Whether the sender is the bound owner is the service's
   decision, not this plugin's.
-- `send(text, {replyToRef})` → posts to the DM of whoever wrote `replyToRef`, or, with no
-  ref, of the last account the service accepted a message from (kept in memory, so after a
-  restart an unprompted message fails until the owner writes once). Text over 3500
+- `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
+  bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
+  of its own about who the owner is; without `to` the send fails. Text over 3500
   characters is sent as consecutive messages; the first message's `ts` is the ref.
 - `status()` → `{connected}` from the socket's own state events, with a `detail` when not
-  connected (`connecting`, `reconnecting`, `disconnected`, `start failed: <slack error>`,
-  or why it is not configured).
+  connected (`connecting`, `disconnected`, `disconnected: <slack error>` such as
+  `invalid_auth`, or why it is not configured).
+- Reconnects itself: the SDK's own reconnect is turned off (`autoReconnectEnabled: false`)
+  because in @slack/socket-mode 3.1.1 a reconnect that Slack refuses (a revoked token,
+  for instance) leaves a rejected promise nobody handles, which would end the steward's
+  process. The plugin retries every failed or dropped connection itself, 1 s doubling to
+  at most 5 min, and stops on dispose.
 
 ## Setup
 
@@ -34,7 +39,9 @@ declares the `channels` capability). Design: step 19, §7.2.
 
 The Slack SDK (`@slack/socket-mode` 3.1.1, `@slack/web-api` 8.3.0, pinned exactly) is a
 dependency of the DSH runtime install (`integrations/dsh-driver/package.json`), and is
-resolved from the running DSH entry, not from this directory.
+resolved from the running DSH entry, not from this directory. `@slack/socket-mode` also
+needs `undici`, which it declares as a peer dependency (`^7 || ^8`); npm 7+ installs peer
+dependencies itself, so it needs no pin of its own (the lock has 8.11.2).
 
 ## Tests
 

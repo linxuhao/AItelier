@@ -8,7 +8,8 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { apply, inject, isOwnerDm, loadSlack, name, readTokens, slackChannel, splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
+import { createRequire } from 'node:module';
+import { apply, inject, isOwnerDm, loadSlack, name, readTokens, reconnectDelay, slackChannel, splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
 
 const quiet = { info() {}, warn() {} };
 
@@ -48,6 +49,7 @@ const envelope = (event, type = 'events_api') => {
 const dm = (over = {}) => ({ type: 'message', channel_type: 'im', channel: 'D-U1', user: 'U1', text: 'hello',
   ts: '1763481600.000200', client_msg_id: 'c-1', ...over });
 const deliver = async (socket, env) => { socket.emit('slack_event', env); await new Promise(r => setImmediate(r)); };
+const tick = (ms = 0) => new Promise(r => setTimeout(r, ms));
 
 test('a direct message to the bot reaches ownerChannels.inbound with the channel, sender, ref, text and time', async () => {
   const { socket, ownerChannels } = await started();
@@ -68,7 +70,7 @@ test("Slack's three escapes are undone on the way in and applied on the way out"
   const { channel, socket, ownerChannels, web } = await started();
   await deliver(socket, envelope(dm({ text: 'a &lt;b&gt; &amp;lt; c' })));
   assert.equal(ownerChannels.calls[0].text, 'a <b> &lt; c');
-  await channel.send('x < y & z', { replyToRef: 'c-1' });
+  await channel.send('x < y & z', { replyToRef: 'c-1', to: 'U1' });
   assert.equal(web.posted[0].text, 'x &lt; y &amp; z');
 });
 
@@ -92,6 +94,16 @@ test('bot messages, subtypes, other channel types and other event types are igno
   assert.equal(isOwnerDm(dm()), true);
 });
 
+test('the envelope is acked before the service is asked, so a slow answer does not make Slack redeliver', async () => {
+  const calls = [];
+  const ownerChannels = { inbound: message => (calls.push(message), new Promise(() => {})) }; // never answers
+  const { socket } = await started(ownerChannels);
+  const env = envelope(dm());
+  await deliver(socket, env);
+  assert.equal(calls.length, 1, 'the message reached the service');
+  assert.deepEqual(env.acks, [true], 'and was acknowledged while the service is still working on it');
+});
+
 test('the envelope is acked even when the service throws, and the text is not logged', async () => {
   const warnings = [];
   const ownerChannels = { inbound: async () => { throw new Error('backend down'); } };
@@ -104,37 +116,37 @@ test('the envelope is acked even when the service throws, and the text is not lo
   assert.doesNotMatch(warnings[0], /secret/);
 });
 
-test('a reply goes to the DM of whoever wrote the message it answers', async () => {
-  const ownerChannels = registry(message => ({ accepted: message.senderRef === 'U1' }));
-  const { channel, socket, web } = await started(ownerChannels);
-  await deliver(socket, envelope(dm()));
-  // A stranger's 6-digit bind attempt is answered on its own DM, not the owner's.
+test('send posts to the DM of the account the service names, whatever wrote what before', async () => {
+  const { channel, socket, web } = await started();
+  // The service passes the bound account as `to` on every send; refs this process has
+  // never seen (written before a restart) and other senders change nothing.
+  await deliver(socket, envelope(dm({ user: 'U1', client_msg_id: 'c-1' })));
   await deliver(socket, envelope(dm({ user: 'U2', client_msg_id: 'c-2', text: '123456' })));
-  assert.deepEqual(await channel.send('bound', { replyToRef: 'c-2' }), { ref: '170000001.000100' });
-  assert.deepEqual(await channel.send('ok', { replyToRef: 'c-1' }), { ref: '170000002.000100' });
-  assert.deepEqual(web.posted.map(p => p.channel), ['D-U2', 'D-U1']);
-  assert.deepEqual(web.opened, ['U2', 'U1']);
+  assert.deepEqual(await channel.send('bound', { replyToRef: 'c-2', to: 'U2' }), { ref: '170000001.000100' });
+  assert.deepEqual(await channel.send('a reply to a message from before the restart', { replyToRef: 'old-ref', to: 'U2' }),
+    { ref: '170000002.000100' });
+  await channel.send('unprompted', { to: 'U2' });
+  await channel.send('to the writer of c-1? no: to whom the service says', { replyToRef: 'c-1', to: 'U2' });
+  assert.deepEqual(web.posted.map(p => p.channel), ['D-U2', 'D-U2', 'D-U2', 'D-U2']);
+  assert.deepEqual(web.opened, ['U2'], 'the DM channel is opened once and reused');
 });
 
-test('an unprompted message goes to the last account the service accepted, and fails before there is one', async () => {
-  const ownerChannels = registry(message => ({ accepted: message.senderRef === 'U1' }));
-  const { channel, socket, web } = await started(ownerChannels);
-  await assert.rejects(channel.send('hi'), /no owner account/);
+test('send without an account to send to fails and posts nothing, even after messages came in', async () => {
+  const { channel, socket, web } = await started();
   await deliver(socket, envelope(dm()));
-  await deliver(socket, envelope(dm({ user: 'U9', client_msg_id: 'c-9' }))); // refused: not the owner
-  await channel.send('reminder');
-  await channel.send('again', { replyToRef: 'unknown-ref' });
-  assert.deepEqual(web.posted.map(p => p.channel), ['D-U1', 'D-U1']);
-  assert.deepEqual(web.opened, ['U1'], 'the DM channel is opened once and reused');
+  await assert.rejects(channel.send('hi'), /options\.to/);
+  await assert.rejects(channel.send('hi', { replyToRef: 'c-1' }), /options\.to/);
+  assert.deepEqual(web.posted, []);
+  assert.deepEqual(web.opened, []);
 });
 
 test('send splits text longer than 3500 characters into consecutive messages and returns the first ref', async () => {
   const { channel, socket, web } = await started();
   await deliver(socket, envelope(dm()));
   const text = 'a'.repeat(SLACK_TEXT_LIMIT) + 'b'.repeat(SLACK_TEXT_LIMIT) + 'c';
-  assert.deepEqual(await channel.send(text, { replyToRef: 'c-1' }), { ref: '170000001.000100' });
+  assert.deepEqual(await channel.send(text, { replyToRef: 'c-1', to: 'U1' }), { ref: '170000001.000100' });
   assert.deepEqual(web.posted.map(p => p.text), ['a'.repeat(SLACK_TEXT_LIMIT), 'b'.repeat(SLACK_TEXT_LIMIT), 'c']);
-  await channel.send('a'.repeat(SLACK_TEXT_LIMIT), { replyToRef: 'c-1' });
+  await channel.send('a'.repeat(SLACK_TEXT_LIMIT), { to: 'U1' });
   assert.equal(web.posted.length, 4, 'exactly 3500 characters is one message');
 });
 
@@ -149,32 +161,140 @@ test('splitText: parts end at a line break in their second half, and no code poi
   assert.ok(parts.every(part => Array.from(part).length <= SLACK_TEXT_LIMIT));
 });
 
-test('status follows the socket: connecting, connected, reconnecting, disconnected', async () => {
+test('the socket is made without the SDK reconnect; status follows it: connecting, connected, disconnected', async () => {
   const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-1', botToken: 'xoxb-1',
-    SocketModeClient: class extends FakeSocket { async start() {} }, WebClient: FakeWeb, log: quiet });
+    SocketModeClient: FakeSocket, WebClient: FakeWeb, log: quiet, backoff: () => 60_000 });
   assert.deepEqual(channel.status(), { connected: false, detail: 'connecting' });
   await channel.start();
   const socket = FakeSocket.last;
-  socket.emit('connected');
+  assert.equal(socket.options.autoReconnectEnabled, false);
   assert.deepEqual(channel.status(), { connected: true });
-  socket.emit('reconnecting');
-  assert.deepEqual(channel.status(), { connected: false, detail: 'reconnecting' });
+  socket.emit('disconnected'); // dropped: shown at once, not after the SDK's reconnect delay
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
   socket.emit('connected');
   await channel.stop();
   assert.equal(socket.disconnected, true);
   assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
 });
 
+// A socket shaped like the SDK's with its reconnect off: start() resolves on 'connected'
+// and rejects when it cannot connect; a drop emits 'disconnected'. Each start() takes the
+// next outcome from `outcomes` ('ok', an Error, or a gate promise to wait on first).
+const scripted = outcomes => class extends FakeSocket {
+  constructor(options) { super(options); this.starts = 0; this.open = false; }
+  async start() {
+    this.starts += 1;
+    let next = outcomes.shift() ?? 'ok';
+    if (next instanceof Promise) next = await next;
+    if (next instanceof Error) throw next;
+    this.open = true;
+    this.emit('connected');
+  }
+  async disconnect() { this.disconnected = true; this.open = false; this.emit('disconnected'); }
+};
+const invalidAuth = () => Object.assign(new Error('An API error occurred: invalid_auth'), { data: { error: 'invalid_auth' } });
+
+test('a drop is reconnected by the plugin; a failing reconnect is caught, shown with its cause, and retried', async () => {
+  const rejections = [];
+  const onRejection = reason => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const warnings = [], delays = [];
+    const Socket = scripted(['ok', invalidAuth(), invalidAuth(), 'ok']);
+    const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-SECRET', botToken: 'xoxb-SECRET',
+      SocketModeClient: Socket, WebClient: FakeWeb, log: { info() {}, warn: line => warnings.push(line) },
+      backoff: attempt => (delays.push(attempt), 0) });
+    await channel.start();
+    const socket = FakeSocket.last;
+    assert.deepEqual(channel.status(), { connected: true });
+    socket.emit('disconnected'); // Slack refreshed the connection
+    await tick(); // first reconnect: invalid_auth (the token was revoked meanwhile)
+    assert.equal(socket.starts, 2);
+    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
+    await tick(); await tick(); // second reconnect fails too, the third connects
+    assert.equal(socket.starts, 4);
+    assert.deepEqual(channel.status(), { connected: true });
+    assert.deepEqual(delays, [0, 1, 2], 'the backoff grows with each failure in a row');
+    socket.emit('disconnected');
+    await tick();
+    assert.equal(socket.starts, 5);
+    assert.deepEqual(delays, [0, 1, 2, 0], 'a connection resets the backoff');
+    await channel.stop();
+    assert.doesNotMatch(warnings.join('\n'), /SECRET/);
+    await tick(20);
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+});
+
+test('reconnectDelay: 1 s, doubling, at most 5 minutes', () => {
+  assert.deepEqual([0, 1, 2, 3].map(reconnectDelay), [1000, 2000, 4000, 8000]);
+  assert.equal(reconnectDelay(20), 300_000);
+});
+
+test('after stop nothing reconnects, and a start still in flight is closed when it connects', async () => {
+  let open;
+  const gate = new Promise(resolve => { open = resolve; });
+  const Socket = scripted([gate]);
+  const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-1', botToken: 'xoxb-1',
+    SocketModeClient: Socket, WebClient: FakeWeb, log: quiet, backoff: () => 0 });
+  const starting = channel.start(); // apply() does not await this
+  const socket = FakeSocket.last;
+  await channel.stop(); // disposed while Slack is still being asked for a URL
+  open('ok');
+  await starting;
+  await tick(5);
+  assert.equal(socket.open, false, 'the connection made after stop was closed');
+  assert.equal(socket.starts, 1, 'and no reconnect followed');
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
+});
+
 test('a socket that cannot start reports why, without the token, and does not crash', async () => {
   const warnings = [];
-  const failing = class extends FakeSocket {
-    async start() { throw Object.assign(new Error('An API error occurred: invalid_auth'), { data: { error: 'invalid_auth' } }); }
-  };
   const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-SECRET', botToken: 'xoxb-SECRET',
-    SocketModeClient: failing, WebClient: FakeWeb, log: { info() {}, warn: line => warnings.push(line) } });
+    SocketModeClient: scripted([invalidAuth()]), WebClient: FakeWeb, backoff: () => 60_000,
+    log: { info() {}, warn: line => warnings.push(line) } });
   await channel.start();
-  assert.deepEqual(channel.status(), { connected: false, detail: 'start failed: invalid_auth' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
   assert.doesNotMatch(warnings.join('\n'), /SECRET/);
+  await channel.stop();
+});
+
+test('with the real SDK, a dropped socket whose reconnect Slack refuses does not reject into the process', async () => {
+  // The reviewer's reproduction: with the SDK's own reconnect on, a 'close' schedules
+  // start() with no catch, and invalid_auth from apps.connections.open escapes as an
+  // unhandled rejection - which ends the steward's process.
+  const driver = fileURLToPath(new URL('../../dsh-driver/package.json', import.meta.url));
+  const slack = loadSlack(driver);
+  const { WebAPIPlatformError } = createRequire(driver)('@slack/web-api');
+  let opens = 0;
+  class Refused extends slack.SocketModeClient {
+    constructor(options) {
+      super({ ...options, clientPingTimeout: 5 }); // the SDK's reconnect delay, made short
+      this.webClient.apps.connections.open = async () => { opens += 1; throw new WebAPIPlatformError({ ok: false, error: 'invalid_auth' }); };
+      Refused.last = this;
+    }
+  }
+  const rejections = [];
+  const onRejection = reason => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-test', botToken: 'xoxb-test',
+      SocketModeClient: Refused, WebClient: slack.WebClient, logLevel: 'error', log: quiet, backoff: () => 5 });
+    await channel.start();
+    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
+    Refused.last.emit('close'); // what the SDK's websocket emits when the connection drops
+    await tick(60);
+    await channel.stop();
+    const after = opens;
+    await tick(30);
+    assert.deepEqual(rejections.map(r => r?.data?.error ?? r?.message), []);
+    assert.ok(after >= 3, `the plugin kept retrying (${after} attempts)`);
+    assert.equal(opens, after, 'and stopped after stop()');
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
 });
 
 test('readTokens: both files present and well-formed, or a reason that carries no token', () => {
@@ -223,7 +343,9 @@ test('the pinned Slack SDK resolves from the DSH runtime install and has what th
   const socket = new slack.SocketModeClient({ appToken: 'xapp-test', logLevel: slack.logLevel });
   // The state events status() listens to are the SDK's own names.
   const source = readFileSync(join(driver, '..', 'node_modules', '@slack', 'socket-mode', 'dist', 'src', 'SocketModeClient.js'), 'utf8');
-  for (const state of ['connected', 'reconnecting', 'disconnected']) assert.match(source, new RegExp(`= "${state}"`));
+  for (const state of ['connected', 'disconnected']) assert.match(source, new RegExp(`= "${state}"`));
+  // The option that turns the SDK's own reconnect off, by the name this plugin passes.
+  assert.match(source, /autoReconnectEnabled = true,/);
   assert.match(source, /this\.emit\('slack_event', \{\s*ack,/);
   assert.equal(typeof socket.start, 'function');
   assert.equal(typeof socket.disconnect, 'function');

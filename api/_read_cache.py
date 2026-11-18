@@ -14,7 +14,7 @@ per tab per tick. Caching it for a few seconds does not make any single request
 faster; it makes the Nth concurrent request free, which is the only number that
 was going to hurt.
 
-Two properties this has to get right:
+Three properties this has to get right:
 
 **The key carries the identity.** These endpoints filter by owner. A cache keyed
 only on the path would serve one user's filtered list to another — turning a
@@ -26,7 +26,32 @@ request that arrives during a cold window start its own computation, which is
 precisely the stampede this exists to prevent — worst at exactly the moment it
 matters, after a restart, when every waiting tab polls a cold process at once
 (measured: 15.6s for the first `/api/projects` against a cold page cache). So a
-miss takes a per-key lock and the others wait for its result.
+miss takes a per-key lock and the others wait for its result. That is the COLD
+path and it is still synchronous on purpose: there is nothing to serve while the
+process has never built the answer at all.
+
+**An EXPIRED entry is not a reason to wait.** It used to be: the caller that
+found the entry too old rebuilt it under the lock and every poll arriving during
+that rebuild queued behind it. Measured on the live backend, `GET /api/runs`
+took 18.30s each time its entry had expired and 0.065s on the cached repeats —
+against a SPA that polls every 10s and a `DEFAULT_TTL` of 10s, so nearly every
+poll paid the rebuild. The rebuild is ~1545 projects of per-project enrichment
+(11-16s), not the DB query (`list_projects_with_stats` returned 1545 rows in
+0.10s) and not the YAML registry (0.00ms per call once warm). So an expired
+entry is served to the caller immediately and a single background thread
+rebuilds it: the value is at most one rebuild older, and the request that used
+to pay 18s now pays microseconds. Exactly one rebuild runs per key at a time —
+the per-key lock is what says so (a rebuild is in progress exactly when the lock
+is held), so reads arriving during the rebuild get the stale value and start
+nothing.
+
+**A failing rebuild must not cost the entry or reach a caller.** It is logged
+and dropped, the previous value keeps being served, and the next expired read
+tries again. A rebuild also refuses to publish into a store that was dropped
+while it ran: `clear()` exists for write-invalidation, and a rebuild that began
+before the write landed holds pre-write data, so publishing it would resurrect
+exactly what the write invalidated. `clear()` therefore bumps a generation, and
+the next read after it is a COLD miss (see above).
 
 Deliberately not a general-purpose cache: no eviction policy beyond the TTL, no
 size bound, no invalidation hooks. It holds one entry per distinct query and
@@ -34,9 +59,12 @@ those are few. Reach for something real before using it for anything else.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable, Hashable
+
+logger = logging.getLogger(__name__)
 
 # Aligned with the SPA's poll interval (web/src/views/UnifiedDashboard.svelte:165
 # — `setInterval(..., 10000)`), and that alignment is the whole point.
@@ -73,19 +101,60 @@ _store: dict[Hashable, tuple[float, Any]] = {}
 _locks: dict[Hashable, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
+# Bumped by everything that DROPS the store (`clear()`, the key-cap reset). A
+# background rebuild records the generation it started in and will not publish
+# into a later one — see `_publish` and the docstring. There is deliberately no
+# per-key structure for this: the lock table is already bounded, and a second
+# table keyed on caller-supplied values would be an unbounded one.
+_generation = 0
+
 
 def _lock_for(key: Hashable) -> threading.Lock:
+    global _generation
     with _locks_guard:
         lock = _locks.get(key)
         if lock is None:
             if len(_locks) >= _MAX_KEYS:
                 # Drop everything rather than pretend to be an LRU. These are
-                # 5-second entries; losing them costs one recomputation, and a
+                # 10-second entries; losing them costs one recomputation, and a
                 # wrong eviction policy here would be more code than the cache.
                 _locks.clear()
                 _store.clear()
+                _generation += 1
             lock = _locks[key] = threading.Lock()
         return lock
+
+
+def _publish(key: Hashable, value: Any, generation: int) -> bool:
+    """Store a rebuild's result unless the store was dropped while it ran."""
+    with _locks_guard:
+        if generation != _generation:
+            return False
+        _store[key] = (time.monotonic(), value)
+        return True
+
+
+def _rebuild(key: Hashable, build: Callable[[], Any], lock: threading.Lock,
+             generation: int) -> None:
+    """One background rebuild. Owns `lock` for its whole life — that IS the flag.
+
+    A failure is logged and nothing else: the previous entry stays in `_store`,
+    callers keep being served it, and the next expired read starts a new attempt.
+    """
+    try:
+        try:
+            value = build()
+        except Exception:
+            logger.warning(
+                "read cache: background rebuild for %r failed; serving the "
+                "previous value until a later rebuild succeeds", key,
+                exc_info=True)
+            return
+        if not _publish(key, value, generation):
+            logger.debug(
+                "read cache: rebuild for %r finished after clear(); discarded", key)
+    finally:
+        lock.release()
 
 
 def cached(key: Hashable, build: Callable[[], Any], ttl: float = DEFAULT_TTL) -> Any:
@@ -94,13 +163,46 @@ def cached(key: Hashable, build: Callable[[], Any], ttl: float = DEFAULT_TTL) ->
     The returned object is SHARED between callers. Treat it as read-only —
     mutating it mutates what the next caller gets. Everything here is handed
     straight to the JSON serializer, which does not mutate.
+
+    Three states, three behaviours: FRESH is returned; ABSENT (a cold miss, or
+    the first read after `clear()`) is computed inline while other callers wait
+    for it; EXPIRED is returned immediately while one background rebuild runs.
+    A non-positive `ttl` means "do not reuse" — there is no window in which the
+    value would be fresh, so serving it stale would be serving a value the
+    caller declared unusable, and that takes the blocking path.
     """
+    # Read BEFORE `hit`: anything that drops the store afterwards bumps the
+    # generation, and a rebuild from this call must not publish into that.
+    generation = _generation
     now = time.monotonic()
     hit = _store.get(key)
     if hit is not None and now - hit[0] < ttl:
         return hit[1]
 
     lock = _lock_for(key)
+    if hit is not None and ttl > 0:
+        # EXPIRED: the lock says whether a rebuild already owns this key. A
+        # non-blocking acquire is the whole election — no second structure that
+        # could disagree with the lock about whether a rebuild is running.
+        if not lock.acquire(blocking=False):
+            return hit[1]
+        started = False
+        try:
+            threading.Thread(
+                target=_rebuild, args=(key, build, lock, generation),
+                name="read-cache-refresh", daemon=True,
+            ).start()
+            started = True
+        finally:
+            if not started:
+                # No thread to be had (a process at its thread limit, say).
+                # Fall through to the blocking path rather than never
+                # refreshing again — that is the behaviour this cache had
+                # before it served stale values.
+                lock.release()
+        if started:
+            return hit[1]
+
     with lock:
         # Re-check under the lock: whoever held it may have just filled the
         # entry, and this is the whole point — one computation, N readers.
@@ -115,8 +217,13 @@ def cached(key: Hashable, build: Callable[[], Any], ttl: float = DEFAULT_TTL) ->
 
 def clear() -> None:
     """Drop everything. For tests, and for a caller that knows it just wrote."""
-    _store.clear()
-    # `_locks` too: it used to be left behind, which made "clear" not clear and
-    # let the lock table grow without any bound at all.
+    global _generation
     with _locks_guard:
+        _store.clear()
+        # `_locks` too: it used to be left behind, which made "clear" not clear
+        # and let the lock table grow without any bound at all.
         _locks.clear()
+        # A rebuild in flight holds a lock that is no longer in the table, so it
+        # cannot make the next read wait; this stops it from publishing what it
+        # computed from the pre-write state.
+        _generation += 1

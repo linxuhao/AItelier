@@ -1,0 +1,33 @@
+# systemd USER unit for the WeChat bridge (README.md). Not installed by anything:
+# copy to ~/.config/systemd/user/, then `systemctl --user daemon-reload` and
+# `systemctl --user start aitelier-wechat-bridge` when the owner is ready to scan.
+[Unit]
+Description=AItelier WeChat bridge (Wechaty + puppet-neo, loopback HTTP for the steward)
+# A QR nobody scans, or a logout, ends the process (exit 75) so the next start shows
+# a fresh QR; five starts an hour at most, then the unit stays failed until the
+# owner starts it again, so an unattended bridge does not keep asking WeChat for QRs.
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# puppet-neo 0.1.1 declares node >= 26; the first node on this PATH is the one used.
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+Environment=WECHAT_BRIDGE_PORT=18731
+ExecStart=/usr/bin/env node %h/AItelier/integrations/wechat-bridge/main.mjs
+# Wechaty writes its memory card into the working directory: the state dir is the
+# only place this process may write.
+StateDirectory=aitelier-wechat-bridge
+WorkingDirectory=%S/aitelier-wechat-bridge
+Restart=on-failure
+RestartSec=30
+# 78 = no token file: starting again cannot help.
+RestartPreventExitStatus=78
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%S/aitelier-wechat-bridge
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target

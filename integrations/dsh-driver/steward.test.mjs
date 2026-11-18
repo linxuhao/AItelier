@@ -48,7 +48,8 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
 
 test('presented_only: the steward has exactly its presented tools; everything else is refused, however it is called', () => {
   const steward = aitelierRoles(table).steward;
-  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director'],
+  assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director',
+    'schedule_list', 'schedule_set', 'schedule_delete'],
     'the adapter adds only the owner message and the letter reply');
   assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
   // The inbox reader is the steward's own and nobody else's.
@@ -800,4 +801,31 @@ test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the direc
   }
   assert.match(steward.tools.idle_dormant, /Nothing is expected of you until your owner or a director writes/);
   assert.notEqual(director.tools.idle_dormant, steward.tools.idle_dormant);
+});
+
+test('step 17 layer 2: open threads from data - the unanswered owner messages and the last 7 days of handoffs, answered or not', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  const conversation = [owner('o1', '2026-11-18T10:00:00Z', 'tell wuxia to pause'), mine('s1', '2026-11-18T10:01:00Z', 'ok', 'o1'),
+    owner('o2', '2026-11-18T10:05:00Z', 'and the ledger?')];
+  let replies = [];
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/send_director_message')) return { result: { message: { message_id: 'hm1' }, deliveries: [{ delivery_id: 'hd1' }] } };
+    if (path.endsWith('/list_director_messages')) return { result: { items: replies, has_more: false } };
+    throw new Error('unexpected ' + path);
+  };
+  const ops = stewardOps({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'pause please', citesUserMessageId: 'o1' })).handed_off, true);
+  const { openThreads } = await import('./steward-host.mjs');
+  const now = Date.parse('2026-11-18T12:00:00Z');
+  let threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir, now: Date.now() });
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => m.message_id), ['o2']);
+  assert.deepEqual(threads.handoffs_last_7_days.map(h => [h.project_id, h.cites_user_message_id, h.answered]), [['wuxia', 'o1', false]]);
+  replies = [{ message: { message_id: 'r1', reply_to_delivery_id: 'hd1', sender_project_id: 'wuxia' }, delivery: { delivery_id: 'x' } }];
+  threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir, now: Date.now() });
+  assert.equal(threads.handoffs_last_7_days[0].answered, true, 'the project wrote back citing that handoff');
+  // Older than 7 days: gone from the view.
+  threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir, now: Date.now() + 8 * 24 * 3600e3 });
+  assert.deepEqual(threads.handoffs_last_7_days, []);
+  void now;
 });

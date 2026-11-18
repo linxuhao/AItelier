@@ -480,3 +480,29 @@ test('iss-a81f: a crossed budget line is logged once and stays on status.over_bu
   assert.equal(store.statusLine().over_budget, undefined, 'within the real budget nothing is reported');
   await store.close();
 });
+
+test('step 17 layer 3: the recent turns verbatim, oldest first, whole turns dropped at the bound; the snapshot carries them', async () => {
+  const root = newRoot(); const store = await open(root);
+  for (let i = 0; i < 12; i++) await store.recordTurn('t' + String(i).padStart(2, '0'), [
+    { role: 'owner', part: 'o', at: `2026-11-18T0${Math.floor(i / 10)}:${String(i % 10).padStart(2, '0')}:00Z`, text: 'owner says ' + i },
+    { role: 'steward', part: 'r', at: `2026-11-18T0${Math.floor(i / 10)}:${String(i % 10).padStart(2, '0')}:30Z`, text: 'steward answers ' + i }]);
+  await store.note('a note is not conversation');
+  const turns = store.recentTurns();
+  assert.equal(turns.length, 10, 'ten turns');
+  assert.match(turns[0], /owner: owner says 2\n.*steward: steward answers 2$/s, 'oldest first, owner then steward');
+  assert.match(turns.at(-1), /owner says 11/);
+  assert.ok(!turns.join().includes('a note is not conversation'));
+  // The character bound drops whole turns from the oldest end, never half a turn.
+  const bounded = store.recentTurns(10, 200);
+  assert.ok(bounded.join('\n\n').length <= 200 && bounded.every(t => /owner says \d+\n.*steward answers \d+$/s.test(t)));
+  assert.match(bounded.at(-1), /owner says 11/);
+  // One newest turn longer than the bound alone: kept, cut from its start, and it says so.
+  await store.recordTurn('long', [{ role: 'owner', part: 'o', at: '2026-11-18T09:00:00Z', text: 'x'.repeat(500) + 'END' }]);
+  const cut = store.recentTurns(10, 100);
+  assert.equal(cut.length, 1);
+  assert.match(cut[0], /^\[…earlier part of this turn cut\]\n.*END$/s);
+  const section = await profileSection({ store });
+  assert.match(section, /Recent conversation with your owner \(verbatim, oldest first; older turns: memory_search\):\n/);
+  assert.match(section, /END/);
+  await store.close();
+});

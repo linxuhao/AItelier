@@ -1154,6 +1154,48 @@ class CompleteStewardMemoryRequest(Project):
     result: dict[str, Any]
 
 
+# Step 16: the steward's scheduled reminders (core.state_steward, design-steward 7.4).
+_SCHEDULE = ("{kind: 'once', at: ISO time} or {kind: 'cron', expr: 5-field cron 'min hour day month weekday'}; "
+             "runs at least 15 minutes apart")
+_TZ = "IANA time zone; default Europe/Paris (AITELIER_OWNER_TZ)"
+
+
+class ListStewardSchedules(Request):
+    include_disabled: bool = True
+
+
+class CreateStewardSchedule(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    title: str = Field(min_length=1, max_length=200)
+    instruction: str = Field(min_length=1, max_length=2000)
+    schedule: dict[str, Any] = Field(description=_SCHEDULE)
+    tz: str | None = Field(default=None, min_length=1, max_length=64, description=_TZ)
+    enabled: bool = True
+
+
+class UpdateStewardSchedule(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    schedule_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    instruction: str | None = Field(default=None, min_length=1, max_length=2000)
+    schedule: dict[str, Any] | None = Field(default=None, description=_SCHEDULE)
+    tz: str | None = Field(default=None, min_length=1, max_length=64, description=_TZ)
+    enabled: bool | None = None
+
+
+class DeleteStewardSchedule(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    schedule_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=1)
+
+
+class FireStewardSchedule(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    schedule_id: str = Field(min_length=1, max_length=64)
+    expected_next_run_at: str = Field(min_length=1, max_length=64)
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1186,6 +1228,7 @@ READ_REQUESTS = {
     "list_subagents": ListSubagents, "list_handoffs": ListHandoffs, "get_handoff": HandoffRef,
     "list_steward_proposals": ListStewardProposals,
     "list_steward_memory_requests": ListStewardMemoryRequests,
+    "list_steward_schedules": ListStewardSchedules,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1261,6 +1304,8 @@ WRITER_ONLY_READS = frozenset({
     # The owner's steward (plugin steps 13-14): its proposals and the owner's
     # memory requests. Private tables (core.state_privacy).
     "list_steward_proposals", "list_steward_memory_requests",
+    # Step 16: the steward's scheduled reminders. A private table.
+    "list_steward_schedules",
 })
 
 
@@ -1319,6 +1364,10 @@ WRITE_REQUESTS = {
     "create_steward_proposal": CreateStewardProposal,
     "withdraw_steward_proposal": WithdrawStewardProposal,
     "complete_steward_memory_request": CompleteStewardMemoryRequest,
+    "create_steward_schedule": CreateStewardSchedule,
+    "update_steward_schedule": UpdateStewardSchedule,
+    "delete_steward_schedule": DeleteStewardSchedule,
+    "fire_steward_schedule": FireStewardSchedule,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1672,6 +1721,11 @@ def _handlers(service) -> dict:
         "list_steward_proposals": service.steward.list_proposals,
         "list_steward_memory_requests": service.steward.list_memory_requests,
         "complete_steward_memory_request": service.steward.complete_memory_request,
+        "list_steward_schedules": service.steward.list_schedules,
+        "create_steward_schedule": service.steward.create_schedule,
+        "update_steward_schedule": service.steward.update_schedule,
+        "delete_steward_schedule": service.steward.delete_schedule,
+        "fire_steward_schedule": service.steward.fire_schedule,
     }
 
 
@@ -1745,6 +1799,8 @@ def _driver_defaults(service, action, arguments):
 # acknowledge_driver_message is the same acknowledgement for a letter delivered to the
 # steward's PRIVATE driver inbox (owner 2026-11-17: the steward settles both inboxes),
 # acknowledgement only - never resolve (_STEWARD_PRIVATE_INBOX_WRITES).
+# The four *_steward_schedule actions are step 16's: they write only the steward's
+# own schedule table (the service checks the steward and its project again).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1755,7 +1811,8 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "send_driver_message",
     # Owner 2026-11-17: and it MARKs a private letter read, so a settled delivery is
     # not re-injected on every wake. Acknowledgement only; resolve stays closed.
-    "acknowledge_driver_message"})
+    "acknowledge_driver_message",
+    "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

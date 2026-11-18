@@ -40,6 +40,7 @@ NOTEBOOK_TABLES = ("state_driver_notes", "state_driver_note_revisions",
 ADMIN_TOKEN = "state-canaries-admin-token-not-a-secret"
 STEWARD_PROPOSAL = "proposal-canary"
 STEWARD_MEMORY_REQUEST = "memreq-canary"
+STEWARD_SCHEDULE = "sch-canary"
 
 
 def canary(table: str) -> str:
@@ -174,6 +175,13 @@ def _plan():
             ("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,result_json,"
              "created_at,completed_at,created_by) VALUES(?,'profile_read','{}','done',?,?,?,'owner:seeder')"),
             (STEWARD_MEMORY_REQUEST, '{"text": "%s"}' % c("state_steward_memory_requests"), now, now)),
+        # A live, enabled reminder whose title and instruction carry the canary.
+        "state_steward_schedules": (
+            ("INSERT INTO state_steward_schedules(schedule_id,version,title,instruction,kind,at,expr,tz,enabled,"
+             "next_run_at,created_by,updated_by,created_at,updated_at) "
+             "VALUES(?,1,?,?,'once',?,NULL,'Europe/Paris',1,?,'owner','owner',?,?)"),
+            (STEWARD_SCHEDULE, c("state_steward_schedules"), c("state_steward_schedules"),
+             "2999-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00", now, now)),
     }
 
 

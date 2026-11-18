@@ -7,8 +7,8 @@
  *  not flash into a list before the driver table has arrived.
  */
 import {
-  createStewardMemoryRequest, stewardMemoryRequest,
-  type DriverStatusResponse, type StewardImpact, type StewardMemoryKind,
+  ApiError, createStewardMemoryRequest, stewardMemoryRequest,
+  type DriverStatusResponse, type StewardImpact, type StewardMemoryKind, type StewardSchedule,
 } from './api';
 
 export const STEWARD_PROJECT_ID = 'aitelier-home';
@@ -67,4 +67,59 @@ export async function runMemoryRequest(
     if (row.status === 'done') return row.result ?? {};
   }
   return null;
+}
+
+// ── Scheduled reminders (plugin step 16) ──
+
+/** One-click cron expressions; the owner can still write any 5-field expression. */
+export const SCHEDULE_PRESETS = [
+  {id: 'daily', expr: '0 9 * * *'},
+  {id: 'weekdays', expr: '0 9 * * 1-5'},
+  {id: 'monday', expr: '0 9 * * 1'},
+  {id: 'monthly', expr: '0 9 1 * *'},
+] as const;
+
+/** The refusal codes the schedule endpoints give with a 422 (each has a steward.schedReason.* text). */
+export const SCHEDULE_REFUSALS = ['invalid_cron', 'too_frequent', 'at_in_past', 'invalid_timezone'];
+
+export function browserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+/** A run time for people, on the row's own zone's wall clock; '—' when there is none. */
+export function formatRunAt(iso: string | null | undefined, tz?: string): string {
+  if (!iso) return '—';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  try { return at.toLocaleString(undefined, {timeZone: tz, dateStyle: 'medium', timeStyle: 'short'}); }
+  catch { return at.toLocaleString(); }
+}
+
+/** ISO instant -> the value of an <input type="datetime-local"> in the browser's zone. */
+export function toLocalInput(iso: string | null | undefined): string {
+  const at = new Date(iso ?? '');
+  if (!iso || Number.isNaN(at.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/** The datetime-local value (browser zone) -> ISO UTC; '' when it is empty or not a time. */
+export function fromLocalInput(value: string): string {
+  const at = new Date(value);
+  return value && !Number.isNaN(at.getTime()) ? at.toISOString() : '';
+}
+
+/** The current row a version-conflict refusal carries, or null when this is something else. */
+export function scheduleConflict(error: unknown): StewardSchedule | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const detail = error.detail as {schedule?: StewardSchedule} | null;
+  return detail?.schedule && typeof detail.schedule === 'object' ? detail.schedule : null;
+}
+
+/** A 422's {code, reason}, or null. */
+export function scheduleRefusal(error: unknown): {code: string; reason: string} | null {
+  if (!(error instanceof ApiError) || error.status !== 422) return null;
+  const detail = error.detail as {code?: unknown; reason?: unknown} | null;
+  return detail && typeof detail === 'object' && typeof detail.code === 'string'
+    ? {code: detail.code, reason: typeof detail.reason === 'string' ? detail.reason : ''} : null;
 }

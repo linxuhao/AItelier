@@ -6,7 +6,10 @@
  *  - a proposal card follows open -> executing -> terminal, and a 409 refreshes it;
  *  - a stop_driver card with work in flight needs the explicit "stop anyway";
  *  - the profile page edits against a version and shows the text that won a conflict;
- *  - purge asks first; the old butler's /chat route is gone.
+ *  - purge asks first; the old butler's /chat route is gone;
+ *  - reminders (step 16): the list marks steward edits and disabled rows, the form
+ *    previews the backend's next runs, saves with the browser zone / the version it
+ *    read, shows the row that won a 409, and deletes only after a confirm.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -24,10 +27,12 @@ const api = vi.hoisted(() => ({
   startDshDriver: vi.fn(), stopDshDriver: vi.fn(),
   listStewardProposals: vi.fn(), approveStewardProposal: vi.fn(), declineStewardProposal: vi.fn(),
   stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(),
+  listStewardSchedules: vi.fn(), createStewardSchedule: vi.fn(), updateStewardSchedule: vi.fn(),
+  deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(),
 }));
 // The real module underneath, so ApiError is the class the components check.
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
-import { ApiError, type DriverConversationEntry, type StewardProposal } from '../../lib/api';
+import { ApiError, type DriverConversationEntry, type StewardProposal, type StewardSchedule } from '../../lib/api';
 import { openQuestions } from '../../lib/questions';
 import { runMemoryRequest, totalOpenQuestions } from '../../lib/steward';
 import StateProjects from '../../views/StateProjects.svelte';
@@ -35,6 +40,8 @@ import ProjectDashboard from '../../views/ProjectDashboard.svelte';
 import StewardQuestions from '../../views/StewardQuestions.svelte';
 import StewardProposalCard from '../../views/StewardProposalCard.svelte';
 import StewardProfile from '../../views/StewardProfile.svelte';
+import StewardSchedules from '../../views/StewardSchedules.svelte';
+import StewardScheduleForm from '../../views/StewardScheduleForm.svelte';
 import AppBar from '../../views/AppBar.svelte';
 import { navArea } from '../../lib/navigation.svelte';
 
@@ -163,7 +170,7 @@ describe('the steward card', () => {
     await fireEvent.click(pinned);
     const pane = await view.findByRole('complementary');
     await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('aitelier-home'));
-    for (const name of ['Proposals', 'Open questions by project', 'Profile']) {
+    for (const name of ['Proposals', 'Open questions by project', 'Reminders', 'Profile']) {
       expect(within(pane).getByRole('tab', {name})).toBeTruthy();
     }
   });
@@ -443,6 +450,210 @@ describe('the profile page', () => {
     await waitFor(() => expect(api.createStewardMemoryRequest).toHaveBeenCalledWith('purge', {ids: ['e1']}));
     await view.findByText('Purged.');
     expect(view.container.querySelector('[data-forgotten="e1"]')).toBeNull();
+  });
+});
+
+describe('reminders', () => {
+  const schedule = (over: Partial<StewardSchedule> = {}): StewardSchedule => ({
+    schedule_id: 'sch-1', version: 4, title: 'Morning check', instruction: 'look at the open questions',
+    schedule: {kind: 'cron', expr: '0 9 * * 1-5'}, tz: 'Europe/Paris', enabled: true,
+    next_run_at: '2026-11-18T08:00:00+00:00', last_run_at: '2026-11-17T08:00:00+00:00', last_missed: 0,
+    created_by: 'owner', updated_by: 'owner', last_fired_by: null,
+    created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-17T08:00:00Z', ...over,
+  });
+  const runs = ['2026-11-18T09:00:00+01:00', '2026-11-19T09:00:00+01:00', '2026-11-20T09:00:00+01:00',
+    '2026-11-23T09:00:00+01:00', '2026-11-24T09:00:00+01:00'];
+  const card = (container: HTMLElement, id: string) => container.querySelector(`[data-schedule="${id}"]`) as HTMLElement;
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const form = () => ({onchange: vi.fn(), onclose: vi.fn()});
+  beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); });
+
+  it('review 337: a reminder past its time by more than five minutes is marked overdue (a stopped clock shows)', async () => {
+    api.listStewardSchedules.mockResolvedValue([
+      schedule({overdue_seconds: 1800}),
+      schedule({schedule_id: 'sch-2', title: 'Just due', overdue_seconds: 40}),
+      schedule({schedule_id: 'sch-3', title: 'Off', enabled: false, overdue_seconds: 0}),
+    ]);
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    expect(card(view.container, 'sch-1').querySelector('[data-overdue]')?.textContent).toBe('Overdue by 30 min');
+    expect(card(view.container, 'sch-2').querySelector('[data-overdue]')).toBeNull();
+    expect(card(view.container, 'sch-3').querySelector('[data-overdue]')).toBeNull();
+  });
+
+  it('lists each reminder with its schedule, runs, author, the steward-edit mark and disabled rows', async () => {
+    api.listStewardSchedules.mockResolvedValue([
+      schedule({updated_by: 'steward'}),
+      schedule({schedule_id: 'sch-2', title: 'Pay rent', schedule: {kind: 'once', at: '2026-12-01T08:00:00Z'},
+        enabled: false, next_run_at: null, last_run_at: null, created_by: 'steward', updated_by: 'owner'}),
+    ]);
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    const cron = card(view.container, 'sch-1'), once = card(view.container, 'sch-2');
+    expect(cron.querySelector('[data-steward-edited]')?.textContent).toBe('Changed by the steward');
+    expect(once.querySelector('[data-steward-edited]')).toBeNull();
+    const when = cron.querySelector('[data-schedule-when]')?.textContent ?? '';
+    expect(when).toContain('Weekdays at 9:00');
+    expect(when).toContain('0 9 * * 1-5');
+    expect(when).toContain('Next run');
+    expect(cron.querySelector('[data-next]')?.textContent).not.toBe('—');
+    expect(cron.querySelector('[data-last]')?.textContent).not.toBe('—');
+    expect(cron.querySelector('[data-created-by]')?.textContent).toBe('You');
+    expect((cron.querySelector('[role="switch"]') as HTMLInputElement).checked).toBe(true);
+    // A disabled once-reminder: the time it was set for, no next run, switch off.
+    expect(once.dataset.enabled).toBe('0');
+    expect(once.classList.contains('disabled')).toBe(true);
+    expect(once.querySelector('[data-schedule-when]')?.textContent).toContain('Once at');
+    expect(once.querySelector('[data-next]')?.textContent).toBe('—');
+    expect(once.querySelector('[data-last]')?.textContent).toBe('—');
+    expect(once.querySelector('[data-created-by]')?.textContent).toBe('Steward');
+    expect((once.querySelector('[role="switch"]') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('a preset fills the expression, and the preview shows the next 5 runs (debounced)', async () => {
+    const view = render(StewardScheduleForm, form());
+    const expr = view.container.querySelector('[data-schedule-expr]') as HTMLInputElement;
+    await fireEvent.input(expr, {target: {value: '0'}});
+    await fireEvent.input(expr, {target: {value: '0 9'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Weekdays at 9:00'}));
+    expect(expr.value).toBe('0 9 * * 1-5');
+    await waitFor(() => expect(view.container.querySelectorAll('[data-preview] li')).toHaveLength(5));
+    // Only the expression the owner settled on was sent, with the zone shown on the form.
+    expect(api.previewStewardSchedule).toHaveBeenCalledTimes(1);
+    expect(api.previewStewardSchedule).toHaveBeenCalledWith({kind: 'cron', expr: '0 9 * * 1-5'}, browserZone);
+    expect(view.container.querySelector('[data-schedule-tz]')?.textContent).toBe(browserZone);
+  });
+
+  it.each([
+    ['too_frequent', 'Runs less than 15 minutes apart'],
+    ['invalid_cron', 'Invalid cron expression'],
+  ])('the preview shows a 422 %s inline with its reason', async (code, label) => {
+    api.previewStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code, reason: 'from the backend'}));
+    const view = render(StewardScheduleForm, form());
+    await fireEvent.input(view.container.querySelector('[data-schedule-expr]') as HTMLInputElement, {target: {value: '* * * * *'}});
+    const shown = await waitFor(() => {
+      const el = view.container.querySelector('[data-preview-error]');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(shown.textContent).toBe(`${label}: from the backend`);
+    expect(view.container.querySelector('[data-preview]')).toBeNull();
+  });
+
+  it('create posts title, instruction, schedule and the browser zone', async () => {
+    const p = form();
+    api.createStewardSchedule.mockImplementation(async (fields: object) => schedule({...fields, schedule_id: 'sch-9', version: 1}));
+    const view = render(StewardScheduleForm, p);
+    await fireEvent.input(view.getByLabelText('Title'), {target: {value: ' Morning check '}});
+    await fireEvent.input(view.getByLabelText('Instruction for the steward'), {target: {value: 'look at the open questions'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Every day at 9:00'}));
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(api.createStewardSchedule).toHaveBeenCalledWith({title: 'Morning check',
+      instruction: 'look at the open questions', schedule: {kind: 'cron', expr: '0 9 * * *'}, tz: browserZone}));
+    await waitFor(() => expect(p.onclose).toHaveBeenCalled());
+    expect(p.onchange).toHaveBeenCalledWith(expect.objectContaining({schedule_id: 'sch-9'}));
+  });
+
+  it('a once reminder sends the datetime-local time (browser zone) as an ISO instant', async () => {
+    api.createStewardSchedule.mockResolvedValue(schedule());
+    const view = render(StewardScheduleForm, form());
+    await fireEvent.input(view.getByLabelText('Title'), {target: {value: 'Pay rent'}});
+    await fireEvent.input(view.getByLabelText('Instruction for the steward'), {target: {value: 'remind me'}});
+    await fireEvent.click(view.getByLabelText('Once'));
+    await fireEvent.input(view.container.querySelector('[data-schedule-at]') as HTMLInputElement, {target: {value: '2030-01-02T09:30'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    const at = new Date('2030-01-02T09:30').toISOString();
+    await waitFor(() => expect(api.createStewardSchedule).toHaveBeenCalledWith(
+      {title: 'Pay rent', instruction: 'remind me', schedule: {kind: 'once', at}, tz: browserZone}));
+    await waitFor(() => expect(api.previewStewardSchedule).toHaveBeenCalledWith({kind: 'once', at}, browserZone));
+  });
+
+  it('edit sends the version it read; a 409 shows the current row and the owner starts from it', async () => {
+    api.listStewardSchedules.mockResolvedValue([schedule()]);
+    const current = schedule({version: 6, title: 'Morning check (steward)', instruction: 'and the proposals',
+      schedule: {kind: 'cron', expr: '0 9 * * 1'}, updated_by: 'steward'});
+    api.updateStewardSchedule.mockRejectedValueOnce(new ApiError(409, '', null, {code: 'version_conflict', schedule: current}));
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    await fireEvent.click(within(card(view.container, 'sch-1')).getByRole('button', {name: 'Edit'}));
+    const title = view.getByLabelText('Title') as HTMLInputElement;
+    expect(title.value).toBe('Morning check');
+    expect(view.container.querySelector('[data-schedule-tz]')?.textContent).toBe('Europe/Paris');
+    await fireEvent.input(title, {target: {value: 'Morning review'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenCalledWith('sch-1', 4, {title: 'Morning review',
+      instruction: 'look at the open questions', schedule: {kind: 'cron', expr: '0 9 * * 1-5'}, tz: 'Europe/Paris'}));
+    const shown = await waitFor(() => {
+      const el = view.container.querySelector('[data-schedule-current]');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(shown.textContent).toContain('Morning check (steward)');
+    expect(shown.textContent).toContain('0 9 * * 1');
+    // The list behind the form shows the row that won as well.
+    expect(card(view.container, 'sch-1').querySelector('[data-steward-edited]')).not.toBeNull();
+    await fireEvent.click(view.getByRole('button', {name: 'Start from this version'}));
+    expect(title.value).toBe('Morning check (steward)');
+    expect((view.container.querySelector('[data-schedule-expr]') as HTMLInputElement).value).toBe('0 9 * * 1');
+    api.updateStewardSchedule.mockResolvedValueOnce(schedule({version: 7}));
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenLastCalledWith('sch-1', 6, expect.objectContaining(
+      {title: 'Morning check (steward)', schedule: {kind: 'cron', expr: '0 9 * * 1'}})));
+    await waitFor(() => expect(view.container.querySelector('form')).toBeNull());
+  });
+
+  it('delete asks first and sends the version shown', async () => {
+    api.listStewardSchedules.mockResolvedValue([schedule()]);
+    api.deleteStewardSchedule.mockResolvedValue({deleted: true});
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    const row = card(view.container, 'sch-1');
+    await fireEvent.click(within(row).getByRole('button', {name: 'Delete'}));
+    await frame();
+    expect(api.deleteStewardSchedule).not.toHaveBeenCalled();
+    const dialog = view.container.ownerDocument.querySelector('dialog[open]') as HTMLElement;
+    expect(dialog.textContent).toContain('Morning check');
+    await fireEvent.click(within(dialog).getByRole('button', {name: 'No'}));
+    expect(api.deleteStewardSchedule).not.toHaveBeenCalled();
+    await fireEvent.click(within(row).getByRole('button', {name: 'Delete'}));
+    await frame();
+    const again = view.container.ownerDocument.querySelector('dialog[open]') as HTMLElement;
+    await fireEvent.click(within(again).getByRole('button', {name: 'Delete'}));
+    await waitFor(() => expect(api.deleteStewardSchedule).toHaveBeenCalledWith('sch-1', 4));
+    await waitFor(() => expect(card(view.container, 'sch-1')).toBeNull());
+  });
+
+  it('the enabled switch sends a PUT with the version shown; a 409 shows the current row', async () => {
+    api.listStewardSchedules.mockResolvedValue([schedule()]);
+    api.updateStewardSchedule.mockResolvedValueOnce(schedule({version: 5, enabled: false, next_run_at: null}));
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    await fireEvent.click(card(view.container, 'sch-1').querySelector('[role="switch"]') as HTMLInputElement);
+    await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenCalledWith('sch-1', 4, {enabled: false}));
+    await waitFor(() => expect(card(view.container, 'sch-1').dataset.enabled).toBe('0'));
+    // Switching back while the steward changed it: the refusal's row is shown, the switch follows it.
+    api.updateStewardSchedule.mockRejectedValueOnce(new ApiError(409, '', null,
+      {code: 'version_conflict', schedule: schedule({version: 8, enabled: false, next_run_at: null, updated_by: 'steward'})}));
+    await fireEvent.click(card(view.container, 'sch-1').querySelector('[role="switch"]') as HTMLInputElement);
+    await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenLastCalledWith('sch-1', 5, {enabled: true}));
+    await view.findByText('This reminder changed meanwhile; the current version is shown.');
+    const row = card(view.container, 'sch-1');
+    expect((row.querySelector('[role="switch"]') as HTMLInputElement).checked).toBe(false);
+    expect(row.querySelector('[data-steward-edited]')).not.toBeNull();
+  });
+
+  it('PUT carries its JSON body and a 409 its current row through the real client', async () => {
+    const current = schedule({version: 9});
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({detail: {code: 'version_conflict', schedule: current}}), {status: 409}));
+    vi.stubGlobal('fetch', fetchMock);
+    const real = await vi.importActual<typeof import('../../lib/api')>('../../lib/api');
+    const error = await real.updateStewardSchedule('sch-1', 4, {enabled: false}).catch(e => e);
+    expect(fetchMock).toHaveBeenCalledWith('/api/steward/schedules/sch-1', expect.objectContaining(
+      {method: 'PUT', body: JSON.stringify({expected_version: 4, enabled: false})}));
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.detail).toEqual({code: 'version_conflict', schedule: current});
+    await real.deleteStewardSchedule('sch-1', 4).catch(() => null);
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/steward/schedules/sch-1?expected_version=4', expect.objectContaining({method: 'DELETE'}));
   });
 });
 

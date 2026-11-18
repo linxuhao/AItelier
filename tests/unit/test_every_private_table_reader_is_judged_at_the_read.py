@@ -657,8 +657,9 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # state_steward_memory_requests - the two list queries, the impact read, the
 # owner's memory-request read, the decision endpoints, and the steward's wake
 # (a driver-inbox delivery carrying the result) - refuses the anonymous identity
-# and delivers neither canary.
-STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests")
+# and delivers neither canary. Step 16 adds state_steward_schedules: its list
+# query and the owner's schedule routes.
+STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -689,6 +690,8 @@ def _steward_calls(svc):
         "impact": lambda: svc.steward.impact(C.STEWARD_PROPOSAL),
         "list_memory_requests": lambda: svc.steward.list_memory_requests("pending", 50),
         "read_memory_request": lambda: svc.steward.read_memory_request(C.STEWARD_MEMORY_REQUEST),
+        "execute list_steward_schedules": lambda: execute(svc, "list_steward_schedules", {}),
+        "list_schedules": lambda: svc.steward.list_schedules(),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -738,6 +741,12 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/steward/proposals/proposal-canary-2/approve", {"expected_version": 1}),
             ("POST", "/api/steward/proposals/proposal-canary-2/decline", {"expected_version": 1}),
             ("POST", "/api/steward/memory-requests", {"kind": "profile_read", "payload": {}}),
+            ("POST", "/api/state/query/list_steward_schedules", {}),
+            ("GET", "/api/steward/schedules", None),
+            ("POST", "/api/steward/schedules", {"title": "t", "instruction": "i", "tz": "UTC",
+                                                "schedule": {"kind": "cron", "expr": "0 9 * * *"}}),
+            ("PUT", f"/api/steward/schedules/{C.STEWARD_SCHEDULE}", {"expected_version": 1, "title": "t"}),
+            ("DELETE", f"/api/steward/schedules/{C.STEWARD_SCHEDULE}?expected_version=1", None),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -758,6 +767,8 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert conn.execute("SELECT status FROM state_steward_proposals WHERE proposal_id="
                                 "'proposal-canary-2'").fetchone()[0] == "open"
             assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 1
+            assert [tuple(r) for r in conn.execute("SELECT version, deleted_at FROM state_steward_schedules")] \
+                == [(1, None)]
 
 
 def _trusted_db(anonymous):

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -33,6 +34,7 @@ export function apply(ctx) {
       const text = JSON.stringify(options.messages);
       await post('/test/request', { session: options.sessionId, purpose: options.purpose ?? null,
         tools: (options.tools ?? []).map(t => t.name), descriptions: (options.tools ?? []).map(t => [t.name, t.description ?? '']),
+        recent: text.includes('RECENT_TURN_MARKER_99'),
         system: systemText(options.messages) });
       let block;
       if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: nothing in flight.' };
@@ -88,6 +90,10 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
   const expected = ['ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'memory_forget', 'memory_note', 'memory_profile_update', 'memory_read', 'memory_search'];
   const rootRequests = () => requests.filter(r => r.session === 'stw-root' && r.purpose !== 'compaction' && r.tools.length);
   try {
+    // Step 17 layer 3: a turn already in the owner's memory reaches the steward verbatim in its snapshot.
+    const seeded = await MemoryStore.open({ root: memRoot, userId: 'owner' });
+    await seeded.recordTurn('seed', [{ role: 'owner', part: 'o', text: 'RECENT_TURN_MARKER_99 记账工具' }]);
+    await seeded.close();
     await mkdir(join(root, 'inbox'), { recursive: true });
     await writeFile(join(root, 'inbox', 'start.json'), JSON.stringify({ task: 'begin' }));
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
@@ -116,7 +122,8 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
         assert.deepEqual([...r.tools].sort(), expected, `boot ${boot}: the steward's tool list`);
         assert.ok(r.system.includes(stewardSkill.trim()), `boot ${boot}: the steward's system prompt lacks steward.md`);
         assert.ok(!r.system.includes(directorSkill.split('\n')[0]), `boot ${boot}: the steward's system prompt carries director.md`);
-        for (const [name, description] of r.descriptions)
+        assert.ok(r.recent, `boot ${boot}: the steward's request lacks the recent conversation from memory`);
+      for (const [name, description] of r.descriptions)
           assert.ok(!description.startsWith('Director only'), `boot ${boot}: the steward is shown ${name} as "Director only"`);
       }
     };

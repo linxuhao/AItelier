@@ -33,8 +33,13 @@ export async function profileSection(memory) {
   // f7: what the owner must be told (an interrupted purge) rides along until acknowledged.
   const notices = memory.store.notices?.length
     ? `\n\nMemory notices - tell your owner:\n${memory.store.notices.map(n => '- ' + n).join('\n')}` : '';
+  // Design-steward 7.3 layer 3: the latest exchanges verbatim, so a compaction never takes
+  // away what was just said (every turn is in the memory log already).
+  const recent = memory.store.recentTurns?.() ?? [];
+  const conversation = recent.length
+    ? `\n\nRecent conversation with your owner (verbatim, oldest first; older turns: memory_search):\n${recent.join('\n\n')}` : '';
   return `\n\nOwner profile (resident; version ${p.version}; edit with memory_profile_update and this version):\n`
-    + (p.text.trim() ? p.text : '(empty)') + notices;
+    + (p.text.trim() ? p.text : '(empty)') + notices + conversation;
 }
 
 /** @param scope the director-scope (or role-scope) agent context

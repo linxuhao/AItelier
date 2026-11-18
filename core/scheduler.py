@@ -8,7 +8,6 @@
 
 import logging
 import asyncio
-import contextlib
 import functools
 import json
 import threading
@@ -471,13 +470,32 @@ def _sf_statement_lock(sf):
     isolation calls. It is a re-entrant lock, so nesting inside a site that
     already holds it (`_fail_unstarted_isolation_run`, registration) is safe.
 
-    A stand-in engine (a test double, an embedder's SDK object) has no `_lock`
-    and issues no sqlite statement to race on, so it gets a no-op context
-    instead of an AttributeError — the same capability dispatch
-    `core.skillflow_host.start_with_ledger` uses for a bare `SkillFlow`.
+    A missing `_lock` is REFUSED, loudly. It used to fall back to
+    `contextlib.nullcontext`, which silently disabled the whole protection: a
+    future engine that renames (or drops) `_lock` would put every host statement
+    back on the unlocked connection, and the symptom would be the same
+    `InterfaceError` this exists to prevent — with nothing anywhere naming the
+    cause. So the lookup raises an `AttributeError` that says which attribute is
+    missing and why it cannot be worked around, and logs it on the scheduler
+    logger first, because three call sites (`_has_active_claim`,
+    `_has_unsettled_operation`, `_sync_task_statuses`) catch `Exception` by
+    design and would otherwise swallow the refusal. A stand-in engine that has
+    no connection either (`_conn`, and therefore no statement to serialise) must
+    be given a `_lock` too, or the guard reports it — an engine whose `_conn`
+    is real but whose lock is not is exactly the state this must never run in.
+    The branch is witnessed by
+    `tests/unit/test_scheduler_skillflow_connection_lock.py`.
     """
     lock = getattr(sf, "_lock", None)
-    return lock if lock is not None else contextlib.nullcontext()
+    if lock is None:
+        missing = (f"{type(sf).__module__}.{type(sf).__qualname__} has no "
+                   "`_lock` (or it is None): the shared SQLite connection "
+                   "cannot be serialised, so the scheduler refuses to issue a "
+                   "statement on it unlocked (`_sf_statement_lock`). A renamed "
+                   "lock must be handled here, not silently skipped.")
+        logging.getLogger("aitelier.scheduler").error("%s", missing)
+        raise AttributeError(missing)
+    return lock
 
 
 def _get_or_create_skillflow_run(project_id: str) -> str | None:
@@ -1285,9 +1303,14 @@ def _parked_checkpoint(sf, run_id: str) -> dict | None:
 
 
 #: Messages that mean "another thread was inside the same SQLite connection",
-#: not "this graph is broken". `sqlite3.InterfaceError` is classified by TYPE
-#: below — CPython maps SQLITE_MISUSE onto it — and these cover the busy/lock
-#: side of the same accident when the engine lets it out as an OperationalError.
+#: not "this graph is broken". The busy/lock side of the same accident arrives
+#: as an `OperationalError`; CPython renders SQLITE_MISUSE as an
+#: `InterfaceError` carrying "bad parameter or other API misuse". Matched by
+#: TEXT only, never by exception type: `sqlite3.InterfaceError` is ALSO what a
+#: PERMANENT defect arrives as — "Error binding parameter 0 - probably
+#: unsupported type." — and the tick's retryable arm writes no run status, so a
+#: project whose payload cannot be bound would be retried on every poll forever
+#: and never reach a terminal state (review of 709790239b).
 _TRANSIENT_RUN_START_MARKERS = (
     "database is locked",
     "database table is locked",
@@ -1309,20 +1332,21 @@ def _is_transient_run_start_error(exc: BaseException) -> bool:
       * `sqlite3.InterfaceError: bad parameter or other API misuse` — CPython's
         rendering of SQLITE_MISUSE, produced when two threads are handed the
         same prepared statement out of the connection's SQL-text statement
-        cache. Classified by TYPE: this defect is the one this issue fixes, and
-        a "bad parameter" raised inside `create_run` from a statement the host
-        did not write is not the host's bind bug.
+        cache. Recognised by that MESSAGE, not by its type. `InterfaceError` is
+        a grab bag: the same class also carries "Error binding parameter 0 -
+        probably unsupported type.", which no retry can fix, and the retryable
+        arm deliberately writes neither a run status nor a counter — so a type
+        match would leave such a project retried on every poll forever,
+        terminal never. Both sides are pinned in
+        `tests/unit/test_scheduler_skillflow_connection_lock.py`.
       * `database is locked` / `database table is locked` / `database is busy` —
         WAL + `busy_timeout=5000` contention that outlived the timeout.
 
-    A UNIQUE constraint, a missing config or an isolation refusal keeps its
-    terminal status: those fail identically on every retry, and the terminal
-    arm exists so a user sees the reason instead of a project that never moves.
+    A UNIQUE constraint, a missing config, an isolation refusal or an unbindable
+    binding keeps its terminal status: those fail identically on every retry,
+    and the terminal arm exists so a user sees the reason instead of a project
+    that never moves.
     """
-    import sqlite3
-
-    if isinstance(exc, sqlite3.InterfaceError):
-        return True
     message = " ".join(str(exc).lower().split())
     return any(marker in message for marker in _TRANSIENT_RUN_START_MARKERS)
 

@@ -23,7 +23,12 @@ What is asserted here — and what is deliberately NOT:
 * (b) no SQL text was ever executing on two threads at once,
 * (c) the transient class is recorded as a retryable observation and the project
   is NOT marked failed, while a deterministic run-start defect still writes the
-  terminal status it was always written for.
+  terminal status it was always written for. The split is drawn on the MESSAGE,
+  not on the exception class: `sqlite3.InterfaceError` is both the race and a
+  permanent "cannot bind this value" defect, so the type alone proves nothing
+  (review of 709790239b), and
+* (d) a `SkillFlow` without `_lock` is REFUSED with a named reason instead of
+  silently running every statement unlocked.
 
 NOT asserted: that `InterfaceError` never appears in the process. Three
 engine-internal sites are still unlocked inside skillflow itself and are a
@@ -33,6 +38,7 @@ tree on the very first statement, without depending on timing. Tick speed is not
 asserted either: the fix intentionally lets a tick wait for the lock.
 """
 
+import logging
 import sqlite3
 import threading
 
@@ -45,6 +51,19 @@ from core.db_manager import DBManager
 GRAPH_NAME = "conn_race_t"
 PROJECTS = ("race-p1", "race-p2")
 ROUNDS = 8
+
+#: `sqlite3.InterfaceError` is BOTH the concurrency accident and a PERMANENT
+#: defect: CPython raises the same class for "this value cannot be bound". This
+#: is the wording the review of 709790239b measured — with the classifier's type
+#: arm it was reported transient, and the retryable arm writes no run status and
+#: keeps no counter, so such a project would be retried on every poll forever and
+#: never reach a terminal state.
+_PERMANENT_BIND_ERROR = sqlite3.InterfaceError(
+    "Error binding parameter 0 - probably unsupported type.")
+
+#: The message the measured race actually produces (CPython's rendering of
+#: SQLITE_MISUSE, out of the connection's SQL-text statement cache).
+_RACE_ERROR_MESSAGE = "bad parameter or other API misuse"
 
 
 def _graph():
@@ -369,9 +388,62 @@ def test_a_transient_concurrency_error_is_not_a_terminal_project_failure(
     sqlite3.OperationalError("database is locked"),
     sqlite3.OperationalError("SQLITE_MISUSE: bad parameter or other API misuse"),
 ])
-def test_the_transient_class_is_recognised_by_type_and_by_message(exc):
-    """The three shapes measured/expected from the same root cause."""
+def test_the_transient_class_is_recognised_by_its_message(exc):
+    """The three shapes measured/expected from the same root cause.
+
+    Recognised by TEXT only — `InterfaceError` is not a transient class (see
+    `test_a_permanent_bind_type_error_is_not_transient` below), so the first row
+    passes because of its message, not because of its type.
+    """
     assert scheduler._is_transient_run_start_error(exc) is True
+
+
+def test_the_race_message_is_transient_whatever_carries_it():
+    """The pin for the positive side of the split: the RACE ITSELF still retries.
+
+    Two independent carries of the measured race message must be classified
+    transient — the `InterfaceError` CPython actually raised, and a plain
+    `RuntimeError` carrying the same text — which is what makes this a statement
+    about the message rather than about a type. On the candidate commit the type
+    arm answered the first row; after the fix the marker list must answer both.
+    """
+    assert scheduler._is_transient_run_start_error(
+        sqlite3.InterfaceError(_RACE_ERROR_MESSAGE)) is True
+    assert scheduler._is_transient_run_start_error(
+        RuntimeError(_RACE_ERROR_MESSAGE)) is True
+
+
+def test_a_permanent_bind_type_error_is_not_transient():
+    """The pin for the negative side: the SAME class, a defect no retry can fix.
+
+    `sqlite3.InterfaceError("Error binding parameter 0 - probably unsupported
+    type.")` is what the engine would raise for a payload it cannot bind; every
+    poll would raise it again. The candidate commit classified it transient
+    purely because of the `isinstance(exc, sqlite3.InterfaceError)` arm, and the
+    retryable arm at the call site writes neither a run status nor a counter — a
+    project in that state never reaches a terminal state. It must be terminal.
+    """
+    assert isinstance(_PERMANENT_BIND_ERROR, sqlite3.InterfaceError)
+    assert scheduler._is_transient_run_start_error(_PERMANENT_BIND_ERROR) is False
+
+
+def test_a_real_unbindable_parameter_is_not_transient():
+    """The same defect produced by sqlite3 itself, not hand-written.
+
+    Measured on this interpreter (3.12: `ProgrammingError`, "Error binding
+    parameter 1: type 'object' is not supported"); the class varies by CPython
+    version, which is precisely why the classifier may not lean on a class. What
+    is asserted is that sqlite3's own "this value cannot be bound" failure — the
+    permanent kind — is not retried forever.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE t (x)")
+        with pytest.raises(sqlite3.Error) as info:
+            conn.execute("INSERT INTO t VALUES (?)", (object(),))
+    finally:
+        conn.close()
+    assert scheduler._is_transient_run_start_error(info.value) is False
 
 
 @pytest.mark.parametrize("exc", [
@@ -408,3 +480,109 @@ def test_a_deterministic_run_start_defect_is_still_terminal(engine, monkeypatch)
     assert len(status) <= 160
     assert ("run_start_failed" in [outcome for _p, outcome, _d in observed])
     assert not any(detail.get("retryable") for _p, _o, detail in observed)
+
+
+def test_a_permanent_bind_type_error_reaches_a_terminal_state(engine, monkeypatch):
+    """The reviewer's measured defect, end to end: no retry forever.
+
+    The run lookup raises `sqlite3.InterfaceError("Error binding parameter 0 -
+    probably unsupported type.")` — the same CLASS as the race, a defect that
+    fails identically on every poll. On the candidate commit the type arm
+    reported it retryable, and the retryable arm writes no run status: the
+    project keeps `planning` and is re-picked on every tick forever, with no
+    counter to show it. Pinned here against the REAL tick: the terminal arm must
+    fire, naming the reason, exactly as it does for the UNIQUE constraint.
+    """
+    sf, db, _run_ids = engine
+    pid = PROJECTS[0]
+    sf._conn = _RaisingStatement(
+        sf._conn, "FROM skillflow_runs", _PERMANENT_BIND_ERROR)
+
+    observed = _drive_one_tick(monkeypatch, pid)
+
+    status = db.get_project(pid)["status"]
+    assert status.startswith("failed:could not start run — "), (
+        "a permanent bind failure was treated as retryable, so the project "
+        f"never reaches a terminal state: {status!r}")
+    assert "probably unsupported type" in status, status
+    assert len(status) <= 160
+    assert "run_start_failed" in [outcome for _p, outcome, _d in observed]
+    assert not any(detail.get("retryable") for _p, _o, detail in observed)
+
+
+# ── (d): a missing `_lock` is refused, not silently skipped ──────────
+
+
+class _EngineWithoutTheLock:
+    """The REAL connection, deliberately missing `_lock`.
+
+    This is the shape a future engine rename produces: `_conn` is still there
+    and still dangerous to drive from two threads, while the attribute the
+    scheduler serialises on is gone. `getattr(sf, "_lock", None)` answers None
+    for it, which is the branch the candidate commit turned into a
+    `contextlib.nullcontext` — the whole protection silently off.
+    """
+
+    def __init__(self, sf):
+        self._conn = sf._conn
+
+    def __getattr__(self, name):        # nothing else is delegated on purpose
+        raise AttributeError(name)
+
+
+def test_a_missing_lock_is_refused_before_any_statement(engine, monkeypatch,
+                                                        caplog):
+    """The witness for the fallback branch: it must now REFUSE and SAY WHY.
+
+    Red on the candidate commit, where this call would simply issue the run
+    lookup on the unlocked connection and return the run id. What is asserted:
+    the refusal names the missing attribute and the engine type, no statement
+    reached the connection, and an ERROR is on the scheduler logger — so the
+    three call sites that catch `Exception` by design (`_has_active_claim`,
+    `_has_unsettled_operation`, `_sync_task_statuses`) still leave evidence.
+    """
+    sf, _db, _run_ids = engine
+    recorder = _ConnectionRecorder(sf._conn, sf._lock)
+    blind = _EngineWithoutTheLock(sf)
+    blind._conn = recorder                  # catches anything issued unlocked
+    monkeypatch.setattr(scheduler, "get_skillflow", lambda: blind)
+
+    with caplog.at_level(logging.ERROR, logger="aitelier.scheduler"):
+        with pytest.raises(AttributeError) as info:
+            scheduler._get_or_create_skillflow_run(PROJECTS[0])
+
+    message = str(info.value)
+    assert "_lock" in message, message
+    assert "_EngineWithoutTheLock" in message, message
+    assert recorder.statements == [], (
+        "a statement was issued on the shared connection while the lock lookup "
+        f"was unresolved: {recorder.statements!r}")
+    logged = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.ERROR and "_lock" in r.getMessage()]
+    assert logged, (
+        "the refusal was raised but never logged; the guards that catch "
+        f"Exception would swallow it: {[r.getMessage() for r in caplog.records]!r}")
+
+
+def test_the_swallowing_guards_leave_the_refusal_visible(engine, caplog):
+    """Both `except Exception: return False` guards, against the same engine.
+
+    These two deliberately answer "not in flight" when a read fails rather than
+    raise, which is correct for a transient read error and wrong for a permanent
+    misconfiguration: without the log line, the scheduler would treat every
+    project as claimable and never say why. Asserted: unchanged return values
+    (False) AND an ERROR record per refusal.
+    """
+    sf, _db, run_ids = engine
+    blind = _EngineWithoutTheLock(sf)
+    run_id = run_ids[PROJECTS[0]]
+
+    with caplog.at_level(logging.ERROR, logger="aitelier.scheduler"):
+        assert scheduler._has_unsettled_operation(blind, run_id) is False
+        assert scheduler._has_active_claim(blind, run_id) is False
+
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.ERROR and "_lock" in r.getMessage()]
+    assert len(errors) >= 2, (
+        "a guard swallowed the missing-lock refusal without a record: "
+        f"{errors!r}")

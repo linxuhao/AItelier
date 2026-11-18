@@ -97,6 +97,7 @@ const en: Record<string, string> = {
   kind_defect: 'Defect', kind_gap: 'Gap', kind_handoff: 'Hand-off', kind_question: 'Question',
   showArchived: 'Show archived', archivedHidden: 'Archived (hidden)',
   archiveProject: 'Archive', restoreProject: 'Restore', archivedBadge: 'archived', archiveDismiss: 'Dismiss',
+  archiveConfirm: 'Archive this project? It disappears from the list until you show archived projects.', archiveConfirmYes: 'Yes, archive', archiveConfirmCancel: 'Cancel, keep it listed',
 };
 const zh: Record<string, string> = {
   newProject:'新建项目', newProjectId:'项目 id（字母、数字、. _ -）', newProjectTitle:'标题', newProjectGoal:'目标（作为你的第一条消息发给 driver）', newProjectSource:'源项目 id（可选）', newProjectStartDriver:'立即启动它的 driver', newProjectPrivateNote:'项目是私有的，不会公开，以后可以再公开。', newProjectCreate:'创建', newProjectCancel:'取消', newProjectCreated:'项目已创建。', newProjectCreatedWithErrors:'项目已创建，但：', newProjectGoalFailed:'目标没有发出', newProjectStartFailed:'driver 没有启动',
@@ -184,6 +185,7 @@ const zh: Record<string, string> = {
   kind_defect:'缺陷', kind_gap:'缺口', kind_handoff:'转交', kind_question:'问题',
   showArchived:'显示已归档', archivedHidden:'已归档（已隐藏）',
   archiveProject:'归档', restoreProject:'恢复', archivedBadge:'已归档', archiveDismiss:'关闭',
+  archiveConfirm:'确定要归档这个项目吗？归档后它会从列表中消失，直到你显示已归档项目。', archiveConfirmYes:'确认归档', archiveConfirmCancel:'取消，保持列出',
 };
 const fr: Record<string, string> = {
   newProject:'Nouveau projet', newProjectId:'Identifiant du projet (lettres, chiffres, . _ -)', newProjectTitle:'Titre', newProjectGoal:'Objectif (envoyé au driver comme votre premier message)', newProjectSource:'Identifiant du projet source (facultatif)', newProjectStartDriver:'Démarrer son driver maintenant', newProjectPrivateNote:'Le projet est privé : il n’est pas publié. Vous pourrez l’ouvrir plus tard.', newProjectCreate:'Créer', newProjectCancel:'Annuler', newProjectCreated:'Projet créé.', newProjectCreatedWithErrors:'Projet créé, mais :', newProjectGoalFailed:'l’objectif n’a pas été envoyé', newProjectStartFailed:'le driver n’a pas démarré',
@@ -275,6 +277,7 @@ const fr: Record<string, string> = {
   kind_defect:'Défaut', kind_gap:'Lacune', kind_handoff:'Transfert', kind_question:'Question',
   showArchived:'Afficher les archivés', archivedHidden:'Archivés (masqués)',
   archiveProject:'Archiver', restoreProject:'Restaurer', archivedBadge:'archivé', archiveDismiss:'Fermer',
+  archiveConfirm:'Archiver ce projet ? Il disparaît de la liste jusqu’à ce que vous affichiez les archivés.', archiveConfirmYes:'Oui, archiver', archiveConfirmCancel:'Annuler, le garder listé',
 };
 export function st(key: string): string {
   const table = lang.startsWith('zh') ? zh : lang === 'fr' ? fr : en;

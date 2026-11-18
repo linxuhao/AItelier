@@ -138,3 +138,31 @@ describe('conversation workbench layout', () => {
     expect(view.container.querySelector('[data-conversation-thread]')).toBe(thread);
   });
 });
+
+describe('full screen (owner 2026-11-18: on a phone the chat had no room)', () => {
+  it('the whole pane - conversation, history and tabs - covers the page, and leaves it on the button or Escape', async () => {
+    const view = render(StateProjects);
+    const toggle = await waitFor(() => {
+      const button = view.container.querySelector('.fullscreen-toggle') as HTMLButtonElement;
+      expect(button).toBeTruthy();
+      return button;
+    });
+    const pane = view.container.querySelector('.conversation-pane') as HTMLElement;
+    expect(pane.classList.contains('fullscreen')).toBe(false);
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.getAttribute('aria-label')).toBe('Full screen');
+    await fireEvent.click(toggle);
+    expect(pane.classList.contains('fullscreen')).toBe(true);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle.getAttribute('aria-label')).toBe('Exit full screen');
+    expect(document.body.style.overflow).toBe('hidden');
+    // The tabs ride along: the mode buttons are inside the full-screen pane.
+    expect(pane.querySelector('.pane-modes')).toBeTruthy();
+    await fireEvent.keyDown(window, {key: 'Escape'});
+    expect(pane.classList.contains('fullscreen')).toBe(false);
+    expect(document.body.style.overflow).toBe('');
+    await fireEvent.click(toggle);
+    await fireEvent.click(toggle);
+    expect(pane.classList.contains('fullscreen')).toBe(false);
+  });
+});

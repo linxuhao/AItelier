@@ -18,6 +18,18 @@
     prefill?: {text: string} | null;
   } = $props();
   let visitedRun = $state(false);
+  // Full screen (owner 2026-11-18: on a phone the rest of the dashboard leaves the chat no
+  // room): the whole pane - conversation, history and the host's tabs (questions,
+  // proposals, ...) - covers the page until toggled off or Escape.
+  let fullscreen = $state(false);
+  $effect(() => {
+    if (!fullscreen) return;
+    const prior = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') fullscreen = false; };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = prior; window.removeEventListener('keydown', onKey); };
+  });
   let busy = $state(false), controlError = $state('');
   // Session-local: switching projects retains text and exact reply citations;
   // nothing from these private conversations is written to browser storage.
@@ -47,7 +59,7 @@
     if (next === 'run') visitedRun = true;
   }
 </script>
-<aside class="conversation-pane" aria-label={st('conversationPane')}>
+<aside class="conversation-pane" class:fullscreen aria-label={st('conversationPane')}>
   <header class="pane-header">
     <div class="pane-heading">
       <a class="pane-project" href={stateProjectHref(selected)} aria-label={st('conversationPaneOpenDag')}>
@@ -57,6 +69,10 @@
     </div>
     <div class="pane-controls">
       <span class="pane-driver-state"><DriverStateBadge phase={driver?.phase} /></span>
+      <button type="button" class="outline fullscreen-toggle" aria-pressed={fullscreen}
+        aria-label={fullscreen ? st('conversationExitFullscreen') : st('conversationFullscreen')}
+        title={fullscreen ? st('conversationExitFullscreen') : st('conversationFullscreen')}
+        onclick={() => fullscreen = !fullscreen}>{fullscreen ? '⤡' : '⤢'}</button>
       <button type="button" class="outline driver-toggle" disabled={busy || !selected}
         aria-label={driver?.enabled ? st('driverStop') : st('driverStart')}
         onclick={() => void toggleDriver()}>
@@ -115,6 +131,8 @@
   .pane-controls{display:flex;align-items:center;gap:10px;}
   .pane-driver-state{font-size:12px;}
   .driver-toggle{background:transparent;color:var(--pico-primary);font-size:12px;padding:5px 9px;margin:0;width:auto;}
+  .fullscreen-toggle{background:transparent;color:var(--pico-primary);font-size:14px;line-height:1;padding:5px 8px;margin:0;width:auto;}
+  .conversation-pane.fullscreen{position:fixed;inset:0;z-index:1000;width:100vw;height:100dvh;max-width:none;}
   .pane-navigation{display:flex;align-items:center;gap:20px;padding:0 22px;border-bottom:1px solid var(--pico-muted-border-color);flex:0 0 auto;}
   .pane-modes{display:flex;gap:20px;}
   .pane-modes button{width:auto;margin:0;padding:8px 0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--pico-muted-color);font-size:13px;box-shadow:none;}

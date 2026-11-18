@@ -138,7 +138,7 @@ async function _request<T = unknown>(
       signal: controller.signal,
     };
 
-    if (body !== undefined && body !== null && (method === 'POST' || method === 'PATCH')) {
+    if (body !== undefined && body !== null && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
       headers['Content-Type'] = 'application/json';
       fetchOptions.body = JSON.stringify(body);
     }
@@ -231,6 +231,10 @@ function _post<T = unknown>(path: string, body?: unknown, timeout?: number): Pro
 
 function _patch<T = unknown>(path: string, body?: unknown): Promise<T> {
   return _request<T>('PATCH', path, body);
+}
+
+function _put<T = unknown>(path: string, body?: unknown): Promise<T> {
+  return _request<T>('PUT', path, body);
 }
 
 function _del<T = unknown>(path: string): Promise<T> {
@@ -853,4 +857,35 @@ export function createStewardMemoryRequest(kind: StewardMemoryKind, payload: Rec
 }
 export function stewardMemoryRequest(requestId: string): Promise<StewardMemoryRequest> {
   return _get('/api/steward/memory-requests/' + encodeURIComponent(requestId));
+}
+
+// ── Scheduled reminders (plugin step 16). The backend computes every run time;
+//    409 carries {code: 'version_conflict', schedule: current row} in `detail`,
+//    422 carries {code, reason}.
+export type StewardScheduleSpec = {kind: 'once'; at: string} | {kind: 'cron'; expr: string};
+export interface StewardSchedule {
+  schedule_id: string; version: number; title: string; instruction: string;
+  schedule: StewardScheduleSpec; tz: string; enabled: boolean | number;
+  next_run_at: string | null; last_run_at: string | null; last_missed: number;
+  created_by: 'owner' | 'steward'; updated_by: 'owner' | 'steward'; last_fired_by: string | null;
+  created_at: string; updated_at: string;
+}
+export interface StewardScheduleFields {
+  title?: string; instruction?: string; schedule?: StewardScheduleSpec; tz?: string; enabled?: boolean;
+}
+export function listStewardSchedules(): Promise<StewardSchedule[]> {
+  return _get<{schedules?: StewardSchedule[]}>('/api/steward/schedules').then(r => r.schedules ?? []);
+}
+export function createStewardSchedule(fields: StewardScheduleFields): Promise<StewardSchedule> {
+  return _post('/api/steward/schedules', fields);
+}
+export function updateStewardSchedule(id: string, expectedVersion: number, fields: StewardScheduleFields): Promise<StewardSchedule> {
+  return _put('/api/steward/schedules/' + encodeURIComponent(id), {expected_version: expectedVersion, ...fields});
+}
+export function deleteStewardSchedule(id: string, expectedVersion: number): Promise<{deleted: boolean}> {
+  return _del('/api/steward/schedules/' + encodeURIComponent(id) + '?expected_version=' + expectedVersion);
+}
+/** The next 5 runs as the backend computes them (ISO strings with the zone's offset). */
+export function previewStewardSchedule(schedule: StewardScheduleSpec, tz: string): Promise<string[]> {
+  return _post<{next_runs?: string[]}>('/api/steward/schedules/preview', {schedule, tz}).then(r => r.next_runs ?? []);
 }

@@ -275,7 +275,10 @@ class TestTheReadCache:
         single-core process, that is the difference between saturating at nine
         visitors and at hundreds."""
         from api import _read_cache
-        _read_cache.clear()
+        # `reset()`, not `clear()`: clear() now keeps the previous value on
+        # purpose (a write must not make the next read expensive), so it no
+        # longer means "this key has never been built".
+        _read_cache.reset()
         calls = []
         for _ in range(5):
             _read_cache.cached(("k", None), lambda: calls.append(1) or "v")
@@ -286,7 +289,7 @@ class TestTheReadCache:
         serve one identity's runs to another — a performance fix turning into
         a disclosure."""
         from api import _read_cache
-        _read_cache.clear()
+        _read_cache.reset()
         a = _read_cache.cached(("runs", None, None, "a@x"), lambda: "A")
         b = _read_cache.cached(("runs", None, None, "b@x"), lambda: "B")
         assert (a, b) == ("A", "B")
@@ -313,7 +316,7 @@ class TestTheReadCache:
 
     def test_it_expires(self):
         from api import _read_cache
-        _read_cache.clear()
+        _read_cache.reset()
         calls = []
         _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
         _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
@@ -547,7 +550,7 @@ class TestSseEvictionIsNotSilent:
 class TestTheCacheTablesAreBounded:
     def test_clear_clears_the_locks_too(self):
         from api import _read_cache as rc
-        rc.clear()
+        rc.reset()
         rc.cached(("a",), lambda: 1)
         assert rc._locks
         rc.clear()
@@ -557,7 +560,7 @@ class TestTheCacheTablesAreBounded:
         """`/api/runs` takes free-form `config_name` / `status`, so every
         `?config_name=zzz<n>` minted a permanent lock entry."""
         from api import _read_cache as rc
-        rc.clear()
+        rc.reset()
         for i in range(rc._MAX_KEYS * 3):
             rc.cached(("runs", f"cfg{i}", None, None), lambda: i)
         assert len(rc._locks) <= rc._MAX_KEYS

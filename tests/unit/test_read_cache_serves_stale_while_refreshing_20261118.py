@@ -10,26 +10,36 @@ returned 1545 rows in 0.10s) and not the YAML registry (0.00ms once warm).
 So this file pins the three states apart, because the cache has to behave
 differently in each and the difference is the fix:
 
-* ABSENT (a cold miss, and the first read after `clear()`) is computed INLINE
-  and the other callers wait for it — `test_a_cold_miss_is_computed_once_and_
-  other_callers_wait` and `test_clear_makes_the_next_read_a_cold_miss`. This is
-  the anti-stampede property the module exists for; making it asynchronous would
-  turn one reboot into N concurrent 1545-project rebuilds.
+* ABSENT (a key this process has never built) is computed INLINE and the other
+  callers wait for it — `test_a_cold_miss_is_computed_once_and_other_callers_
+  wait`. This is the anti-stampede property the module exists for; making it
+  asynchronous would turn one reboot into N concurrent 1545-project rebuilds.
 * EXPIRED is returned to the caller IMMEDIATELY while exactly one background
   rebuild runs — `test_an_expired_entry_is_served_without_waiting_for_the_
   builder`, `test_two_concurrent_expired_reads_start_exactly_one_rebuild`,
   `test_the_fresh_value_appears_after_the_rebuild_finishes`.
+* INVALIDATED (`clear()` after a mutating request) is the same shape as
+  EXPIRED: the previous value is served at once and one rebuild runs —
+  `test_clear_does_not_serve_pre_write_bytes_as_fresh_and_lands_within_one_
+  rebuild`. It is NOT a cold miss any more: the write no longer makes its own
+  reads pay for the rebuild (measured 10.93 / 8.87s warm and 21.26 / 22.76 /
+  28.13s expired, against 0.083-0.128s for an untouched poll).
 * EXPIRED and the rebuild FAILS keeps the previous value and raises nothing —
   `test_a_failing_rebuild_keeps_the_old_value_and_does_not_raise`.
 
 `test_a_rebuild_running_across_a_write_does_not_republish_the_old_bytes` covers
 the one thing the background rebuild can break that the synchronous one could
 not: a rebuild that began before a write landed holding pre-write data, and the
-next read after `clear()` returning it as if it were fresh.
+next read after `clear()` returning it as if it were fresh. The generation guard
+is what refuses that publish, and it has to survive `clear()` becoming a
+"serve the previous bytes" operation rather than a drop.
 
 Every test drives `cached()` and asserts the RESULT; the only internals touched
-are the entry's timestamp (written, not slept, so the cache's own clock is the
-one under test) and `_store` reads to show a value was published or not.
+are the entry `_store` holds (written, not slept, so the cache's own clock is the
+one under test) and `_store` reads to show a value was published or not. Each
+test starts by dropping the store outright (`reset()`, not `clear()`): `clear()`
+now leaves the previous value in place on purpose, so it is no longer a way to
+make a key ABSENT.
 """
 from __future__ import annotations
 
@@ -44,8 +54,8 @@ REFRESH_THREAD = "read-cache-refresh"
 
 
 def _expire(key, value, ttl=rc.DEFAULT_TTL):
-    """Put `value` in the store already older than `ttl`."""
-    rc._store[key] = (time.monotonic() - ttl - 1, value)
+    """Put `value` in the store already older than `ttl`, in the live generation."""
+    rc._store[key] = (time.monotonic() - ttl - 1, value, rc._generation)
 
 
 def _called(message):
@@ -76,6 +86,7 @@ def test_a_cold_miss_is_computed_once_and_other_callers_wait():
     builds and the others WAIT for that one build rather than starting their
     own. At 11-16s per rebuild, a cold process serving k tabs this way would be
     k rebuilds of 1545 projects on one core."""
+    rc.reset()
     entered = threading.Event()
     release = threading.Event()
     calls = []
@@ -109,6 +120,7 @@ def test_a_cold_miss_is_computed_once_and_other_callers_wait():
 def test_an_expired_entry_is_served_without_waiting_for_the_builder():
     """The 18.30s -> 0.065s case: the entry we have is too old to be called
     fresh and is still far better than making this request pay for the rebuild."""
+    rc.reset()
     _expire(KEY, "old")
     built = threading.Event()
 
@@ -132,6 +144,7 @@ def test_an_expired_entry_is_served_without_waiting_for_the_builder():
 def test_two_concurrent_expired_reads_start_exactly_one_rebuild():
     """Serving stale must not become the new stampede: both readers get the old
     value, and the key rebuilds once, not once per reader."""
+    rc.reset()
     _expire(KEY, "old")
     calls = []
     entered = threading.Event()
@@ -178,6 +191,7 @@ def test_two_concurrent_expired_reads_start_exactly_one_rebuild():
 def test_the_fresh_value_appears_after_the_rebuild_finishes():
     """Staleness is bounded by one rebuild, not permanent: the next read after
     the rebuild lands must be the new value and must not build again."""
+    rc.reset()
     _expire(KEY, "old")
     built = []
 
@@ -197,6 +211,7 @@ def test_a_failing_rebuild_keeps_the_old_value_and_does_not_raise(caplog):
     """The dashboard's readers must not inherit the rebuild's exception, and a
     failed rebuild must not cost the entry — otherwise one bad enrichment makes
     every poll a cold miss (and therefore a synchronous 11-16s rebuild)."""
+    rc.reset()
     _expire(KEY, "old")
     attempts = []
 
@@ -220,22 +235,61 @@ def test_a_failing_rebuild_keeps_the_old_value_and_does_not_raise(caplog):
         "a rebuild that failed once left the key unable to rebuild again")
 
 
-def test_clear_makes_the_next_read_a_cold_miss():
-    """Write-invalidation is unchanged: the middleware's `clear()` must take the
-    synchronous path, not serve the entry it just invalidated."""
+def test_clear_does_not_serve_pre_write_bytes_as_fresh_and_lands_within_one_rebuild():
+    """`clear()` runs after EVERY non-GET request (api/main.py:442), so what it
+    means decides what a write costs the reads behind it.
+
+    It used to drop the store: the next read was a cold miss computed inline,
+    measured at 10.93 / 8.87s with the enrichment memo warm and 21.26 / 22.76 /
+    28.13s with it expired, against 0.083-0.128s for an untouched poll. Now it
+    invalidates: the previous value is served on the calling thread at once, one
+    background rebuild runs, and the read after that rebuild lands is the new
+    value. What must NOT happen is the invalidated bytes being treated as if
+    nothing had changed — the rebuild is the evidence that they are stale.
+    """
+    rc.reset()
     calls = []
     assert rc.cached(KEY, lambda: calls.append("cold") or "v1") == "v1"
-    rc.clear()
-    assert rc.cached(KEY, lambda: calls.append("after-clear") or "v2") == "v2"
-    assert calls == ["cold", "after-clear"]
-    assert rc._store[KEY][1] == "v2"
+    assert rc._store[KEY][1] == "v1"
+
+    rc.clear()          # a mutating request went through the middleware
+
+    rebuilds = []
+
+    def build_after_the_write():
+        rebuilds.append(threading.current_thread().name)
+        return "v2"
+
+    started_at = time.monotonic()
+    value = rc.cached(KEY, build_after_the_write)
+    elapsed = time.monotonic() - started_at
+
+    assert value == "v1", (
+        "the read after clear() did not serve the previously built value")
+    assert elapsed < 0.2, f"the caller waited {elapsed:.2f}s for the rebuild"
+    assert threading.main_thread().name not in rebuilds, (
+        "the read after clear() re-entered the builder on the calling thread — "
+        "that is the cold-miss path a write must not force any more")
+    assert _wait_until(lambda: rc._store.get(KEY, (0.0, None, -1))[1] == "v2"), (
+        "the write invalidated the entry but no rebuild republished it — the "
+        "dashboard would serve pre-write bytes for ever")
+    assert rebuilds == [REFRESH_THREAD], (
+        f"the rebuild ran on {rebuilds}, not on exactly one background thread")
+    assert rc.cached(KEY, lambda: _called("rebuilt a freshly published entry")) == "v2"
 
 
 def test_a_rebuild_running_across_a_write_does_not_republish_the_old_bytes():
     """A synchronous rebuild could not outlive the request that started it; a
-    background one can. Without that guard, a write that lands mid-rebuild is
-    immediately undone: the rebuild stores what it computed from the pre-write
-    state, with a fresh timestamp, and every read for the next TTL serves it."""
+    background one can. `clear()` now KEEPS the previous value so the next read
+    does not pay for a rebuild, which makes the generation guard the only thing
+    standing between a write and its own invalidation: a rebuild that began
+    before the write holds pre-write data, and publishing it as fresh would
+    resurrect exactly what the write invalidated.
+
+    So the discarded rebuild leaves the previous (stale) value in place, the
+    write's own rebuild is the one that lands, and its answer is what the reads
+    after it get."""
+    rc.reset()
     _expire(KEY, "old")
     entered = threading.Event()
     release = threading.Event()
@@ -251,6 +305,17 @@ def test_a_rebuild_running_across_a_write_does_not_republish_the_old_bytes():
     release.set()
     _wait_for_refreshes()
 
-    assert KEY not in rc._store, (
-        "a rebuild that began before the write republished the pre-write value")
-    assert rc.cached(KEY, lambda: "post-write") == "post-write"
+    assert rc._store[KEY][1] == "old", (
+        "a rebuild that began before the write republished its pre-write bytes")
+    after = []
+
+    def post_write_build():
+        after.append(threading.current_thread().name)
+        return "post-write"
+
+    assert rc.cached(KEY, post_write_build) == "old", (
+        "the discarded rebuild's bytes, or a cold inline build, reached a reader")
+    assert _wait_until(lambda: rc._store.get(KEY, (0.0, None, -1))[1] == "post-write"), (
+        "the write's own rebuild never published")
+    assert rc.cached(KEY, lambda: _called("rebuilt after the write landed")) == "post-write"
+    assert after == [REFRESH_THREAD]

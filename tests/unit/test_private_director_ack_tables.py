@@ -15,6 +15,15 @@ TABLES={'state_director_delivery_acks','state_director_legacy_acks'}
 # packages private, the enforcement switch public.
 P3_PRIVATE={'state_handoffs'}
 P3_PUBLIC={'state_project_enforcement'}
+# The owner's project-archive switch (iss-174f3100129b457f) is PUBLIC: no read
+# surface hands an anonymous caller its rows - the archive predicate is applied
+# by the TRUSTED listing only (core/state_graph.py:list_projects,
+# core/state_portfolio.py:projects), and project_overview/get_project read
+# state_projects alone - so it joins the public set the way the enforcement
+# switch did. Its read boundary is measured, not asserted here:
+# tests/unit/test_project_archive_20261118.py::test_the_anonymous_list_is_untouched_by_archiving
+# reds when the anonymous branch applies the predicate.
+ARCHIVE_PUBLIC={'state_project_archive'}
 # The retained Git bundle store holds the same private bytes as state_git_artifacts.
 BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
 # Audited retirement of cross-project context run protection (3f817f6fe7): the
@@ -64,7 +73,7 @@ def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
     assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
-    assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC
+    assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC|ARCHIVE_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
     assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE) & set(PUBLIC_STATE_TABLES)
 

@@ -29,9 +29,10 @@ from tenacity import (
     retry_if_exception,
 )
 
-from core.ai_router import (AIGateway, FAILOVER_EXCEPTIONS, _read_secret,
-                            _endpoint_available, _endpoint_window,
+from core.ai_router import (AIGateway, FAILOVER_EXCEPTIONS, OutgoingBodyTooLarge,
+                            _read_secret, _endpoint_available, _endpoint_window,
                             _note_endpoint_spent, _retry_llm_error,
+                            body_identity, refuse_if_body_too_large,
                             resolve_agent_model)
 from core.llm_quota import is_quota_exhausted
 
@@ -2176,6 +2177,16 @@ class MetaAgent:
                             full_text = event["text"]
                             tool_calls = event["tool_calls"]
                             self._persist_usage(event.get("usage"))
+                except OutgoingBodyTooLarge as e:
+                    # The transcript this turn assembled is over the bound in
+                    # core/ai_router.py, so nothing was sent and no endpoint was
+                    # contacted. NOT a resumable interruption: "continue"
+                    # rebuilds the same transcript and re-sends the same bytes,
+                    # forever. Surface the measurement — that is what the driver
+                    # can act on — instead of a connection story.
+                    self._log_error(f"turn refused before dispatch: {e}")
+                    yield {"type": "error", "message": str(e)}
+                    return
                 except Exception as e:
                     # Transient LLM/streaming failure (provider 5xx, rate-limit,
                     # connection dropped mid-stream). Handshake retries inside
@@ -2457,21 +2468,38 @@ class MetaAgent:
             "timeout": 300.0,
         }
         try:
-            # The SECOND caller that binds an endpoint, and it fails SOFTLY:
-            # the `except` below turns any failure into `None`, which
-            # `_maybe_compact` reads as "leave the transcript alone" — so a
-            # single unreachable endpoint used to mean the session silently
-            # stopped compacting and drifted into the context overflow this
-            # whole mechanism exists to prevent. The compacter runs on `flash`,
-            # whose first candidate is the local box, so "the box is off" was
-            # all it took. Parking alone did not cover it: a box that is down
-            # is not quota-exhausted.
+            # The second of the three writers that build a provider request
+            # themselves, and it fails SOFTLY: the `except`s below turn any
+            # failure into `None`, which `_maybe_compact` reads as "leave the
+            # transcript alone" — so a single unreachable endpoint used to mean
+            # the session silently stopped compacting and drifted into the
+            # context overflow this whole mechanism exists to prevent. The
+            # compacter runs on `flash`, whose first candidate is the local box,
+            # so "the box is off" was all it took. Parking alone did not cover
+            # it: a box that is down is not quota-exhausted.
+            #
+            # The outgoing-body guard is the ONE in core/ai_router.py (same
+            # bound, same error type, same one-line message) — imported, never
+            # re-declared. Called before the walk, so an over-bound chunk sends
+            # nothing and is refused once, not once per candidate.
+            refuse_if_body_too_large(
+                kwargs, identity=body_identity(
+                    kwargs, caller="meta_agent.compacter",
+                    model_route=raw_model, session=self.session_id))
             resp, _ = await _walk_endpoints(
                 raw_model, kwargs, lambda kw: litellm.acompletion(**kw),
                 self._log_error)
             self._persist_usage(AIGateway._extract_usage(resp))
             content = resp.choices[0].message.content
             return content.strip() if content else None
+        except OutgoingBodyTooLarge as e:
+            # Fail soft, but NOT silent: the generic handler below would file
+            # this as another provider failure, and the caller cannot tell a
+            # skipped compaction from an ordinary one. The refusal is a property
+            # of the chunk we built, so say that it was refused locally and
+            # include the measurement the shared guard produced.
+            self._log_error(f"compaction refused before dispatch: {e}")
+            return None
         except Exception as e:
             self._log_error(f"compaction LLM call failed: {e}")
             return None
@@ -2572,6 +2600,20 @@ class MetaAgent:
                 # stops applying and nothing says so.
                 extra_body["reasoning_effort"] = self.thinking_effort
             kwargs["extra_body"] = extra_body
+
+        # THE OUTGOING-BODY GUARD, before the endpoint walk and before the
+        # handshake retry: this is the third writer that fills a provider
+        # request itself (the gateway and the compacter are the others), so an
+        # over-bound transcript was forwarded unexamined and died upstream with
+        # no byte count and no culprit. Same imported guard as those two — the
+        # bound and the error type are core/ai_router.py's, not a second policy.
+        # `_walk_endpoints` rewrites model/api_base/api_key per candidate, none
+        # of which the measurement counts, so measuring here measures the body
+        # every candidate would receive.
+        refuse_if_body_too_large(
+            kwargs, identity=body_identity(
+                kwargs, caller="meta_agent.butler_turn",
+                model_route=self._raw_model, session=self.session_id))
 
         # Retry only the handshake: transient provider errors (rate-limit,
         # 5xx, connection at request time) surface here before any token has

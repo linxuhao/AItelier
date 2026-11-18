@@ -580,8 +580,10 @@ def _tool_label(tool) -> str:
 def measure_outgoing_body(kwargs: dict) -> tuple[int, list[dict]]:
     """(total bytes, per-part breakdown) of the body `kwargs` becomes.
 
-    Called ONCE per completion, at the funnel (`_complete_prebuilt`), never per
-    candidate attempt and never twice in one call. Cost: one JSON encoding of
+    Called ONCE per completion by `refuse_if_body_too_large` (the funnel
+    `_complete_prebuilt` and both of `core/meta_agent.py`'s direct
+    `litellm.acompletion` sites go through it), never per candidate attempt and
+    never twice in one call. Cost: one JSON encoding of
     the payload the transport is about to encode anyway — a second pass over
     bytes that then go out over a network call costing seconds to minutes, so
     it is a rounding error against the call it protects. It is also why this
@@ -683,6 +685,72 @@ class OutgoingBodyTooLarge(Exception):
             f"\n"
             f"Where: {where}"
         )
+
+
+def body_identity(kwargs: dict, **fields) -> dict:
+    """The handles that make a refusal attributable, from whatever layer has them.
+
+    The payload contributes the shape (`messages` / `tools` counts); the caller
+    contributes what it knows about WHICH call this is — the internal route name,
+    the endpoint it is bound to, the session, and which writer assembled the
+    body. One constructor on purpose: the 2026-11-18 refusal could be tied to no
+    session, role or route, and three writers producing three identity shapes
+    would put that hole back in a different form.
+    """
+    return {**fields,
+            "messages": len(kwargs.get("messages") or []),
+            "tools": len(kwargs.get("tools") or [])}
+
+
+def refuse_if_body_too_large(kwargs: dict, *, identity: dict | None = None) -> None:
+    """Measure the outgoing body once; refuse locally if it is over OUR bound.
+
+    THE ONE GUARD for every writer that assembles a provider request itself.
+    There are three, and before this was lifted out of `AIGateway` only the
+    first was covered:
+
+      1. `AIGateway._complete_prebuilt` — the gateway funnel (both public
+         completions enter there).
+      2. `core/meta_agent.py:_summarize_chunk` — the compacter, which calls
+         `litellm.acompletion` directly and swallows every failure into None.
+      3. `core/meta_agent.py:_stream_llm` — the butler's streaming turn, through
+         its `_open_stream` attempt.
+
+    Sites 2 and 3 bypass the gateway entirely, so a body over the bound there
+    was forwarded unexamined and died upstream with the same unattributable
+    `decoded body exceeds 50331648 bytes` the guard exists to replace. The
+    bound, the error type and this message shape live HERE and nowhere else; an
+    imported guard keeps them one policy, a second copy in a bypass path drifts.
+
+    The refusal happens before dispatch and before the candidate walk: nothing
+    is sent, no endpoint is parked, no retry budget is spent and no failover is
+    attempted, because the body is a property of what the caller assembled and
+    is identical for every candidate on the route. See OUTGOING_BODY_BOUND_BYTES
+    for the measured basis and the margin.
+    """
+    measured, parts = measure_outgoing_body(kwargs)
+    bound = OUTGOING_BODY_BOUND_BYTES
+    if measured <= bound:
+        return
+    identity = dict(identity or body_identity(kwargs))
+    largest = max(parts, key=lambda p: p["bytes"]) if parts else None
+    error = OutgoingBodyTooLarge(
+        measured_bytes=measured, bound_bytes=bound,
+        gateway_limit_bytes=GATEWAY_BODY_LIMIT_BYTES,
+        parts=parts, identity=identity, largest=largest)
+    # Loud on purpose, and one line: the refusal has to be visible in a log that
+    # is read after a turn died, which is the half of the 2026-11-18 occurrence
+    # that was missing entirely. `caller` names the writer that was refused, so
+    # a bypass path's refusal is not attributed to the gateway.
+    route, endpoint = identity.get("model_route"), identity.get("endpoint")
+    where = " -> ".join(str(x) for x in (route, endpoint) if x)
+    print(f"[ai_router] refused outgoing body "
+          f"({identity.get('caller') or 'gateway'}"
+          f"{f', {where}' if where else ''}, session "
+          f"{identity.get('session')}): {measured:,} bytes > {bound:,} bound, "
+          f"largest {largest['part'] if largest else '?'} "
+          f"({largest['bytes'] if largest else 0:,} bytes)", flush=True)
+    raise error
 
 
 class AIGateway:
@@ -1277,44 +1345,10 @@ class AIGateway:
         sent to OpenCode Go as `x-opencode-session`), and the shape of the
         payload.
         """
-        return {
-            "model_route": self.internal_model,
-            "endpoint": self.active_model,
-            "candidate": f"{self._candidate_ix + 1}/{len(self._candidates)}",
-            "session": self._opencode_session_id,
-            "messages": len(kwargs.get("messages") or []),
-            "tools": len(kwargs.get("tools") or []),
-            "native": native,
-        }
-
-    def _refuse_if_body_too_large(self, kwargs: dict, *, native: bool) -> None:
-        """Measure the outgoing body once; refuse locally if it is over OUR bound.
-
-        The refusal happens before the candidate walk, so nothing is sent
-        upstream, no endpoint is parked, no retry budget is spent and no
-        failover is attempted: the body is a property of what the caller
-        assembled, identical for every candidate on the route. See
-        OUTGOING_BODY_BOUND_BYTES for the measured basis and the margin.
-        """
-        measured, parts = measure_outgoing_body(kwargs)
-        bound = OUTGOING_BODY_BOUND_BYTES
-        if measured <= bound:
-            return
-        identity = self._body_identity(kwargs, native=native)
-        largest = max(parts, key=lambda p: p["bytes"]) if parts else None
-        error = OutgoingBodyTooLarge(
-            measured_bytes=measured, bound_bytes=bound,
-            gateway_limit_bytes=GATEWAY_BODY_LIMIT_BYTES,
-            parts=parts, identity=identity, largest=largest)
-        # Loud on purpose, and one line: the refusal has to be visible in a log
-        # that is read after a turn died, which is the half of the 2026-11-18
-        # occurrence that was missing entirely.
-        print(f"[ai_router] refused outgoing body ({identity.get('model_route')}"
-              f" -> {identity.get('endpoint')}, session "
-              f"{identity.get('session')}): {measured:,} bytes > {bound:,} "
-              f"bound, largest {largest['part'] if largest else '?'} "
-              f"({largest['bytes']:,} bytes)", flush=True)
-        raise error
+        return body_identity(
+            kwargs, model_route=self.internal_model, endpoint=self.active_model,
+            candidate=f"{self._candidate_ix + 1}/{len(self._candidates)}",
+            session=self._opencode_session_id, native=native)
 
     def _complete_prebuilt(self, kwargs: dict, *, native: bool = False):
         """One completion, walking this model's candidates on endpoint errors.
@@ -1340,7 +1374,7 @@ class AIGateway:
         still sees a real provider error (and `_explain_auth` can still name the
         missing secret).
 
-        THE OUTGOING-BODY GUARD LIVES HERE, and this is the funnel for a
+        THE OUTGOING-BODY GUARD IS CALLED HERE, and this is the funnel for a
         structural reason rather than a convenient one. Everything below is a
         private chain with exactly one entry point:
 
@@ -1359,8 +1393,14 @@ class AIGateway:
         `_observed_completion` or `_call_llm`) would also run it once per
         candidate: the same body would be measured again for every failover,
         paying the same pass to rediscover the same number.
+
+        The guard itself is `refuse_if_body_too_large` at module level, since
+        `core/meta_agent.py` calls `litellm.acompletion` directly at two sites
+        and needs the same policy; see its docstring for the three writers it
+        covers.
         """
-        self._refuse_if_body_too_large(kwargs, native=native)
+        refuse_if_body_too_large(
+            kwargs, identity=self._body_identity(kwargs, native=native))
         while True:
             try:
                 response = self._observed_completion(kwargs, native=native)

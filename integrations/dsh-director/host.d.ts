@@ -160,7 +160,7 @@ export interface DirectorHost {
    *  [none: not registered]. propose records an OPEN proposal and nothing else - the owner
    *  approves or declines it through the host, the host executes the approved version and
    *  delivers each result to the steward through events(). kind: create_project |
-   *  start_driver | stop_driver; supersedes names the steward's own open proposal it replaces.
+   *  start_driver | stop_driver | archive_project | unarchive_project; supersedes names the steward's own open proposal it replaces.
    *  withdraw takes back the steward's own open proposal, as a record. */
   proposals?: {
     propose(proposal: { kind: string; payload: object; reason: string; supersedes?: string }, signal?: AbortSignal): Promise<object>;

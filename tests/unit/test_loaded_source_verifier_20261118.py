@@ -18,8 +18,11 @@ halves of the contract the consumer exists for:
   (``test_the_reported_digest_is_the_shared_implementations_value``);
 * the rule's loop exists in exactly ONE place, and that place is
   ``core/source_identity.py``: ``api/main.py`` imports it instead of owning a
-  copy, and no other non-test module carries the rule's fingerprint
-  (``test_the_digest_rule_is_implemented_exactly_once``).
+  copy, and no other non-test module the repository TRACKS carries the rule's
+  fingerprint (``test_the_digest_rule_is_implemented_exactly_once``, with
+  ``test_the_scan_ignores_files_the_repository_does_not_track`` holding the
+  difference between that scan and a filesystem walk - the deployed checkout
+  carries untracked ``.cache/`` wheels full of third-party Python).
 
 The server is started with ``--lifespan off`` on purpose: /health's payload does
 not touch what the lifespan builds (State backend, scheduler, claims), and the
@@ -199,17 +202,38 @@ def test_the_reported_digest_is_the_shared_implementations_value(live_backend):
 _RULE_FINGERPRINT = "hexdigest().encode()"
 
 
-def _python_sources():
-    for path in sorted(REPO_ROOT.rglob("*.py")):
-        relative = path.relative_to(REPO_ROOT)
-        if relative.parts[0] in {"tests", "web", ".git"}:
+def _tracked_python_sources(root: Path):
+    """This repository's own Python sources: git's view, not the filesystem's.
+
+    A filesystem walk also sees trees this repository does not track, and the
+    DEPLOYED checkout carries them: ``.cache/apply-patch-dev/uv-cache`` holds
+    vendored wheels whose third-party modules contain the same expression, so a
+    walk reported seven holders of the rule and six of them were httpx and
+    litellm. A guard whose verdict flips on a file the repository does not track
+    is not a guard (measured 2026-11-18 on the deployed checkout; the clean
+    worktree the change was written in had none of those directories, which is
+    how the walk looked correct there).
+    """
+    listing = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.py"],
+        cwd=str(root), capture_output=True, text=True, timeout=120,
+    )
+    assert listing.returncode == 0, (
+        "git ls-files could not list the repository's sources, so this scan "
+        "measured nothing", listing.returncode, listing.stderr[-500:])
+    for name in listing.stdout.split("\0"):
+        if not name:
             continue
-        yield relative, path.read_text(encoding="utf-8", errors="replace")
+        relative = Path(name)
+        if relative.parts[0] in {"tests", "web"}:
+            continue
+        yield relative, (root / relative).read_text(encoding="utf-8",
+                                                    errors="replace")
 
 
 def test_the_digest_rule_is_implemented_exactly_once():
     """The loop lives in core/source_identity.py and nowhere else."""
-    holders = [str(relative) for relative, text in _python_sources()
+    holders = [str(relative) for relative, text in _tracked_python_sources(REPO_ROOT)
                if _RULE_FINGERPRINT in text]
     assert holders == ["core/source_identity.py"]
 
@@ -246,3 +270,38 @@ def test_the_digest_rule_is_implemented_exactly_once():
     )
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.strip() == "False"
+
+
+def test_the_scan_ignores_files_the_repository_does_not_track(tmp_path):
+    """The guard must not move when an untracked tree appears under the checkout.
+
+    Witnessed both ways in one fixture: a TRACKED module carrying the fingerprint
+    is found, and the same bytes in an untracked file (``.cache/vendored/…``, the
+    shape the deployed checkout actually has) are not. The rglob walk this
+    replaced reports both, so the assertion separates the guard from a directory
+    listing rather than comparing two listings.
+    """
+    repo = tmp_path / "repo"
+    (repo / "instrument").mkdir(parents=True)
+    (repo / "instrument" / "rule.py").write_text(
+        "stolen = hashlib.sha256(b'')." + _RULE_FINGERPRINT + "\n",
+        encoding="utf-8")
+    (repo / "README.txt").write_text("not python\n", encoding="utf-8")
+    identity = ["-c", "user.email=director@example.invalid",
+                "-c", "user.name=director"]
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", *identity, "add", "instrument/rule.py", "README.txt"],
+                   cwd=str(repo), check=True)
+    untracked = repo / ".cache" / "vendored" / "third_party.py"
+    untracked.parent.mkdir(parents=True)
+    untracked.write_text("same = hashlib.sha256(b'')." + _RULE_FINGERPRINT + "\n",
+                         encoding="utf-8")
+
+    tracked_holders = [str(relative) for relative, text in _tracked_python_sources(repo)
+                       if _RULE_FINGERPRINT in text]
+    assert tracked_holders == ["instrument/rule.py"], tracked_holders
+
+    walk_holders = sorted(str(path.relative_to(repo)) for path in repo.rglob("*.py")
+                          if _RULE_FINGERPRINT in path.read_text(encoding="utf-8"))
+    assert walk_holders == [".cache/vendored/third_party.py",
+                            "instrument/rule.py"], walk_holders

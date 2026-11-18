@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import { installToolDiscovery, searchTools, presentTools } from './tool-discovery.mjs';
 import { loadRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
+import { discoveryTexts } from './aitelier-texts.mjs';
 
 /** Generic layer: the repository table alone. Adapter layer: plus AItelier's additions (D3). */
 const table = loadRoles();
@@ -95,11 +96,11 @@ if (libraries.status === 'unmeasured') {
     if (libraries.mismatches.length) t.diagnostic(describeDeclinedToMeasure(libraries.pinned, libraries.mismatches));
   });
 
-  async function fixture(body, roles = effective) {
+  async function fixture(body, roles = effective, rootRole = undefined) {
     const ctx = new Context();
     const prompt = ctx.plugin(SystemPrompt); await prompt.await();
     const tools = ctx.plugin(Tools); await tools.await();
-    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles });
+    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles, ...(rootRole ? { rootRole } : {}) });
     let scopeOwner;
     const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
     const scopes = [];
@@ -269,6 +270,27 @@ if (libraries.status === 'unmeasured') {
     assert.deepEqual(await listedFor(root), [...table.director.presented].sort());
     assert.deepEqual(await listedFor(child), [...table.worker.presented].sort());
   }, table));
+
+  test('the real assembly: a steward root is shown no section of a tool it cannot call; a director root is shown them all', async () => {
+    const registered = ['tool:bash', 'tool:jobs', 'mcp:devmcp', 'mcp-resource-servers', 'aitelier:host-own'];
+    const sectionsFor = async rootRole => {
+      let names;
+      await fixture(async ({ctx, agent}) => {
+        for (const name of registered) ctx.systemPrompt.section({ name, order: 50, interpolate: false, text: 'section ' + name });
+        const root = agent('root');
+        names = (await ctx.systemPrompt.assemble({ agent: root, scope: root })).sections.map(s => s.name);
+      }, effective, rootRole);
+      return names;
+    };
+    const steward = await sectionsFor('steward'), director = await sectionsFor(undefined);
+    // This deployment names the discovery section itself (aitelier-texts.mjs).
+    const discovery = discoveryTexts.sectionName;
+    for (const name of ['tool:bash', 'tool:jobs', 'mcp:devmcp', 'mcp-resource-servers', discovery])
+      assert.ok(!steward.includes(name), name + ' shown to the steward: ' + steward);
+    assert.ok(steward.includes('aitelier:host-own'), 'the host\'s own section is kept');
+    for (const name of [...registered, discovery])
+      assert.ok(director.includes(name), name + ' missing for the director: ' + director);
+  });
 
   test('adapter layer: without aitelier-roles the State tools are not the director\'s, so the guard test above depends on it', () => fixture(async ({ctx, agent, call}) => {
     const child = agent('child');

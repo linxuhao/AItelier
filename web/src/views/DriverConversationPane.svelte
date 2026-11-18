@@ -9,13 +9,16 @@
   import DriverConversation from './DriverConversation.svelte';
   import DriverRunLog from './DriverRunLog.svelte';
   let { projects = [], status = null, onread = () => {}, onrefresh = () => {},
-    selected = $bindable(''), mode = $bindable('conversation'), tabs = [], panel, prefill = null }: {
+    selected = $bindable(''), mode = $bindable('conversation'), tabs = [], panel, prefill = null, ack = false }: {
     projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     onread?: () => void; onrefresh?: () => void; selected?: string;
     // A host may add its own tabs after the two built-in ones (the steward's
     // proposals, questions and profile); `panel` renders the chosen one.
     mode?: string; tabs?: {id: string; label: string}[]; panel?: Snippet<[string]>;
     prefill?: {text: string} | null;
+    // The steward's pane shows a receipt under the owner's unanswered message
+    // (DriverConversation `ack`); a director's pane does not.
+    ack?: boolean;
   } = $props();
   let visitedRun = $state(false);
   // Full screen (owner 2026-11-18: on a phone the rest of the dashboard leaves the chat no
@@ -100,7 +103,7 @@
         <div id="driver-conversation-panel" class="pane-panel" data-mode-panel="conversation" role="tabpanel"
           aria-labelledby="driver-conversation-tab" hidden={mode !== 'conversation'}>
           <DriverConversation projectId={selected} projectTitle={current?.title ?? selected}
-            driverId={driver?.driver_id ?? ''} onread={onread} {drafts} {prefill} />
+            driverId={driver?.driver_id ?? ''} onread={onread} {drafts} {prefill} ack={ack ? {phase: driver?.phase} : null} />
         </div>
         <div id="driver-run-panel" class="pane-panel scroll" data-mode-panel="run" role="tabpanel"
           aria-labelledby="driver-run-tab" hidden={mode !== 'run'}>

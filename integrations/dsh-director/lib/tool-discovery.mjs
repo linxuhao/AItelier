@@ -15,6 +15,35 @@ export function presentTools(tools, role) {
   return tools.filter(t => presented.has(t.name));
 }
 
+/** The prompt sections one session is shown. A presented_only role (the steward) has a
+ *  closed tool set, so the guidance other tools register for themselves is only noise to
+ *  it - and misleading noise: a steward told how to use bash, read, jobs or an MCP server
+ *  believes it can (measured 2026-11-18: its self-check listed eleven tools and three MCP
+ *  servers it cannot call). For such a role, judged against `shown` - the names of the
+ *  tools this request actually lists for it - a tool's own section (`tool:<name>`, or
+ *  `tool:<name>:<detail>`) stays only when that tool is shown, an MCP server's section
+ *  (`mcp:<server>`) only when one of that server's tools (`mcp__<server>__*`) is, the MCP
+ *  resource section only when a resource tool is, and the discovery section only when
+ *  search_tools is. Every other section - the persona, the role prompt, the host's own -
+ *  is kept; this is a rule over these section NAMES (DSH's own naming), so a section a
+ *  plugin registers under another name reaches the steward. Every other role's sections
+ *  are returned untouched (the same array). */
+const RESOURCE_TOOLS = ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'];
+export function presentSections(sections, role, discoverySection, shown = role?.presented ?? []) {
+  if (!role?.presented_only || !Array.isArray(sections)) return sections;
+  const names = new Set(shown);
+  return sections.filter(({ name }) => {
+    if (name === discoverySection) return names.has('search_tools');
+    if (name.startsWith('tool:')) return names.has(name.slice('tool:'.length).split(':')[0]);
+    if (name === 'mcp-resource-servers') return RESOURCE_TOOLS.some(tool => names.has(tool));
+    if (name.startsWith('mcp:')) {
+      const prefix = `mcp__${name.slice('mcp:'.length)}__`;
+      return [...names].some(tool => tool.startsWith(prefix));
+    }
+    return true;
+  });
+}
+
 /** Why `role` may not run this call, or undefined. Refused: every tool the role
  *  forbids, and - for a tool listed in `allowed_actions` - any call whose `action`
  *  argument is not on that tool's list (a missing or non-string action included).
@@ -64,7 +93,9 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     const assembly = await next();
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
-    return { ...assembly, tools: presentTools(assembly.tools, roleFor(caller?.session?.id)) };
+    const role = roleFor(caller?.session?.id);
+    const tools = presentTools(assembly.tools, role);
+    return { ...assembly, tools, sections: presentSections(assembly.sections, role, wording.sectionName, tools.map(t => t.name)) };
   });
   ctx.systemPrompt.section({ name: wording.sectionName, order: 3090, interpolate: false, text: wording.section });
   ctx.tools.register(defineTool({ name: 'search_tools',

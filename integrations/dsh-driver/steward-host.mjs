@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -339,7 +340,7 @@ export async function forwardFinalText({ request, project, me, text, input = '',
 const stewardAsk = 'Anything you wait on from your owner (a decision, an approval) must be a question they can see: ask it with ask_owner before you go dormant.';
 export const stewardTexts = Object.freeze({
   heldWork: 'your owner has messages you have not answered: answer each with send_user_message first',
-  idleDormant: 'Call when nothing is waiting for you: your owner\'s messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.',
+  idleDormant: `Call when nothing is waiting for you: your owner's messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes (whole minutes, ${DORMANT_MIN_MINUTES}-${DORMANT_MAX_MINUTES}) is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.`,
   askOwner: 'Ask your owner ONE concrete question only they can decide (a choice, an approval). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry; another question under that id is refused. context is optional background shown with it. The answer comes back to you as a message from your owner. Use close_question when it no longer needs an answer.',
   closeQuestion: 'Take back one of your own questions to your owner that no longer needs an answer, with the reason; it stays visible as withdrawn. An answered question cannot be closed; closing twice changes nothing.',
   continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, read whole first with portfolio_inbox (a project letter) or private_inbox (a letter in your private inbox) when a wake showed you only its first 240 characters, and read ones marked with portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in your private inbox)? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
@@ -389,6 +390,91 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
   return threads;
 }
 
+/** What the steward is shown of one project's work (owner 2026-11-18, the steward's
+ *  self-check; reshaped after review 357): project_overview carries every node whole -
+ *  aitelier ~1.4 MB, 860 nodes, 816 closed - and a result that size was spilled to a file
+ *  the steward has no tool to read. The summary keeps:
+ *  - the counts, whole;
+ *  - the RECENT_CLOSED most recently closed nodes, always (they are what "progress" is
+ *    read from, so the bound never spends them first);
+ *  - the open work - not-closed nodes and open issue work items in one list - one PAGE at a
+ *    time: as many as fit under NODES_CHARS, then `open_next_after` to pass back as
+ *    `open_after`. The order is the node key and the cursor is the last key shown (a
+ *    keyset, review 360): the list is read afresh for every page, so a position would
+ *    skip or repeat items when one closes or changes between two reads; a key cannot.
+ *    Every item open at both reads is shown exactly once; one opened mid-walk with a key
+ *    before the cursor is on the next walk's pages, and every line carries its own change
+ *    time, so "what moved last" is read from the lines and from recently_closed_nodes;
+ *  - no field cut silently: titles are kept as the overview gives them (its first goal
+ *    line, at most 180 chars); a hold reason longer than HOLD_CHARS is cut and says so
+ *    (held_reason_truncated, held_reason_chars), and a long blocked_by list keeps its total.
+ *  `nodes_shown` says how many of how many for both lists. */
+const NODES_CHARS = 9000, HOLD_CHARS = 300, BLOCKED_SHOWN = 5, RECENT_CLOSED = 8;
+const CLOSED_NODE = new Set(['VERIFIED', 'SUPERSEDED']);
+const nodeChanged = n => n.latest_attempt?.updated_at ?? n.node_hold?.updated_at ?? '';
+const byChange = (a, b) => (nodeChanged(b) > nodeChanged(a) ? 1 : nodeChanged(b) < nodeChanged(a) ? -1
+  : String(a.node_key).localeCompare(String(b.node_key)));
+function openLine(n) {
+  const hold = n.hold?.held ? n.hold : n.node_hold?.held ? n.node_hold : null;
+  const reason = String(hold?.reason ?? '');
+  const blocked = Array.isArray(n.blocked_by) ? n.blocked_by : [];
+  return { node_key: n.node_key, ...(n.issue_id ? { issue_id: n.issue_id } : {}), title: n.title, status: n.status,
+    readiness: n.readiness, ...(n.next_action ? { next_action: n.next_action } : {}),
+    ...(blocked.length ? { blocked_by: blocked.slice(0, BLOCKED_SHOWN), ...(blocked.length > BLOCKED_SHOWN ? { blocked_by_total: blocked.length } : {}) } : {}),
+    ...(hold ? { held: true, held_since: hold.updated_at ?? null, held_reason: reason.slice(0, HOLD_CHARS),
+      ...(reason.length > HOLD_CHARS ? { held_reason_truncated: true, held_reason_chars: reason.length } : {}) } : {}),
+    ...(n.latest_attempt ? { latest_attempt: { status: n.latest_attempt.status, updated_at: n.latest_attempt.updated_at } } : {}),
+    ...(n.latest_evidence && Object.keys(n.latest_evidence).length ? { latest_evidence: n.latest_evidence } : {}),
+    ...(n.open_issue_count ? { open_issue_count: n.open_issue_count } : {}),
+    ...(n.claims?.length ? { live_claims: n.claims.map(c => ({ driver_id: c.driver_id ?? null, ...(c.subagent ? { subagent: c.subagent } : {}),
+      lease_expires_at: c.lease_expires_at ?? null })) } : {}) };
+}
+const closedLine = n => ({ node_key: n.node_key, title: n.title, status: n.status,
+  ...(n.latest_attempt ? { updated_at: n.latest_attempt.updated_at } : {}) });
+export function projectSummary(overview, { openAfter, limit = NODES_CHARS } = {}) {
+  if (!overview || !Array.isArray(overview.nodes)) {
+    // Not the shape this summary knows: say so instead of passing an unbounded value on.
+    return { unrecognised_overview: true, chars: JSON.stringify(overview ?? null).length };
+  }
+  // A cursor is the node key a previous page ended on; anything else is refused by name,
+  // never read as "start again" (review 360).
+  if (openAfter !== undefined && openAfter !== null && (typeof openAfter !== 'string' || !openAfter))
+    return { refused: 'invalid_open_after', reason: 'open_after is the open_next_after string a previous answer gave' };
+  const byKey = (a, b) => (String(a.node_key) < String(b.node_key) ? -1 : String(a.node_key) > String(b.node_key) ? 1 : 0);
+  const work = [...overview.nodes, ...(overview.issue_work ?? [])];
+  const open = work.filter(n => !CLOSED_NODE.has(n.status)).sort(byKey);
+  const closed = overview.nodes.filter(n => CLOSED_NODE.has(n.status)).sort(byChange);
+  const rest = openAfter ? open.filter(n => String(n.node_key) > openAfter) : open;
+  const base = { project: overview.project, counts: overview.counts, readiness_counts: overview.readiness_counts,
+    ready_action_counts: overview.ready_action_counts, issue_counts: overview.issue_counts,
+    issue_work_counts: overview.issue_work_counts, observed_at: overview.observed_at,
+    recently_closed_nodes: closed.slice(0, RECENT_CLOSED).map(closedLine), open_work: [] };
+  const shown = () => ({ open_after: openAfter ?? null, open: base.open_work.length, open_total: open.length,
+    open_remaining_after_page: rest.length - base.open_work.length,
+    open_next_after: base.open_work.length < rest.length ? base.open_work[base.open_work.length - 1].node_key : null,
+    recently_closed: base.recently_closed_nodes.length, closed_total: closed.length, all_total: work.length });
+  // One page: add open work in key order while the whole summary still fits; at least one
+  // line per page, so a walk always moves forward.
+  for (const n of rest) {
+    base.open_work.push(openLine(n));
+    if (base.open_work.length > 1 && JSON.stringify({ ...base, nodes_shown: shown() }).length > limit) { base.open_work.pop(); break; }
+  }
+  return { ...base, nodes_shown: shown() };
+}
+
+/** The open issues: the query's own page (oldest first, ISSUES_PAGE rows, each title whole -
+ *  at most 300 chars by the issue schema) in a few fields, and its own cursor to pass back
+ *  as `issues_after`. Nothing on the page is dropped, so nothing is unreachable. */
+export const ISSUES_PAGE = 15;
+/** Open questions to the owner: the query's newest QUESTIONS_PAGE, with its own matched_total and has_more. */
+export const QUESTIONS_PAGE = 20;
+export function issuesSummary(page) {
+  if (!page || !Array.isArray(page.issues)) return page;
+  return { issues: page.issues.map(i => ({ issue_id: i.issue_id, kind: i.kind, title: i.title, updated_at: i.updated_at })),
+    status_counts: page.status_counts, has_more: page.has_more === true,
+    ...(page.has_more === true ? { issues_next_after: page.next_after } : {}) };
+}
+
 export function stewardOps({ request, project, me, stateDir }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
   return {
@@ -409,12 +495,18 @@ export function stewardOps({ request, project, me, stateDir }) {
               : questions.has_more ? `${(questions.questions ?? []).length}+` : (questions.questions ?? []).length };
         })) };
       },
-      async project(projectId, signal) {
+      async project(projectId, signal, { openAfter, issuesAfter } = {}) {
+        // A cursor that is not one a previous answer gave is refused by name, never read as
+        // "the first page" (review 360).
+        if (issuesAfter !== undefined && issuesAfter !== null && !(Number.isInteger(issuesAfter) && issuesAfter >= 0))
+          return { refused: 'invalid_issues_after', reason: 'issues_after is the issues_next_after integer a previous answer gave' };
         const [overview, issues, questions] = await Promise.all([
           list('/api/state/query/project_overview', { project_id: projectId }, signal),
-          list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: 50 }, signal),
-          list('/api/state/query/list_user_questions', { project_id: projectId, status: 'open', limit: 50 }, signal)]);
-        return { project_id: projectId, overview, open_issues: issues, open_questions: questions };
+          list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: ISSUES_PAGE,
+            ...(Number.isInteger(issuesAfter) && issuesAfter > 0 ? { after: issuesAfter } : {}) }, signal),
+          list('/api/state/query/list_user_questions', { project_id: projectId, status: 'open', limit: QUESTIONS_PAGE }, signal)]);
+        return { project_id: projectId, overview: projectSummary(overview, { openAfter }), open_issues: issuesSummary(issues),
+          open_questions: questions };
       },
       conversation: (projectId, cursor, signal) => list('/api/state/query/list_user_conversation',
         { project_id: projectId, limit: 30, ...(cursor ? { cursor } : {}) }, signal),

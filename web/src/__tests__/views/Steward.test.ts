@@ -174,6 +174,28 @@ describe('the steward card', () => {
       expect(within(pane).getByRole('tab', {name})).toBeTruthy();
     }
   });
+
+  it('shows the receipt under the owner\'s unanswered message, from the steward\'s phase', async () => {
+    conversations['aitelier-home'] = [answer('aitelier-home', 'h1', [], '2026-01-01T00:00:01Z')];
+    try {
+      const view = render(StateProjects);
+      const pinned = await waitFor(() => {
+        const el = view.container.querySelector('[data-steward-card]') as HTMLElement;
+        expect(el).not.toBeNull();
+        return el;
+      });
+      await fireEvent.click(pinned);
+      const pane = await view.findByRole('complementary');
+      // The table above has the steward 'waiting': delivered, about to be picked up.
+      const ack = await waitFor(() => {
+        const el = pane.querySelector('[data-conversation-ack]');
+        expect(el).not.toBeNull();
+        return el as HTMLElement;
+      });
+      expect(ack.dataset.conversationAck).toBe('waiting');
+      expect(ack.textContent).toBe('Delivered - it will pick this up in a moment…');
+    } finally { delete conversations['aitelier-home']; }
+  });
 });
 
 describe('the open-questions summary', () => {

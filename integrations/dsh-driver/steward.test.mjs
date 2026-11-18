@@ -11,9 +11,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { refusal, presentTools } from './tool-discovery.mjs';
+import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
-import { conversationTurns, stewardOps, syncConversation, replyToLetter, unansweredOwnerMessages,
+import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
@@ -66,6 +66,116 @@ test('presented_only: the steward has exactly its presented tools; everything el
   assert.equal(refusal(effective.director, exec('some_new_tool')), undefined);
   assert.equal(refusal(effective.worker, exec('some_new_tool')), undefined);
   for (const role of ['director', 'worker']) assert.ok(!effective[role].presented.includes('portfolio_inbox'), role);
+});
+
+test('presented_only: the steward is shown no guidance for tools it cannot call', () => {
+  // Measured 2026-11-18: the steward's prompt described bash, read, write, edit, glob, grep,
+  // jobs, web_search, web_fetch, goals, subagent, search_tools and three MCP servers; its
+  // own self-check named them as tools it was told about and could not call.
+  const effective = aitelierRoles(table);
+  const discovery = defaultDiscoveryTexts.sectionName;
+  const names = ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot',
+    'tool:bash', 'tool:read', 'tool:write', 'tool:edit', 'tool:jobs', 'tool:web_search', 'tool:web_fetch', 'tool:goal',
+    'tool:subagent', 'tool:subagent:depth', 'tool:session-query', 'tool:idle_dormant', 'tool:idle_dormant:detail',
+    'mcp-resource-servers', 'mcp:agentmcp', 'mcp:devmcp', 'mcp:zvec', discovery, 'deployment:persona-suffix'];
+  const sections = names.map(name => ({ name, text: name }));
+  const steward = effective.steward;
+  assert.deepEqual(presentSections(sections, steward, discovery, steward.presented).map(s => s.name),
+    ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot', 'tool:idle_dormant',
+      'tool:idle_dormant:detail', 'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
+  // Judged against the tools the request actually lists, not the role table: a presented
+  // tool missing from this request loses its section too.
+  assert.ok(!presentSections(sections, steward, discovery, ['memory_search']).some(s => s.name === 'tool:idle_dormant'));
+  // Every other role is shown every section, as before (the same array).
+  for (const role of ['director', 'worker'])
+    assert.equal(presentSections(sections, effective[role], discovery, ['bash']), sections, role);
+  // Per MCP server: a tool of one server brings back that server's section only.
+  const one = presentSections(sections, steward, discovery, [...steward.presented, 'mcp__agentmcp__ocr_image', 'search_tools']).map(s => s.name);
+  assert.ok(one.includes('mcp:agentmcp') && one.includes(discovery));
+  assert.ok(!one.includes('mcp:devmcp') && !one.includes('mcp:zvec') && !one.includes('mcp-resource-servers'));
+  assert.ok(presentSections(sections, steward, discovery, ['read_mcp_resource']).some(s => s.name === 'mcp-resource-servers'));
+  assert.equal(presentSections(undefined, steward, discovery), undefined, 'an assembly without sections is passed through');
+});
+
+const summaryNode = (i, status, extra = {}) => ({ node_key: `d.n${String(i).padStart(4, '0')}`, title: '很长的标题'.repeat(36), status,
+  readiness: 'closed', revision: 1, contract_hash: 'x'.repeat(64), dependencies: [], blocked_by: [], hold: null,
+  node_hold: { held: 0, reason: '' }, claims: [], next_action: null,
+  latest_attempt: { status: 'candidate', updated_at: new Date(Date.UTC(2026, 10, 1) + i * 60000).toISOString(), artifact_ref: 'y'.repeat(64) },
+  latest_evidence: { pass: 2 }, open_issue_count: 0, ...extra });
+const summaryShape = (openKeys, closedCount = 816) => ({ project: { project_id: 'p' }, counts: { VERIFIED: closedCount }, readiness_counts: {},
+  nodes: [...Array.from({ length: closedCount }, (_, i) => summaryNode(i, 'VERIFIED')), ...openKeys.map(i => summaryNode(i, 'CANDIDATE'))],
+  issue_work: [summaryNode(5000, 'OPEN', { issue_id: 'iss-1' })], issue_work_counts: { OPEN: 1 }, observed_at: 'now' });
+/** Walk every page, reading the overview afresh before each one (`overviewAt(page)`). */
+function walk(overviewAt) {
+  const seen = [];
+  let after;
+  for (let page = 0; page < 1000; page++) {
+    const summary = projectSummary(overviewAt(page), { openAfter: after });
+    assert.ok(summary.open_work.length >= 1 || summary.nodes_shown.open_next_after === null, 'a page moves forward');
+    assert.equal(summary.nodes_shown.open_after, after ?? null, 'the cursor asked for is the one reported');
+    seen.push(...summary.open_work.map(n => n.node_key));
+    if (summary.nodes_shown.open_next_after === null) return seen;
+    after = summary.nodes_shown.open_next_after;
+  }
+  throw new Error('walk did not end');
+}
+
+test('portfolio_project is a bounded summary: open work in pages, recent closures always kept, nothing cut silently (reviews 357, 360)', () => {
+  // Measured 2026-11-18: aitelier's whole overview was ~1.4 MB (860 nodes, 816 closed), and
+  // the harness spilled it to a file the steward has no tool to read.
+  for (const openCount of [44, 880]) {
+    const keys = Array.from({ length: openCount }, (_, i) => 1000 + i);
+    const overview = summaryShape(keys), before = JSON.stringify(overview);
+    const first = projectSummary(overview);
+    assert.equal(JSON.stringify(overview), before, 'the overview is not changed');
+    assert.ok(JSON.stringify(first).length <= 9000, `summary is ${JSON.stringify(first).length} chars`);
+    // M1/M2: the recently closed are kept whatever the open count, newest first, with their total.
+    assert.deepEqual(first.recently_closed_nodes.map(n => n.node_key), [815, 814, 813, 812, 811, 810, 809, 808].map(i => `d.n${String(i).padStart(4, '0')}`));
+    assert.equal(first.nodes_shown.closed_total, 816);
+    assert.equal(first.nodes_shown.open_total, openCount + 1); assert.equal(first.nodes_shown.all_total, 816 + openCount + 1);
+    const seen = walk(() => overview);
+    assert.deepEqual(seen, [...keys.map(i => `d.n${i}`), 'd.n5000'], `${openCount} open: every open item exactly once, in key order`);
+  }
+  // M5 (review 360): the list is read afresh for each page. An item closed between two reads,
+  // or one whose change time moved, must not make the walk skip or repeat any other item.
+  const keys = Array.from({ length: 40 }, (_, i) => 1000 + i);
+  const firstPage = projectSummary(summaryShape(keys)).open_work.map(n => n.node_key);
+  assert.ok(firstPage.length >= 2 && firstPage.length < 41, `page 1 holds ${firstPage.length}`);
+  const closedOnPage1 = Number(firstPage[0].slice(3));
+  const closing = walk(page => summaryShape(page === 0 ? keys : keys.filter(k => k !== closedOnPage1)));
+  assert.deepEqual(closing, [...keys.map(i => `d.n${i}`), 'd.n5000'], 'a page-1 item closing mid-walk skips nothing');
+  const laterKey = 1000 + firstPage.length + 2;
+  const touched = walk(page => {
+    const shape = summaryShape(keys);
+    if (page > 0) shape.nodes.find(n => n.node_key === `d.n${laterKey}`).latest_attempt.updated_at = '2026-12-31T00:00:00Z';
+    return shape;
+  });
+  assert.deepEqual(touched, [...keys.map(i => `d.n${i}`), 'd.n5000'], 'an item changing mid-walk is neither repeated nor lost');
+  // A cursor past the end is an empty last page that says so; a cursor that is not a key is refused.
+  const end = projectSummary(summaryShape(keys), { openAfter: 'd.n9999' });
+  assert.deepEqual([end.open_work.length, end.nodes_shown.open_next_after, end.nodes_shown.open_remaining_after_page], [0, null, 0]);
+  for (const bad of [3, -1, 3.5, '', {}]) assert.equal(projectSummary(summaryShape(keys), { openAfter: bad }).refused, 'invalid_open_after', String(bad));
+  // M4: no field cut silently - titles whole; a long hold reason says it was cut and how long it was;
+  // next_action, latest_evidence and who holds a claim are on the line.
+  const line = projectSummary({ nodes: [summaryNode(1, 'CANDIDATE', { node_hold: { held: 1, reason: 'r'.repeat(500), updated_at: 'then' },
+    blocked_by: Array.from({ length: 12 }, (_, i) => 'b' + i), next_action: 'new_attempt',
+    claims: [{ driver_id: 'drv-a', subagent: 'w1', lease_expires_at: 'soon', claim_id: 'c', fence: 3 }] })] }).open_work[0];
+  assert.equal(line.title.length, 180, 'the title is the overview\'s, uncut');
+  assert.deepEqual([line.held, line.held_since, line.held_reason.length, line.held_reason_truncated, line.held_reason_chars], [true, 'then', 300, true, 500]);
+  assert.deepEqual([line.blocked_by.length, line.blocked_by_total], [5, 12]);
+  assert.equal(line.next_action, 'new_attempt'); assert.deepEqual(line.latest_evidence, { pass: 2 });
+  assert.deepEqual(line.live_claims, [{ driver_id: 'drv-a', subagent: 'w1', lease_expires_at: 'soon' }]);
+  // An overview of another shape is not passed through unbounded.
+  assert.deepEqual(Object.keys(projectSummary({ nodes: 'x'.repeat(300000) })), ['unrecognised_overview', 'chars']);
+  // M3: the open issues are the query's own page, whole, with its cursor while more follow.
+  const issues = { issues: Array.from({ length: 15 }, (_, i) => ({ issue_id: `iss-${i}`, kind: 'gap', title: '问题'.repeat(150),
+    status: 'open', nodes: [], contradicts_acceptance: [], work_item: null, updated_at: 'x' })), status_counts: { open: 40 }, has_more: true, next_after: 77 };
+  const brief = issuesSummary(issues);
+  assert.equal(brief.issues.length, 15); assert.equal(brief.issues_next_after, 77); assert.equal(brief.issues[0].title.length, 300);
+  assert.deepEqual(Object.keys(brief.issues[0]), ['issue_id', 'kind', 'title', 'updated_at']);
+  assert.equal('issues_next_after' in issuesSummary({ ...issues, has_more: false }), false, 'no cursor when nothing follows');
+  assert.ok(JSON.stringify(brief).length <= 6000, 'a full page of the longest titles stays small');
+  assert.equal(issuesSummary({ error: 'x' }).error, 'x');
 });
 
 test('the steward prompt names the tools it has: both inbox readers where it explains the excerpt', () => {
@@ -227,6 +337,21 @@ test('portfolio: every other project with its director and open questions; one p
     { project_id: 'idle', title: 'Idle', director: null, open_questions: '2+' }] });
   const one = await ops.portfolio.project('wuxia');
   assert.deepEqual(Object.keys(one), ['project_id', 'overview', 'open_issues', 'open_questions']);
+  // The issue cursor reaches the query; the open-work cursor is the summary's own.
+  calls.length = 0;
+  const paged = await ops.portfolio.project('wuxia', undefined, { openAfter: 'd.n0003', issuesAfter: 41 });
+  const issueCall = calls.find(([path]) => path === '/api/state/query/list_issues');
+  assert.equal(issueCall[1].after, 41); assert.equal(issueCall[1].limit, 15);
+  assert.equal(calls.find(([path]) => path === '/api/state/query/list_user_questions')[1].limit, 20);
+  // M6 (review 360): the open-work cursor reaches the summary - read back from the answer.
+  // (The fake overview here is not a node list, so build one that is.)
+  const withNodes = stewardOps({ project: 'aitelier-home', me: 'drv-home', request: async (path, body) =>
+    path === '/api/state/query/project_overview' ? { result: summaryShape([1, 2, 3, 4, 5], 2) } : request(path, body) });
+  const second = await withNodes.portfolio.project('wuxia', undefined, { openAfter: 'd.n0003' });
+  assert.equal(second.overview.nodes_shown.open_after, 'd.n0003');
+  assert.deepEqual(second.overview.open_work.map(n => n.node_key), ['d.n0004', 'd.n0005', 'd.n5000']);
+  assert.equal((await withNodes.portfolio.project('wuxia', undefined, { issuesAfter: 'x' })).refused, 'invalid_issues_after');
+  void paged;
   assert.deepEqual((await ops.portfolio.conversation('wuxia', 'c-1')).body, { project_id: 'wuxia', limit: 30, cursor: 'c-1' });
   assert.ok(calls.every(([path]) => path.startsWith('/api/state/query/') || path === '/api/dsh-drivers'), 'reads only');
 });

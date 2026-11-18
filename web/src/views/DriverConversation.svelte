@@ -7,8 +7,14 @@
   import { renderMarkdown } from '../lib/markdown';
   import type { ConversationDraft } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null }: {
+  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null, ack = null }: {
     projectId: string; projectTitle?: string; driverId?: string;
+    // The steward's receipt (owner 2026-11-18: "收到消息先ack，再处理/回复"): a host that
+    // passes its driver's phase gets one status line under the owner's newest message
+    // while no reply has come after it - working on it, about to, or not running. It is
+    // drawn from what the page already reads (the thread and the driver's phase), so it
+    // costs no model step and adds nothing to the conversation itself.
+    ack?: {phase?: string} | null;
     // Only a host that can actually dismiss the thread passes `onclose`: the
     // dashboard pane always shows it, so it passes nothing and gets no close
     // button (the one it had closed nothing there).
@@ -26,6 +32,9 @@
   let messages = $state<DriverConversationEntry[]>([]);
   let nextCursor = $state<string | null>(null), hasMore = $state(false), endOfHistory = $state(false);
   let loading = $state(false), ready = $state(false), error = $state('');
+  const awaiting = $derived(ack !== null && ready && messages.length > 0 && messages[messages.length - 1].sender_kind === 'user');
+  const ackText = $derived(ack?.phase === 'running' ? st('conversationAckWorking')
+    : ['waiting', 'dormant', 'starting'].includes(ack?.phase ?? '') ? st('conversationAckQueued') : st('conversationAckStopped'));
   let replyTo = $state<DriverConversationEntry | null>(null);
   // The question the composer is bound to, when the user chose the reply
   // control on a rail item. One question per send: it closes exactly that one.
@@ -423,6 +432,7 @@
           {/if}
         </article>
       {/each}
+      {#if awaiting}<p class="ack identity" data-conversation-ack={ack?.phase ?? 'stopped'} role="status">{ackText}</p>{/if}
     {/if}
   </div>
   <!-- The complete question history stays independent of thread pagination. -->
@@ -529,6 +539,7 @@
   .message.mine{margin-left:15%;}
   .message header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;padding:0;background:transparent;border:0;font-size:12px;color:var(--pico-muted-color);}
   .mine header{justify-content:flex-end;}
+  .ack{margin:4px 0 0 auto;text-align:right;font-size:13px;}
   .sender{font-weight:600;}.message .subject{display:block;margin:0 0 8px;font-size:14px;font-weight:600;}
   .message-content{font-size:14px;line-height:1.7;overflow-wrap:anywhere;min-width:0;}
   .message-content.plain{white-space:pre-wrap;padding:10px 14px;border-radius:10px 2px 10px 10px;background:color-mix(in srgb,var(--pico-primary) 9%,var(--pico-background-color));}

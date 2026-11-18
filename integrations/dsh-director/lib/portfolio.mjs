@@ -20,7 +20,7 @@
 
 export const PORTFOLIO_TOOLS = ['portfolio_projects', 'portfolio_project', 'portfolio_conversation', 'portfolio_inbox'];
 
-/** @param portfolio host.portfolio: { projects(signal), project(id, signal), conversation(id, cursor, signal),
+/** @param portfolio host.portfolio: { projects(signal), project(id, signal, page), conversation(id, cursor, signal),
  *    inbox(page, signal), privateInbox(page, signal), acknowledge({ deliveryId, version }, signal),
  *    acknowledgePrivate({ deliveryId, version }, signal) } - all optional; without `inbox`
  *    the project reader is not registered, without `privateInbox` neither is the private one,
@@ -35,10 +35,15 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
       parameters: {}, output: jsonOutput,
       execute: (_args, exec) => portfolio.projects(exec.signal),
     }));
+    // The page arguments are passed through as given; what a page holds and how it says what
+    // it did not show is the host's.
     scope.tools.register(defineTool({ name: 'portfolio_project',
-      description: 'One project in detail: its overview (work items and their states), its open issues and its open questions to your owner. Read-only.',
-      parameters: { project_id: projectId }, output: jsonOutput,
-      execute: (args, exec) => portfolio.project(args.project_id, exec.signal),
+      description: 'One project in summary: how many work items it has in each state, its most recently closed work items, its open work (in key order, one page at a time; each line says when it last changed), its open issues (oldest first, one page at a time) and its open questions to your owner. Nothing is cut silently: nodes_shown says how many of how many you were shown; pass open_next_after back as open_after, or issues_next_after as issues_after, to read the next page. open_after is a work-item key: the next page starts after it, so pass exactly the value you were given. A bad open_after is refused inside overview, a bad issues_after for the whole answer. Read-only.',
+      parameters: { project_id: projectId,
+        open_after: { type: 'string', description: 'the open_next_after a previous answer gave; omit for the first page' },
+        issues_after: { type: 'integer', description: 'the issues_next_after a previous answer gave; omit for the first page' } },
+      output: jsonOutput,
+      execute: (args, exec) => portfolio.project(args.project_id, exec.signal, { openAfter: args.open_after, issuesAfter: args.issues_after }),
     }));
     scope.tools.register(defineTool({ name: 'portfolio_conversation',
       description: 'One page of a project\'s conversation between your owner and its director, newest first; pass next_cursor to read older messages. Read-only.',
@@ -46,7 +51,7 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
       execute: (args, exec) => portfolio.conversation(args.project_id, args.cursor, exec.signal),
     }));
     if (portfolio.inbox) scope.tools.register(defineTool({ name: 'portfolio_inbox',
-      description: 'One page of the messages delivered to your own inbox, oldest delivery first, whole: each delivery\'s id, seq, message id, subject, sender, time, status and version, and its body. One call holds at most 5 deliveries, one body at most 8000 characters, and the whole answer is capped at 24000 characters: a longer body comes back with its true body_chars and body_truncated, and a longer page answers with matched_total, has_more and next_after, which you pass back as after for the next page. Read-only: nothing is acknowledged or changed.',
+      description: 'One page of your PROJECT inbox - the letters sent to your project (in a wake they are under project_inbox; a letter sent to you yourself, under driver_inbox, is in private_inbox instead), oldest delivery first, whole: each delivery\'s id, seq, message id, subject, sender, time, status and version, and its body. One call holds at most 5 deliveries, one body at most 8000 characters, and the whole answer is capped at 24000 characters: a longer body comes back with its true body_chars and body_truncated, and a longer page answers with matched_total, has_more and next_after, which you pass back as after for the next page. Read-only: nothing is acknowledged or changed.',
       parameters: { after: { type: 'integer', description: 'the last delivery_seq you have read; omit to start at the first delivery' },
         limit: { type: 'integer', description: 'deliveries to return; at most 5, and fewer when an answer would pass its cap' } },
       output: jsonOutput,
@@ -57,7 +62,7 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
     // the only way to read one whole before answering it. Same bounds, same self-describing
     // answer, same single read; nothing is acknowledged or changed.
     if (portfolio.privateInbox) scope.tools.register(defineTool({ name: 'private_inbox',
-      description: 'One page of the letters delivered to your own private inbox, oldest delivery first, whole: every delivery\'s id and seq (delivery_id, delivery_seq), message id, subject, sender (sender_driver_id, the driver that sent it), time, status, version and its body. A wake shows you only the first 240 characters of a letter, so read it whole here before you answer it. One call holds at most 5 deliveries, one body at most 8000 characters, and the whole answer is capped at 24000 characters: a longer body comes back with its true body_chars and body_truncated, and a longer page answers with matched_total, has_more and next_after, which you pass back as after for the next page. Read-only: nothing is acknowledged or changed, and only deliveries addressed to you are in it.',
+      description: 'One page of your PRIVATE inbox - the letters sent to you yourself, by your driver id (in a wake they are under driver_inbox; a letter sent to your project, under project_inbox, is in portfolio_inbox instead), oldest delivery first, whole: every delivery\'s id and seq (delivery_id, delivery_seq), message id, subject, sender (sender_driver_id, the driver that sent it), time, status, version and its body. A wake shows you only the first 240 characters of a letter, so read it whole here before you answer it. One call holds at most 5 deliveries, one body at most 8000 characters, and the whole answer is capped at 24000 characters: a longer body comes back with its true body_chars and body_truncated, and a longer page answers with matched_total, has_more and next_after, which you pass back as after for the next page. Read-only: nothing is acknowledged or changed, and only deliveries addressed to you are in it.',
       parameters: { after: { type: 'integer', description: 'the last delivery seq you have read; omit to start at the first delivery' },
         limit: { type: 'integer', description: 'deliveries to return; at most 5, and fewer when an answer would pass its cap' } },
       output: jsonOutput,

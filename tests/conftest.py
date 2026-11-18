@@ -128,15 +128,21 @@ def client_fixture(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _clear_read_cache():
-    """The `/api/repos` + `/api/runs` read cache is process-global and TTL-only.
+    """The `/api/repos` + `/api/runs` read cache is process-global; tests forget it.
 
     Each test gets its own DB, the cache does not, so one test's response
     survived into the next test's read — `test_list_all_runs_includes_cache_stats`
     passed alone and failed in the suite. Production has the middleware in
     api/main; tests get this, because a test that never issues a write would
     not trip it.
+
+    `reset()`, not `clear()`: since c147cc917e `clear()` deliberately KEEPS the
+    built values and only marks them stale for one background rebuild — that is
+    what a write must mean. A test needs the process to forget, because the
+    next test serves a different database under the same keys; that is
+    `reset()`.
     """
     from api import _read_cache
-    _read_cache.clear()
+    _read_cache.reset()
     yield
-    _read_cache.clear()
+    _read_cache.reset()

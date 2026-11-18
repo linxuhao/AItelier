@@ -301,6 +301,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Host-scoped additions of the host first (they precede the plan tools in every
   // request, as they always did), then the worker-facing plan tools.
   await op('install')(api);
+  // The host is installed: the channel plugins' messages may reach it now.
+  channels?.ready();
   const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
   // Worker-facing plan tools are host-scoped: the caller is exec.agent, so a child's
   // todo_begin binds the CHILD session to the plan.

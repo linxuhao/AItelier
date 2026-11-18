@@ -38,10 +38,15 @@ const short = error => String(error?.message ?? error).slice(0, 300);
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list (host.d.ts).
  *  @param log   (event, fields) => void; fields never carry a body.
- *  @returns { service, ownerMessageSent }: `service` is what channel plugins get as
- *    `ownerChannels`; `ownerMessageSent` is the director's half (DirectorApi). */
+ *  @returns { service, ownerMessageSent, ready }: `service` is what channel plugins get as
+ *    `ownerChannels`; `ownerMessageSent` is the director's half (DirectorApi); `ready()` says
+ *    the host can be called. The service exists from the plugin's apply on, so a channel
+ *    plugin can hand a message in before the host has installed itself (measured: its
+ *    caller did not exist yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies }) {
   const registered = new Map(), told = new Map();
+  let ready;
+  const started = new Promise(resolve => { ready = resolve; });
   // A reply goes out on the channel it is about; a failure to answer is logged, never thrown
   // into the caller (the message itself was handled).
   const answer = async (channel, line, options) => {
@@ -78,6 +83,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       const seen = { channel, sender_ref: senderRef, at: at ?? new Date().toISOString(), length: body.length };
       const trimmed = body.trim();
       try {
+        await started;
         // Six digits from someone who is not the bound owner is a binding attempt; the bound
         // owner's six digits are an ordinary message.
         if (CODE.test(trimmed) && (await binding(channel))?.sender_ref !== senderRef) {
@@ -115,23 +121,22 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   let queue = Promise.resolve();
   const mirroring = new Set();
   const mirror = async (messageId, body, replyTo) => {
+    await started;
     // Once per message, also across a restart: a delivery row means it was sent (or failed) before.
     if (mirroring.has(messageId) || await host.sourceOf(messageId)) return { mirrored: false, reason: 'already_mirrored' };
     let channel, to, replyToRef;
-    const listed = await host.list();
-    const rows = listed?.channels ?? [];
     if (replyTo) {
       const source = await host.sourceOf(replyTo);
       // A reply to a dashboard message stays on the dashboard.
       if (!source || source.direction !== 'in' || !CHANNEL_NAMES.includes(source.channel)) return { mirrored: false, reason: 'dashboard' };
       channel = source.channel; to = source.sender_ref; replyToRef = source.channel_message_ref ?? undefined;
-    } else {
-      // Unprompted: the default channel, when the owner chose one.
-      channel = listed?.default_channel;
-      if (!CHANNEL_NAMES.includes(channel)) return { mirrored: false, reason: 'no_default_channel' };
     }
+    const listed = await host.list();
+    // Unprompted: the default channel, when the owner chose one.
+    if (!replyTo) channel = listed?.default_channel;
+    if (!CHANNEL_NAMES.includes(channel)) return { mirrored: false, reason: 'no_default_channel' };
     // Only to the account bound now: one unbound since the owner wrote gets nothing.
-    const bound = rows.find(row => row.channel === channel && row.bound && !row.revoked_at && row.sender_ref);
+    const bound = (listed?.channels ?? []).find(row => row.channel === channel && row.bound && !row.revoked_at && row.sender_ref);
     if (!bound || (to !== undefined && bound.sender_ref !== to)) return { mirrored: false, reason: 'not_bound', channel };
     to = bound.sender_ref;
     mirroring.add(messageId);
@@ -161,5 +166,5 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return run;
   };
 
-  return { service, ownerMessageSent };
+  return { service, ownerMessageSent, ready: () => ready() };
 }

@@ -47,6 +47,7 @@ function fakeChannel(name, { fail } = {}) {
 const setup = options => {
   const fake = fakeHost(options), logs = [];
   const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]) });
+  channels.ready();
   const slack = fakeChannel('slack'), wechat = fakeChannel('wechat');
   channels.service.register(slack.channel);
   channels.service.register(wechat.channel);
@@ -62,6 +63,19 @@ test('register: only slack and wechat, with send and status; one plugin per chan
   assert.throws(() => channels.service.register(fakeChannel('slack').channel), /slack is already registered/);
   unregister();
   assert.doesNotThrow(() => channels.service.register(fakeChannel('slack').channel));
+});
+
+test('nothing reaches the host before it is ready: a message handed in early waits, then goes through', async () => {
+  const fake = fakeHost();
+  const channels = createOwnerChannels({ host: fake.host });
+  const early = channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-0', text: 'early' });
+  const mirrored = channels.ownerMessageSent('m-0', 'early reply');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(fake.calls, []);
+  channels.ready();
+  assert.deepEqual(await early, { accepted: true });
+  assert.deepEqual(await mirrored, { mirrored: false, reason: 'no_default_channel' });
+  assert.equal(only(fake.calls, 'relay').length, 1);
 });
 
 test('an ordinary message from the bound owner is relayed with its fields, and nothing is answered', async () => {
@@ -192,6 +206,7 @@ test('a sender unbound since it wrote gets no reply; another account bound since
 test('a failed send is recorded once with its error and never retried; a channel with no plugin is recorded as not connected', async () => {
   const fake = fakeHost({ bindings: { slack: 'U-OWNER', wechat: 'wx' } });
   const channels = createOwnerChannels({ host: fake.host, log: () => {} });
+  channels.ready();
   const slack = fakeChannel('slack', { fail: 'socket closed' });
   channels.service.register(slack.channel);
   fake.sources.set('in-1', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
@@ -207,6 +222,7 @@ test('a failed send is recorded once with its error and never retried; a channel
 test('mirrors run one at a time, in the order the messages were written; a failing host never rejects', async () => {
   const fake = fakeHost({ defaultChannel: 'slack' });
   const channels = createOwnerChannels({ host: fake.host, log: () => {} });
+  channels.ready();
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const order = [];

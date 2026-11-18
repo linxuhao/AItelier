@@ -3,6 +3,7 @@
 
 import pytest
 import json
+import threading
 from core.db_manager import DBManager
 from models.schemas import TaskStatus
 
@@ -275,7 +276,15 @@ def test_retry_project_allows_failed_project_to_be_rescheduled(tmp_path):
 # ── _sync_task_statuses condition tests ──────────────────────────────
 
 class FakeSF:
-    """Minimal fake that records whether _conn was accessed."""
+    """Minimal fake that records whether _conn was accessed.
+
+    It carries `_lock` because the scheduler's helpers issue every statement on
+    the engine's connection inside that lock (`_sf_statement_lock`): a double
+    without it is not a model of SkillFlow, and the guarded path would be refused
+    (or, at the sites that swallow, silently skipped).
+    """
+    _lock = threading.RLock()
+
     def __init__(self, has_loop_state=False, loop_index=0):
         self._conn_accessed = False
         self._has_loop_state = has_loop_state
@@ -382,6 +391,8 @@ def test_sync_task_statuses_supersedes_completed_task_on_goal_loop(tmp_path):
     # Goal-loop reset: scene_bootstrapper dropped from completed_items but still
     # planned (in items_json).
     class _LoopSF:
+        _lock = threading.RLock()   # the engine's statement lock (see _sf_statement_lock)
+
         class _Conn:
             def execute(self, q, params):
                 return self

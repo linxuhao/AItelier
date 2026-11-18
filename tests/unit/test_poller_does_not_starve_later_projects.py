@@ -45,6 +45,27 @@ LONG_STEP_S = 8.0       # the "gate": long next to INTERVAL_S + MARGIN_S
 # loop that starts them.
 SETUP_WAIT_S = 30.0
 
+# A bounded wait for the tick-log FILE, and a consequence of where the product
+# writes the line rather than of anything this module promises: `tick_log(...,
+# "executed", confirm_returned=...)` sits AFTER `await
+# _sync_status_off_the_loop(project_id)` in `_run_skillflow_tick`, while the
+# end-to-end test's `confirm` wrapper sets its Event INSIDE `confirm_step` —
+# before that await. Reading the file once when the Event fires therefore
+# samples a file the tick has not appended to yet (deterministic since
+# 709790239b added the await there; on its parent the write was synchronous and
+# the single sample always won). So the test polls for the line it asserts on,
+# in short steps. Long enough that it is not a second race (~a thread hop), far
+# shorter than LONG_STEP_S so it cannot stretch the window it reasons about.
+TICK_LOG_WAIT_S = 2.0
+
+# ...and the wait is not allowed to outlive the thing it is evidence FOR: the
+# poll gives up this much BEFORE `slow_gate`'s `release.wait(LONG_STEP_S)`
+# returns on its own (`release` is set only in the test's `finally`). A line
+# that appeared after the tool step was over would prove nothing about
+# starvation, so the deadline is capped there and the post-poll assertion
+# re-checks `"end" not in tool_window` at the moment it is read.
+TOOL_WINDOW_GUARD_S = 1.0
+
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
@@ -284,6 +305,32 @@ async def test_end_to_end_a_real_long_tool_step_does_not_starve_a_later_project(
         except asyncio.TimeoutError:
             pass
 
+        assert confirmed.is_set(), (
+            f"{late} was activated at {activated:.2f}s during a "
+            f"{LONG_STEP_S:.0f}s tool step and was not executed within "
+            f"{INTERVAL_S}s + {MARGIN_S}s margin; its tick-log lines: "
+            f"{env.lines_for(late)}")
+        assert "end" not in tool_window, \
+            "the tool step had already returned; this proved nothing"
+
+        # `confirmed` is set inside `confirm_step`, i.e. BEFORE the scheduler
+        # writes this tick's `executed` line: the write sits after
+        # `await _sync_status_off_the_loop(project_id)`, which yields the loop,
+        # so a single read here loses the race. Wait for the observation this
+        # test asserts on -- bounded, and bounded so the line still has to
+        # arrive inside the tool window (`release` is set in the `finally`).
+        window_end = env.t0 + tool_window["start"] + LONG_STEP_S
+        deadline = min(time.monotonic() + TICK_LOG_WAIT_S,
+                       window_end - TOOL_WINDOW_GUARD_S)
+        line = None
+        while True:
+            line = next((ln for ln in env.lines_for(late)
+                         if "outcome=executed" in ln
+                         and "confirm_returned=True" in ln), None)
+            if line is not None or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.02)
+
         print("\ntimeline (s since start, project, event):")
         print(f"  {tool_window['start']:7.2f}  {gate}  slow_gate START")
         for t, pid, what in sorted(env.timeline):
@@ -293,15 +340,18 @@ async def test_end_to_end_a_real_long_tool_step_does_not_starve_a_later_project(
         for ln in env.log_path.read_text().splitlines():
             print(f"  {ln}")
 
-        assert confirmed.is_set(), (
+        assert "end" not in tool_window, (
+            f"the `executed` line for {late} was only observed after the tool "
+            f"step returned, {time.monotonic() - env.t0:.2f}s in; the wait "
+            f"bounded by {TICK_LOG_WAIT_S}s / {TOOL_WINDOW_GUARD_S}s before "
+            f"the window closed must not reach past it")
+        assert line is not None, (
             f"{late} was activated at {activated:.2f}s during a "
-            f"{LONG_STEP_S:.0f}s tool step and was not executed within "
-            f"{INTERVAL_S}s + {MARGIN_S}s margin; its tick-log lines: "
+            f"{LONG_STEP_S:.0f}s tool step, but no "
+            f"`outcome=executed ... confirm_returned=True` line reached the "
+            f"tick-log file within {TICK_LOG_WAIT_S}s of the confirm while the "
+            f"tool step was still running; its tick-log lines: "
             f"{env.lines_for(late)}")
-        assert "end" not in tool_window, \
-            "the tool step had already returned; this proved nothing"
-        assert any("outcome=executed" in ln and "confirm_returned=True" in ln
-                   for ln in env.lines_for(late)), env.lines_for(late)
         row = sf._conn.execute(
             "SELECT status FROM skillflow_steps WHERE run_id = ? AND step_id = 'a'",
             (runs[late],)).fetchone()

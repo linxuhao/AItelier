@@ -1,9 +1,10 @@
 """The owner's steward (plugin steps 13-14): its proposals and the owner's memory requests.
 
 Proposals (design-steward 5). The steward only records an `open` row
-(`create_steward_proposal`); the owner decides on the dashboard, and the backend
-executes exactly the version the owner approved. Status: open -> executing ->
-done | failed, or declined | withdrawn | superseded. Every terminal result the
+(`create_steward_proposal`); the owner decides on the dashboard (or with an exact
+phrase in a message to the steward, core.state_channels - decided_by then names the
+channel and account), and the backend executes exactly the version the owner
+approved. Status: open -> executing -> done | failed, or declined | withdrawn | superseded. Every terminal result the
 owner caused (done, failed, declined) is delivered to the steward's driver inbox
 in the SAME transaction that writes it, so it survives a restart; a result that
 found no steward to deliver to keeps `notified_at` NULL and is delivered by the
@@ -147,6 +148,14 @@ def _proposal(row) -> dict:
             "created_at": row["created_at"], "decided_at": row["decided_at"],
             "decided_by": row["decided_by"],
             "result": json.loads(row["result_json"]) if row["result_json"] else None}
+
+
+def _carrier_still_bound(conn, carrier):
+    """M2 (design-steward 7.2): a chat decision re-reads its sender's binding inside
+    the transaction that decides. Unbound since the message -> refused, row untouched."""
+    if carrier is not None and carrier.get("channel"):
+        from core.state_channels import require_bound
+        require_bound(conn, carrier["channel"], carrier["sender_ref"])
 
 
 class ProposalConflict(StateConflict):
@@ -356,6 +365,11 @@ class StateSteward:
     def __init__(self, store, actor, driver_id=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
         self.project_read_trusted = store.project_read_trusted
+        # Starts or stops a driver for an approval made OUTSIDE the approve route (an
+        # owner's chat phrase, core.state_channels): (kind, project_id, actor) -> the
+        # driver row. The HTTP transport installs it (api.state_graph_routers); without
+        # it such an approval is refused before anything changes.
+        self.driver_runner = None
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
@@ -586,13 +600,20 @@ class StateSteward:
 
     def decline(self, proposal_id, expected_version, reason=None):
         self._owner()
+        return self.decide_decline(proposal_id, expected_version, self.actor,
+                                   {"reason": reason} if reason else {})
+
+    def decide_decline(self, proposal_id, expected_version, decided_by, record, carrier=None):
+        """open -> declined. The owner's button calls it through `decline`; an owner's
+        chat phrase (core.state_channels) calls it with the phrase's `carrier`."""
         with self.store.transaction(write=True) as conn:
+            _carrier_still_bound(conn, carrier)
             row = self._get(conn, proposal_id)
             if row["status"] != "open" or row["version"] != expected_version:
                 raise ProposalConflict(_proposal(row))
             conn.execute("UPDATE state_steward_proposals SET status='declined',version=version+1,"
                          "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=?",
-                         (now(), self.actor, canonical({"reason": reason} if reason else {}), proposal_id))
+                         (now(), decided_by, canonical(record), proposal_id))
             self._wake(conn, proposal_id)
             out = _proposal(self._get(conn, proposal_id))
         self._notify()
@@ -602,13 +623,21 @@ class StateSteward:
         """open -> executing, atomically with the status and version check. Exactly
         one of any number of concurrent approvals gets past here."""
         self._owner()
+        return self.decide_begin(proposal_id, expected_version, self.actor, None)
+
+    def decide_begin(self, proposal_id, expected_version, decided_by, record, carrier=None):
+        """`begin_approval` for a decider already established: the owner's session, or
+        an owner's exact chat phrase (core.state_channels), whose `record` is kept in
+        result_json and whose `carrier` binding is re-read in THIS transaction (M2)."""
         with self.store.transaction(write=True) as conn:
+            _carrier_still_bound(conn, carrier)
             row = self._get(conn, proposal_id)
             if row["status"] != "open" or row["version"] != expected_version:
                 raise ProposalConflict(_proposal(row))
             conn.execute("UPDATE state_steward_proposals SET status='executing',version=version+1,"
-                         "decided_at=?,decided_by=? WHERE proposal_id=? AND status='open' AND version=?",
-                         (now(), self.actor, proposal_id, expected_version))
+                         "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=? AND status='open' "
+                         "AND version=?", (now(), decided_by, canonical(record) if record else None,
+                                           proposal_id, expected_version))
             return _proposal(self._get(conn, proposal_id))
 
     def execute_create_project(self, proposal_id):
@@ -683,9 +712,12 @@ class StateSteward:
     def record_confirmation(self, proposal_id, confirm_interrupt, impact):
         """Keep the owner's confirmation (and what it covered) on the executing row."""
         with self.store.transaction(write=True) as conn:
+            # Merged: a chat approval's record (who, which channel, which phrase) stays.
+            previous = self._get(conn, proposal_id)["result_json"]
             conn.execute("UPDATE state_steward_proposals SET result_json=? WHERE proposal_id=? "
                          "AND status='executing'",
-                         (canonical({"confirm_interrupt": bool(confirm_interrupt), "impact": impact}),
+                         (canonical({**(json.loads(previous) if previous else {}),
+                                     "confirm_interrupt": bool(confirm_interrupt), "impact": impact}),
                           proposal_id))
 
     # ---------------------------------------------------------------- the steward's wake

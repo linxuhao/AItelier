@@ -41,6 +41,7 @@ ADMIN_TOKEN = "state-canaries-admin-token-not-a-secret"
 STEWARD_PROPOSAL = "proposal-canary"
 STEWARD_MEMORY_REQUEST = "memreq-canary"
 STEWARD_SCHEDULE = "sch-canary"
+CHANNEL_MESSAGE = "message-source-canary"
 
 
 def canary(table: str) -> str:
@@ -182,6 +183,22 @@ def _plan():
              "VALUES(?,1,?,?,'once',?,NULL,'Europe/Paris',1,?,'owner','owner',?,?)"),
             (STEWARD_SCHEDULE, c("state_steward_schedules"), c("state_steward_schedules"),
              "2999-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00", now, now)),
+        # Step 19: the owner's bound Slack account (the steward's trust anchor), an
+        # outstanding binding code, and the source row of an owner message - each
+        # with the canary in its identifying columns.
+        "state_owner_channels": (
+            ("INSERT INTO state_owner_channels(channel,sender_ref,bound_at,bound_by,revoked_at,is_default) "
+             "VALUES('slack',?,?,?,NULL,1)"),
+            (c("state_owner_channels"), now, c("state_owner_channels"))),
+        "state_owner_channel_codes": (
+            ("INSERT INTO state_owner_channel_codes(code_hash,channel,issued_at,expires_at) "
+             "VALUES(?,'wechat',?,'2999-01-01T00:00:00+00:00')"),
+            (c("state_owner_channel_codes"), now)),
+        "state_message_sources": (
+            ("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,channel_message_ref,at,error) "
+             "VALUES(?,'in','slack',?,?,?,?)"),
+            (CHANNEL_MESSAGE, c("state_message_sources"), c("state_message_sources"), now,
+             c("state_message_sources"))),
     }
 
 

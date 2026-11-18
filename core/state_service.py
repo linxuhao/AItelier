@@ -181,6 +181,11 @@ class StateService:
         # requests (after the inbox: it uses the inbox's request ledger).
         from core.state_steward import StateSteward
         self.steward = StateSteward(self.store, actor, driver_id)
+        # Step 19: the owner's chat channels to the steward (after the steward: its
+        # identity checks and request ledger, and the inbox: the message writer).
+        from core.state_channels import StateChannels
+        self.channels = StateChannels(self.store, actor, driver_id, steward=self.steward,
+                                      inbox=self.driver_inbox)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

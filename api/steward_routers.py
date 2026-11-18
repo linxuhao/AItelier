@@ -10,8 +10,13 @@ steward's. Every answer is a private record: none is served to an anonymous call
 Scheduled reminders (step 16, design-steward 7.4): the owner creates, edits,
 deletes and previews them here; the list is the owner's or the steward's. The
 steward itself writes them through its State commands.
+
+Chat channels (step 19, design-steward 7.2): the owner issues a binding code, unbinds
+and picks the default channel here (owner session only); the binding list and the
+messages' sources are the owner's (the steward reads them through its State queries).
 """
 import asyncio
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -215,3 +220,53 @@ def delete_schedule(schedule_id: str, expected_version: int, service=Depends(get
     _owner(service)
     out = _schedule_call(service.steward.delete_schedule, schedule_id, expected_version, as_owner=True)
     return {"deleted": True} if isinstance(out, dict) else out
+
+
+# --- chat channels (step 19) ---------------------------------------------------------------
+
+Channel = Literal["slack", "wechat"]
+
+
+class DefaultChannel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    channel: Channel | None
+
+
+@router.get("/channels", dependencies=[Depends(authz.require_reader)])
+def list_channels(service=Depends(get_service)):
+    """Both channels, bound or not, and the default one. (A channel's live status is
+    the host's to report; none is reported to the backend yet.)"""
+    _owner(service)
+    return service.channels.list_owner_channels()
+
+
+@router.put("/channels/default", dependencies=[Depends(authz.require_writer)])
+def set_default_channel(body: DefaultChannel, service=Depends(get_service)):
+    _owner(service)
+    return service.channels.set_default(body.channel)
+
+
+@router.post("/channels/{channel}/code", dependencies=[Depends(authz.require_writer)])
+def issue_code(channel: Channel, service=Depends(get_service)):
+    """A 6-digit code, valid 10 minutes, once: the owner sends it to the bot from the
+    account to bind. The plaintext is in this answer only (the backend keeps a hash)."""
+    _owner(service)
+    return service.channels.issue_code(channel)
+
+
+@router.delete("/channels/{channel}", dependencies=[Depends(authz.require_writer)])
+def unbind_channel(channel: Channel, service=Depends(get_service)):
+    _owner(service)
+    return service.channels.unbind(channel)
+
+
+@router.get("/message-sources", dependencies=[Depends(authz.require_reader)])
+def message_sources(ids: str = "", service=Depends(get_service)):
+    """Which channel each of these messages came from or went to; an absent id came
+    from (or stayed on) the dashboard."""
+    _owner(service)
+    message_ids = [i for i in ids.split(",") if i]
+    try:
+        return service.channels.message_sources(message_ids)
+    except StateGraphError as exc:
+        raise HTTPException(422, str(exc)) from exc

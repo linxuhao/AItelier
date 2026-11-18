@@ -521,6 +521,8 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL for the per-project DSH driver table",
     ("core/state_attempts.py", "SCHEMA"):
         "SQL DDL schema for the attempt tables",
+    ("core/state_channels.py", "SCHEMA"):
+        "SQL DDL for the owner chat channel tables (step 19)",
     # Visible only since the collector learned `.format()` on a literal and `+`
     # concatenation (issue iss-6bb926aa392748d2): `CLAIMS_TABLE` and
     # `HISTORY_TABLE` are a literal plus the `_STATUS_CHECK` name, and `SCHEMA`

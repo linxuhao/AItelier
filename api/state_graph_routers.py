@@ -38,11 +38,31 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
     # any route declaration, and travels into the service so `execute` can consult
     # it. A route author who forges a guard cannot reopen a private project: the
     # project decision is taken before routing and independent of the guard.
-    return StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
-                        runtime_factory=lambda: (get_skillflow(), get_config_registry()),
-                        project_read_trusted=may_read_private(request),
-                        driver_id=authenticated_driver_id(request),
-                        is_admin=authenticated_is_admin(request))
+    service = StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
+                           runtime_factory=lambda: (get_skillflow(), get_config_registry()),
+                           project_read_trusted=may_read_private(request),
+                           driver_id=authenticated_driver_id(request),
+                           is_admin=authenticated_is_admin(request))
+    service.steward.driver_runner = _driver_runner(request)
+    return service
+
+
+def _driver_runner(request):
+    """Start / stop a driver for an owner's chat approval (core.state_channels) with
+    the entries the approve route uses (api.steward_routers.approve). A State command
+    runs in a worker thread; the driver manager lives on the app's event loop, so the
+    call is handed back to that loop (anyio.from_thread)."""
+    def run(kind, project_id, actor):
+        from functools import partial
+
+        from anyio.from_thread import run as on_loop
+
+        from api.dsh_driver_routers import manager
+        runtime = manager(request)
+        if kind == "start_driver":
+            return on_loop(partial(runtime.start, project_id, provider="aitelier", model=None, actor=actor))
+        return on_loop(runtime.stop, project_id)
+    return run
 
 
 # Two verdicts, one identity check: `require_writer` for writes and for any read

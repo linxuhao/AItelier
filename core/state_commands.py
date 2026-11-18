@@ -1222,6 +1222,40 @@ class FireStewardSchedule(Project):
     expected_next_run_at: str = Field(min_length=1, max_length=64)
 
 
+# Step 19: the owner's chat channels (core.state_channels, design-steward 7.2). The
+# three writes are the steward's HOST's (its runtime code relays what a channel
+# received); `project_id` is the steward's own project, filled from its credential.
+_CHANNEL = Literal["slack", "wechat"]
+
+
+class RelayOwnerMessage(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    sender_ref: str = Field(min_length=1, max_length=200)
+    channel_message_ref: str = Field(min_length=1, max_length=200)
+    # Bounded by the service in UTF-8 bytes (body_too_long), never truncated.
+    body: str
+
+
+class BindOwnerChannel(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    sender_ref: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=32)
+
+
+class RecordChannelDelivery(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    message_id: str = Field(min_length=1, max_length=200)
+    channel: _CHANNEL
+    channel_message_ref: str | None = Field(default=None, min_length=1, max_length=200)
+    error: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class MessageSources(Request):
+    message_ids: list[str] = Field(max_length=200)
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1255,6 +1289,7 @@ READ_REQUESTS = {
     "list_steward_proposals": ListStewardProposals,
     "list_steward_memory_requests": ListStewardMemoryRequests,
     "list_steward_schedules": ListStewardSchedules,
+    "list_owner_channels": Empty, "message_sources": MessageSources,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1332,6 +1367,8 @@ WRITER_ONLY_READS = frozenset({
     "list_steward_proposals", "list_steward_memory_requests",
     # Step 16: the steward's scheduled reminders. A private table.
     "list_steward_schedules",
+    # Step 19: the owner's channel bindings and the messages' sources. Private tables.
+    "list_owner_channels", "message_sources",
 })
 
 
@@ -1395,6 +1432,8 @@ WRITE_REQUESTS = {
     "update_steward_schedule": UpdateStewardSchedule,
     "delete_steward_schedule": DeleteStewardSchedule,
     "fire_steward_schedule": FireStewardSchedule,
+    "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
+    "record_channel_delivery": RecordChannelDelivery,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1669,7 +1708,9 @@ def _handlers(service) -> dict:
         "send_driver_message": service.driver_inbox.send_driver_message,
         "send_user_message": service.driver_inbox.send_user_message,
         "withdraw_user_question": service.driver_inbox.withdraw_user_question,
-        "send_user_conversation_message": service.driver_inbox.send_user_conversation_message,
+        # The inbox writes it; an owner's exact approval phrase in the steward's
+        # conversation then decides a proposal (core.state_channels).
+        "send_user_conversation_message": service.channels.send_owner_message,
         "mark_user_conversation_read": service.driver_inbox.mark_user_conversation_read,
         "list_driver_messages": service.driver_inbox.list_driver_messages,
         "list_user_messages": service.driver_inbox.list_user_messages,
@@ -1755,6 +1796,11 @@ def _handlers(service) -> dict:
         "update_steward_schedule": service.steward.update_schedule,
         "delete_steward_schedule": service.steward.delete_schedule,
         "fire_steward_schedule": service.steward.fire_schedule,
+        "relay_owner_message": service.channels.relay_owner_message,
+        "bind_owner_channel": service.channels.bind_owner_channel,
+        "record_channel_delivery": service.channels.record_channel_delivery,
+        "list_owner_channels": service.channels.list_owner_channels,
+        "message_sources": service.channels.message_sources,
     }
 
 
@@ -1831,6 +1877,12 @@ def _driver_defaults(service, action, arguments):
 # acknowledgement only - never resolve (_STEWARD_PRIVATE_INBOX_WRITES).
 # The four *_steward_schedule actions are step 16's: they write only the steward's
 # own schedule table (the service checks the steward and its project again).
+# The three channel actions are step 19's, called by the steward's HOST code with what
+# a chat channel received, never by its model: relay_owner_message writes an owner
+# message only from the channel's bound account (and an exact approval phrase in it is
+# decided by code, core.state_channels), bind_owner_channel binds only with a code the
+# owner issued on the dashboard, record_channel_delivery only notes where the steward's
+# own message went. None of them approves or declines on the steward's say.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1842,7 +1894,8 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # Owner 2026-11-17: and it MARKs a private letter read, so a settled delivery is
     # not re-injected on every wake. Acknowledgement only; resolve stays closed.
     "acknowledge_driver_message",
-    "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule"})
+    "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
+    "relay_owner_message", "bind_owner_channel", "record_channel_delivery"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

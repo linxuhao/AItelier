@@ -94,6 +94,11 @@ PRIVATE_STATE_TABLES = frozenset({
     # Step 16: the steward's scheduled reminders. A row's instruction is the
     # owner's (or the steward's) standing order. No projection: never public.
     "state_steward_schedules",
+    # Step 19: the owner's chat channels. The bound account per channel (the
+    # steward's trust anchor), the hashed one-time binding codes, and the side
+    # table naming which channel each owner/steward message came from or went to.
+    # No projection: never public.
+    "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

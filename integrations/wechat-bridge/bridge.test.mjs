@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -361,4 +361,38 @@ test('run.sh publishes the container\'s 18731 on the host\'s 127.0.0.1:18741 onl
   const published = args => args.filter((arg, i) => args[i - 1] === '--publish');
   assert.deepEqual(published(run({})), ['127.0.0.1:18741:18731']);
   assert.deepEqual(published(run({ WECHAT_BRIDGE_PORT: '19999' })), ['127.0.0.1:19999:18731']);
+});
+
+test('run.sh puts the container on its own network, creating it only when missing, and keeps every hardening flag', () => {
+  // A stand-in `docker` logs each call (one line, its arguments joined by spaces) and
+  // answers `network inspect` as if the network existed only when NETWORK_EXISTS=1.
+  const home = mkdtempSync(join(tmpdir(), 'wechat-bridge-net-'));
+  mkdirSync(join(home, '.aitelier-secrets'));
+  writeFileSync(join(home, '.aitelier-secrets', 'wechat-bridge-token'), 'throwaway\n');
+  mkdirSync(join(home, 'bin'));
+  const log = join(home, 'calls.log');
+  writeFileSync(join(home, 'bin', 'docker'), '#!/bin/sh\necho "$*" >> "$CALLS"\n'
+    + 'if [ "$1 $2" = "network inspect" ] && [ "$NETWORK_EXISTS" != 1 ]; then exit 1; fi\n');
+  chmodSync(join(home, 'bin', 'docker'), 0o755);
+  const script = fileURLToPath(new URL('./run.sh', import.meta.url));
+  const calls = exists => {
+    writeFileSync(log, '');
+    execFileSync('sh', [script], { encoding: 'utf8', env: { PATH: `${join(home, 'bin')}:/usr/bin:/bin`, HOME: home,
+      CALLS: log, NETWORK_EXISTS: exists ? '1' : '0' } });
+    return readFileSync(log, 'utf8').trim().split('\n');
+  };
+  const missing = calls(false);
+  assert.deepEqual(missing.slice(0, 2), ['network inspect aitelier-wechat-bridge', 'network create aitelier-wechat-bridge']);
+  assert.equal(missing.length, 3);
+  const run = missing[2].split(' ');
+  assert.equal(run[0], 'run');
+  assert.equal(run[run.indexOf('--network') + 1], 'aitelier-wechat-bridge');
+  for (const flag of ['--read-only', '--cap-drop', '--security-opt', '--memory', '--memory-swap', '--cpus', '--pids-limit', '--tmpfs']) {
+    assert.ok(run.includes(flag), flag);
+  }
+  assert.equal(run[run.indexOf('--publish') + 1], '127.0.0.1:18741:18731');
+  // An existing network is used as it is: no second create.
+  const present = calls(true);
+  assert.deepEqual(present.map(line => line.split(' ').slice(0, 2).join(' ')), ['network inspect', 'run --detach']);
+  assert.ok(present[1].includes('--network aitelier-wechat-bridge'));
 });

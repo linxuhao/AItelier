@@ -38,7 +38,7 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
     // The page arguments are passed through as given; what a page holds and how it says what
     // it did not show is the host's.
     scope.tools.register(defineTool({ name: 'portfolio_project',
-      description: 'One project in summary: how many work items it has in each state, its most recently closed work items, its open work (in key order, one page at a time; each line says when it last changed), its open issues (oldest first, one page at a time) and its open questions to your owner. Nothing is cut silently: nodes_shown says how many of how many you were shown; pass open_next_after back as open_after, or issues_next_after as issues_after, to read the next page. Read-only.',
+      description: 'One project in summary: how many work items it has in each state, its most recently closed work items, its open work (in key order, one page at a time; each line says when it last changed), its open issues (oldest first, one page at a time) and its open questions to your owner. Nothing is cut silently: nodes_shown says how many of how many you were shown; pass open_next_after back as open_after, or issues_next_after as issues_after, to read the next page. open_after is a work-item key: the next page starts after it, so pass exactly the value you were given. A bad open_after is refused inside overview, a bad issues_after for the whole answer. Read-only.',
       parameters: { project_id: projectId,
         open_after: { type: 'string', description: 'the open_next_after a previous answer gave; omit for the first page' },
         issues_after: { type: 'integer', description: 'the issues_next_after a previous answer gave; omit for the first page' } },

@@ -1,6 +1,9 @@
 # File: api/dependencies.py
 
+import copy
 import os
+import threading
+import time
 from pathlib import Path
 from fastapi import HTTPException, Request
 from core import datadir
@@ -544,12 +547,151 @@ def get_agent_configs() -> dict:
     return _agent_configs_cache
 
 
-def enrich_project_status(project: dict | None) -> dict | None:
-    """Augment a project dict with pipeline status from skillflow (source of truth)."""
-    if not project:
+# ── The per-project enrichment memo ──────────────────────────────────
+#
+# One `GET /api/runs` cache rebuild measured 26874 ms on the live backend
+# (2026-11-18, `/health` process.started_at 2026-11-18T13:47:36.354+00:00), and
+# while it ran a `GET /api/projects` — a different cache key — took 26.22 s
+# against a `GET /health` of 2.8 ms. One interpreter, one GIL: every other read
+# the page makes queues behind this loop. Neither the DB nor the registry is the
+# cost (`list_projects_with_stats(None)` returns 1545 rows in 0.10 s; the YAML
+# registry is 0.00 ms per call warm). The cost is `enrich_project_status` at
+# 4.1 ms per row over all 1545 rows, 10.6 ms per row over the 200 most recently
+# active: a run lookup, a trace query for the failure reason, a config manifest
+# lookup and a `get_steps` call — per row, per pass — and three endpoints rebuild
+# the same list from the same rows on a 10 s dashboard poll.
+#
+# Two snapshots of all 1545 rows 12 s apart differed in ZERO rows by
+# (status, updated_at, current_project_step). The scheduler mirrors every run
+# change into the project row, so an unchanged row is the common case by a wide
+# margin, and there is nothing in it left to recompute.
+#
+# So the DERIVED fields are memoised on the row's own change fields. Three
+# bounds keep that honest:
+#
+#   the key     project_id / status / updated_at / current_project_step /
+#               config_name — the mirror fields the scheduler writes. Any
+#               scheduler write to the row changes the key.
+#   the TTL     a run can advance between two scheduler writes of the mirror
+#               row, so an unchanged row is still recomputed once the TTL
+#               elapses. The TTL is a BACKSTOP, not the freshness mechanism: the
+#               key already catches everything the scheduler has recorded.
+#   the engine  every value here was read from ONE skillflow object. A different
+#               one from `get_skillflow()` (a rebuilt singleton, a test double)
+#               is a different database of runs, and its entries are not reused.
+#
+# What is stored is the derived fields ONLY — never a dict handed to a caller.
+# Callers keep mutating the result (`project_routers` sets config_label /
+# is_authoring / has_task_loop, `repo_routers` calls this for its side effect),
+# so each call applies a fresh copy onto its own dict and no caller can poison
+# the next one's answer.
+#
+# Why 30 s: the SPA polls at 10 s (web/src/views/UnifiedDashboard.svelte), three
+# endpoints share this work, and the first pass after a restart takes ~27 s — a
+# TTL shorter than one pass would expire entries it had just written. What 30 s
+# can add is staleness for a change the mirror row has NOT recorded, which is at
+# most one scheduler tick, not 30 s of a live run.
+ENRICH_MEMO_TTL = 30.0
+
+# One entry per distinct row state, and rows are user data: a project edited
+# 3000 times would otherwise leave one entry per version forever. The read
+# cache's pattern — drop everything at the cap — is right here too: losing the
+# memo costs one recomputation, and a real eviction policy would be more code
+# than the thing it protects.
+ENRICH_MEMO_MAX_KEYS = 8192
+
+# key -> (stored_at, engine, derived). `stored_at` is time.monotonic().
+_enrichment_memo: dict[tuple, tuple[float, object, dict]] = {}
+_enrichment_locks: dict[tuple, threading.Lock] = {}
+_enrichment_guard = threading.Lock()
+
+
+def clear_enrichment_memo() -> None:
+    """Drop every memoised enrichment. For tests, and for a writer that knows.
+
+    `api/main.py`'s invalidation middleware clears `api/_read_cache` on any
+    mutating request; calling this there too would make a write refresh the next
+    pass immediately instead of waiting out the TTL. It is not wired from here
+    because that middleware is outside this change's scope.
+    """
+    with _enrichment_guard:
+        _enrichment_memo.clear()
+        _enrichment_locks.clear()
+
+
+def _enrichment_memo_key(project: dict) -> tuple:
+    """The row's OWN change fields — the scheduler's mirror of a run's state.
+
+    Deliberately not the whole row: `title`, `owner_email` and friends change
+    without changing anything skillflow knows, and a key that moved for them
+    would miss for no reason.
+    """
+    return (project.get("project_id"), project.get("status"),
+            project.get("updated_at"), project.get("current_project_step"),
+            project.get("config_name"))
+
+
+def _enrichment_lookup(key: tuple, sf, ttl: float) -> dict | None:
+    with _enrichment_guard:
+        hit = _enrichment_memo.get(key)
+    if hit is None:
         return None
+    stored_at, engine, derived = hit
+    if engine is not sf or time.monotonic() - stored_at >= ttl:
+        return None
+    return derived
+
+
+def _enrichment_lock_for(key: tuple) -> threading.Lock:
+    """The per-key lock, so N threads arriving on one cold key compute it once.
+
+    These endpoints are called from AnyIO worker threads; without this, a cold
+    project list under three concurrent requests runs the same 1545 enrichments
+    three times over, which is the stampede `api/_read_cache` exists to prevent
+    one layer up.
+    """
+    with _enrichment_guard:
+        lock = _enrichment_locks.get(key)
+        if lock is None:
+            if len(_enrichment_locks) >= ENRICH_MEMO_MAX_KEYS:
+                _enrichment_memo.clear()
+                _enrichment_locks.clear()
+            lock = _enrichment_locks[key] = threading.Lock()
+        return lock
+
+
+def _enrichment_store(key: tuple, sf, derived: dict) -> None:
+    with _enrichment_guard:
+        if len(_enrichment_memo) >= ENRICH_MEMO_MAX_KEYS:
+            _enrichment_memo.clear()
+            _enrichment_locks.clear()
+        _enrichment_memo[key] = (time.monotonic(), sf, derived)
+
+
+def _copy_derived(derived: dict) -> dict:
+    """A copy of the memoised fields that one caller may keep and mutate.
+
+    The containers (`completed_project_steps`, `config_addons`) are copied too: a
+    caller appending to them must not edit the next caller's answer. Everything
+    else in there is a str/bool, which cannot be mutated.
+    """
+    return {k: (copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v)
+            for k, v in derived.items()}
+
+
+def _derive_project_enrichment(project: dict, sf) -> tuple[dict, bool]:
+    """The expensive part: read one project's pipeline state out of skillflow.
+
+    Returns ``(derived_fields, complete)`` and NEVER the caller's dict, so the
+    result can be memoised and re-applied to a fresh dict per call. `complete` is
+    False when skillflow raised part-way: the fields collected up to that point
+    are still applied (that is what the old in-place code left behind, and a
+    transient failure must not blank a row that was already enriched), but the
+    partial answer is not memoised — the next pass gets to try again.
+    """
+    derived: dict = {}
+    complete = True
     try:
-        sf = get_skillflow()
         # get_run_by_project excludes completed runs, so a finished project would
         # otherwise keep its last cached status (e.g. "running:5") forever. Use the
         # most recent run of ANY status as the source of truth.
@@ -561,20 +703,20 @@ def enrich_project_status(project: dict | None) -> dict | None:
             # Surface the run's config identity so clients can tell which config a
             # run belongs to and render its labels/checkpoints generically.
             cfg = run.get("graph_name") or project.get("config_name") or "dpe_default_v2"
-            project["config_name"] = cfg
+            derived["config_name"] = cfg
             try:
                 from core.addon_registry import describe_config
                 _d = describe_config(cfg)
-                project["config_base"] = _d["base"]
-                project["config_addons"] = _d["addons"]
+                derived["config_base"] = _d["base"]
+                derived["config_addons"] = _d["addons"]
             except Exception:
-                project["config_base"] = cfg
-                project["config_addons"] = []
+                derived["config_base"] = cfg
+                derived["config_addons"] = []
             try:
                 manifest = get_config_registry().get(cfg)
             except Exception:
                 manifest = None
-            project["config_label"] = manifest.label if manifest else cfg
+            derived["config_label"] = manifest.label if manifest else cfg
             has_task_loop = bool(manifest and manifest.has_task_loop)
 
             # AT-15: preserve the DB's enriched status (e.g. "running:3")
@@ -600,31 +742,76 @@ def enrich_project_status(project: dict | None) -> dict | None:
             # its prefix disagrees, so this must not depend on which producer won.
             try:
                 from core.scheduler import _failure_reason
-                project["error_reason"] = _failure_reason(run) if (
+                derived["error_reason"] = _failure_reason(run) if (
                     run.get("status") == "failed") else (run.get("error_reason") or "")
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
                     "could not resolve the enriched failure reason", exc_info=True)
-                project["error_reason"] = run.get("error_reason") or ""
+                derived["error_reason"] = run.get("error_reason") or ""
             run_status = run["status"]
             db_status = project.get("status") or ""
             if run_status == "running" and run.get("current_node"):
-                project["status"] = f"running:{run['current_node']}"
+                derived["status"] = f"running:{run['current_node']}"
             elif db_status.split(":", 1)[0] == run_status and db_status != run_status:
                 pass                      # keep the enriched value
             else:
-                project["status"] = run_status
-            project["current_project_step"] = run["current_node"] or ""
+                derived["status"] = run_status
+            derived["current_project_step"] = run["current_node"] or ""
             # completed steps from skillflow, not from cached column
             steps = sf.get_steps(run["id"])
-            project["completed_project_steps"] = [
+            derived["completed_project_steps"] = [
                 s["step_id"] for s in steps if s["status"] == "completed"
             ]
-            project["has_task_loop"] = has_task_loop
+            derived["has_task_loop"] = has_task_loop
         elif not project.get("status"):
-            project["status"] = "planning"
+            derived["status"] = "planning"
     except Exception:
+        complete = False
+    return derived, complete
+
+
+def _memoised_enrichment(project: dict, sf, ttl: float) -> dict:
+    """The derived fields for `project`, from the memo when it is still valid."""
+    key = _enrichment_memo_key(project)
+    derived = _enrichment_lookup(key, sf, ttl)
+    if derived is not None:
+        return derived
+    with _enrichment_lock_for(key):
+        # Re-check under the lock: whoever held it may have just filled the
+        # entry, and that is the whole point — one computation, N readers.
+        derived = _enrichment_lookup(key, sf, ttl)
+        if derived is not None:
+            return derived
+        derived, complete = _derive_project_enrichment(project, sf)
+        if complete:
+            _enrichment_store(key, sf, derived)
+        return derived
+
+
+def enrich_project_status(project: dict | None, ttl: float | None = None) -> dict | None:
+    """Augment a project dict with pipeline status from skillflow (source of truth).
+
+    In place, on the caller's own dict, exactly as before — `repo_routers` relies
+    on the side effect and the other callers on the return value. What changed is
+    that the fields come from a memo keyed on the row's own change fields
+    (see the block above): a second pass over unchanged rows does no skillflow
+    work at all, instead of one run lookup, one trace query, one manifest lookup
+    and one `get_steps` call per row.
+
+    `ttl` overrides `ENRICH_MEMO_TTL` for this call — the seam a test uses to
+    cross the TTL without sleeping for it.
+    """
+    if not project:
+        return None
+    try:
+        sf = get_skillflow()
+        project.update(_copy_derived(_memoised_enrichment(
+            project, sf, ENRICH_MEMO_TTL if ttl is None else ttl)))
+    except Exception:
+        # This runs on every project list; it must never break the page. Same
+        # contract as before the memo: whatever could be resolved is applied and
+        # anything else is left as the DB returned it.
         pass
     return project
 

@@ -85,6 +85,15 @@ export interface DirectorApi {
    *  [{role: 'owner'|'steward', text}]) and runs the owner's own operations (forget,
    *  restore, purge, profile edits) through it - purge exists only here, never as a tool. */
   readonly memory?: unknown;
+  /** v1.2, capability `channels`: the host calls this after the root wrote message
+   *  `messageId` to its owner (replying to `replyTo` when given), with the text it wrote.
+   *  The director sends the same text on the owner's chat channel: a reply goes to the
+   *  channel the answered message came from, an unprompted message to the default channel
+   *  when one is set and bound, a reply to a dashboard message nowhere. Each message is
+   *  sent at most once (also across a restart, through channels.sourceOf) and recorded
+   *  with channels.recordDelivery, a failed send included, never retried. Never rejects;
+   *  without channels it resolves {mirrored: false}. */
+  ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -94,7 +103,7 @@ export interface DirectorHost {
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
   capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
-    | 'portfolio' | 'handoff' | 'proposals'>;
+    | 'portfolio' | 'handoff' | 'proposals' | 'channels'>;
   config: HostConfig;
 
   // ---- required ----
@@ -166,6 +175,37 @@ export interface DirectorHost {
     propose(proposal: { kind: string; payload: object; reason: string; supersedes?: string }, signal?: AbortSignal): Promise<object>;
     withdraw(withdrawal: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
   };
+  /** v1.2, design-steward 7.2: the owner's chat channels (Slack, WeChat). Declared, the
+   *  director provides the cordis service `ownerChannels` to channel plugins [none: the
+   *  service is not provided and channel plugins do not load]. The host owns who the owner
+   *  is and the conversation; the director only connects channel plugins to these:
+   *  - relay: one channel message from `senderRef` into the owner's conversation, exactly
+   *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
+   *    (channel, messageRef): a redelivery answers the first result with duplicate: true.
+   *    The host refuses a sender that is not the channel's current binding
+   *    (channel_sender_not_bound), a body over its bound (body_too_long) and too many
+   *    messages (rate_limited), as {refused: code}. When the text is exactly an approval
+   *    phrase the host executes it in code and says so in `approval`; the model never does.
+   *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
+   *    {bound: true} or {refused: invalid_code | code_expired | code_used}.
+   *  - sourceOf: where a message came from or went to: null for the dashboard, else
+   *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
+   *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
+   *    channel's own ref) or failed (`error`).
+   *  - list: every channel's binding and the default channel for unprompted messages. */
+  channels?: {
+    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string }, signal?: AbortSignal):
+      Promise<{ message_id: string; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
+        outcome: 'executed' | 'refused'; refusal?: string; result?: object } } | { refused: string; reason?: string }>;
+    bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
+      Promise<{ bound: true; channel: string; sender_ref: string } | { refused: string; reason?: string }>;
+    sourceOf(messageId: string, signal?: AbortSignal): Promise<null | { direction: 'in' | 'out'; channel: 'slack' | 'wechat';
+      sender_ref: string | null; channel_message_ref: string | null; at: string; error: string | null }>;
+    recordDelivery(delivery: { messageId: string; channel: 'slack' | 'wechat'; channelMessageRef?: string; error?: string },
+      signal?: AbortSignal): Promise<object>;
+    list(signal?: AbortSignal): Promise<{ channels: Array<{ channel: 'slack' | 'wechat'; bound: boolean; sender_ref: string | null;
+      bound_at: string | null; revoked_at: string | null; is_default: boolean }>; default_channel: 'slack' | 'wechat' | null }>;
+  };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */
@@ -179,4 +219,19 @@ export interface DirectorHost {
   texts?: Record<string, unknown>;
   /** Message source kinds and section names (persisted in session logs) [dsh-director-*]. */
   labels?: Record<string, string>;
+}
+
+/** The cordis service `ownerChannels` (provided only with the host's `channels`), what a
+ *  channel plugin injects. `register` returns the function that takes the channel back.
+ *  `send` is given the text and where it goes: `to` is the account it is for (the bound
+ *  owner, or the sender a binding answer is for), `replyToRef` the channel message it
+ *  answers when there is one; it resolves with the channel's own ref for the sent message.
+ *  `inbound` is one message that arrived; a text of exactly six digits from an account
+ *  that is not bound is a binding attempt. Nothing but the root's own message to its owner
+ *  and one-line answers about the sender's own message is ever sent. */
+export interface OwnerChannels {
+  register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
+    status(): { connected: boolean; detail?: string } }): () => void;
+  inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
+    Promise<{ accepted: boolean; reason?: string }>;
 }

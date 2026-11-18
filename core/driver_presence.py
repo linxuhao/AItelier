@@ -53,6 +53,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from core import drivers
+from core.off_loop_sqlite import retry_while_locked
 
 WAIT_GRACE_ENV = "AITELIER_PRESENCE_WAIT_GRACE_SECONDS"
 WAIT_GRACE_DEFAULT = 120
@@ -317,13 +318,28 @@ def _wait_begin(db, driver_id, timeout_seconds) -> str:
 
 
 def _wait_end(db, wait_id) -> None:
-    try:
+    """Stamp the wait as ended, retrying a held write lock a bounded 3 times.
+
+    BEST EFFORT, and the retry is what keeps it from being best-effort-lossy:
+    this runs in the `finally` of the wait, where the driver is already on its
+    way back, so it may not raise - but a row left with `ended_at` NULL keeps
+    the driver reading as "still waiting" for the rest of the grace period after
+    the wait actually ended. Measured in the live backend log (three times in
+    three hours, `iss-0297fe77883241b5`): another writer held the database,
+    SQLite refused the UPDATE, and the only trace was this warning. The failure
+    still warns once, after the last attempt, when the lock outlives the whole
+    window.
+    """
+    def write():
         with db.get_connection() as conn:
             # Short: the wait's answer is held until this returns. A miss is safe -
             # the driver stays online until the row's `until`, never longer.
             conn.execute("PRAGMA busy_timeout=500")
             conn.execute("UPDATE driver_presence_waits SET ended_at=? WHERE wait_id=?", (_stamp(_clock()), wait_id))
             conn.commit()
+
+    try:
+        retry_while_locked(write)
     except sqlite3.Error:
         _log.warning("could not record the end of wait %s", wait_id, exc_info=True)
 

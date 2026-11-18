@@ -131,7 +131,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         await answer(channel, bound ? replies.bound : replies.bindRefused, { replyToRef: messageRef, to: senderRef });
         return bound ? { accepted: true } : { accepted: false, reason: String(result?.refused ?? 'refused') };
       }
-      const result = await host.relay({ channel, senderRef, messageRef, text: body });
+      const result = await host.relay({ channel, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}) });
       if (result?.refused) {
         const reason = String(result.refused);
         log('channel_relay_refused', { ...seen, reason });

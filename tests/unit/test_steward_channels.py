@@ -65,10 +65,11 @@ def bind(world, channel="slack", sender=SLACK_USER, key="bind-1"):
                    {"request_key": key, "channel": channel, "sender_ref": sender, "code": code}, allow_write=True)
 
 
-def relay(world, body, ref, key=None, channel="slack", sender=SLACK_USER, service=None):
+def relay(world, body, ref, key=None, channel="slack", sender=SLACK_USER, service=None, channel_at=None):
     return execute(service or world.steward, "relay_owner_message",
                    {"request_key": key or f"relay-{ref}", "channel": channel, "sender_ref": sender,
-                    "channel_message_ref": ref, "body": body}, allow_write=True)
+                    "channel_message_ref": ref, "body": body,
+                    **({"channel_at": channel_at} if channel_at is not None else {})}, allow_write=True)
 
 
 def plant_proposal(world, proposal_id="p-1", kind="create_project", payload=None):
@@ -137,6 +138,52 @@ def test_a_wrong_expired_or_other_channel_code_binds_nothing(world, monkeypatch)
     refused(lambda: execute(world.steward, "bind_owner_channel",
                             {**args, "request_key": "b4", "channel": "wechat"}, allow_write=True), "code_expired")
     assert not any(c["bound"] for c in execute(world.owner, "list_owner_channels", {})["channels"])
+
+
+def test_five_refused_attempts_retire_the_live_code_until_the_owner_issues_a_new_one(world, caplog):
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    code = world.owner.channels.issue_code("slack")["code"]
+    wrong = f"{(int(code) + 1) % 10 ** 6:06d}"
+    other = world.owner.channels.issue_code("wechat")["code"]
+    attempt = {"channel": "slack", "sender_ref": "intruder"}
+    # Any refused attempt on the channel counts: a wrong code, a malformed one, another
+    # channel's code - each a guess at the live code.
+    for i, guess in enumerate([wrong, "12345a", other, wrong]):
+        refused(lambda: execute(world.steward, "bind_owner_channel", {**attempt, "request_key": f"g{i}", "code": guess},
+                                allow_write=True), "invalid_code")
+    refused(lambda: execute(world.steward, "bind_owner_channel", {**attempt, "request_key": "g4", "code": wrong},
+                            allow_write=True), "invalid_code")
+    assert "retired after 5 refused binding attempts" in caplog.records[-1].getMessage()
+    assert wrong not in caplog.records[-1].getMessage() and code not in caplog.records[-1].getMessage()
+    # The sixth try, even with the right code and from the owner's own account, binds nothing.
+    for key, sender in (("g5", "intruder"), ("g6", SLACK_USER)):
+        refused(lambda: execute(world.steward, "bind_owner_channel",
+                                {"request_key": key, "channel": "slack", "sender_ref": sender, "code": code},
+                                allow_write=True), "code_retired")
+    assert not execute(world.owner, "list_owner_channels", {})["channels"][0]["bound"]
+    # The other channel's code is untouched; a new slack code binds.
+    assert execute(world.steward, "bind_owner_channel", {"request_key": "w", "channel": "wechat",
+                                                         "sender_ref": "wxid_owner", "code": other},
+                   allow_write=True)["bound"]
+    bind(world, key="fresh")
+    assert execute(world.owner, "list_owner_channels", {})["channels"][0]["sender_ref"] == SLACK_USER
+
+
+def test_four_refused_attempts_leave_the_code_live_and_none_count_without_one(world):
+    # Guesses while the channel has no live code count against no later code.
+    for i in range(5):
+        refused(lambda: execute(world.steward, "bind_owner_channel", {"request_key": f"n{i}", "channel": "slack",
+                                                                      "sender_ref": "x", "code": "000000"},
+                                allow_write=True), "invalid_code")
+    code = world.owner.channels.issue_code("slack")["code"]
+    wrong = f"{(int(code) + 1) % 10 ** 6:06d}"
+    for i in range(4):
+        refused(lambda: execute(world.steward, "bind_owner_channel", {"request_key": f"g{i}", "channel": "slack",
+                                                                      "sender_ref": "x", "code": wrong},
+                                allow_write=True), "invalid_code")
+    assert execute(world.steward, "bind_owner_channel", {"request_key": "ok", "channel": "slack",
+                                                         "sender_ref": SLACK_USER, "code": code},
+                   allow_write=True)["bound"]
 
 
 def test_a_new_code_retires_the_unused_one_and_a_rebind_replaces_the_account(world):
@@ -208,7 +255,9 @@ def test_a_bound_owner_message_lands_like_a_dashboard_message_with_its_source(wo
 def test_a_relay_is_idempotent_by_request_key_and_by_channel_message(world):
     bind(world)
     first = relay(world, "hello", "ts-1", key="k1")
-    assert relay(world, "hello", "ts-1", key="k1") == first
+    assert first["duplicate"] is False
+    assert relay(world, "hello", "ts-1", key="k1") == {**first, "duplicate": True}, \
+        "a replay of the same request is a redelivery too"
     again = relay(world, "hello", "ts-1", key="k2")
     assert again == {**first, "duplicate": True}
     with pytest.raises(StateGraphError, match="idempotency_conflict"):
@@ -336,6 +385,44 @@ def test_the_exact_phrase_approves_as_the_bound_account_through_the_dashboards_p
     assert any("p-1" in m["subject"] for m in execute(world.steward, "list_driver_messages", {})["messages"])
     assert relay(world, "  同意 proposal p-1\n", "ts-approve", key="other") == {**out, "duplicate": True}, \
         "a redelivered message answers the first result and decides nothing again"
+
+
+def test_an_approval_replayed_under_its_request_key_says_duplicate_and_decides_nothing_again(world):
+    bind(world)
+    plant_proposal(world)
+    out = relay(world, "同意 proposal p-1", "ts-approve", key="k")
+    assert out["duplicate"] is False and out["approval"]["outcome"] == "executed"
+    assert relay(world, "同意 proposal p-1", "ts-approve", key="k") == {**out, "duplicate": True}
+    assert len(conversation(world)) == 1 and proposal(world)["status"] == "done"
+
+
+@pytest.mark.parametrize("age,outcome", [(timedelta(minutes=9, seconds=59), "executed"),
+                                         (timedelta(minutes=10, seconds=1), "refused"),
+                                         (timedelta(hours=3), "refused")])
+def test_an_approval_written_on_the_channel_over_ten_minutes_ago_is_refused(world, age, outcome):
+    bind(world)
+    plant_proposal(world)
+    written = (state_channels._now() - age).isoformat()
+    out = relay(world, "同意 proposal p-1", "ts", channel_at=written)
+    assert out["message_id"] and [m["message_id"] for m in conversation(world)] == [out["message_id"]], \
+        "the message itself is written either way"
+    assert out["approval"]["outcome"] == outcome, out
+    if outcome == "refused":
+        assert out["approval"]["refusal"] == "approval_too_old"
+        assert proposal(world)["status"] == "open" and proposal(world)["decided_by"] is None
+    else:
+        assert proposal(world)["status"] == "done"
+
+
+def test_channel_at_without_an_offset_is_utc_and_garbage_is_refused(world):
+    bind(world)
+    plant_proposal(world)
+    naive = (state_channels._now() - timedelta(minutes=30)).replace(tzinfo=None).isoformat()
+    assert relay(world, "拒绝 proposal p-1", "ts-1", channel_at=naive)["approval"]["refusal"] == "approval_too_old"
+    refused(lambda: relay(world, "hello", "ts-2", channel_at="yesterday"), "invalid_request")
+    # Not part of the request's identity: a redelivery stamped anew is still the same message.
+    first = relay(world, "hello", "ts-3", key="k", channel_at="2026-11-18T10:00:00Z")
+    assert relay(world, "hello", "ts-3", key="k", channel_at="2026-11-18T10:00:05Z") == {**first, "duplicate": True}
 
 
 def test_the_decline_phrase_declines_as_the_bound_account(world):

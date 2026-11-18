@@ -82,7 +82,10 @@ test('nothing reaches the host before it is ready: a message handed in early wai
 test('an ordinary message from the bound owner is relayed with its fields, and nothing is answered', async () => {
   const s = setup();
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' }), { accepted: true });
-  assert.deepEqual(only(s.calls, 'relay'), [{ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY }]);
+  // The channel's own time goes along (the host dates an approval phrase by it); none, none.
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }), { accepted: true });
+  assert.deepEqual(only(s.calls, 'relay'), [{ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' },
+    { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }]);
   assert.equal(s.slack.sent.length, 0);
 });
 
@@ -168,8 +171,7 @@ test('an approval the host executed is answered with one line of its outcome; a 
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-0', text: '同意 proposal p-1' }),
     { accepted: true, duplicate: true });
   assert.equal(s.slack.sent.length, 4);
-  // The backend replays a redelivery under the same request key as the first result,
-  // duplicate: false included: the message is still answered only once.
+  // Even a replay a host does not flag (duplicate: false) is answered only once.
   s.host.next = approval('approve', 'executed');
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' }), { accepted: true });
   assert.equal(s.slack.sent.length, 4);

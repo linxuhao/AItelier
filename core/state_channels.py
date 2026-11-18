@@ -57,7 +57,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS state_owner_channels_one_default ON state_owne
 CREATE TABLE IF NOT EXISTS state_owner_channel_codes (
  code_hash TEXT PRIMARY KEY,
  channel TEXT NOT NULL CHECK(channel IN ('slack','wechat')),
- issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
+ issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT,
+ failed_attempts INTEGER NOT NULL DEFAULT 0, retired_at TEXT);
 CREATE TABLE IF NOT EXISTS state_message_sources (
  message_id TEXT PRIMARY KEY,
  direction TEXT NOT NULL CHECK(direction IN ('in','out')),
@@ -72,6 +73,14 @@ CREATE INDEX IF NOT EXISTS state_message_sources_rate ON state_message_sources(c
 
 BODY_MAX_BYTES = 4096
 CODE_TTL = timedelta(minutes=10)
+# Wrong binding attempts on a channel while its code is live; the last one retires the
+# code (code_retired until the owner issues a new one): a stranger gets at most this
+# many guesses at a code, whoever relays them.
+BIND_FAILURES_MAX = 5
+# An approval phrase written (on the channel) longer ago than this decides nothing
+# (approval_too_old): a channel that delivers late - a bridge that logs in again and
+# drains what was written while it was down - must not execute an old decision.
+APPROVAL_MAX_AGE = timedelta(minutes=10)
 MESSAGE_SOURCES_MAX = 200
 APPROVE, DECLINE = "同意 proposal ", "拒绝 proposal "
 DRIVER_KINDS = ("start_driver", "stop_driver")
@@ -118,6 +127,17 @@ def match_phrase(conn, body):
     return None
 
 
+def _written_at(channel_at):
+    """The channel's own time of a message (ISO 8601; no offset = UTC), or None."""
+    if channel_at is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(channel_at)
+    except (TypeError, ValueError):
+        raise StateGraphError("invalid_request: channel_at must be an ISO 8601 time") from None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def _refusal(exc) -> str:
     return str(exc).split(":", 1)[0]
 
@@ -133,9 +153,13 @@ class StateChannels:
                 conn.commit()
 
     # ---------------------------------------------------------------- the steward's host
-    def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body):
+    def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body,
+                            channel_at=None):
         """One owner message from a channel into the steward's conversation, then the
-        chat approval check. Idempotent per request_key and per channel message."""
+        chat approval check. Idempotent per request_key and per channel message: either
+        replay answers the first result with duplicate: true. `channel_at` is when the
+        channel says the message was written (else: now); it dates an approval phrase
+        and is not part of the request's identity (a redelivery may stamp it anew)."""
         if channel not in CHANNELS:
             raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
         if not isinstance(body, str) or not body.strip():
@@ -145,13 +169,14 @@ class StateChannels:
             self._log_refusal("body_too_long", channel, sender_ref, size)
             raise StateGraphError(f"body_too_long: {size} bytes; at most {BODY_MAX_BYTES} bytes")
         refuse_credential_body(body)
+        written_at = _written_at(channel_at)
         request_hash = _hash([channel, sender_ref, channel_message_ref, body])
         home = steward_project()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
             replay = self.steward._replay(conn, "relay_owner_message", request_key, request_hash)
             if replay is not None:
-                return replay
+                return {**replay, "duplicate": True}
             seen = conn.execute("SELECT message_id FROM state_message_sources WHERE direction='in' AND channel=? "
                                 "AND channel_message_ref=?", (channel, channel_message_ref)).fetchone()
             if seen is not None:
@@ -191,7 +216,8 @@ class StateChannels:
         if matched is not None:
             carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
                        "phrase": matched["phrase"]}
-            result = {**result, "approval": self._decide(matched, f"owner:{channel}:{sender_ref}", carrier)}
+            result = {**result, "approval": self._decide(matched, f"owner:{channel}:{sender_ref}", carrier,
+                                                         written_at or moment)}
             with self.store.transaction(write=True) as conn:
                 conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND "
                              "((operation='relay_owner_message' AND request_key=?) OR "
@@ -207,30 +233,56 @@ class StateChannels:
 
     def bind_owner_channel(self, project_id, request_key, channel, sender_ref, code):
         """Bind `sender_ref` as the channel's owner account with an unexpired, unused
-        code issued for that channel. A previous binding of the channel is replaced."""
+        code issued for that channel. A previous binding of the channel is replaced.
+        Every refused attempt while the channel has a live code counts against that
+        code; the BIND_FAILURES_MAX-th retires it (code_retired, even for the right
+        code, until the owner issues a new one)."""
         request_hash = _hash([channel, sender_ref, code])
+        refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
             replay = self.steward._replay(conn, "bind_owner_channel", request_key, request_hash)
             if replay is not None:
                 return replay
+            moment = _now()
+            # At most one: issue_code deletes the channel's earlier unused codes.
+            live = conn.execute("SELECT * FROM state_owner_channel_codes WHERE channel=? AND used_at IS NULL",
+                                (channel,)).fetchone()
+            if live is not None and datetime.fromisoformat(live["expires_at"]) <= moment:
+                live = None
             well_formed = len(code) == 6 and code.isascii() and code.isdigit()
             row = conn.execute("SELECT * FROM state_owner_channel_codes WHERE code_hash=?",
                                (_code_hash(code),)).fetchone() if well_formed else None
-            if row is None or row["channel"] != channel:
-                raise StateGraphError("invalid_code")
-            if row["used_at"] is not None:
-                raise StateGraphError("code_used")
-            if datetime.fromisoformat(row["expires_at"]) <= _now():
-                raise StateGraphError("code_expired")
-            stamp = _now().isoformat()
-            conn.execute("UPDATE state_owner_channel_codes SET used_at=? WHERE code_hash=?", (stamp, row["code_hash"]))
-            conn.execute("INSERT INTO state_owner_channels(channel,sender_ref,bound_at,bound_by,revoked_at) "
-                         "VALUES(?,?,?,?,NULL) ON CONFLICT(channel) DO UPDATE SET sender_ref=excluded.sender_ref,"
-                         "bound_at=excluded.bound_at,bound_by=excluded.bound_by,revoked_at=NULL",
-                         (channel, sender_ref, stamp, self.actor))
-            out = self.steward._record(conn, "bind_owner_channel", request_key, request_hash,
-                                       {"bound": True, "channel": channel, "sender_ref": sender_ref})
+            if live is not None and live["retired_at"] is not None:
+                refusal = "code_retired"
+            elif row is None or row["channel"] != channel:
+                refusal = "invalid_code"
+            elif row["used_at"] is not None:
+                refusal = "code_used"
+            elif datetime.fromisoformat(row["expires_at"]) <= moment:
+                refusal = "code_expired"
+            if refusal is not None:
+                if live is not None and live["retired_at"] is None:
+                    failed = live["failed_attempts"] + 1
+                    retired = moment.isoformat() if failed >= BIND_FAILURES_MAX else None
+                    conn.execute("UPDATE state_owner_channel_codes SET failed_attempts=?, retired_at=? "
+                                 "WHERE code_hash=?", (failed, retired, live["code_hash"]))
+                    if retired:
+                        log.warning("owner channel code retired after %d refused binding attempts: channel=%s "
+                                    "sender_ref=%s at=%s", failed, channel, sender_ref, retired)
+            else:
+                stamp = moment.isoformat()
+                conn.execute("UPDATE state_owner_channel_codes SET used_at=? WHERE code_hash=?",
+                             (stamp, row["code_hash"]))
+                conn.execute("INSERT INTO state_owner_channels(channel,sender_ref,bound_at,bound_by,revoked_at) "
+                             "VALUES(?,?,?,?,NULL) ON CONFLICT(channel) DO UPDATE SET sender_ref=excluded.sender_ref,"
+                             "bound_at=excluded.bound_at,bound_by=excluded.bound_by,revoked_at=NULL",
+                             (channel, sender_ref, stamp, self.actor))
+                out = self.steward._record(conn, "bind_owner_channel", request_key, request_hash,
+                                           {"bound": True, "channel": channel, "sender_ref": sender_ref})
+        # Raised after the commit: the attempt's count must outlive its refusal.
+        if refusal is not None:
+            raise StateGraphError(refusal)
         self.steward._notify()
         return out
 
@@ -354,13 +406,16 @@ class StateChannels:
         return result
 
     # ---------------------------------------------------------------- the decision
-    def _decide(self, matched, decided_by, record):
+    def _decide(self, matched, decided_by, record, written_at=None):
         """The dashboard's approve / decline path (api.steward_routers) for an exact
         phrase. A refusal leaves the proposal as it was and is answered, not raised:
-        the message itself was written."""
+        the message itself was written. A phrase written more than APPROVAL_MAX_AGE
+        before now (`written_at`, a channel's own time) is refused approval_too_old."""
         steward, proposal_id = self.steward, matched["proposal_id"]
         version, carrier = matched["expected_version"], record if record.get("channel") else None
         out = {"proposal_id": proposal_id, "action": matched["action"]}
+        if written_at is not None and _now() - written_at > APPROVAL_MAX_AGE:
+            return {**out, "outcome": "refused", "refusal": "approval_too_old"}
         try:
             if matched["action"] == "decline":
                 return {**out, "outcome": "executed",

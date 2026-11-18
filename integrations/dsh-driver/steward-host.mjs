@@ -491,7 +491,7 @@ export function refusalCode(error) {
 /** The refusals the step 19 commands answer with. Any other 4xx (an auth failure, say) is
  *  not something the sender did: it is thrown, logged as a failure, never hidden as a refusal. */
 export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'body_too_long', 'invalid_request', 'rate_limited',
-  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'unknown_message', 'delivery_recorded']);
+  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'code_retired', 'unknown_message', 'delivery_recorded']);
 
 /** Design-steward 7.2: the host side of the owner's chat channels, over the State commands
  *  and queries of step 19 (relay_owner_message, bind_owner_channel, record_channel_delivery,
@@ -511,9 +511,9 @@ export function channelOps(request) {
     return result.code && !result.message_id && !result.bound ? { refused: String(result.code) } : result;
   };
   return {
-    relay: ({ channel, senderRef, messageRef, text }, signal) => request('/api/state/commands/relay_owner_message', {
+    relay: ({ channel, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_owner_message', {
       request_key: `relay:${channel}:${digest(messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
-      body: text }, signal).then(answered, refused),
+      body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
     bind: ({ channel, senderRef, code, messageRef }, signal) => request('/api/state/commands/bind_owner_channel', {
       request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code }, signal)
       .then(answered, refused),

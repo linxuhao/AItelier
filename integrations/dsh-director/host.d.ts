@@ -186,15 +186,18 @@ export interface DirectorHost {
    *    (channel_sender_not_bound), a body over its bound (body_too_long) and too many
    *    messages (rate_limited), as {refused: code}. When the text is exactly an approval
    *    phrase the host executes it in code and says so in `approval`; the model never does.
+   *    `at` is when the channel says the message was written (ISO 8601): a phrase written
+   *    too long ago decides nothing (approval refusal approval_too_old).
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
-   *    {bound: true} or {refused: invalid_code | code_expired | code_used}.
+   *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
+   *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).
    *  - sourceOf: where a message came from or went to: null for the dashboard, else
    *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
    *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
    *    channel's own ref) or failed (`error`).
    *  - list: every channel's binding and the default channel for unprompted messages. */
   channels?: {
-    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string }, signal?: AbortSignal):
+    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
       Promise<{ message_id: string; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
         outcome: 'executed' | 'refused'; refusal?: string; result?: object } } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):

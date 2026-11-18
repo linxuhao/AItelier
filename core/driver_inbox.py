@@ -50,6 +50,8 @@ SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff
 # which scopes its rows the same way, and is imported above so the two agree.
 # A segment id is a short token a reply can cite: letters, digits, and . _ : -.
 _SEGMENT_ID = re.compile(r"[A-Za-z0-9._:-]+")
+# The subject of a user's message that names none (the dashboard's, a chat channel's).
+USER_SUBJECT = "Message from the user"
 
 
 def citation_fields(row):
@@ -589,7 +591,8 @@ class DriverInbox:
         return self.actor.startswith("owner:") or self.actor == CLI_OWNER_ACTOR
 
     def send_user_conversation_message(self, request_key, project_id, body, subject=None,
-                                       reply_to_message_id=None, target_driver_id=None, answers=None):
+                                       reply_to_message_id=None, target_driver_id=None, answers=None,
+                                       _written=None):
         """Record one message from the project's USER to its driver.
 
         The mirror of `send_user_message`, and equally PRESENTATION: this writes
@@ -612,10 +615,15 @@ class DriverInbox:
         not modified; the link lives on this reply's row.
 
         Idempotent per (actor, request_key), like every write here.
+
+        `_written(conn, message_id)` (not a request field) runs inside the write
+        transaction of a NEW message only - never on a replay: the steward's chat
+        approval reads the proposal version as of this message there
+        (core.state_channels).
         """
         if type(request_key) is not str or not request_key or len(request_key) > 320:
             raise StateGraphError("invalid_request")
-        subject = "Message from the user" if subject is None else subject
+        subject = USER_SUBJECT if subject is None else subject
         if (type(subject) is not str or not 1 <= len(subject) <= 200
                 or type(body) is not str or len(body) > 8000):
             raise StateGraphError("invalid_request")
@@ -638,41 +646,10 @@ class DriverInbox:
             self.store._project(conn, project_id)
             if answers:
                 self._resolve_answers(conn, project_id, answers)
-            parent = None
-            if reply_to_message_id is not None:
-                parent = self._conversation_message(conn, project_id, reply_to_message_id)
-                if parent is None:
-                    raise StateGraphError("unknown_message")
-                if parent["audience"] != "user" or not parent["sender_driver_id"]:
-                    raise StateGraphError("invalid_reply_target")
-            if target_driver_id is not None:
-                targets = [target_driver_id]
-            elif parent is not None:
-                targets = [parent["sender_driver_id"]]
-            else:
-                targets = [r["driver_id"] for r in conn.execute(
-                    "SELECT p.driver_id FROM project_drivers p JOIN drivers d USING(driver_id) "
-                    "WHERE p.project_id=? AND p.status='member' ORDER BY p.driver_id", (project_id,))]
-            if not targets or len(targets) > 200:
-                raise StateGraphError("no_recipients")
-            for target in targets:
-                self._driver(conn, target)
-            mid, created = str(uuid4()), now()
-            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
-                         "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel,"
-                         "answers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
-                          "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user",
-                          json.dumps(answers) if answers else None))
-            deliveries = []
-            for target in targets:
-                seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries "
-                                   "WHERE target_driver_id=?", (target,)).fetchone()[0]
-                did = str(uuid4())
-                conn.execute("INSERT INTO driver_inbox_deliveries VALUES(?,?,?,?,?,?)",
-                             (did, mid, target, seq, "unread", 1))
-                deliveries.append({"delivery_id": did, "target_driver_id": target, "seq": seq,
-                                   "status": "unread", "version": 1})
+            mid, created, deliveries = self.write_user_half(conn, project_id, subject, body, reply_to_message_id,
+                                                            target_driver_id, answers)
+            if _written is not None:
+                _written(conn, mid)
             result = self._record(conn, "send_user_conversation", request_key, payload,
                                   {"message_id": mid, "project_id": project_id, "sender_kind": "user",
                                    "created_at": created, "reply_to_message_id": reply_to_message_id,
@@ -680,6 +657,49 @@ class DriverInbox:
         from core.state_changes import notify
         notify(self.store.db.db_path)
         return result
+
+    def write_user_half(self, conn, project_id, subject, body, reply_to_message_id=None, target_driver_id=None,
+                        answers=None):
+        """The user's message row and the deliveries that wake its driver(s), on the
+        caller's write connection; (message_id, created_at, deliveries). The one
+        writer of the user's half: the dashboard's message above and a message the
+        owner sent from a chat channel (core.state_channels) land identically."""
+        parent = None
+        if reply_to_message_id is not None:
+            parent = self._conversation_message(conn, project_id, reply_to_message_id)
+            if parent is None:
+                raise StateGraphError("unknown_message")
+            if parent["audience"] != "user" or not parent["sender_driver_id"]:
+                raise StateGraphError("invalid_reply_target")
+        if target_driver_id is not None:
+            targets = [target_driver_id]
+        elif parent is not None:
+            targets = [parent["sender_driver_id"]]
+        else:
+            targets = [r["driver_id"] for r in conn.execute(
+                "SELECT p.driver_id FROM project_drivers p JOIN drivers d USING(driver_id) "
+                "WHERE p.project_id=? AND p.status='member' ORDER BY p.driver_id", (project_id,))]
+        if not targets or len(targets) > 200:
+            raise StateGraphError("no_recipients")
+        for target in targets:
+            self._driver(conn, target)
+        mid, created = str(uuid4()), now()
+        conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
+                     "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel,"
+                     "answers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
+                      "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user",
+                      json.dumps(answers) if answers else None))
+        deliveries = []
+        for target in targets:
+            seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries "
+                               "WHERE target_driver_id=?", (target,)).fetchone()[0]
+            did = str(uuid4())
+            conn.execute("INSERT INTO driver_inbox_deliveries VALUES(?,?,?,?,?,?)",
+                         (did, mid, target, seq, "unread", 1))
+            deliveries.append({"delivery_id": did, "target_driver_id": target, "seq": seq,
+                               "status": "unread", "version": 1})
+        return mid, created, deliveries
 
     @writer_only_read('list_user_conversation')
     def list_user_conversation(self, project_id, limit=30, cursor=None):

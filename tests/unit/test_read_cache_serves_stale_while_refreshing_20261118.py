@@ -227,6 +227,7 @@ def test_a_failing_rebuild_keeps_the_old_value_and_does_not_raise(caplog):
             "read cache" in record.getMessage() and record.levelno >= logging.WARNING
             for record in caplog.records)), "the failed rebuild was not logged"
 
+    _wait_for_refreshes()   # the lock is released strictly AFTER the log
     assert rc._store[KEY][1] == "old", "a failed rebuild dropped the entry"
     # The lock was released, so the key is not stuck: the next expired read
     # tries again, and this time the new value lands.

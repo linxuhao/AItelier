@@ -82,6 +82,23 @@ def _wait_until(predicate, timeout=5.0):
     return predicate()
 
 
+def _wait_for_refreshes(timeout=5.0):
+    """Block until every background rebuild thread is over.
+
+    Waiting for the WARNING is not waiting for the rebuild: `_rebuild` logs the
+    failure inside its `except` and releases the key's lock in the `finally`
+    AFTERWARDS, and caplog sees the record before the traceback is formatted. A
+    read that lands in that gap finds the lock held and — correctly — starts no
+    rebuild, so a test that re-read the instant the log appeared could report
+    'the key is stuck' on a healthy cache (measured: the same selection is green
+    alone and red inside the full suite).
+    """
+    deadline = time.monotonic() + timeout
+    for thread in threading.enumerate():
+        if thread.name == REFRESH_THREAD:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+
 class TestTheReadAfterAWrite:
     def test_it_serves_the_previous_value_while_exactly_one_rebuild_runs(self):
         """The defect, in one test. `clear()` is the ONLY invalidation signal the
@@ -160,6 +177,7 @@ class TestARebuildThatFails:
             assert _wait_until(lambda: _warned(caplog)), (
                 "the failed rebuild was not logged")
 
+        _wait_for_refreshes()   # the lock is released strictly AFTER the log
         assert _stored(KEY_BROKEN) == "before", "a failed rebuild dropped the entry"
 
         # The lock was released, so the key is not stuck: the next read serves

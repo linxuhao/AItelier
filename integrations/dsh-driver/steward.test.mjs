@@ -14,7 +14,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -212,7 +212,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(steward.config.rootRole, 'steward');
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
-  assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
+  assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
+  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'list', 'recordDelivery', 'relay', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
@@ -222,7 +223,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(director.config.memory, undefined);
   assert.equal(director.config.permissionPreset, 'danger-full-access');
   assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention']);
-  for (const op of ['memory', 'portfolio', 'handoff', 'proposals']) assert.equal(director[op], undefined, op);
+  for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels']) assert.equal(director[op], undefined, op);
   assert.doesNotThrow(() => validateHost(director));
   // A root role the table does not have is refused when the host is loaded.
   const rolesFile = join(mkdtempSync(join(tmpdir(), 'roles-')), 'roles.json');
@@ -610,6 +611,65 @@ test('proposals (step 13): propose records one open proposal under a digest key;
   assert.deepEqual(calls[3], ['/api/state/commands/withdraw_steward_proposal', { request_key: 'withdraw-proposal:p-1', proposal_id: 'p-1', reason: 'owner changed their mind' }]);
   assert.equal((await proposals.withdraw({ id: 'p-gone', reason: 'x' })).refused, 'state_refused');
   assert.ok(calls.every(([path]) => /\/(create|withdraw)_steward_proposal$/.test(path)), 'nothing but the two steward writes');
+});
+
+test('chat channels (step 19): each plugin call is one State request; the request key is the channel message, so a redelivery is a replay', async () => {
+  const calls = [];
+  let answer = {};
+  const request = async (path, body) => { calls.push([path, body]); if (answer instanceof Error) throw answer; return answer; };
+  const channels = channelOps(request);
+  answer = { result: { message_id: 'm-1', duplicate: false, approval: null } };
+  assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-1', text: '同意 proposal p-1' }),
+    { message_id: 'm-1', duplicate: false, approval: null });
+  await channels.relay({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-1', text: '同意 proposal p-1' });
+  await channels.relay({ channel: 'wechat', senderRef: 'U1', messageRef: 'ts-1', text: 'x' });
+  assert.equal(calls[0][0], '/api/state/commands/relay_owner_message');
+  assert.deepEqual({ ...calls[0][1], request_key: undefined }, { request_key: undefined, channel: 'slack', sender_ref: 'U1',
+    channel_message_ref: 'ts-1', body: '同意 proposal p-1' });
+  assert.equal(calls[1][1].request_key, calls[0][1].request_key);
+  assert.notEqual(calls[2][1].request_key, calls[0][1].request_key, 'the same ref on another channel is another message');
+  answer = { bound: true, channel: 'wechat', sender_ref: 'wx' };
+  assert.deepEqual(await channels.bind({ channel: 'wechat', senderRef: 'wx', code: '123456', messageRef: 'w-1' }), answer);
+  assert.deepEqual({ ...calls[3][1], request_key: undefined }, { request_key: undefined, channel: 'wechat', sender_ref: 'wx', code: '123456' });
+  assert.ok(!calls[3][1].request_key.includes('123456'), 'the code is not in the request key');
+  answer = { result: { recorded: true } };
+  await channels.recordDelivery({ messageId: 'm-9', channel: 'slack', channelMessageRef: 'ts-out' });
+  await channels.recordDelivery({ messageId: 'm-10', channel: 'wechat', error: 'socket closed' });
+  assert.deepEqual(calls.slice(4).map(([path, body]) => [path, body]), [
+    ['/api/state/commands/record_channel_delivery', { request_key: 'delivery:m-9:slack', message_id: 'm-9', channel: 'slack', channel_message_ref: 'ts-out' }],
+    ['/api/state/commands/record_channel_delivery', { request_key: 'delivery:m-10:wechat', message_id: 'm-10', channel: 'wechat', error: 'socket closed' }]]);
+  answer = { sources: { 'm-1': { direction: 'in', channel: 'slack', sender_ref: 'U1', channel_message_ref: 'ts-1', at: 't', error: null } } };
+  assert.equal((await channels.sourceOf('m-1')).channel, 'slack');
+  assert.equal(await channels.sourceOf('m-dashboard'), null, 'no row is the dashboard');
+  assert.deepEqual(calls.at(-1), ['/api/state/query/message_sources', { message_ids: ['m-dashboard'] }]);
+  answer = { result: { channels: [], default_channel: null } };
+  assert.deepEqual(await channels.list(), { channels: [], default_channel: null });
+  assert.deepEqual(calls.at(-1), ['/api/state/query/list_owner_channels', {}]);
+});
+
+test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped connection is an error, not a refusal', async () => {
+  const failing = (status, detail) => Object.assign(new Error(`AItelier /api/state/commands/x: HTTP ${status} ${detail}`), { status });
+  for (const [error, code] of [[failing(422, '"rate_limited: 6 per minute"'), 'rate_limited'], [failing(422, '"body_too_long"'), 'body_too_long'],
+    [failing(409, '{"code":"idempotency_conflict"}'), 'idempotency_conflict'], [failing(403, '"steward_read_only: no"'), 'steward_read_only'],
+    [failing(500, '"internal"'), undefined], [new TypeError('fetch failed'), undefined], [failing(422, '"Not A Code"'), undefined]])
+    assert.equal(refusalCode(error), code, error.message);
+  let thrown = failing(422, '"channel_sender_not_bound: U9 is not bound"');
+  const channels = channelOps(async () => { throw thrown; });
+  assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), { refused: 'channel_sender_not_bound' });
+  thrown = failing(422, '"code_expired"');
+  assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'y' }), { refused: 'code_expired' });
+  thrown = failing(503, '"busy"');
+  await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 503/);
+  // A 4xx that is not a channel refusal (a misconfigured token, say) is a failure to log, never hidden as one.
+  thrown = failing(403, '"steward_read_only: no"');
+  await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 403/);
+  thrown = failing(401, '"unauthorized: bad token"');
+  await assert.rejects(channels.recordDelivery({ messageId: 'm-1', channel: 'slack' }), /HTTP 401/);
+  thrown = failing(404, '"unknown_message: not yours"');
+  assert.deepEqual(await channels.recordDelivery({ messageId: 'm-1', channel: 'slack' }), { refused: 'unknown_message' });
+  // A 200 that carries a code is a refusal too.
+  assert.deepEqual(await channelOps(async () => ({ result: { code: 'invalid_code' } })).bind({ channel: 'slack', senderRef: 'U', code: '1', messageRef: 'z' }),
+    { refused: 'invalid_code' });
 });
 
 test('owner memory requests (step 14): each kind runs against the store as the owner; results go back; an unwritten result runs again', async () => {

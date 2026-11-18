@@ -4,8 +4,8 @@ driver as the steward role.
 Covered here: the role-to-project mapping, the role-dependent completion route,
 compaction policy and start (model, environment, refusal without a steward
 entry), `capabilities.role` at provisioning, and the steward's profile without
-the `mcp-aitelier` wiring. Ordinary projects are asserted unchanged next to
-each steward case."""
+the `mcp-aitelier` wiring, and its chat channel plugins (step 19). Ordinary
+projects are asserted unchanged next to each steward case."""
 import asyncio
 import copy
 import json
@@ -142,6 +142,48 @@ def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_
     assert strip(steward_patch) == strip(director_patch)
     assert ([e for e in next(p for p in steward_patch if "insert" in p)["insert"]]
             == [e for e in next(p for p in director_patch if "insert" in p)["insert"] if e["id"] != "mcp-aitelier"])
+
+
+def test_steward_profile_loads_a_chat_channel_plugin_only_when_its_secrets_exist(runtime, roles_file, monkeypatch, tmp_path):
+    """Step 19 B: dsh-channel-slack / dsh-channel-wechat are inserted for the steward only,
+    each only when every secret file it reads exists (and the plugin is in the checkout);
+    absent, the profile is exactly today's."""
+    import functools
+    home, checkout = tmp_path / "home", tmp_path / "checkout"
+    (home / ".aitelier-secrets").mkdir(parents=True)
+    for plugin in dsh_driver.CHANNEL_PLUGINS:
+        (checkout / "integrations" / plugin).mkdir(parents=True)
+        (checkout / "integrations" / plugin / "index.mjs").write_text("export const name = 'x';")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(dsh_driver, "enabled_channel_plugins",
+                        functools.partial(dsh_driver.enabled_channel_plugins, checkout=checkout))
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+
+    def inserted():
+        runtime._environment(steward)
+        runtime._environment(director)
+        return _inserted_ids(_patch(runtime, steward)), _inserted_ids(_patch(runtime, director))
+
+    without = inserted()
+    assert not [i for ids in without for i in ids if i.startswith("dsh-channel-")]
+    secret = lambda name: (home / ".aitelier-secrets" / name).write_text("fixture-not-a-token")
+    secret("slack-app-token")
+    assert inserted() == without, "half of Slack's secrets loads nothing"
+    secret("slack-bot-token")
+    steward_ids, director_ids = inserted()
+    assert steward_ids == without[0] + ["dsh-channel-slack"]
+    assert director_ids == without[1], "a director never gets a channel"
+    secret("wechat-bridge-token")
+    steward_ids, director_ids = inserted()
+    assert steward_ids == without[0] + ["dsh-channel-slack", "dsh-channel-wechat"]
+    assert director_ids == without[1]
+    entries = next(p for p in _patch(runtime, steward) if "insert" in p)["insert"]
+    assert {e["id"]: e["name"] for e in entries if e["id"].startswith("dsh-channel-")} == {
+        plugin: str(checkout / "integrations" / plugin / "index.mjs") for plugin in dsh_driver.CHANNEL_PLUGINS}
+    # A secret without the plugin in the checkout names nothing DSH cannot load.
+    (checkout / "integrations" / "dsh-channel-wechat" / "index.mjs").unlink()
+    assert inserted()[0] == without[0] + ["dsh-channel-slack"]
 
 
 def test_start_passes_the_role_only_to_the_steward(runtime, roles_file, monkeypatch):

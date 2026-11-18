@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
+import { createOwnerChannels } from './lib/channels.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -43,7 +44,13 @@ export function hostWording(host) {
   return { texts, labels };
 }
 
-export async function boot(ctx, { host = ctx.directorHost } = {}) {
+/** The owner's chat channels (design-steward 7.2), when the host declares them. */
+export function ownerChannelsFor(ctx, host) {
+  if (!Array.isArray(host?.capabilities) || !host.capabilities.includes('channels') || !host.channels) return undefined;
+  return createOwnerChannels({ host: host.channels, log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
+}
+
+export async function boot(ctx, { host = ctx.directorHost, channels = ownerChannelsFor(ctx, host) } = {}) {
   // Anything a session log wrote from here on, this process wrote (plugin step 6).
   const startedAt = Date.now();
   validateHost(host);
@@ -284,6 +291,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
     liveSessions, planWork, todoPlans, batchRedispatch, notify: notifyEvent, eventMessage, report, currentPhase,
     memory: memory?.store,
+    ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
+      : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
     isDisposed: () => disposed };
@@ -292,6 +301,8 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
   // Host-scoped additions of the host first (they precede the plan tools in every
   // request, as they always did), then the worker-facing plan tools.
   await op('install')(api);
+  // The host is installed: the channel plugins' messages may reach it now.
+  channels?.ready();
   const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
   // Worker-facing plan tools are host-scoped: the caller is exec.agent, so a child's
   // todo_begin binds the CHILD session to the plan.
@@ -748,7 +759,12 @@ export async function boot(ctx, { host = ctx.directorHost } = {}) {
 }
 
 export function apply(ctx) {
+  // The channel plugins inject `ownerChannels`; it is provided here, synchronously, because a
+  // service is owned by the fiber that applies the plugin. Without the host's `channels`
+  // nothing is provided and no channel plugin loads.
+  const channels = ownerChannelsFor(ctx, ctx.directorHost);
+  if (channels) ctx.provide('ownerChannels', channels.service);
   // Awaiting loader settlement inside apply would deadlock its own startup.
-  void boot(ctx).catch(error => { console.error('dsh-director startup:', String(error)); ctx.get('appExit')?.(1); });
+  void boot(ctx, { channels }).catch(error => { console.error('dsh-director startup:', String(error)); ctx.get('appExit')?.(1); });
 }
 

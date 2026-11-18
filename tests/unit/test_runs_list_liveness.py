@@ -142,8 +142,13 @@ def _install_store(monkeypatch, store):
 
 
 def _list_rows(db, registry, monkeypatch, store):
+    # `cutoff=None` is the NO-WINDOW call (`?include_all=true`). This file is
+    # about the liveness rule, and its fixture timestamps are offsets from a
+    # pinned NOW rather than from wall time, so putting them through the 30-day
+    # window would make them expire. The window has its own file:
+    # tests/unit/test_run_list_window_20261118.py.
     _install_store(monkeypatch, store)
-    rows = run_routers._list_all_runs_uncached(None, db, registry)
+    rows = run_routers._list_all_runs_uncached(None, db, registry, cutoff=None)["runs"]
     return {r["project_id"]: r for r in rows}
 
 

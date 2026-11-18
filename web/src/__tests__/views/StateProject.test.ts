@@ -166,7 +166,9 @@ describe('Long-lived project pages', () => {
   it('catalog distinguishes no migration from legacy project existence', async () => {
     const view=render(StateProjects);
     expect(await view.findByText(/No state projects yet/)).toBeTruthy();
-    expect(api.stateProjects).toHaveBeenCalledWith(undefined);
+    // The catalog read names all three arguments: no repo_path filter, the
+    // empty paging cursor, and archived rows left out until the toggle asks.
+    expect(api.stateProjects).toHaveBeenCalledWith(undefined,'',false);
   });
   it('catalog and repo links refer to the same project identity', async () => {
     const o=overview();

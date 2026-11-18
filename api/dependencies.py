@@ -572,10 +572,12 @@ def get_agent_configs() -> dict:
 #   the key     project_id / status / updated_at / current_project_step /
 #               config_name — the mirror fields the scheduler writes. Any
 #               scheduler write to the row changes the key.
-#   the TTL     a run can advance between two scheduler writes of the mirror
-#               row, so an unchanged row is still recomputed once the TTL
-#               elapses. The TTL is a BACKSTOP, not the freshness mechanism: the
-#               key already catches everything the scheduler has recorded.
+#   the TTL     a BACKSTOP for change the mirror row never records — not the
+#               freshness mechanism. The key already catches everything the
+#               scheduler has recorded, so the only thing the TTL bounds is
+#               out-of-band change: a run that advanced between two mirror
+#               writes and is being read in that window (one scheduler tick), a
+#               writer outside this process, an engine-side fixup.
 #   the engine  every value here was read from ONE skillflow object. A different
 #               one from `get_skillflow()` (a rebuilt singleton, a test double)
 #               is a different database of runs, and its entries are not reused.
@@ -586,12 +588,36 @@ def get_agent_configs() -> dict:
 # so each call applies a fresh copy onto its own dict and no caller can poison
 # the next one's answer.
 #
-# Why 30 s: the SPA polls at 10 s (web/src/views/UnifiedDashboard.svelte), three
-# endpoints share this work, and the first pass after a restart takes ~27 s — a
-# TTL shorter than one pass would expire entries it had just written. What 30 s
-# can add is staleness for a change the mirror row has NOT recorded, which is at
-# most one scheduler tick, not 30 s of a live run.
-ENRICH_MEMO_TTL = 30.0
+# Why 300 s, and why the read cache's invalidation does NOT drop this memo.
+#
+# `api/_read_cache.clear()` runs after every non-GET request (the middleware at
+# api/main.py:442) and each of those writes now costs the read cache one
+# background rebuild instead of a cold inline miss. That rebuild walks all 1545
+# rows again — so whatever the memo's backstop is, the number of full passes per
+# hour is `3600 / backstop` no matter how often somebody clicks. One full pass
+# costs 8.9-28.1 s of this process's single core (measured 2026-11-18), so at the
+# old 30 s the worst case was 94% of the core spent re-deriving rows that had
+# changed nothing (28.1/30), and even the best case 30% (8.9/30). That is the
+# complaint: using the page is what made its reads expensive.
+#
+# 300 s is chosen against what the key already guarantees. Every change the
+# scheduler makes to a run is mirrored onto the project row, and any change to
+# those five fields is a key miss — so the backstop is paid for change the host
+# never recorded, which is rare by construction and needs no tighter bound than
+# "the page is told within five minutes even then". At 300 s the fixed cost is
+# 3-9.4% of one core (8.9/300 .. 28.1/300) instead of 30-94%, and it is ~11 full
+# passes' worth of slack over the ~27 s a cold first pass takes, so a backstop
+# can never expire entries it has just written.
+#
+# So: TTL = backstop for out-of-band change; the key = freshness; the engine
+# identity = correctness. A write does not drop this memo, and dropping it on
+# every write is exactly the defect — one click would buy back the whole 8.9-28.1
+# s pass. (`clear_enrichment_memo()` exists for tests; the middleware must not
+# call it, and does not.)
+#
+# Two seams make it testable without sleeping: `enrich_project_status(...,
+# ttl=...)` for one call, and the `ENRICH_MEMO_TTL` module global for the default.
+ENRICH_MEMO_TTL = 300.0
 
 # One entry per distinct row state, and rows are user data: a project edited
 # 3000 times would otherwise leave one entry per version forever. The read
@@ -609,10 +635,13 @@ _enrichment_guard = threading.Lock()
 def clear_enrichment_memo() -> None:
     """Drop every memoised enrichment. For tests, and for a writer that knows.
 
-    `api/main.py`'s invalidation middleware clears `api/_read_cache` on any
-    mutating request; calling this there too would make a write refresh the next
-    pass immediately instead of waiting out the TTL. It is not wired from here
-    because that middleware is outside this change's scope.
+    Deliberately NOT wired to `api/main.py`'s invalidation middleware. That
+    middleware clears the READ cache after every mutating request, and if it
+    dropped this memo too, every click would re-pay one full 1545-row pass
+    (8.9-28.1 s of this process's single core) — the defect the read cache's
+    stale-while-rebuilding path exists to remove. A write that actually changes a
+    row changes that row's key (`_enrichment_memo_key`), so it misses on its own;
+    nothing else needs to be dropped. See the block above.
     """
     with _enrichment_guard:
         _enrichment_memo.clear()
@@ -800,7 +829,9 @@ def enrich_project_status(project: dict | None, ttl: float | None = None) -> dic
     and one `get_steps` call per row.
 
     `ttl` overrides `ENRICH_MEMO_TTL` for this call — the seam a test uses to
-    cross the TTL without sleeping for it.
+    cross the backstop without sleeping for it (`ttl=0.0` crosses it for one
+    call). It is a BACKSTOP for out-of-band change, not the freshness
+    mechanism; see the block above.
     """
     if not project:
         return None

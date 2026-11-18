@@ -188,7 +188,8 @@ export interface DirectorHost {
    *    {refused: code}. When the text is exactly an approval phrase the host executes it
    *    in code and says so in `approval`; the model never does.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
-   *    too long ago decides nothing (approval refusal approval_too_old).
+   *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
+   *    more than two minutes ahead of the host's clock (approval_clock_skew).
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
    *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
    *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).

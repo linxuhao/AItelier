@@ -561,6 +561,21 @@ def test_an_approval_written_on_the_channel_over_ten_minutes_ago_is_refused(worl
         assert proposal(world)["status"] == "done"
 
 
+@pytest.mark.parametrize("ahead,outcome,refusal", [(timedelta(minutes=1), "executed", None),
+                                                   (timedelta(hours=1), "refused", "approval_clock_skew"),
+                                                   (timedelta(days=365), "refused", "approval_clock_skew"),
+                                                   (-timedelta(hours=1), "refused", "approval_too_old")])
+def test_an_approval_dated_ahead_of_now_by_more_than_two_minutes_is_refused(world, ahead, outcome, refusal):
+    """The age check had no future bound: channel_at = now + 365 days executed, so a
+    skewed or wrong channel clock switched the stale-approval guard off."""
+    bind(world)
+    plant_proposal(world)
+    out = relay(world, "同意 proposal p-1", "ts", channel_at=(state_channels._now() + ahead).isoformat())
+    assert out["message_id"] and out["approval"]["outcome"] == outcome, out
+    assert out["approval"].get("refusal") == refusal
+    assert proposal(world)["status"] == ("done" if outcome == "executed" else "open")
+
+
 def test_channel_at_without_an_offset_is_utc_and_garbage_is_refused(world):
     bind(world)
     plant_proposal(world)

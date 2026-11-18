@@ -158,7 +158,7 @@ test('an approval the host executed is answered with one line of its outcome; a 
     approval: { proposal_id: 'p-1', action, outcome, ...(refusal ? { refusal } : {}) } });
   const lines = [];
   for (const result of [approval('approve', 'executed'), approval('decline', 'executed'), approval('approve', 'refused', 'needs_dashboard_confirmation'),
-    approval('approve', 'refused', 'channel_sender_not_bound')]) {
+    approval('approve', 'refused', 'channel_sender_not_bound'), approval('approve', 'refused', 'approval_clock_skew')]) {
     s.host.next = result;
     await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-' + lines.length, text: '同意 proposal p-1' });
     lines.push(s.slack.sent.at(-1).text);
@@ -167,14 +167,15 @@ test('an approval the host executed is answered with one line of its outcome; a 
   assert.match(lines[1], /proposal p-1: declined/);
   assert.match(lines[2], /dashboard/);
   assert.match(lines[3], /not done \(channel_sender_not_bound\)/);
+  assert.match(lines[4], /not done \(approval_clock_skew\)/, 'a phrase dated ahead of the host clock is named, not hidden');
   s.host.next = { ...approval('approve', 'executed'), duplicate: true };
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-0', text: '同意 proposal p-1' }),
     { accepted: true, duplicate: true });
-  assert.equal(s.slack.sent.length, 4);
+  assert.equal(s.slack.sent.length, 5);
   // Even a replay a host does not flag (duplicate: false) is answered only once.
   s.host.next = approval('approve', 'executed');
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' }), { accepted: true });
-  assert.equal(s.slack.sent.length, 4);
+  assert.equal(s.slack.sent.length, 5);
   // The same ref on another channel is another message.
   const w = setup({ bindings: { wechat: 'U-OWNER' } });
   w.host.next = approval('approve', 'executed');

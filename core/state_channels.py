@@ -92,6 +92,10 @@ BIND_FAILURES_MAX = 5
 # (approval_too_old): a channel that delivers late - a bridge that logs in again and
 # drains what was written while it was down - must not execute an old decision.
 APPROVAL_MAX_AGE = timedelta(minutes=10)
+# ... and one dated more than this AHEAD of now decides nothing either
+# (approval_clock_skew): without a bound on that side a skewed or wrong channel time
+# (now + 365 days) would pass the age check forever and quietly switch it off.
+APPROVAL_CLOCK_SKEW = timedelta(minutes=2)
 MESSAGE_SOURCES_MAX = 200
 APPROVE, DECLINE = "同意 proposal ", "拒绝 proposal "
 DRIVER_KINDS = ("start_driver", "stop_driver")
@@ -510,12 +514,15 @@ class StateChannels:
         """The dashboard's approve / decline path (api.steward_routers) for an exact
         phrase. A refusal leaves the proposal as it was and is answered, not raised:
         the message itself was written. A phrase written more than APPROVAL_MAX_AGE
-        before now (`written_at`, a channel's own time) is refused approval_too_old."""
+        before now (`written_at`, a channel's own time) is refused approval_too_old, one
+        dated more than APPROVAL_CLOCK_SKEW after now approval_clock_skew."""
         steward, proposal_id = self.steward, matched["proposal_id"]
         version, carrier = matched["expected_version"], record if record.get("channel") else None
         out = {"proposal_id": proposal_id, "action": matched["action"]}
         if written_at is not None and _now() - written_at > APPROVAL_MAX_AGE:
             return {**out, "outcome": "refused", "refusal": "approval_too_old"}
+        if written_at is not None and written_at - _now() > APPROVAL_CLOCK_SKEW:
+            return {**out, "outcome": "refused", "refusal": "approval_clock_skew"}
         try:
             if matched["action"] == "decline":
                 return {**out, "outcome": "executed",

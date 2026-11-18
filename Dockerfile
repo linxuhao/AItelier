@@ -77,11 +77,11 @@ RUN touch /opt/aitelier-gate-imports/docker/__init__.py \
 COPY --from=frontend-build /app/web/dist /srv/web_dist
 ENV AITELIER_WEB_DIST=/srv/web_dist
 # The SPA's OWN test toolchain, reused from the frontend-build stage instead of a
-# second `npm ci` in this stage: the final image currently carries a node binary
-# (copied from dsh-runtime at line 50) and the built bundle, but NOT vitest/jsdom/
-# @testing-library/svelte. Without them `tests/integration/test_web_suite_in_image.py`
-# can only report the suite as UNMEASURED, and nothing in the Python gate executes
-# web/src at all - a red Svelte/TS test ships silently. Same lock-pinned tree that
+# second `npm ci` in this stage: the final image carries a node binary (copied from
+# dsh-runtime at line 50) and the built bundle, but NOT vitest/jsdom/
+# @testing-library/svelte. Without this tree `tests/integration/test_web_suite_runs.py`
+# fails as UNMEASURED instead of passing, which is what keeps a red Svelte/TS test from
+# shipping silently. Same lock-pinned tree that
 # `npm run build` above just used, so the gate and the build never disagree about
 # vitest's version. It lives OUTSIDE /app for the same reason /srv/web_dist does:
 # the .:/app live-source mount would shadow a repository-local node_modules, and

@@ -9,16 +9,20 @@
  *  in its description, and the host states the same numbers back in every answer (`limits`), so
  *  a steward can tell what it was and was not shown.
  *
- *  The steward's one inbox write is registered the same way, only when the host's portfolio
+ *  The steward's inbox writes are registered the same way, only when the host's portfolio
  *  acknowledges: a wake re-injects every unread delivery, so acknowledging one is the only
- *  thing that stops the same letters coming back. It is a write, not a read, so it is not part
- *  of PORTFOLIO_TOOLS; a host without it registers no such tool. */
+ *  thing that stops the same letters coming back - in the steward's project inbox
+ *  (`portfolio_inbox_acknowledge`) and in its private driver inbox
+ *  (`private_inbox_acknowledge`). They are writes, not reads, so they are not part of
+ *  PORTFOLIO_TOOLS; a host without one registers no such tool. */
 
 export const PORTFOLIO_TOOLS = ['portfolio_projects', 'portfolio_project', 'portfolio_conversation', 'portfolio_inbox'];
 
 /** @param portfolio host.portfolio: { projects(signal), project(id, signal), conversation(id, cursor, signal),
- *    inbox(page, signal), acknowledge({ deliveryId, version }, signal) } - both are optional;
- *    without `inbox` the reader is not registered, without `acknowledge` neither is the write.
+ *    inbox(page, signal), acknowledge({ deliveryId, version }, signal),
+ *    acknowledgePrivate({ deliveryId, version }, signal) } - all optional; without `inbox`
+ *    the reader is not registered, without `acknowledge` neither is the project-inbox write,
+ *    without `acknowledgePrivate` neither is the private-inbox one.
  *  @param handoff host.handoff: ({ projectId, text, citesUserMessageId }, signal) => result */
 export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio, handoff }) {
   const projectId = { type: 'string', required: true };
@@ -54,6 +58,16 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
         version: { type: 'integer', required: true, description: 'the delivery version the wake showed you' } },
       output: jsonOutput,
       execute: (args, exec) => portfolio.acknowledge({ deliveryId: args.delivery_id, version: args.version }, exec.signal),
+    }));
+    // The same write, one inbox over: a letter delivered to the steward's PRIVATE inbox.
+    // Acknowledgement only - no resolve, no other driver, no break-glass (the host never
+    // sends one, and the server refuses it for the steward role).
+    if (portfolio.acknowledgePrivate) scope.tools.register(defineTool({ name: 'private_inbox_acknowledge',
+      description: 'Acknowledge ONE delivery addressed to your own private inbox, so it stops being re-injected: a wake re-injects every unread private delivery, and this is what stops the same letter coming back. Pass the delivery_id your wake (or your inbox page) showed you, and the version it showed if you have it. It is acknowledgement only: no resolve, no other driver, no break-glass. The same delivery and version is the same request, so a retry is not a second acknowledgement.',
+      parameters: { delivery_id: { type: 'string', required: true },
+        version: { type: 'integer', description: 'the delivery version you were shown; omit to settle the version the inbox holds' } },
+      output: jsonOutput,
+      execute: (args, exec) => portfolio.acknowledgePrivate({ deliveryId: args.delivery_id, version: args.version }, exec.signal),
     }));
   }
   if (handoff) scope.tools.register(defineTool({ name: 'handoff',

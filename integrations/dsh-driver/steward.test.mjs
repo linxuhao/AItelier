@@ -77,8 +77,9 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
-  assert.deepEqual(Object.keys(steward.portfolio).sort(), ['acknowledge', 'conversation', 'inbox', 'project', 'projects'],
-    'the steward\'s own inbox page is one of the reads this host provides, and acknowledging a delivery is its one write');
+  assert.deepEqual(Object.keys(steward.portfolio).sort(),
+    ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'project', 'projects'],
+    'the steward\'s own inbox page is one of the reads this host provides, and acknowledging a delivery is its one write per inbox');
   assert.doesNotThrow(() => validateHost(steward));
   const director = aitelierHost(env());
   assert.equal(director.config.rootRole, undefined);
@@ -230,8 +231,8 @@ function stewardInboxTool(request) {
   const tools = new Map();
   registerPortfolioTools({ tools: { register: tool => tools.set(tool.name, tool) } },
     { defineTool: tool => tool, jsonOutput: {}, portfolio: stewardOps({ request, project: 'aitelier-home', me: 'drv-home' }).portfolio });
-  assert.deepEqual([...tools.keys()], [...PORTFOLIO_TOOLS, 'portfolio_inbox_acknowledge'],
-    'the steward host registers the four portfolio reads and its one inbox write');
+  assert.deepEqual([...tools.keys()], [...PORTFOLIO_TOOLS, 'portfolio_inbox_acknowledge', 'private_inbox_acknowledge'],
+    'the steward host registers the four portfolio reads and one acknowledgement per inbox');
   return tools.get('portfolio_inbox');
 }
 const toolCall = { signal: AbortSignal.timeout(5000) };
@@ -397,6 +398,112 @@ test('inbox acknowledgement: the registered tool writes ONE acknowledge for the 
   assert.equal(readOnly.has('portfolio_inbox_acknowledge'), false);
 });
 
+/** A fake State holding the PRIVATE deliveries addressed to this steward, exactly the page
+ *  `list_driver_messages` returns for it (a delivery with no sender is a system notice and is
+ *  still addressed to this driver), and recording every write. `refuse` makes the write answer
+ *  the way the real server answers a refused request: a 200 whose inner result carries a code
+ *  and a message, never a thrown error. */
+function privateInbox({ refuse = null } = {}) {
+  const writes = [], reads = [];
+  const deliveries = [
+    { delivery_id: 'd-priv', version: 3, status: 'unread', subject: 'ping', sender_driver_id: 'drv-plat', delivery_seq: 1 },
+    { delivery_id: 'd-notice', version: 1, status: 'unread', subject: 'lease notice', sender_driver_id: null, delivery_seq: 2 },
+  ];
+  const request = async (path, body) => {
+    if (path === '/api/state/query/list_driver_messages') {
+      reads.push(body);
+      if (body.driver_id !== 'drv-home') throw new Error('the private inbox read another driver: ' + body.driver_id);
+      return { result: { driver_id: body.driver_id, messages: deliveries, truncated: false, next_after: 2 } };
+    }
+    if (path !== '/api/state/commands/acknowledge_driver_message') throw new Error('unexpected ' + path);
+    writes.push(body);
+    if (refuse) return { result: { schema: 'aitelier.driver-inbox.v1', code: refuse,
+      detail: { message: refuse + ': the transition refused this delivery' } } };
+    return { result: { delivery_id: body.delivery_id, status: 'acknowledged', version: body.expected_version + 1 } };
+  };
+  return { request, writes, reads, base: { request, project: 'aitelier-home', me: 'drv-home' } };
+}
+
+test('private inbox acknowledgement (iss-cef568c3d62e4962): ONE acknowledge for the private letter, at the version State holds', async () => {
+  const { writes, reads, base } = privateInbox();
+  const ops = stewardOps(base);
+  const tools = collectPortfolio({ portfolio: ops.portfolio });
+  assert.ok(tools.has('private_inbox_acknowledge'), 'registered when the host acknowledges its private inbox');
+  const tool = tools.get('private_inbox_acknowledge');
+  const answer = await tool.execute({ delivery_id: 'd-priv' }, exec);
+  assert.deepEqual({ acknowledged: answer.acknowledged, inbox: answer.inbox, delivery_id: answer.delivery_id,
+    status: answer.status, version: answer.version },
+  { acknowledged: true, inbox: 'private', delivery_id: 'd-priv', status: 'acknowledged', version: 4 },
+  'the settled delivery comes back as the answer');
+  assert.equal(writes.length, 1, 'one acknowledgement is one write');
+  assert.deepEqual(writes[0], { delivery_id: 'd-priv', expected_version: 3,
+    request_key: 'steward-ack-private:d-priv:3' }, 'the looked-up version, and a key derived from the delivery');
+  // The version the caller was shown, when it is the one State holds, is the same request.
+  assert.equal((await tool.execute({ delivery_id: 'd-priv', version: 3 }, exec)).acknowledged, true);
+  assert.deepEqual(writes[1], writes[0], 'same delivery and version = same request: State replays it');
+  // A system notice has no sender and is still a delivery addressed to this steward.
+  assert.equal((await tool.execute({ delivery_id: 'd-notice' }, exec)).status, 'acknowledged');
+  assert.equal(writes[2].expected_version, 1);
+  // A version the delivery has moved past is refused rather than silently overridden.
+  const before = writes.length;
+  const stale = await tool.execute({ delivery_id: 'd-priv', version: 2 }, exec);
+  assert.deepEqual({ refused: stale.refused, current_version: stale.current_version },
+    { refused: 'version_conflict', current_version: 3 });
+  // What it cannot identify writes nothing at all.
+  assert.equal((await tool.execute({ delivery_id: '', version: 1 }, exec)).refused, 'invalid_delivery');
+  assert.equal((await tool.execute({ delivery_id: 'd-priv', version: 0 }, exec)).refused, 'invalid_version');
+  assert.equal(writes.length, before, 'a refused call writes nothing');
+  assert.ok(reads.every(read => read.driver_id === 'drv-home'), 'only the steward\'s own inbox is ever read');
+});
+
+test('private inbox acknowledgement: a delivery not addressed to the steward is unknown_delivery, and no write is made', async () => {
+  const { writes, reads, base } = privateInbox();
+  const ops = stewardOps(base);
+  assert.equal((await ops.portfolio.acknowledgePrivate({ deliveryId: 'd-other' })).refused, 'unknown_delivery');
+  assert.equal((await ops.portfolio.acknowledgePrivate({ deliveryId: 'd-other', version: 1 })).refused, 'unknown_delivery');
+  assert.equal(writes.length, 0, 'the lookup is the steward\'s own inbox: nothing was written');
+  assert.ok(reads.length >= 1 && reads.every(read => read.driver_id === 'drv-home'));
+});
+
+test('private inbox acknowledgement: a 200 whose inner result carries a code is a refusal naming it, never a success', async () => {
+  const { writes, base } = privateInbox({ refuse: 'unknown_delivery' });
+  const ops = stewardOps(base);
+  const answer = await ops.portfolio.acknowledgePrivate({ deliveryId: 'd-priv', version: 3 });
+  assert.equal(writes.length, 1, 'the write was attempted');
+  assert.equal(answer.acknowledged, undefined, 'a refusal must not claim the letter was settled');
+  assert.deepEqual({ refused: answer.refused, code: answer.code }, { refused: 'state_refused', code: 'unknown_delivery' });
+  assert.match(String(answer.reason), /unknown_delivery/, 'the server\'s own message is carried, so the steward can act on it');
+});
+
+test('private inbox acknowledgement: registered only when the host offers it; acknowledgement only, and the steward is told about it', () => {
+  const { base } = privateInbox();
+  const ops = stewardOps(base);
+  const tools = collectPortfolio({ portfolio: ops.portfolio });
+  const tool = tools.get('private_inbox_acknowledge');
+  assert.ok(tool, 'registered when the op is provided');
+  assert.deepEqual(tool.parameters.delivery_id, { type: 'string', required: true });
+  assert.equal(tool.parameters.version.type, 'integer');
+  assert.equal(tool.parameters.version.required, undefined, 'the version is optional: the host looks it up');
+  // The description says what it is for and what it is not.
+  assert.match(tool.description, /ONE delivery addressed to your own private inbox/);
+  assert.match(tool.description, /wake re-injects every unread private delivery/);
+  assert.match(tool.description, /stops the same letter coming back/);
+  assert.match(tool.description, /acknowledgement only: no resolve, no other driver, no break-glass/);
+  assert.equal(/resolve_driver_message|resolve_director_message/.test(tool.description), false,
+    'it names no resolve action, only the refusal of resolving');
+  // A host that does not offer the private acknowledgement registers no such tool; the two
+  // inbox writes are registered independently of each other.
+  const noPrivate = collectPortfolio({ portfolio: { ...ops.portfolio, acknowledgePrivate: undefined } });
+  assert.equal(noPrivate.has('private_inbox_acknowledge'), false);
+  assert.ok(noPrivate.has('portfolio_inbox_acknowledge'), 'the project-inbox write is unaffected');
+  const noProject = collectPortfolio({ portfolio: { ...ops.portfolio, acknowledge: undefined } });
+  assert.equal(noProject.has('portfolio_inbox_acknowledge'), false);
+  assert.ok(noProject.has('private_inbox_acknowledge'), 'the private-inbox write is unaffected');
+  // The steward's own wording names it, next to the project letter's acknowledgement.
+  assert.match(stewardTexts.continuationQuestion,
+    /portfolio_inbox_acknowledge \(a project letter\) or private_inbox_acknowledge \(a letter in your private inbox\)/);
+});
+
 /** A fake State holding one letter in each inbox and recording every write.
  *  `refuse` makes the write answer the way the real server answers a refused request: a
  *  200 whose inner result carries a code and a message (never a thrown error). */
@@ -518,7 +625,8 @@ test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the direc
     assert.deepEqual(named.filter(word => !presented.has(word)), [], `${key} names a tool the steward does not have`);
   }
   // It asks the steward for what it can do.
-  for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox_acknowledge', 'handoff', 'ask_owner'])
+  for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox_acknowledge',
+    'private_inbox_acknowledge', 'handoff', 'ask_owner'])
     assert.ok(steward.continuationQuestion.includes(tool) || steward.askTheUser.includes(tool), tool);
   assert.match(steward.tools.idle_dormant, /Nothing is expected of you until your owner or a director writes/);
   assert.notEqual(director.tools.idle_dormant, steward.tools.idle_dormant);

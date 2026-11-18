@@ -1738,10 +1738,13 @@ def _driver_defaults(service, action, arguments):
 # else a steward-role driver writes is refused. create_steward_proposal and
 # withdraw_steward_proposal are step 13's; complete_steward_memory_request is
 # step 14's, called by the steward's runtime code, never by its model.
-# acknowledge_director_message is the one delivery write: a wake re-injects every
-# unread delivery of its own inbox, so the steward's acknowledgement is what stops
-# the same letters coming back. It is NOT a grant to the project mailbox at large:
-# _STEWARD_OWN_INBOX_WRITES bounds it to the project the steward is bound to.
+# acknowledge_director_message is the one project-inbox delivery write: a wake
+# re-injects every unread delivery of its own inbox, so the steward's acknowledgement
+# is what stops the same letters coming back. It is NOT a grant to the project mailbox
+# at large: _STEWARD_OWN_INBOX_WRITES bounds it to the project the steward is bound to.
+# acknowledge_driver_message is the same acknowledgement for a letter delivered to the
+# steward's PRIVATE driver inbox (owner 2026-11-17: the steward settles both inboxes),
+# acknowledgement only - never resolve (_STEWARD_PRIVATE_INBOX_WRITES).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1749,16 +1752,29 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "acknowledge_director_message",
     # Owner 2026-11-17 ("state dag的inbox和导演的私人inbox都要能回复"): the steward may answer a
     # letter in its private inbox - only as a reply, to that letter's sender (below).
-    "send_driver_message"})
+    "send_driver_message",
+    # Owner 2026-11-17: and it MARKs a private letter read, so a settled delivery is
+    # not re-injected on every wake. Acknowledgement only; resolve stays closed.
+    "acknowledge_driver_message"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
-# Settling a delivery is the steward's only inbox write. A delivery's target is
+# Settling a delivery in the PROJECT inbox. A delivery's target is
 # its project (state_director_deliveries.target_project_id, which the transition
 # itself checks against the named project), so requiring the named project to be
 # the steward's bound project keeps every other inbox out of reach. resolve is
 # deliberately absent: an acknowledgement already withholds the body from later
 # wakes, and dismissing standing guidance stays the project's decision.
 _STEWARD_OWN_INBOX_WRITES = frozenset({"acknowledge_director_message"})
+# Settling a delivery in the PRIVATE driver inbox. Its recipient is the delivery's
+# target_driver_id, not a project, and that restriction already lives in the command:
+# core.driver_inbox.transition authorizes the WRITE against row["target_driver_id"], so
+# a delivery addressed to another driver is `not_inbox_recipient` there. Nothing about
+# the recipient is duplicated here; what this set adds is the field the command would
+# otherwise honour - break_glass_reason is the one argument that widens that check to an
+# owner/admin caller, and the steward never escalates into another driver's delivery.
+# resolve is deliberately absent for the same reason as above: dismissing standing
+# guidance is not the steward's call, and no consumer needs it.
+_STEWARD_PRIVATE_INBOX_WRITES = frozenset({"acknowledge_driver_message"})
 
 
 def _refuse_steward_write(service, action, arguments) -> None:
@@ -1770,8 +1786,10 @@ def _refuse_steward_write(service, action, arguments) -> None:
     is refused (`steward_role_missing`), so a registration that lost its role
     never makes the steward an ordinary writer. A steward may write only the
     whitelist above, its notebook writes only into its OWN notebooks (its private
-    one, or its bound project's), and its one delivery write only into its OWN
-    project's inbox. Any other driver is unchanged.
+    one, or its bound project's), its project-inbox delivery write only into its OWN
+    project's inbox, and its private-inbox acknowledgement only without break-glass
+    (the recipient restriction is the command's own, see _STEWARD_PRIVATE_INBOX_WRITES).
+    Any other driver is unchanged.
     """
     driver_id = getattr(service, "driver_id", None)
     if not driver_id:
@@ -1817,6 +1835,16 @@ def _refuse_steward_write(service, action, arguments) -> None:
             raise StateGraphError(
                 f"steward_read_only: {action} may only settle a delivery addressed to "
                 "this steward's own project")
+    if allowed and action in _STEWARD_PRIVATE_INBOX_WRITES:
+        # Which delivery it may settle is the command's own check (the transition
+        # authorizes against the row's target_driver_id), so nothing is duplicated
+        # here. break_glass_reason is refused outright: it is the one argument that
+        # would let this acknowledgement reach another driver's delivery.
+        target = arguments if isinstance(arguments, dict) else {}
+        if target.get("break_glass_reason") is not None:
+            raise StateGraphError(
+                f"steward_read_only: {action} may only settle a delivery addressed to this "
+                "steward's own inbox, and never with break_glass_reason")
     if allowed and action == "send_driver_message":
         # Only an answer to a delivery addressed to the steward, to one driver: never a
         # message of its own, never to a whole project's members.

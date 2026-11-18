@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto';
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
  *  (which includes the steward's own inbox page, read whole) and the handoff, all over
- *  State reads and three State writes the steward is allowed (send_user_message is
+ *  State reads and the State writes the steward is allowed (send_user_message is
  *  runtime.mjs's tool; send_director_message is the handoff; acknowledge_director_message
- *  settles one delivery in its own inbox and nothing else).
+ *  settles one delivery in its own PROJECT inbox, acknowledge_driver_message marks one
+ *  read in its own PRIVATE inbox, and nothing else).
  *
  *  `request(path, body, signal)` is the runtime's authenticated State caller. */
 
@@ -179,6 +180,48 @@ export async function replyToLetter({ request, project, me, inbox, deliveryId, t
   }, refusedBy);
 }
 
+/** Mark ONE letter addressed to the steward's PRIVATE inbox read (owner 2026-11-17:
+ *  the steward settles both boxes, acknowledgement only). A wake re-injects every unread
+ *  private delivery, so this - not a reply - is what stops the same letter coming back.
+ *
+ *  Bounded by construction: the letter is looked up in the steward's own inbox only, so a
+ *  delivery addressed to another driver is `unknown_delivery` here and no write is made;
+ *  `version` is optional (the looked-up version is used when it is omitted) and a supplied
+ *  version that the delivery has moved past is refused rather than silently overridden.
+ *  The server allows the steward `acknowledge_driver_message` and nothing else in this
+ *  inbox: resolve is not offered, and break-glass is never sent. The request key is the
+ *  delivery identity and version, so a retry is State's replay, not a second
+ *  acknowledgement. */
+export async function acknowledgePrivateLetter({ request, project, me, deliveryId, version, signal }) {
+  if (typeof deliveryId !== 'string' || !deliveryId.trim()) {
+    return { refused: 'invalid_delivery', reason: 'delivery_id must name a delivery in your private inbox' };
+  }
+  if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
+    return { refused: 'invalid_version', reason: 'version must be the delivery version you were shown (1 or more)' };
+  }
+  const letter = await findLetter({ request, project, me, inbox: 'private', deliveryId, signal });
+  if (!letter) return { refused: 'unknown_delivery', reason: `no private letter ${deliveryId} addressed to you` };
+  const expected = letter.version;
+  if (version !== undefined && version !== expected) {
+    return { refused: 'version_conflict', delivery_id: deliveryId, current_version: expected,
+      reason: `that letter is at version ${expected}, not ${version}: read it again before acknowledging` };
+  }
+  // A refusal can arrive as a 200 with a code inside the result (the same shape replyToLetter
+  // guards against), so the answer decides the outcome: reported as success, the steward
+  // believes a letter it never settled stopped being re-injected.
+  return request('/api/state/commands/acknowledge_driver_message', { delivery_id: deliveryId,
+    expected_version: expected, request_key: `steward-ack-private:${deliveryId}:${expected}` }, signal).then(r => {
+    const result = r?.result ?? r ?? {};
+    const code = result.code ?? result.refused ?? result.error?.code;
+    if (code) {
+      const detail = result.detail?.message ?? result.detail ?? result.message ?? result.error?.message ?? null;
+      return { refused: 'state_refused', code: String(code), delivery_id: deliveryId,
+        ...(detail ? { reason: String(detail).slice(0, 500) } : {}) };
+    }
+    return { acknowledged: true, inbox: 'private', ...result };
+  }, refusedBy);
+}
+
 // ---- every owner message gets an answer (owner 2026-11-17: 管家需要事事有回应) ----
 
 /** The owner's messages after the steward's last message in its own conversation: the ones
@@ -245,7 +288,7 @@ export const stewardTexts = Object.freeze({
   idleDormant: 'Call when nothing is waiting for you: your owner\'s messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.',
   askOwner: 'Ask your owner ONE concrete question only they can decide (a choice, an approval). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry; another question under that id is refused. context is optional background shown with it. The answer comes back to you as a message from your owner. Use close_question when it no longer needs an answer.',
   closeQuestion: 'Take back one of your own questions to your owner that no longer needs an answer, with the reason; it stays visible as withdrawn. An answered question cannot be closed; closing twice changes nothing.',
-  continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, and read ones marked with portfolio_inbox_acknowledge? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
+  continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, and read ones marked with portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in your private inbox)? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
   reviewInstruction: 'Look again at your owner\'s conversation, your inbox (portfolio_inbox) and your open proposals: answer what waits on you, pass on what your owner asked you to pass on, and tell your owner what changed for them. ' + stewardAsk + ' If nothing waits, reply with one line that starts with NOTHING_LEFT: and call idle_dormant.',
 });
 
@@ -347,6 +390,13 @@ export function stewardOps({ request, project, me }) {
             reason: String(response.detail?.message ?? response.code).slice(0, 500) };
         }
         return response?.result ?? response;
+      },
+      /** Acknowledge ONE delivery of this steward's PRIVATE inbox, so the wake stops
+       *  re-injecting it. The same narrowing as `acknowledge`, one box over: the letter
+       *  must be one addressed to this steward (findLetter reads only its own inbox), the
+       *  server allows acknowledgement only, and no break-glass is ever sent. */
+      acknowledgePrivate({ deliveryId, version } = {}, signal) {
+        return acknowledgePrivateLetter({ request, project, me, deliveryId, version, signal });
       },
     },
     /** Plugin step 13: one open proposal row and nothing more; the owner decides, the backend

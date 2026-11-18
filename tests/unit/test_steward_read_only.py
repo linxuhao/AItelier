@@ -55,6 +55,11 @@ def _own_inbox_refusal(action):
             "this steward's own project")
 
 
+def _private_inbox_refusal(action):
+    return (f"steward_read_only: {action} may only settle a delivery addressed to this "
+            "steward's own inbox, and never with break_glass_reason")
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     table = copy.deepcopy(load_roles())
@@ -101,12 +106,12 @@ REFUSED = {
     "claim_node": {"project_id": "alpha", "node_key": "n1"},
     "start_attempt": {"project_id": "alpha", "node_key": "n1"},
     "create_project": {"project_id": "gamma", "title": "Gamma"},
-    # The steward's one inbox write is acknowledge_director_message; resolve (even of its
-    # OWN delivery) and the private driver inbox's acknowledgement stay closed.
+    # The steward's inbox writes are ACKNOWLEDGEMENTS only (a letter can be answered and
+    # marked read); resolve stays closed in both inboxes, even for its OWN deliveries.
     "resolve_director_message": {"project_id": HOME, "delivery_id": "0" * 36,
                                  "expected_version": 1, "request_key": "resolve"},
-    "acknowledge_driver_message": {"delivery_id": "0" * 36, "expected_version": 1,
-                                   "request_key": "ack-driver"},
+    "resolve_driver_message": {"delivery_id": "0" * 36, "expected_version": 1,
+                               "request_key": "resolve-driver"},
 }
 
 
@@ -119,7 +124,8 @@ def test_the_steward_is_refused_every_write_outside_the_whitelist(world, action)
 
 
 def test_the_steward_write_whitelist_is_exactly_these_actions():
-    """Enumerated, not derived: the one inbox write is named here and nothing else moved."""
+    """Enumerated, not derived: both inbox acknowledgements are named here and nothing
+    else moved (resolve stays out of both)."""
     from core.state_commands import STEWARD_WRITE_ACTIONS
     assert STEWARD_WRITE_ACTIONS == {
         "send_user_message", "withdraw_user_question", "send_director_message",
@@ -127,10 +133,12 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
         "acknowledge_director_message",
         # Owner 2026-11-17: replies in the private inbox, reply-only (see the both-inboxes test).
-        "send_driver_message"}
+        "send_driver_message",
+        # Owner 2026-11-17: and marking a private letter read, so a wake stops re-injecting it.
+        "acknowledge_driver_message"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
-    assert not {"acknowledge_driver_message", "resolve_driver_message"} & STEWARD_WRITE_ACTIONS
-    assert "resolve_director_message" not in STEWARD_WRITE_ACTIONS
+    assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
+    assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS
 
 
 def test_every_other_state_write_is_still_refused(world):
@@ -255,21 +263,27 @@ def _letter(world, target, key):
     return {k: delivery[k] for k in ("delivery_id", "version", "status")}
 
 
+def _private_delivery(world, target, key):
+    """One private message from alpha's director to `target`; that driver's delivery row."""
+    did = world.director["driver_id"]
+    execute(world.service(world.director), "send_driver_message", {"request_key": key, "subject": "private",
+            "body": "y" * 900, "target_driver_id": target}, allow_write=True)
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT delivery_id, version, status FROM driver_inbox_deliveries "
+                           "WHERE target_driver_id=? ORDER BY rowid DESC LIMIT 1", (target,)).fetchone()
+    return dict(row)
+
+
 def _private_letter(world, key):
     """One private message from alpha's director to the steward; its delivery to the steward."""
-    sid = world.steward["driver_id"]
-    execute(world.service(world.director), "send_driver_message", {"request_key": key, "subject": "private",
-            "body": "y" * 900, "target_driver_id": sid}, allow_write=True)
-    with world.db.get_connection() as conn:
-        row = conn.execute("SELECT delivery_id, version FROM driver_inbox_deliveries WHERE target_driver_id=? "
-                           "ORDER BY rowid DESC LIMIT 1", (sid,)).fetchone()
-    return dict(row)
+    return _private_delivery(world, world.steward["driver_id"], key)
 
 
 def test_the_steward_answers_letters_in_both_inboxes_but_never_starts_one(world):
     """Owner 2026-11-17: the steward replies to directors in the project inbox and in its
     private inbox. A private message from it is only ever a reply, to the sender of the
-    delivery it cites; it never settles a private delivery (not on its whitelist)."""
+    delivery it cites; it settles a private delivery by ACKNOWLEDGEMENT only (the tests
+    below), never by resolving it."""
     steward = world.service(world.steward)
     sid, did = world.steward["driver_id"], world.director["driver_id"]
     # Project inbox: a reply to the letter, back to the sender's project.
@@ -297,10 +311,96 @@ def test_the_steward_answers_letters_in_both_inboxes_but_never_starts_one(world)
     for why, arguments in refused.items():
         with pytest.raises(StateGraphError, match=re.escape(_refusal("send_driver_message"))):
             execute(steward, "send_driver_message", arguments, allow_write=True)
-    for action in ("acknowledge_driver_message", "resolve_driver_message", "resolve_director_message"):
+    # Settling is acknowledgement only: resolve stays closed over its OWN private letter.
+    for action in ("resolve_driver_message", "resolve_director_message"):
         with pytest.raises(StateGraphError, match=re.escape(_refusal(action))):
             execute(steward, action, {"delivery_id": private["delivery_id"], "expected_version": private["version"],
                     "request_key": "settle-" + action, "project_id": HOME}, allow_write=True)
+
+
+def test_the_steward_acknowledges_a_letter_in_its_own_private_inbox(world):
+    """The other half of Owner 2026-11-17 (iss-cef568c3d62e4962): a private letter the
+    steward has answered is MARKED READ, so the wake stops re-injecting it. The delivery
+    is the steward's own: its driver id is the row's target."""
+    sid = world.steward["driver_id"]
+    private = _private_delivery(world, sid, "private-ack")
+    assert (private["status"], private["version"]) == ("unread", 1)
+    steward = world.service(world.steward)
+    arguments = {"delivery_id": private["delivery_id"], "expected_version": private["version"],
+                 "request_key": "steward-ack-private:" + private["delivery_id"]}
+    acked = execute(steward, "acknowledge_driver_message", arguments, allow_write=True)
+    assert (acked["delivery_id"], acked["status"], acked["version"]) == (
+        private["delivery_id"], "acknowledged", private["version"] + 1)
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT status, version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                           (private["delivery_id"],)).fetchone()
+    assert tuple(row) == ("acknowledged", private["version"] + 1)
+    # The same request is State's replay, not a second acknowledgement or a second version.
+    replay = execute(steward, "acknowledge_driver_message", arguments, allow_write=True)
+    assert replay == acked
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                            (private["delivery_id"],)).fetchone()[0] == private["version"] + 1
+
+
+def test_the_steward_cannot_acknowledge_another_drivers_private_letter(world):
+    """The widening is one box, not the driver inbox: the recipient restriction is the
+    command's own (core.driver_inbox.transition authorizes against the row's target), so a
+    delivery addressed to another driver is refused and left exactly as it was."""
+    world.registry.register("other", "Other", actor="fixture")
+    foreign = _private_delivery(world, "other", "private-foreign")
+    steward = world.service(world.steward)
+    with pytest.raises(StateGraphError) as refused:
+        execute(steward, "acknowledge_driver_message", {
+            "delivery_id": foreign["delivery_id"], "expected_version": foreign["version"],
+            "request_key": "ack-foreign"}, allow_write=True)
+    assert str(refused.value) == "not_inbox_recipient"
+    # An id that names no delivery is a named refusal too, never a silent success.
+    with pytest.raises(StateGraphError) as unknown:
+        execute(steward, "acknowledge_driver_message", {
+            "delivery_id": "0" * 36, "expected_version": 1, "request_key": "ack-unknown"}, allow_write=True)
+    assert str(unknown.value) == "unknown_delivery"
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT status, version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                           (foreign["delivery_id"],)).fetchone()
+    assert tuple(row) == ("unread", foreign["version"]), "a refused acknowledgement wrote nothing"
+
+
+def test_the_steward_never_settles_with_break_glass_reason(world):
+    """break_glass_reason is the one argument that widens the command's own recipient check
+    (owner/admin), so the server refuses it before anything else; the same delivery without
+    it is still acknowledged, so the refusal is about the escalation, not the action."""
+    sid = world.steward["driver_id"]
+    private = _private_delivery(world, sid, "private-glass")
+    steward = world.service(world.steward)
+    arguments = {"delivery_id": private["delivery_id"], "expected_version": private["version"],
+                 "request_key": "ack-glass", "break_glass_reason": "the owner said so"}
+    with pytest.raises(StateGraphError) as refused:
+        execute(steward, "acknowledge_driver_message", arguments, allow_write=True)
+    assert str(refused.value) == _private_inbox_refusal("acknowledge_driver_message")
+    with world.db.get_connection() as conn:
+        assert tuple(conn.execute("SELECT status, version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                                  (private["delivery_id"],)).fetchone()) == ("unread", private["version"])
+    # The same delivery, acknowledged without the escalation, is accepted.
+    acked = execute(steward, "acknowledge_driver_message", {k: v for k, v in arguments.items()
+                    if k != "break_glass_reason"} | {"request_key": "ack-no-glass"}, allow_write=True)
+    assert acked["status"] == "acknowledged"
+
+
+def test_resolve_stays_closed_for_the_steward(world):
+    """Regression: the permission did not widen. resolve_driver_message was and stays off
+    the whitelist (no consumer; dismissing standing guidance is not the steward's call)."""
+    from core.state_commands import STEWARD_WRITE_ACTIONS
+    private = _private_letter(world, "private-resolve")
+    assert "resolve_driver_message" not in STEWARD_WRITE_ACTIONS
+    with pytest.raises(StateGraphError) as refused:
+        execute(world.service(world.steward), "resolve_driver_message", {
+            "delivery_id": private["delivery_id"], "expected_version": private["version"],
+            "request_key": "resolve-private"}, allow_write=True)
+    assert str(refused.value) == _refusal("resolve_driver_message")
+    with world.db.get_connection() as conn:
+        assert tuple(conn.execute("SELECT status, version FROM driver_inbox_deliveries WHERE delivery_id=?",
+                                  (private["delivery_id"],)).fetchone()) == ("unread", private["version"])
 
 
 def test_proposal_actions_are_named_for_step_13():

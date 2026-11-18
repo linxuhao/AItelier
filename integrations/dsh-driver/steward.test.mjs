@@ -67,6 +67,31 @@ test('presented_only: the steward has exactly its presented tools; everything el
   for (const role of ['director', 'worker']) assert.ok(!effective[role].presented.includes('portfolio_inbox'), role);
 });
 
+test('the steward prompt names the tools it has: both inbox readers where it explains the excerpt', () => {
+  const md = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  // One direction: every inbox tool the table presents is named in the prompt, so a reader
+  // can never be presented to the steward without the words that tell it to use it.
+  const inboxTools = table.steward.presented.filter(name => name.includes('inbox'));
+  assert.ok(inboxTools.length >= 4, `presented inbox tools: ${inboxTools.join(', ')}`);
+  for (const name of inboxTools) assert.ok(md.includes(name), `steward.md never names ${name}`);
+  // The paragraph that explains the 240-character excerpt is where a letter is read: naming
+  // only the project reader there is the defect this guards (a private letter came back
+  // unread, 2026-11-18).
+  const paragraph = md.split('\n\n').find(part => part.includes('240 characters'));
+  assert.ok(paragraph, 'steward.md still explains the 240-character excerpt');
+  for (const name of ['portfolio_inbox', 'private_inbox'])
+    assert.ok(paragraph.includes(name), `the excerpt paragraph never names ${name}`);
+  // The other direction: the prompt never promises the steward a tool it is not presented.
+  // Any name the table gives some role must be in the steward's set for the prompt to say it.
+  // Only names built with an underscore: this is prose, and the single-word tools (read,
+  // write, edit, grep, bash) are English words here - "read every project" is not a promise
+  // of the read tool, and asserting on it would red for the verb.
+  const anywhere = new Set(Object.values(table).flatMap(role => Array.isArray(role.presented) ? role.presented : []));
+  for (const name of anywhere)
+    if (name.includes('_') && new RegExp(`\\b${name}\\b`).test(md))
+      assert.ok(table.steward.presented.includes(name), `steward.md names ${name}, which the steward is not presented`);
+});
+
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });

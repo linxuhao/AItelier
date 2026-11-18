@@ -503,6 +503,188 @@ def _normalized_tool_call(tool_call):
     return {**tool_call, "function": {**function, "arguments": arguments}}
 
 
+# ── Outgoing request body: measured, and bounded before it is sent ───────────
+#
+# MEASURED OCCURRENCE, 2026-11-18T11:49:47Z. The director's turn built a
+# completion request — a large tool result plus the transcript around it — and
+# this backend forwarded it unexamined. The upstream gateway refused it:
+#
+#   litellm.BadRequestError: OpenAIException - Upstream request failed:
+#   [invalid_request_error] decoded body exceeds 50331648 bytes
+#   (request_id: gw-2a538a5c39f0-1af3c80)
+#
+# The turn died with NO result and NO attributable log line: the exception
+# arrived at the driver shaped like a provider's complaint about its own
+# parameters, carrying no byte count, no limit, no culprit and no way to know
+# this backend could have measured the same number for free before dispatch.
+# Nothing in the system could answer "how big was the body, and what made it
+# big", so nothing could be dropped and retried.
+#
+# Two facts make this measurable on our side instead of the gateway's:
+#   1. Every AIGateway completion is assembled right here from one kwargs dict
+#      and handed to `_complete_prebuilt` (see the funnel note there), so the
+#      body is available, whole, before anything is sent.
+#   2. 48 MiB is not a tight budget for a chat request — a request that crosses
+#      it is carrying something pathological (a spilled-file read, a giant tool
+#      result), which is exactly the case a caller can fix once it is told.
+#
+# GATEWAY_BODY_LIMIT_BYTES is the upstream's published ceiling: 50331648 bytes
+# is 48 MiB exactly, which is why the refusal above says 50331648.
+GATEWAY_BODY_LIMIT_BYTES = 48 * 1024 * 1024        # 50,331,648
+
+# OUTGOING_BODY_BOUND_BYTES is OUR bound, deliberately below the gateway's, and
+# it is a module-level constant so a test can inject a small one instead of
+# building 48 MiB of payload. The measurement below covers the payload-bearing
+# kwargs; it does NOT see everything the transport eventually writes — the JSON
+# separators between array elements, the `stream` / `stream_options` keys
+# `_call_llm` adds after assembly, and the provider-quirk keys `_apply_binding`
+# rewrites on a failover (which is measured once, see below, not per attempt).
+# Those are all small and BOUNDED, so a flat margin covers them with room to
+# spare; the point of the margin is that a request we let through must never be
+# refused upstream, not that the number be exact to the byte.
+OUTGOING_BODY_BOUND_BYTES = GATEWAY_BODY_LIMIT_BYTES - 4 * 1024 * 1024  # 46,137,344
+
+# kwargs that never reach the request body: credentials/base URL/timeout are
+# consumed by the transport, and extra_headers become HTTP headers. Counting
+# them would report size the body does not have — the number has to be about
+# what the gateway decodes or it cannot be compared to 50331648.
+_BODY_TRANSPORT_ONLY = frozenset({"api_key", "api_base", "timeout", "extra_headers"})
+
+
+def _json_bytes(value) -> int:
+    """Bytes this value contributes to the request body, as JSON.
+
+    Encoded the way httpx encodes a `json=` body — UTF-8, non-ASCII characters
+    left literal (`ensure_ascii=False`) — because that, not a Python repr, is
+    what a byte limit upstream is counting. `default=str` is a guard, not a
+    convention: a body we cannot serialize is a bug this measurement must not
+    turn into a crash of its own.
+    """
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                          default=str).encode("utf-8"))
+
+
+def _message_label(message) -> str:
+    role = message.get("role") if isinstance(message, dict) else None
+    return f"role={role}" if role else "message"
+
+
+def _tool_label(tool) -> str:
+    try:
+        name = tool["function"]["name"]
+    except (KeyError, TypeError):
+        return "tool"
+    return f"name={name}"
+
+
+def measure_outgoing_body(kwargs: dict) -> tuple[int, list[dict]]:
+    """(total bytes, per-part breakdown) of the body `kwargs` becomes.
+
+    Called ONCE per completion, at the funnel (`_complete_prebuilt`), never per
+    candidate attempt and never twice in one call. Cost: one JSON encoding of
+    the payload the transport is about to encode anyway — a second pass over
+    bytes that then go out over a network call costing seconds to minutes, so
+    it is a rounding error against the call it protects. It is also why this
+    walks messages/tools individually: the walk is what makes the culprit
+    nameable, and summing the parts costs the same single pass as encoding the
+    whole list.
+
+    The total is the sum of each part's own JSON, i.e. the body minus its
+    structural punctuation (a handful of bytes per part). Exactness is not the
+    job — the bound's margin is (see OUTGOING_BODY_BOUND_BYTES).
+    """
+    parts: list[dict] = []
+    total = 0
+    for key, value in kwargs.items():
+        if key in _BODY_TRANSPORT_ONLY or value is None:
+            continue
+        if key in ("messages", "tools") and isinstance(value, list):
+            for i, item in enumerate(value):
+                n = _json_bytes(item)
+                total += n
+                part = {"part": f"{key}[{i}]",
+                        "kind": "message" if key == "messages" else "tool",
+                        "index": i, "bytes": n}
+                part["detail"] = (_message_label(item) if key == "messages"
+                                  else _tool_label(item))
+                parts.append(part)
+            continue
+        n = _json_bytes(value)
+        total += n
+        parts.append({"part": key, "kind": "field", "bytes": n})
+    return total, parts
+
+
+class OutgoingBodyTooLarge(Exception):
+    """This backend refused a request it built, before anything was sent.
+
+    Deliberately NOT a `litellm` exception, and deliberately absent from
+    FAILOVER_EXCEPTIONS and RETRYABLE_EXCEPTIONS: no endpoint was called, no
+    other candidate can accept a smaller body than the one the route's own first
+    candidate refused to (the body is identical for all of them), and retrying
+    re-measures the same bytes to learn the same fact. What the driver needs is a
+    statement about THIS backend's limit, with the numbers and the culprit that
+    make it act — not a provider-shaped 400 that names neither.
+
+    Carries, for callers that want to branch instead of read prose:
+      measured_bytes       what the outgoing body weighs (this backend's count)
+      bound_bytes          the bound it crossed (OUTGOING_BODY_BOUND_BYTES)
+      gateway_limit_bytes  the upstream ceiling the bound leaves margin under
+      largest              {"part", "kind", "bytes", "detail"} — the one part to
+                           drop first (the biggest single contributor)
+      parts                every part, unsorted, as measured
+      identity             session/model identity the gateway knows
+    """
+
+    def __init__(self, *, measured_bytes: int, bound_bytes: int,
+                 gateway_limit_bytes: int, parts: list[dict],
+                 identity: dict, largest: dict | None = None):
+        self.measured_bytes = measured_bytes
+        self.bound_bytes = bound_bytes
+        self.gateway_limit_bytes = gateway_limit_bytes
+        self.parts = parts
+        self.largest = largest
+        self.identity = identity
+        super().__init__(self._describe())
+
+    def _describe(self) -> str:
+        mib = 1024 * 1024
+        margin = max(0, self.gateway_limit_bytes - self.bound_bytes)
+        biggest = self.largest or {"part": "?", "kind": "?", "bytes": 0}
+        share = (100.0 * biggest["bytes"] / self.measured_bytes
+                 if self.measured_bytes else 0.0)
+        runner_up = sorted((p for p in self.parts if p is not biggest),
+                           key=lambda p: p["bytes"], reverse=True)[:2]
+        next_big = "".join(
+            f"\n  next: {p['part']} {p.get('detail', '')} — "
+            f"{p['bytes']:,} bytes ({100.0 * p['bytes'] / self.measured_bytes:.0f}%)"
+            for p in runner_up if self.measured_bytes)
+        where = ", ".join(f"{k}={v}" for k, v in (self.identity or {}).items())
+        return (
+            f"AItelier refused this call before sending it, because the request "
+            f"body this backend built is larger than it will deliver.\n"
+            f"\n"
+            f"  measured: {self.measured_bytes:,} bytes "
+            f"({self.measured_bytes / mib:.2f} MiB)\n"
+            f"  bound:    {self.bound_bytes:,} bytes "
+            f"({self.bound_bytes / mib:.2f} MiB) — AItelier's own limit\n"
+            f"  upstream: {self.gateway_limit_bytes:,} bytes "
+            f"({self.gateway_limit_bytes / mib:.2f} MiB), so the bound keeps a "
+            f"{margin:,}-byte margin under it\n"
+            f"\n"
+            f"Nothing was sent upstream; this is not a provider error. The one "
+            f"part to shrink first is {biggest['part']} "
+            f"({biggest.get('detail') or biggest['kind']}, "
+            f"{biggest['bytes']:,} bytes = {share:.0f}% of the body).{next_big}\n"
+            f"\n"
+            f"Drop or spill that content — write the tool result to a file and "
+            f"read a slice of it, summarise or drop older tool results, or "
+            f"compact the transcript — then retry.\n"
+            f"\n"
+            f"Where: {where}"
+        )
+
+
 class AIGateway:
     """
     AItelier 统一模型路由网关
@@ -1084,6 +1266,56 @@ class AIGateway:
              elapsed_s=round(_t.monotonic() - t0, 3))
         return response
 
+    def _body_identity(self, kwargs: dict, *, native: bool) -> dict:
+        """What this gateway knows about WHICH call this is.
+
+        The 2026-11-18 refusal could be attributed to nothing: the gateway's own
+        message carried a `request_id` nobody on this side could tie to a
+        session, a role or a route. These are the handles that exist at this
+        layer — the internal route name an agent_config asked for, the concrete
+        endpoint bound right now, this conversation's session id (the same one
+        sent to OpenCode Go as `x-opencode-session`), and the shape of the
+        payload.
+        """
+        return {
+            "model_route": self.internal_model,
+            "endpoint": self.active_model,
+            "candidate": f"{self._candidate_ix + 1}/{len(self._candidates)}",
+            "session": self._opencode_session_id,
+            "messages": len(kwargs.get("messages") or []),
+            "tools": len(kwargs.get("tools") or []),
+            "native": native,
+        }
+
+    def _refuse_if_body_too_large(self, kwargs: dict, *, native: bool) -> None:
+        """Measure the outgoing body once; refuse locally if it is over OUR bound.
+
+        The refusal happens before the candidate walk, so nothing is sent
+        upstream, no endpoint is parked, no retry budget is spent and no
+        failover is attempted: the body is a property of what the caller
+        assembled, identical for every candidate on the route. See
+        OUTGOING_BODY_BOUND_BYTES for the measured basis and the margin.
+        """
+        measured, parts = measure_outgoing_body(kwargs)
+        bound = OUTGOING_BODY_BOUND_BYTES
+        if measured <= bound:
+            return
+        identity = self._body_identity(kwargs, native=native)
+        largest = max(parts, key=lambda p: p["bytes"]) if parts else None
+        error = OutgoingBodyTooLarge(
+            measured_bytes=measured, bound_bytes=bound,
+            gateway_limit_bytes=GATEWAY_BODY_LIMIT_BYTES,
+            parts=parts, identity=identity, largest=largest)
+        # Loud on purpose, and one line: the refusal has to be visible in a log
+        # that is read after a turn died, which is the half of the 2026-11-18
+        # occurrence that was missing entirely.
+        print(f"[ai_router] refused outgoing body ({identity.get('model_route')}"
+              f" -> {identity.get('endpoint')}, session "
+              f"{identity.get('session')}): {measured:,} bytes > {bound:,} "
+              f"bound, largest {largest['part'] if largest else '?'} "
+              f"({largest['bytes']:,} bytes)", flush=True)
+        raise error
+
     def _complete_prebuilt(self, kwargs: dict, *, native: bool = False):
         """One completion, walking this model's candidates on endpoint errors.
 
@@ -1107,7 +1339,28 @@ class AIGateway:
         Raises the LAST error once the candidates are exhausted, so the caller
         still sees a real provider error (and `_explain_auth` can still name the
         missing secret).
+
+        THE OUTGOING-BODY GUARD LIVES HERE, and this is the funnel for a
+        structural reason rather than a convenient one. Everything below is a
+        private chain with exactly one entry point:
+
+            _complete_prebuilt            <-- both public calls enter here
+              -> _observed_completion     (per candidate attempt)
+                -> _completion_bounded    (worker thread + wall cap)
+                  -> _call_llm            (the only litellm.completion in this module)
+
+        `generate` and `generate_native` are the module's only public
+        completions, and both reach litellm through this line and no other. So a
+        check placed here cannot be routed around by adding a call site later,
+        whereas one placed in `_build_kwargs` would measure an INCOMPLETE body:
+        `generate_native` adds `tools`/`tool_choice` and `generate` adds
+        `response_format` AFTER the kwargs are built, and those are exactly the
+        parts big payloads are made of. Placing it below (in
+        `_observed_completion` or `_call_llm`) would also run it once per
+        candidate: the same body would be measured again for every failover,
+        paying the same pass to rediscover the same number.
         """
+        self._refuse_if_body_too_large(kwargs, native=native)
         while True:
             try:
                 response = self._observed_completion(kwargs, native=native)

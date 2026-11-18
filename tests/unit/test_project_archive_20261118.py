@@ -453,10 +453,12 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM state_project_archive").fetchone()[0] == 0
         # ...and NOTHING else about the previous schema moved: the additive table
-        # is the whole migration
+        # is the whole migration (besides the tables later steps add on their own:
+        # step 19's owner chat channels, core/state_channels.py)
         tables = sorted(row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'") if row[0].startswith("state_"))
-        assert sorted(set(tables) - {"state_project_archive"}) == previous["tables"]
+        later = {"state_owner_channels", "state_owner_channel_codes", "state_message_sources"}
+        assert sorted(set(tables) - {"state_project_archive"} - later) == previous["tables"]
         assert access_columns(path) == previous["access_columns"]
     # the list served afterwards equals the list served before, exactly
     assert read(changed, "list_projects") == previous["list"]

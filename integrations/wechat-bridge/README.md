@@ -56,7 +56,9 @@ not start (exit 78) and the plugin stays disabled.
 
 - non-root (uid 1000), `--read-only` with a 16 MB tmpfs on `/tmp`, `--cap-drop ALL`,
   `--security-opt no-new-privileges`, `--memory 512m --cpus 1 --pids-limit 256`;
-- publishes only `127.0.0.1:18731:18731`; inside, the bridge listens on `0.0.0.0`
+- publishes only `127.0.0.1:18741:18731` (host port `WECHAT_BRIDGE_PORT`, default
+  18741, the same variable and default the channel plugin uses); inside, the bridge
+  listens on port 18731 on `0.0.0.0`
   (`WECHAT_BRIDGE_BIND`, set by the image; the bridge accepts `0.0.0.0` only inside a
   container and otherwise listens on `127.0.0.1`);
 - the token file read-only is the only host mount; outbound network is allowed (WeChat's
@@ -75,10 +77,10 @@ WeChat for QRs. The login lives in the container's memory only: a restart means 
 scan. Wechaty keeps no memory-card file (the bot has no `name`), so nothing is written
 to disk.
 
-On this host port 18731 was already taken on 2026-11-18 by an unrelated
-`python3 -m http.server 18731 --bind 127.0.0.1` (running since 2026-11-06); it has to
-be stopped, or both `run.sh` and the plugin given another port
-(`WECHAT_BRIDGE_PORT`), before the bridge can be published there.
+The host port is 18741 and not the container's 18731 because on this host
+`127.0.0.1:18731` is taken by an unrelated `python3 -m http.server 18731 --bind
+127.0.0.1` (running since 2026-11-06). To use another one, set `WECHAT_BRIDGE_PORT`
+for both `run.sh` and the steward's host (or the plugin's `url` config).
 
 Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API and never
 starts the puppet. With the `run.sh` flags, a throwaway token and host port 18741, on
@@ -89,7 +91,9 @@ starts the puppet. With the `run.sh` flags, a throwaway token and host port 1874
 ## API
 
 Listens on `127.0.0.1` (or `0.0.0.0` inside its container, published on the host's
-`127.0.0.1` only), port `WECHAT_BRIDGE_PORT`, default 18731. Every request
+`127.0.0.1:18741` only), port `WECHAT_BRIDGE_PORT`, default 18731 (the image sets
+18731; on the host side `WECHAT_BRIDGE_PORT` is the published port, default 18741).
+Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
 - `GET /status` → `{logged_in, user_id?, qr?, qr_svg?, since}`. `qr` (the payload) and

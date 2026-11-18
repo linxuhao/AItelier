@@ -1235,6 +1235,8 @@ class RelayOwnerMessage(Project):
     channel_message_ref: str = Field(min_length=1, max_length=200)
     # Bounded by the service in UTF-8 bytes (body_too_long), never truncated.
     body: str
+    # When the channel says the message was written (ISO 8601); dates an approval phrase.
+    channel_at: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class BindOwnerChannel(Project):

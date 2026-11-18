@@ -622,7 +622,9 @@ test('chat channels (step 19): each plugin call is one State request; the reques
   assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-1', text: '同意 proposal p-1' }),
     { message_id: 'm-1', duplicate: false, approval: null });
   await channels.relay({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-1', text: '同意 proposal p-1' });
-  await channels.relay({ channel: 'wechat', senderRef: 'U1', messageRef: 'ts-1', text: 'x' });
+  await channels.relay({ channel: 'wechat', senderRef: 'U1', messageRef: 'ts-1', text: 'x', at: '2026-11-18T10:00:00.000Z' });
+  assert.equal(calls[2][1].channel_at, '2026-11-18T10:00:00.000Z', "the channel's own time dates an approval phrase");
+  assert.ok(!('channel_at' in calls[0][1]), 'no time from the channel, none sent');
   assert.equal(calls[0][0], '/api/state/commands/relay_owner_message');
   assert.deepEqual({ ...calls[0][1], request_key: undefined }, { request_key: undefined, channel: 'slack', sender_ref: 'U1',
     channel_message_ref: 'ts-1', body: '同意 proposal p-1' });
@@ -658,6 +660,9 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
   assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), { refused: 'channel_sender_not_bound' });
   thrown = failing(422, '"code_expired"');
   assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'y' }), { refused: 'code_expired' });
+  thrown = failing(422, '"code_retired"');
+  assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'z' }), { refused: 'code_retired' },
+    'a retired code is a refusal the stranger is answered once for, not an outage (a WeChat message would be held and retried)');
   thrown = failing(503, '"busy"');
   await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 503/);
   // A 4xx that is not a channel refusal (a misconfigured token, say) is a failure to log, never hidden as one.

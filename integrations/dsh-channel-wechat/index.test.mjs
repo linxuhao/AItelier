@@ -92,6 +92,24 @@ test('without a token file the channel is registered disconnected and nothing is
   assert.equal(channels.unregistered, true);
 });
 
+test('without a url the bridge is looked for on 127.0.0.1:18741 (run.sh\'s host port), or on WECHAT_BRIDGE_PORT', async () => {
+  const saved = process.env.WECHAT_BRIDGE_PORT;
+  const urls = [];
+  const fetch = async url => { urls.push(String(url)); throw new Error('no bridge here'); };
+  try {
+    for (const port of [undefined, '19999']) {
+      if (port === undefined) delete process.env.WECHAT_BRIDGE_PORT; else process.env.WECHAT_BRIDGE_PORT = port;
+      const before = urls.length;
+      const channel = startWechatChannel({ ownerChannels: fakeChannels(), logger: quiet, fetch, config: { tokenFile }, waitSeconds: 1, retryMs: 10 });
+      await until(() => urls.length > before);
+      await channel.stop();
+      assert.match(urls[before], new RegExp(`^http://127\\.0\\.0\\.1:${port ?? 18741}/`));
+    }
+  } finally {
+    if (saved === undefined) delete process.env.WECHAT_BRIDGE_PORT; else process.env.WECHAT_BRIDGE_PORT = saved;
+  }
+});
+
 test('bridge messages reach ownerChannels.inbound with the channel fields, and the cursor advances', async () => {
   const bridge = await fakeBridge();
   const channels = fakeChannels();

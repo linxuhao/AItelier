@@ -602,10 +602,21 @@ def _commit_registration(sf, registry, config_name: str, graph, hints,
         transaction.commit()
 
 
-def _validated_registration(config_name: str, yaml_text: str,
-                            roles: dict | None = None, sf=None):
-    """Parse all graph/host policy inputs without mutating live registries."""
-    data = yaml.safe_load(yaml_text)
+def _validated_registration(config_name: str, yaml_text: str | None = None,
+                            roles: dict | None = None, sf=None,
+                            document: dict | None = None):
+    """Parse all graph/host policy inputs without mutating live registries.
+
+    ``document`` is an ALREADY-parsed mapping: the boot scan holds the build's one
+    parse of the directory (``core.output_migration.generated_configs``) and passes
+    it here instead of the text, so a file is not parsed a second time to be
+    validated. It is copied before validation renames the graph and namespaces its
+    roles, because that parse is shared with every other reader of the build.
+    """
+    if document is not None:
+        data = copy.deepcopy(document)
+    else:
+        data = yaml.safe_load(yaml_text)
     if not isinstance(data, dict):
         raise ValueError("generated pipeline YAML is not a mapping")
     data["name"] = config_name
@@ -1176,38 +1187,61 @@ def load_generated_configs(sf, registry) -> list[str]:
     """Boot-time: register every persisted ``gen_*.yaml``. Returns the names
     registered. Invalid files are skipped (logged), never fatal. A companion
     ``<name>.roles.json`` (forge-generated pipelines) restores the real role
-    prompts before the graph registers."""
+    prompts before the graph registers.
+
+    All three passes read the directory through
+    :func:`core.output_migration.generated_configs`, the build's single parse of
+    it: the ownership pre-check, the two migrations and the registration used to
+    parse each config (and each sidecar) themselves, which over a deployment's
+    ``gen_*`` directory is the same bytes parsed several times per boot.
+    """
     config_dir = generated_configs_dir()
+    from core.output_migration import generated_configs
     from core.release_gate_migration import release_gate_ownership_error
+    snapshot = generated_configs(config_dir)
     unsafe_release_configs = set()
-    for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
+    for path in snapshot.paths:
         try:
-            document = yaml.safe_load(path.read_bytes())
+            document = snapshot.document(path)
             if release_gate_ownership_error(document):
+                _log.warning("skipping generated config %s: release gate "
+                             "ownership is not held by the host", path.name)
                 unsafe_release_configs.add(path.stem)
                 continue
-            roles_path = path.with_suffix(".roles.json")
             roles = None
-            if roles_path.exists():
+            if snapshot.has_roles(path):
                 try:
-                    roles = json.loads(roles_path.read_text(encoding="utf-8"))
+                    roles = snapshot.roles(path)
+                except FileNotFoundError:
+                    _log.warning("skipping generated config %s: its sidecar "
+                                 "vanished after the directory was scanned",
+                                 path.name)
+                    continue
                 except (json.JSONDecodeError, UnicodeError):
+                    _log.warning("skipping generated config %s: its %s sidecar "
+                                 "is not valid JSON", path.name,
+                                 path.with_suffix(".roles.json").name)
                     unsafe_release_configs.add(path.stem)
                     continue
                 if not isinstance(roles, dict):
+                    _log.warning("skipping generated config %s: its %s sidecar "
+                                 "is not a JSON object", path.name,
+                                 path.with_suffix(".roles.json").name)
                     unsafe_release_configs.add(path.stem)
                     continue
             if release_gate_ownership_error(document, roles, sf=sf):
+                _log.warning("skipping generated config %s: a paired role grants "
+                             "a release gate the host does not own", path.name)
                 unsafe_release_configs.add(path.stem)
-        except (UnicodeError, yaml.YAMLError):
+        except (UnicodeError, yaml.YAMLError) as e:
+            _log.warning("skipping invalid generated config %s: %s", path.name, e)
             continue
 
     from core.output_migration import migrate_generated_outputs
     from core.release_gate_migration import migrate_generated_release_gates
     from core.registration_transaction import RegistrationTransaction
 
-    names = [path.stem for path in sorted(
-        config_dir.glob(f"{GEN_PREFIX}*.yaml"))]
+    names = [path.stem for path in snapshot.paths]
     out: list[str] = []
     try:
         # Migration and publication are one boot operation. A late manifest or
@@ -1226,19 +1260,26 @@ def load_generated_configs(sf, registry) -> list[str]:
                 _log.info("release fail-fast migration: %s (backup %s)",
                           migration["path"], migration["backup"])
 
+            # A migration that rewrote a config changed the directory's identity,
+            # so this re-asks the cache and reads the MIGRATED bytes — the one
+            # place a boot legitimately parses a file twice, because the second
+            # parse is of different bytes. An unmigrated run re-parses nothing.
+            snapshot = generated_configs(config_dir)
+
             plans = []
             skip = archived_names()
-            for f in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
+            for f in snapshot.paths:
                 if f.stem in skip or f.stem in unsafe_release_configs:
                     continue
                 try:
-                    roles_file = f.with_suffix(".roles.json")
-                    roles = None
-                    if roles_file.exists():
-                        roles = json.loads(roles_file.read_text(encoding="utf-8"))
-                    yaml_text = f.read_text(encoding="utf-8")
+                    roles = (snapshot.roles(f, mutable=True)
+                             if snapshot.has_roles(f) else None)
+                    # The document is passed already parsed, so validation does
+                    # not parse the file again; it is copied there because the
+                    # parse itself is shared by every reader of this build.
                     graph, hints = _validated_registration(
-                        f.stem, yaml_text, roles=roles, sf=sf)
+                        f.stem, roles=roles, sf=sf,
+                        document=snapshot.document(f))
                     plans.append((f, roles, graph, hints))
                 except Exception as e:
                     _log.warning(

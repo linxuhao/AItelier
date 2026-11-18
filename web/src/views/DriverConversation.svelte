@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
-    type DriverConversationEntry } from '../lib/api';
+    stewardMessageSources, MESSAGE_SOURCES_BATCH, type DriverConversationEntry, type MessageSource } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
   import { railQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
   import { renderMarkdown } from '../lib/markdown';
   import type { ConversationDraft } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null, ack = null }: {
+  const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null, ack = null, sources = false }: {
     projectId: string; projectTitle?: string; driverId?: string;
     // The steward's receipt (owner 2026-11-18: "收到消息先ack，再处理/回复"): a host that
     // passes its driver's phase gets one status line under the owner's newest message
@@ -22,6 +22,10 @@
     // Text the host puts into the composer (the steward's "change it"): each new
     // object replaces the draft and focuses the input; nothing is sent.
     prefill?: {text: string} | null;
+    // The steward's conversation only (design 7.2): mark the owner's messages that
+    // came in from Slack / WeChat and the steward's that were mirrored out. No mark
+    // is the dashboard.
+    sources?: boolean;
   } = $props();
   // How often an open thread re-reads its newest page: the same bounded cadence
   // the DAG list polls driver status with, so one tick of latency is the floor.
@@ -278,6 +282,43 @@
     return (entry.segments ?? []).map((segment) => segment.text).filter((text) => text.trim()).join('\n');
   }
 
+  // ── where a steward message came from / went to ───────────────────────────
+  // Asked once per message id, when the id first appears in the thread, batched:
+  // a poll tick that brings no new message asks nothing. The one exception is a
+  // fresh steward message with no row yet - its host records the channel delivery
+  // just after writing it - which is asked exactly once more, a little later. A
+  // failed read leaves the marks off (they are a convenience) and is not retried.
+  const SOURCE_RECHECK_MS = 15000, SOURCE_FRESH_MS = 120000;
+  let sourceMap = $state<Record<string, MessageSource>>({});
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+  const askedSources = new Set<string>();
+  $effect(() => {
+    if (!sources) return;
+    const fresh = messages.map(m => m.message_id).filter(id => !askedSources.has(id));
+    if (!fresh.length) return;
+    for (const id of fresh) askedSources.add(id);
+    void loadSources(fresh, true);
+  });
+  async function loadSources(ids: string[], recheck: boolean) {
+    for (let i = 0; i < ids.length; i += MESSAGE_SOURCES_BATCH) {
+      const batch = ids.slice(i, i + MESSAGE_SOURCES_BATCH);
+      let found: Record<string, MessageSource>;
+      try { found = await stewardMessageSources(batch); } catch { continue; }
+      if (!alive) return;
+      sourceMap = {...sourceMap, ...found};
+      const pending = recheck ? batch.filter(id => !found[id] && isFreshReply(id)) : [];
+      if (pending.length) setTimeout(() => { if (alive) void loadSources(pending, false); }, SOURCE_RECHECK_MS);
+    }
+  }
+  function isFreshReply(id: string): boolean {
+    const entry = messages.find(m => m.message_id === id);
+    return entry?.sender_kind === 'driver' && Date.now() - Date.parse(entry.created_at) < SOURCE_FRESH_MS;
+  }
+  const channelName = (channel: string) => channel === 'wechat' ? st('messageSourceWechat') : st('messageSourceSlack');
+  // "WeChat" came in from it; "→ Slack" was mirrored out to it; ⚠ the mirror failed.
+  const sourceLabel = (source: MessageSource) =>
+    (source.direction === 'out' ? '→ ' : '') + channelName(source.channel) + (source.error ? ' ⚠' : '');
+
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
   // button, because the thread was fetched on mount and never again. The poll
@@ -410,6 +451,12 @@
             <time class="identity" datetime={entry.created_at} title={new Date(entry.created_at).toLocaleString()}>{new Date(entry.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</time>
             {#if entry.sender_kind === 'driver'}
               <button class="outline" type="button" aria-label="{st('driverConversationReply')}: {entry.subject}" onclick={() => reply(entry)}>{st('driverConversationReply')}</button>
+            {/if}
+            {#if sourceMap[entry.message_id]}
+              {@const source = sourceMap[entry.message_id]}
+              <span class="source" class:failed={!!source.error} data-message-source={source.channel} data-direction={source.direction}
+                title={source.error ? st('messageSourceFailed').replace('{channel}', channelName(source.channel)) + ': ' + source.error : undefined}
+                >{sourceLabel(source)}</span>
             {/if}
             {#if entry.segments?.some((segment) => segment.kind === 'question')}
               <span class="asks" title={st('messageAsksQuestion')} aria-label={st('messageAsksQuestion')}>?</span>
@@ -578,6 +625,8 @@
   .composer-footer button{margin:0;}
   button{width:auto;font-size:12px;padding:5px 9px;margin:0;}
   .asks{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);font-size:11px;}
+  .source{display:inline-block;padding:0 6px;border-radius:5px;border:1px solid var(--pico-muted-border-color);color:var(--pico-muted-color);font-size:11px;line-height:1.5;white-space:nowrap;}
+  .source.failed{border-color:var(--pico-del-color);color:var(--pico-del-color);}
   @container(max-width:900px){.conversation{grid-template-columns:minmax(0,1fr) 240px;}.conversation-thread{padding:16px;}.composer{padding:12px 16px;}}
   @container(max-width:680px){
     .conversation{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto auto;}

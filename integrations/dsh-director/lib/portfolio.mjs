@@ -1,13 +1,15 @@
-/** The steward's view across projects, its own inbox page and its handoff (plugin step 12,
+/** The steward's view across projects, its own inbox pages and its handoff (plugin step 12,
  *  design-steward 4). Registered only for what the host provides (host.d.ts v1.2 `portfolio`,
- *  `handoff`), and the inbox reader only when the host's portfolio offers it; which role is
+ *  `handoff`), and each inbox reader only when the host's portfolio offers it; which role is
  *  shown them is roles.json's business. Every read is the host's: this file adds no reading of
  *  its own, so the host's read rules are the only ones.
  *
- *  The inbox reader exists because a wake carries only the first 240 characters of every
- *  message body: anything longer than that is unread until it is fetched whole. Its bounds are
- *  in its description, and the host states the same numbers back in every answer (`limits`), so
- *  a steward can tell what it was and was not shown.
+ *  The inbox readers exist because a wake carries only the first 240 characters of every
+ *  message body: anything longer than that is unread until it is fetched whole - in the
+ *  steward's project inbox (`portfolio_inbox`) and in its private driver inbox
+ *  (`private_inbox`). Both have the same bounds, stated in their descriptions, and the host
+ *  states the same numbers back in every answer (`limits`), so a steward can tell what it was
+ *  and was not shown.
  *
  *  The steward's inbox writes are registered the same way, only when the host's portfolio
  *  acknowledges: a wake re-injects every unread delivery, so acknowledging one is the only
@@ -19,10 +21,11 @@
 export const PORTFOLIO_TOOLS = ['portfolio_projects', 'portfolio_project', 'portfolio_conversation', 'portfolio_inbox'];
 
 /** @param portfolio host.portfolio: { projects(signal), project(id, signal), conversation(id, cursor, signal),
- *    inbox(page, signal), acknowledge({ deliveryId, version }, signal),
+ *    inbox(page, signal), privateInbox(page, signal), acknowledge({ deliveryId, version }, signal),
  *    acknowledgePrivate({ deliveryId, version }, signal) } - all optional; without `inbox`
- *    the reader is not registered, without `acknowledge` neither is the project-inbox write,
- *    without `acknowledgePrivate` neither is the private-inbox one.
+ *    the project reader is not registered, without `privateInbox` neither is the private one,
+ *    without `acknowledge` neither is the project-inbox write, without `acknowledgePrivate`
+ *    neither is the private-inbox one.
  *  @param handoff host.handoff: ({ projectId, text, citesUserMessageId }, signal) => result */
 export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio, handoff }) {
   const projectId = { type: 'string', required: true };
@@ -48,6 +51,17 @@ export function registerPortfolioTools(scope, { defineTool, jsonOutput, portfoli
         limit: { type: 'integer', description: 'deliveries to return; at most 5, and fewer when an answer would pass its cap' } },
       output: jsonOutput,
       execute: (args, exec) => portfolio.inbox({ after: args.after, limit: args.limit }, exec.signal),
+    }));
+    // The same reader, one inbox over: a letter delivered to the steward's PRIVATE driver
+    // inbox. A wake shows only the first 240 characters of a private letter too, so this is
+    // the only way to read one whole before answering it. Same bounds, same self-describing
+    // answer, same single read; nothing is acknowledged or changed.
+    if (portfolio.privateInbox) scope.tools.register(defineTool({ name: 'private_inbox',
+      description: 'One page of the letters delivered to your own private inbox, oldest delivery first, whole: every delivery\'s id and seq (delivery_id, delivery_seq), message id, subject, sender (sender_driver_id, the driver that sent it), time, status, version and its body. A wake shows you only the first 240 characters of a letter, so read it whole here before you answer it. One call holds at most 5 deliveries, one body at most 8000 characters, and the whole answer is capped at 24000 characters: a longer body comes back with its true body_chars and body_truncated, and a longer page answers with matched_total, has_more and next_after, which you pass back as after for the next page. Read-only: nothing is acknowledged or changed, and only deliveries addressed to you are in it.',
+      parameters: { after: { type: 'integer', description: 'the last delivery seq you have read; omit to start at the first delivery' },
+        limit: { type: 'integer', description: 'deliveries to return; at most 5, and fewer when an answer would pass its cap' } },
+      output: jsonOutput,
+      execute: (args, exec) => portfolio.privateInbox({ after: args.after, limit: args.limit }, exec.signal),
     }));
     // One inbox write, and only for a delivery in the steward's own inbox: the wake
     // carries each delivery's id and version, and an acknowledged delivery's body is

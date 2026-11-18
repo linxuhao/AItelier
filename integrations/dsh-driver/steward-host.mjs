@@ -2,32 +2,70 @@ import { createHash } from 'node:crypto';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
- *  (which includes the steward's own inbox page, read whole) and the handoff, all over
- *  State reads and the State writes the steward is allowed (send_user_message is
- *  runtime.mjs's tool; send_director_message is the handoff; acknowledge_director_message
- *  settles one delivery in its own PROJECT inbox, acknowledge_driver_message marks one
- *  read in its own PRIVATE inbox, and nothing else).
+ *  (which includes the steward's own inbox pages, read whole: its project inbox and its
+ *  private driver inbox) and the handoff, all over State reads and the State writes the
+ *  steward is allowed (send_user_message is runtime.mjs's tool; send_director_message is
+ *  the handoff; acknowledge_director_message settles one delivery in its own PROJECT inbox,
+ *  acknowledge_driver_message marks one read in its own PRIVATE inbox, and nothing else).
  *
  *  `request(path, body, signal)` is the runtime's authenticated State caller. */
 
 /** How many conversation pages a sync or an owner-message check reads at most. */
 const PAGE = 100, MAX_PAGES = 10, OWNER_CHECK_PAGES = 5;
 
-/** The bounds of the steward's inbox reader (`portfolio.inbox`), stated in its tool
- *  description by the plugin (dsh-director/lib/portfolio.mjs) and echoed in every answer
- *  as `limits`. They exist because a wake injects only the first 240 characters of each
- *  body (runtime.mjs): one call must be able to read a long message whole without letting
- *  a page of long messages flood the steward's context. A body past `body_chars` comes
- *  back clipped and flagged with its true size; a page past `items_per_page`, or one whose
+/** The bounds of the steward's two inbox readers (`portfolio.inbox` for a project letter,
+ *  `portfolio.privateInbox` for a private one), stated in their tool descriptions by the
+ *  plugin (dsh-director/lib/portfolio.mjs) and echoed in every answer as `limits`. They
+ *  exist because a wake injects only the first 240 characters of each body (runtime.mjs,
+ *  in either inbox): one call must be able to read a long message whole without letting a
+ *  page of long messages flood the steward's context. A body past `body_chars` comes back
+ *  clipped and flagged with its true size; a page past `items_per_page`, or one whose
  *  bodies would pass `answer_chars`, is cut and counted. */
 export const INBOX_LIMITS = Object.freeze({ items_per_page: 5, body_chars: 8000, answer_chars: 24000 });
 
-/** One delivery of the steward's inbox: its delivery identity and the whole stored body,
- *  the way `list_director_messages` carries it. The body is clipped only past the per-body
- *  bound, and then it says its true `body_chars` and `body_truncated`. */
+/** One stored body, whole up to the per-body bound: past it, clipped and flagged with its
+ *  true `body_chars`. The one place either reader clips a body. */
+function wholeBody(value) {
+  const body = typeof value === 'string' ? value : value == null ? '' : String(value);
+  return { body_chars: body.length,
+    ...(body.length > INBOX_LIMITS.body_chars ? { body_truncated: true } : {}),
+    body: body.length > INBOX_LIMITS.body_chars ? body.slice(0, INBOX_LIMITS.body_chars) : body };
+}
+
+/** The cursor a page read starts at and the page size it asks for, narrowed to the stated
+ *  bounds: an `after` that is not a number starts at the first delivery, and a `limit` is
+ *  between 1 and `INBOX_LIMITS.items_per_page`. One narrowing for both inboxes. */
+function inboxBounds(after, limit) {
+  const start = Number.isFinite(Number(after)) ? Math.max(0, Math.trunc(Number(after))) : 0;
+  const want = Number.isFinite(Number(limit))
+    ? Math.min(Math.max(Math.trunc(Number(limit)), 1), INBOX_LIMITS.items_per_page) : INBOX_LIMITS.items_per_page;
+  return { start, want };
+}
+
+/** One page of already-read deliveries as the bounded answer both readers give. `matched`
+ *  is what the cursor has left (a remainder: the query counts the deliveries after it);
+ *  `extra` names the box the page came from. One call must not flood the steward's
+ *  context, so the answer keeps the oldest deliveries that fit `answer_chars` and lets the
+ *  cursor say where the next call resumes - and it states every cut it made
+ *  (`matched_total`, `has_more`, `next_after`, `items_omitted`) instead of clipping
+ *  silently. */
+function boundedInboxPage(items, matched, extra) {
+  const answer = (kept, omitted = 0) => ({ ...extra, items: kept, matched_total: matched,
+    has_more: matched > kept.length,
+    next_after: matched > kept.length ? kept.at(-1)?.delivery_seq ?? null : null,
+    items_omitted: omitted, limits: { ...INBOX_LIMITS } });
+  let kept = items, built = answer(kept);
+  while (JSON.stringify(built).length > INBOX_LIMITS.answer_chars && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    built = answer(kept, items.length - kept.length);
+  }
+  return built;
+}
+
+/** One delivery of the steward's project inbox: its delivery identity and the whole stored
+ *  body, the way `list_director_messages` carries it (nested message + delivery). */
 function inboxItem(row) {
   const message = row?.message ?? {}, delivery = row?.delivery ?? {};
-  const body = typeof message.body === 'string' ? message.body : message.body == null ? '' : String(message.body);
   const seq = Number(delivery.delivery_seq);
   return {
     delivery_id: delivery.delivery_id ?? null,
@@ -38,9 +76,25 @@ function inboxItem(row) {
     created_at: message.created_at ?? null,
     status: delivery.status ?? null,
     version: delivery.version ?? null,
-    body_chars: body.length,
-    ...(body.length > INBOX_LIMITS.body_chars ? { body_truncated: true } : {}),
-    body: body.length > INBOX_LIMITS.body_chars ? body.slice(0, INBOX_LIMITS.body_chars) : body,
+    ...wholeBody(message.body),
+  };
+}
+
+/** One delivery of the steward's PRIVATE inbox, the way `list_driver_messages` carries it:
+ *  a flat row (the delivery's columns plus the message's readable ones), addressed to one
+ *  driver. `sender_driver_id` is the driver that sent it, and a system notice has none. */
+function privateInboxItem(row) {
+  const seq = Number(row?.seq ?? row?.delivery_seq);
+  return {
+    delivery_id: row?.delivery_id ?? null,
+    delivery_seq: Number.isFinite(seq) ? seq : null,
+    message_id: row?.message_id ?? null,
+    subject: row?.subject ?? null,
+    sender_driver_id: row?.sender_driver_id ?? null,
+    created_at: row?.created_at ?? null,
+    status: row?.status ?? null,
+    version: row?.version ?? null,
+    ...wholeBody(row?.body),
   };
 }
 
@@ -288,8 +342,8 @@ export const stewardTexts = Object.freeze({
   idleDormant: 'Call when nothing is waiting for you: your owner\'s messages are answered and no director letter needs a reply. Nothing is expected of you until your owner or a director writes; any owner message, director letter or proposal result wakes you. wake_after_minutes is how long you sleep before you look again. Compacts a large context once. Refused while your owner has a message you have not answered.',
   askOwner: 'Ask your owner ONE concrete question only they can decide (a choice, an approval). question_id is yours (1-64 of letters, digits, . _ : -): the same id with the same question is a safe retry; another question under that id is refused. context is optional background shown with it. The answer comes back to you as a message from your owner. Use close_question when it no longer needs an answer.',
   closeQuestion: 'Take back one of your own questions to your owner that no longer needs an answer, with the reason; it stays visible as withdrawn. An answered question cannot be closed; closing twice changes nothing.',
-  continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, and read ones marked with portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in your private inbox)? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
-  reviewInstruction: 'Look again at your owner\'s conversation, your inbox (portfolio_inbox) and your open proposals: answer what waits on you, pass on what your owner asked you to pass on, and tell your owner what changed for them. ' + stewardAsk + ' If nothing waits, reply with one line that starts with NOTHING_LEFT: and call idle_dormant.',
+  continuationQuestion: 'Steward check: you ended a turn. Is every message from your owner answered with send_user_message? Is every director letter that needs it answered with reply_to_director, read whole first with portfolio_inbox (a project letter) or private_inbox (a letter in your private inbox) when a wake showed you only its first 240 characters, and read ones marked with portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in your private inbox)? Anything to pass on with handoff, propose, or keep with memory_note? Do it now; if nothing is left, answer with one line that starts with NOTHING_LEFT:. ' + stewardAsk,
+  reviewInstruction: 'Look again at your owner\'s conversation, your inboxes (portfolio_inbox for a project letter, private_inbox for a letter in your private inbox) and your open proposals: answer what waits on you, pass on what your owner asked you to pass on, and tell your owner what changed for them. ' + stewardAsk + ' If nothing waits, reply with one line that starts with NOTHING_LEFT: and call idle_dormant.',
 });
 
 /** The host texts the steward runs with: the director's, with every line that names a
@@ -336,9 +390,7 @@ export function stewardOps({ request, project, me }) {
        *  page starts (`next_after`) and what it did not show (`items_omitted`,
        *  `body_truncated`, `has_more`) instead of clipping silently. */
       async inbox({ after, limit } = {}, signal) {
-        const start = Number.isFinite(Number(after)) ? Math.max(0, Math.trunc(Number(after))) : 0;
-        const want = Number.isFinite(Number(limit))
-          ? Math.min(Math.max(Math.trunc(Number(limit)), 1), INBOX_LIMITS.items_per_page) : INBOX_LIMITS.items_per_page;
+        const { start, want } = inboxBounds(after, limit);
         const page = await list('/api/state/query/list_director_messages', { project_id: project,
           protocol_version: 'v3', statuses: ['unread', 'acknowledged'], after: start, limit: want }, signal);
         const rows = (Array.isArray(page.items) ? page.items : []).slice(0, want);
@@ -346,19 +398,29 @@ export function stewardOps({ request, project, me }) {
         // matched_total is a remainder, not the size of the whole inbox.
         const matched = Number.isInteger(page.matched_total)
           ? Math.max(page.matched_total, rows.length) : rows.length + (page.has_more === true ? 1 : 0);
-        const items = rows.map(inboxItem);
-        const answer = (kept, omitted = 0) => ({ project_id: project, items: kept, matched_total: matched,
-          has_more: matched > kept.length,
-          next_after: matched > kept.length ? kept.at(-1)?.delivery_seq ?? null : null,
-          items_omitted: omitted, limits: { ...INBOX_LIMITS } });
-        let kept = items, built = answer(kept);
-        // One call must not flood the steward's context: keep the oldest deliveries of the
-        // page that fit the answer bound, and let the cursor say where the next call resumes.
-        while (JSON.stringify(built).length > INBOX_LIMITS.answer_chars && kept.length > 1) {
-          kept = kept.slice(0, -1);
-          built = answer(kept, items.length - kept.length);
-        }
-        return built;
+        return boundedInboxPage(rows.map(inboxItem), matched, { project_id: project });
+      },
+      /** This steward's OWN private inbox (letters a director or another driver sent it),
+       *  one bounded page, bodies whole: the same reader as `inbox`, one box over. A wake
+       *  shows only the first 240 characters of a private letter's body, so a letter
+       *  longer than that is unread until it is fetched here.
+       *
+       *  Read-only: ONE list_driver_messages query naming this steward's own driver id, and
+       *  no write of any kind - nothing is acknowledged, replied to or resolved. A delivery
+       *  addressed to another driver is never in the answer: the query names this driver,
+       *  and every row is checked against it as well. `list_driver_messages` counts
+       *  nothing (`truncated` says only that more wait), so `matched_total` states what the
+       *  page proves - the rows read plus one when it says there are more - and `has_more`
+       *  with `next_after` is the cursor. */
+      async privateInbox({ after, limit } = {}, signal) {
+        const { start, want } = inboxBounds(after, limit);
+        const page = await list('/api/state/query/list_driver_messages', { driver_id: me, after: start, limit: want }, signal);
+        const rows = (Array.isArray(page.messages) ? page.messages : [])
+          .filter(row => row?.target_driver_id == null || row.target_driver_id === me)
+          .slice(0, want);
+        const matched = Number.isInteger(page.matched_total) ? Math.max(page.matched_total, rows.length)
+          : rows.length + (page.truncated === true ? 1 : 0);
+        return boundedInboxPage(rows.map(privateInboxItem), matched, { driver_id: me });
       },
       /** Acknowledge ONE delivery of this steward's OWN inbox: the wake states each
        *  delivery's id and version (projectInboxDigest), and State records the ack under

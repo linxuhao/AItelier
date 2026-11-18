@@ -14,7 +14,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, stewardTexts } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -78,8 +78,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-4), ['memory', 'portfolio', 'handoff', 'proposals']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
-    ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'project', 'projects'],
-    'the steward\'s own inbox page is one of the reads this host provides, and acknowledging a delivery is its one write per inbox');
+    ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
+    'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
   assert.doesNotThrow(() => validateHost(steward));
   const director = aitelierHost(env());
   assert.equal(director.config.rootRole, undefined);
@@ -225,14 +225,15 @@ function fakeInbox(bodies) {
   return { request, calls, deliveries };
 }
 
-/** The inbox reader exactly as the steward is given it: the delivered registered tool
- *  over the delivered adapter operations. */
+/** The inbox readers exactly as the steward is given them: the delivered registered
+ *  tools over the delivered adapter operations. */
 function stewardInboxTool(request) {
   const tools = new Map();
   registerPortfolioTools({ tools: { register: tool => tools.set(tool.name, tool) } },
     { defineTool: tool => tool, jsonOutput: {}, portfolio: stewardOps({ request, project: 'aitelier-home', me: 'drv-home' }).portfolio });
-  assert.deepEqual([...tools.keys()], [...PORTFOLIO_TOOLS, 'portfolio_inbox_acknowledge', 'private_inbox_acknowledge'],
-    'the steward host registers the four portfolio reads and one acknowledgement per inbox');
+  assert.deepEqual([...tools.keys()],
+    [...PORTFOLIO_TOOLS, 'private_inbox', 'portfolio_inbox_acknowledge', 'private_inbox_acknowledge'],
+    'the steward host registers the four portfolio reads, its two inbox readers and one acknowledgement per inbox');
   return tools.get('portfolio_inbox');
 }
 const toolCall = { signal: AbortSignal.timeout(5000) };
@@ -297,6 +298,145 @@ test('the inbox answer itself is bounded: a page of long bodies is cut and count
   assert.equal(answer.items_omitted, 5 - answer.items.length);
   assert.equal(answer.has_more, true);
   assert.equal(answer.next_after, answer.items.at(-1).delivery_seq, 'the cursor resumes after the last delivery it showed');
+});
+
+/** A fake State holding deliveries addressed to a driver exactly as
+ *  `list_driver_messages` returns them: FLAT rows (the delivery's columns plus the
+ *  message's readable ones), paged by the delivery seq, `truncated` when more wait. It
+ *  hands over every row it holds, including one addressed to another driver, so the
+ *  reader's own narrowing is what has to keep that one out - and it records every call,
+ *  so a write can be seen. */
+function privateDeliveries(rows) {
+  const calls = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path !== '/api/state/query/list_driver_messages') throw new Error('the private inbox reader called ' + path);
+    const mine = rows.filter(row => row.seq > body.after).sort((a, b) => a.seq - b.seq);
+    const page = mine.slice(0, body.limit);
+    return { result: { driver_id: body.driver_id, messages: page, truncated: mine.length > page.length,
+      next_after: page.length ? page.at(-1).seq : body.after } };
+  };
+  return { request, calls, rows };
+}
+const privateRow = (seq, over = {}) => ({ delivery_id: `dlv-${seq}`, message_id: `m-${seq}`, seq,
+  target_driver_id: 'drv-home', sender_driver_id: 'drv-plat', subject: `subject ${seq}`, body: `body ${seq}`,
+  created_at: `2026-11-17T10:${String(seq).padStart(2, '0')}:00Z`, status: 'unread', version: 1, ...over });
+
+/** The private inbox reader exactly as the steward is given it: the delivered registered
+ *  tool over the delivered adapter operations. */
+function stewardPrivateInboxTool(request) {
+  const tools = collectPortfolio({ portfolio: stewardOps({ request, project: 'aitelier-home', me: 'drv-home' }).portfolio });
+  const tool = tools.get('private_inbox');
+  assert.ok(tool, 'the steward host registers the private inbox reader');
+  return tool;
+}
+
+test('the private inbox reader: a letter longer than the injected excerpt comes back whole, byte for byte, with its true body_chars', async () => {
+  const stored = '0123456789abcdef'.repeat(117).slice(0, 1863);
+  assert.equal(stored.length, 1863);
+  assert.ok(stored.length > INBOX_EXCERPT_CHARS, 'longer than the excerpt a wake injects');
+  const state = privateDeliveries([privateRow(1, { body: stored }), privateRow(2, { body: 'tiny' })]);
+  const tool = stewardPrivateInboxTool(state.request);
+  const answer = await tool.execute({}, toolCall);
+  assert.equal(answer.driver_id, 'drv-home', 'the answer names the box it read');
+  assert.deepEqual(answer.items.map(item => item.delivery_seq), [1, 2], 'oldest delivery first');
+  const [first, second] = answer.items;
+  assert.equal(first.body, stored, 'the whole stored letter, not the 240-character excerpt');
+  assert.equal(first.body_chars, 1863, 'its true length, not the excerpt length');
+  assert.equal(first.body_truncated, undefined);
+  assert.deepEqual({ delivery_id: first.delivery_id, message_id: first.message_id, subject: first.subject,
+    sender_driver_id: first.sender_driver_id, created_at: first.created_at, status: first.status, version: first.version },
+  { delivery_id: 'dlv-1', message_id: 'm-1', subject: 'subject 1', sender_driver_id: 'drv-plat',
+    created_at: '2026-11-17T10:01:00Z', status: 'unread', version: 1 }, 'the delivery identity and its sender');
+  assert.equal(second.body, 'tiny', 'a short letter is unchanged');
+  assert.equal(second.body_chars, 4);
+  assert.equal(second.body_truncated, undefined);
+  assert.equal(answer.has_more, false);
+  assert.equal(answer.next_after, null);
+  // The bounds the description states are the bounds the answer reports, and they are the
+  // project reader's own constant - not a second set of numbers.
+  const stated = tool.description.match(/at most (\d+) deliveries, one body at most (\d+) characters, and the whole answer is capped at (\d+) characters/);
+  assert.ok(stated, tool.description);
+  assert.deepEqual(answer.limits, { items_per_page: Number(stated[1]), body_chars: Number(stated[2]), answer_chars: Number(stated[3]) });
+  assert.deepEqual(answer.limits, INBOX_LIMITS, 'the same INBOX_LIMITS as the project inbox reader');
+});
+
+test('the private inbox reader is the steward\'s own box: a letter addressed to another driver is not in the page, one query, no write', async () => {
+  const state = privateDeliveries([privateRow(1),
+    privateRow(2, { target_driver_id: 'drv-plat', delivery_id: 'dlv-other', message_id: 'm-other', sender_driver_id: 'drv-x' }),
+    privateRow(3)]);
+  const tool = stewardPrivateInboxTool(state.request);
+  const answer = await tool.execute({ after: 0, limit: 5 }, toolCall);
+  assert.deepEqual(answer.items.map(item => item.delivery_id), ['dlv-1', 'dlv-3'],
+    'only the deliveries addressed to this steward');
+  assert.equal(answer.items.some(item => item.delivery_id === 'dlv-other'), false);
+  assert.deepEqual(state.calls, [['/api/state/query/list_driver_messages', { driver_id: 'drv-home', after: 0, limit: 5 }]],
+    'exactly ONE query, naming the steward\'s own driver id, and no write of any kind');
+});
+
+test('the private inbox reader pages by delivery seq: 7 long letters come back 5 then 2, nothing repeated and nothing dropped', async () => {
+  // Longer than the wake excerpt, but a page of five still fits the answer bound: this
+  // witnesses the PER-PAGE cut, not the answer cap (which has its own test below).
+  const letter = n => `letter ${n}: `.padEnd(1200, String(n % 10));
+  const rows = Array.from({ length: 7 }, (_, i) => privateRow(i + 1, { body: letter(i + 1) }));
+  const state = privateDeliveries(rows);
+  const tool = stewardPrivateInboxTool(state.request);
+  const first = await tool.execute({}, toolCall);
+  assert.equal(first.items.length, 5, 'the per-page bound holds, though 7 are waiting');
+  assert.deepEqual(first.items.map(item => item.delivery_seq), [1, 2, 3, 4, 5]);
+  assert.ok(first.items.every(item => item.body === letter(item.delivery_seq)), 'every body whole');
+  assert.equal(first.has_more, true);
+  assert.equal(first.next_after, 5);
+  assert.equal(first.items_omitted, 0, 'the page bound cut nothing: the cursor resumes');
+  const second = await tool.execute({ after: first.next_after }, toolCall);
+  assert.deepEqual(second.items.map(item => item.delivery_seq), [6, 7]);
+  assert.equal(second.has_more, false);
+  assert.equal(second.next_after, null);
+  const read = [...first.items, ...second.items].map(item => item.delivery_id);
+  assert.deepEqual(read, rows.map(row => row.delivery_id), 'nothing repeated, nothing dropped');
+  assert.equal(new Set(read).size, 7);
+  assert.deepEqual(state.calls.map(([, body]) => [body.driver_id, body.after, body.limit]),
+    [['drv-home', 0, 5], ['drv-home', 5, 5]], 'the second page starts where the first said it would');
+});
+
+test('the private inbox reader: a body past the per-body bound is clipped and says its true body_chars', async () => {
+  const enormous = 'y'.repeat(9000);
+  const state = privateDeliveries([privateRow(1, { body: enormous })]);
+  const tool = stewardPrivateInboxTool(state.request);
+  const answer = await tool.execute({}, toolCall);
+  const [cut] = answer.items;
+  assert.equal(cut.body_chars, 9000, 'the true size of the stored body');
+  assert.equal(cut.body_truncated, true);
+  assert.equal(cut.body.length, answer.limits.body_chars);
+  assert.equal(cut.body, enormous.slice(0, answer.limits.body_chars));
+});
+
+test('the private inbox answer itself is bounded: a page of long letters is cut and counted, and its cursor still moves', async () => {
+  const state = privateDeliveries(Array.from({ length: 5 }, (_, i) => privateRow(i + 1, { body: 'z'.repeat(9000) })));
+  const tool = stewardPrivateInboxTool(state.request);
+  const answer = await tool.execute({}, toolCall);
+  assert.ok(JSON.stringify(answer).length <= answer.limits.answer_chars, 'one call cannot flood the steward\'s context');
+  assert.ok(answer.items.length >= 1 && answer.items.length < 5, 'fewer than the page asked for, not more than the cap');
+  assert.equal(answer.items_omitted, 5 - answer.items.length);
+  assert.equal(answer.has_more, true);
+  assert.equal(answer.next_after, answer.items.at(-1).delivery_seq, 'the cursor resumes after the last delivery it showed');
+  assert.ok(state.calls.every(([path]) => path === '/api/state/query/list_driver_messages'), 'read-only: one query, no acknowledgement, no write');
+});
+
+test('the private inbox reader is presented to the steward, and the steward\'s own texts name it where they say where to read', async () => {
+  const presented = new Set(aitelierRoles(table).steward.presented);
+  assert.ok(presented.has('private_inbox'), 'roles.json presents the private inbox reader to the steward');
+  assert.equal(refusal(aitelierRoles(table).steward, exec('private_inbox')), undefined);
+  const registered = ['private_inbox', 'portfolio_inbox', 'bash'].map(name => ({ name }));
+  assert.deepEqual(presentTools(registered, aitelierRoles(table).steward).map(t => t.name), ['private_inbox', 'portfolio_inbox']);
+  for (const role of ['director', 'worker'])
+    assert.ok(!aitelierRoles(table)[role].presented.includes('private_inbox'), role);
+  // The reader, not only the acknowledgement: a private letter must be readable whole.
+  for (const [key, text] of [['continuationQuestion', stewardTexts.continuationQuestion],
+    ['reviewInstruction', stewardTexts.reviewInstruction]]) {
+    assert.match(text, /private_inbox(?!_)/, key + ' names the private inbox reader');
+    assert.match(text, /portfolio_inbox(?!_)/, key + ' names the project inbox reader');
+  }
 });
 
 test('proposals (step 13): propose records one open proposal under a digest key; withdraw names the proposal; a refusal is an answer', async () => {
@@ -628,8 +768,8 @@ test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the direc
   // `named` above is filtered by `anyTool`, which is itself built from that table, so a tool
   // the table loses drops out of the comparison and goes quiet instead of red (measured
   // 2026-11-18: deleting private_inbox_acknowledge from roles.json reds nothing without this).
-  for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox_acknowledge',
-    'private_inbox_acknowledge', 'handoff', 'ask_owner']) {
+  for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox', 'private_inbox',
+    'portfolio_inbox_acknowledge', 'private_inbox_acknowledge', 'handoff', 'ask_owner']) {
     assert.ok(steward.continuationQuestion.includes(tool) || steward.askTheUser.includes(tool), tool);
     assert.ok(presented.has(tool), 'roles.json and the adapter present ' + tool);
   }

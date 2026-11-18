@@ -40,6 +40,37 @@ test('portfolio, the inbox reader and handoff: registered for what the host prov
   assert.match(description, /Read-only/);
 });
 
+test('the private inbox reader: registered only for a host that provides it, its bounds in the description, the call passed through', async () => {
+  const calls = [];
+  const portfolio = { privateInbox: async page => (calls.push(['privateInbox', page]), 'PI') };
+  // A host whose portfolio does not read the private inbox gets no such tool - and saying
+  // so is not an error, whatever else the portfolio does provide.
+  const without = collect(registerPortfolioTools, { portfolio: {} });
+  assert.equal(without.has('private_inbox'), false);
+  const partial = collect(registerPortfolioTools, { portfolio: { inbox: async () => 'I' } });
+  assert.equal(partial.has('private_inbox'), false, 'the project reader does not imply the private one');
+  assert.ok(partial.has('portfolio_inbox'));
+  assert.doesNotThrow(() => collect(registerPortfolioTools, { portfolio }));
+  const tools = collect(registerPortfolioTools, { portfolio });
+  assert.deepEqual([...tools.keys()].filter(name => name !== 'private_inbox'),
+    PORTFOLIO_TOOLS.filter(name => name !== 'portfolio_inbox'), 'the project reads are the rest of it, nothing invented');
+  // The documented parameters: two optional integers.
+  const tool = tools.get('private_inbox');
+  assert.deepEqual(Object.keys(tool.parameters), ['after', 'limit']);
+  for (const name of ['after', 'limit']) {
+    assert.equal(tool.parameters[name].type, 'integer', name);
+    assert.equal(tool.parameters[name].required, undefined, `${name} is optional: the host states the bounds`);
+  }
+  assert.equal(await tool.execute({ after: 5, limit: 2 }, exec), 'PI');
+  assert.equal(await tool.execute({}, exec), 'PI');
+  assert.deepEqual(calls, [['privateInbox', { after: 5, limit: 2 }], ['privateInbox', { after: undefined, limit: undefined }]],
+    'the call reaches the host unchanged');
+  // Its bounds are in the description, where the model reads them, not only in the answer.
+  const description = tool.description;
+  for (const bound of ['5 deliveries', '8000 characters', '24000 characters']) assert.ok(description.includes(bound), bound);
+  assert.match(description, /Read-only/);
+});
+
 test('proposals: propose passes kind, payload, reason (and supersedes); an unknown kind never reaches the host', async () => {
   const calls = [];
   const proposals = { propose: async p => (calls.push(['propose', p]), { proposal_id: 'p-1' }), withdraw: async w => (calls.push(['withdraw', w]), { withdrawn: true }) };

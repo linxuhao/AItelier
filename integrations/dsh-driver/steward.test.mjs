@@ -689,6 +689,16 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
     await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), new RegExp(`HTTP ${status}`),
       'an auth failure without a code is still a failure, never a refusal');
   }
+  // Only a 400 or 422 is the request's own fault: any other codeless 4xx (a wrong route, a
+  // timeout, a conflict, a body the proxy took as too large, a busy server) is an error the
+  // channel tries again, never a final refusal of the owner's message.
+  for (const status of [404, 405, 408, 409, 413, 429])
+    for (const detail of ['"Not Found"', '']) {
+      thrown = failing(status, detail);
+      await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), new RegExp(`HTTP ${status}`),
+        `a codeless ${status} is not invalid_request`);
+      await assert.rejects(channels.recordDelivery({ messageId: 'm-1', channel: 'slack' }), new RegExp(`HTTP ${status}`));
+    }
   thrown = failing(503, '"busy"');
   await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 503/);
   // A 4xx that is not a channel refusal (a misconfigured token, say) is a failure to log, never hidden as one.

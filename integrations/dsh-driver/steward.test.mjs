@@ -397,8 +397,10 @@ test('inbox acknowledgement: the registered tool writes ONE acknowledge for the 
   assert.equal(readOnly.has('portfolio_inbox_acknowledge'), false);
 });
 
-/** A fake State holding one letter in each inbox and recording every write. */
-function letters() {
+/** A fake State holding one letter in each inbox and recording every write.
+ *  `refuse` makes the write answer the way the real server answers a refused request: a
+ *  200 whose inner result carries a code and a message (never a thrown error). */
+function letters({ refuse = null } = {}) {
   const writes = [];
   const request = async (path, body) => {
     if (path.endsWith('/list_director_messages')) return { result: { items: [{ message: { message_id: 'm1', subject: 'Steward boot',
@@ -406,6 +408,8 @@ function letters() {
     if (path.endsWith('/list_driver_messages')) return { driver_id: 'drv-home', truncated: false, next_after: 1,
       messages: [{ delivery_id: 'd-priv', version: 1, status: 'unread', subject: 'ping', sender_driver_id: 'drv-plat' }] };
     writes.push([path.split('/').at(-1), body]);
+    if (refuse) return { result: { schema: 'aitelier.director-messaging.v3', code: refuse,
+      detail: { message: 'target_project_id / broadcast / reply_to_delivery_id: choose exactly one destination; replies omit target_project_id' } } };
     return { result: { ok: true } };
   };
   return { request, writes, base: { request, project: 'aitelier-home', me: 'drv-home' } };
@@ -416,9 +420,13 @@ test('letters (owner 2026-11-17): a reply goes back to the sender in either inbo
   assert.deepEqual(await replyToLetter({ ...base, inbox: 'project', deliveryId: 'd-proj', text: '收到，已读完整封信' }),
     { replied: true, inbox: 'project', to: 'aitelier', ok: true });
   assert.deepEqual(writes[0][0], 'send_director_message');
+  // ONE destination: the cited delivery. Sending target_project_id as well is refused by
+  // the real server with invalid_request (measured 2026-11-17, iss-8ba3f8ce4b254704), so
+  // the assertion is that the key is absent, not that it names the same sender.
+  assert.equal('target_project_id' in writes[0][1], false, 'a reply omits target_project_id');
   assert.deepEqual({ ...writes[0][1], request_key: undefined }, { protocol_version: 'v3', sender_project_id: 'aitelier-home',
     director_identity: 'drv-home', request_key: undefined, subject: 'Re: Steward boot', body: '收到，已读完整封信',
-    target_project_id: 'aitelier', reply_to_delivery_id: 'd-proj' });
+    reply_to_delivery_id: 'd-proj' });
   await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted' });
   assert.deepEqual(writes[1], ['send_driver_message', { request_key: writes[1][1].request_key, subject: 'Re: ping', body: 'noted',
     target_driver_id: 'drv-plat', reply_to_delivery_id: 'd-priv' }]);
@@ -428,6 +436,20 @@ test('letters (owner 2026-11-17): a reply goes back to the sender in either inbo
   assert.equal((await replyToLetter({ ...base, inbox: 'email', deliveryId: 'd-proj', text: 'x' })).refused, 'unknown_inbox');
   assert.equal((await replyToLetter({ ...base, inbox: 'project', deliveryId: 'd-proj', text: ' ' })).refused, 'empty_text');
   assert.equal(writes.length, 2);
+});
+
+test('a refused reply is not reported as sent: a 200 with a code inside the result is a refusal in either inbox', async () => {
+  for (const [inbox, deliveryId, command] of [['project', 'd-proj', 'send_director_message'],
+                                             ['private', 'd-priv', 'send_driver_message']]) {
+    const { writes, base } = letters({ refuse: 'invalid_request' });
+    const answer = await replyToLetter({ ...base, inbox, deliveryId, text: '收到' });
+    assert.equal(writes.length, 1, `${inbox}: the write was attempted`);
+    assert.equal(writes[0][0], command);
+    assert.equal(answer.replied, undefined, `${inbox}: a refusal must not claim a sent reply`);
+    assert.equal(answer.refused, 'invalid_request', `${inbox}: the refusal names the server's code`);
+    assert.match(String(answer.reason), /choose exactly one destination|one destination/,
+      `${inbox}: the server's own message is carried, so the steward can act on it`);
+  }
 });
 
 test('every owner message gets an answer: the unanswered ones; the last words of a finished turn go to the owner; dormancy is held', async () => {

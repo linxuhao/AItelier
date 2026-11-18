@@ -101,6 +101,10 @@ CODE_TTL = timedelta(minutes=10)
 # code (code_retired until the owner issues a new one): a stranger gets at most this
 # many guesses at a code, whoever relays them.
 BIND_FAILURES_MAX = 5
+# How long a binding attempt is kept to answer its redelivery as a duplicate: far past
+# any channel's replay (a bridge restart replays its last ~10 minutes). Older attempts
+# are deleted by the next binding attempt, so the table does not grow for good.
+BIND_ATTEMPTS_KEPT = timedelta(days=1)
 # An approval phrase written (on the channel) longer ago than this decides nothing
 # (approval_too_old): a channel that delivers late - a bridge that logs in again and
 # drains what was written while it was down - must not execute an old decision.
@@ -359,6 +363,8 @@ class StateChannels:
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
+            conn.execute("DELETE FROM state_owner_channel_bind_attempts WHERE at<?",
+                         ((_now() - BIND_ATTEMPTS_KEPT).isoformat(),))
             # Before the request_key replay: a binding message delivered again - also after
             # the channel was bound to another account since - is answered as the duplicate
             # it is ({bound: true, duplicate: true}, or its refusal), never as a fresh bind,

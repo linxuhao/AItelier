@@ -234,6 +234,23 @@ def test_a_refused_guess_delivered_again_is_not_counted_again(world):
     assert conversation(world) == []
 
 
+def test_binding_attempts_older_than_a_day_are_deleted_by_the_next_attempt(world):
+    """The attempts table was never pruned: every binding message ever relayed stayed."""
+    code = world.owner.channels.issue_code("slack")["code"]
+    assert bind_message(world, code, "ts-recent")["bound"]
+    old = (state_channels._now() - state_channels.BIND_ATTEMPTS_KEPT - timedelta(minutes=1)).isoformat()
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,outcome,at) "
+                     "VALUES('slack','U-OLD','ts-old','invalid_code',?)", (old,))
+        conn.commit()
+    refused(lambda: bind_message(world, "000000", "ts-new", sender="U-STRANGER"), "invalid_code")
+    with world.db.get_connection() as conn:
+        refs = {r[0] for r in conn.execute("SELECT channel_message_ref FROM state_owner_channel_bind_attempts")}
+    assert refs == {"ts-recent", "ts-new"}, "the day-old attempt is gone, the recent ones stay"
+    assert bind_message(world, code, "ts-recent", key="again") == {"bound": True, "channel": "slack",
+                                                                   "sender_ref": SLACK_USER, "duplicate": True}
+
+
 def test_a_new_code_retires_the_unused_one_and_a_rebind_replaces_the_account(world):
     first = world.owner.channels.issue_code("slack")["code"]
     world.owner.channels.issue_code("slack")

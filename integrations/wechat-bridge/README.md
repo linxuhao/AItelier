@@ -61,6 +61,11 @@ not start (exit 78) and the plugin stays disabled.
   listens on port 18731 on `0.0.0.0`
   (`WECHAT_BRIDGE_BIND`, set by the image; the bridge accepts `0.0.0.0` only inside a
   container and otherwise listens on `127.0.0.1`);
+- on its own Docker network, `aitelier-wechat-bridge` (`run.sh` creates it when it is
+  missing), not Docker's default bridge: inside, the bridge listens on `0.0.0.0`, and on
+  the default bridge every other container on `docker0` could reach it with only the
+  token in the way. No other container shares its network. Processes on the host can
+  still reach the container's own address on that network; the token guards that;
 - the token file read-only is the only host mount; outbound network is allowed (WeChat's
   servers);
 - `--restart on-failure:5`.
@@ -86,7 +91,12 @@ Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API and nev
 starts the puppet. With the `run.sh` flags, a throwaway token and host port 18741, on
 2026-11-18 `GET /status` answered `200 {"logged_in":false,...}`, without the token `401`,
 `/events` `200`, `/send` `409 not_logged_in`, and the root filesystem refused writes
-(log: `s19-wechat-image-startcheck.txt` next to the build log).
+(log: `s19-wechat-image-startcheck.txt` next to the build log). The same check of
+`run.sh` itself with its own network (host port 18753, `WECHAT_BRIDGE_SKIP_LOGIN=1` added
+to `docker run` by a stand-in `docker`): the container was on `aitelier-wechat-bridge`
+only, `/status` answered `200` with the token and `401` without, a container on the
+default bridge could not connect to the bridge's address, and a second start reused the
+network (log: `s19-sf-b-bridge-smoke.txt`).
 
 ## API
 
@@ -113,6 +123,19 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   body_too_large` (over 64 KiB), `502 send_failed`.
 
 Message texts are never logged.
+
+## Accepted risks
+
+- Approval power over chat rests on the steward host's driver token. A process running
+  as the same user that holds it could relay an approval phrase in-protocol with false
+  attribution (recorded as decided by the owner on a channel). Under the current
+  same-user trust model this is no new boundary: such a process could already write
+  `aitelier.db`. A later hardening is a separate, host-only credential for the channel
+  commands.
+- A stranger who can message the bot can retire a live binding code with 5 wrong
+  guesses. It cannot take the binding over (5 guesses in 10^6), the refusals are in the
+  log with the sender, and the owner just issues a new code.
+- Token files (this bridge's, the Slack tokens) should be mode 0600; nothing enforces it.
 
 ## Tests
 

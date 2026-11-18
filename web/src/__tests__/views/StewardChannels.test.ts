@@ -3,6 +3,8 @@
  *  - the steward pane has a Channels tab: each channel shows its bound account or
  *    "not bound", and the host's status when it reported one (with its time); a WeChat
  *    login QR is an <img> of a data URL, never markup, with the scan line;
+ *  - while a channel is not connected and the tab is visible, the list is re-read
+ *    every 15 s, so a login QR that appears later shows without a reload;
  *  - Bind asks the backend for a one-time code and shows it with a countdown and
  *    the instruction; the code goes away once the list shows a new binding;
  *  - Unbind asks first; the default-channel selector PUTs the choice (or null);
@@ -161,6 +163,55 @@ describe('the channels tab', () => {
     expect(api.listOwnerChannels).toHaveBeenCalledTimes(calls);
   });
 
+  it('a login QR that first appears after the tab loaded shows on a slow re-read while a channel is not connected', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
+    expect(card(view.container, 'wechat').querySelector('[data-channel-qr]')).toBeNull();
+    // Slower than the bind-code re-read: nothing at 10 s.
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
+    const scanning = channels();
+    scanning.channels[1] = {...scanning.channels[1], qr_svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>'};
+    api.listOwnerChannels.mockResolvedValue(scanning);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr] img')).not.toBeNull());
+  });
+
+  it('with every channel connected the list is not re-read', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
+    const connected = channels();
+    connected.channels[1] = {...connected.channels[1], status: {connected: true}};
+    api.listOwnerChannels.mockResolvedValue(connected);
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-status]')?.getAttribute('data-channel-status'))
+      .toBe('connected'));
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hidden tab does not re-read slowly, and a destroyed view stops re-reading', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      const view = render(StewardChannels);
+      await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue('visible');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(api.listOwnerChannels).toHaveBeenCalledTimes(2);
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(api.listOwnerChannels).toHaveBeenCalledTimes(2);
+    } finally { visibility.mockRestore(); }
+  });
+
   it('Bind shows the one-time code, the instruction and a countdown to its expiry', async () => {
     vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
     vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
@@ -191,8 +242,9 @@ describe('the channels tab', () => {
     const view = render(StewardChannels);
     await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
     expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
-    // No code live: the clock ticks without re-reading.
-    await vi.advanceTimersByTimeAsync(20000);
+    // No code live: the clock ticks without the fast re-read (WeChat is not connected,
+    // so the slow one would come at 15 s).
+    await vi.advanceTimersByTimeAsync(10000);
     expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
     await fireEvent.click(within(card(view.container, 'wechat')).getByRole('button', {name: 'Bind'}));
     await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-code]')).not.toBeNull());

@@ -43,6 +43,22 @@ resolved from the running DSH entry, not from this directory. `@slack/socket-mod
 needs `undici`, which it declares as a peer dependency (`^7 || ^8`); npm 7+ installs peer
 dependencies itself, so it needs no pin of its own (the lock has 8.11.2).
 
+## Accepted risks
+
+These hold for every owner channel (Slack and WeChat):
+
+- Approval power over chat rests on the steward host's driver token. A process running
+  as the same user that holds it could relay an approval phrase in-protocol with false
+  attribution (recorded as decided by the owner on a channel). Under the current
+  same-user trust model this is no new boundary: such a process could already write
+  `aitelier.db`. A later hardening is a separate, host-only credential for the channel
+  commands.
+- A stranger who can DM the bot can retire a live binding code with 5 wrong guesses. It
+  cannot take the binding over (5 guesses in 10^6), the refusals are in the log with the
+  sender, and the owner just issues a new code.
+- Token files (`slack-app-token`, `slack-bot-token`, `wechat-bridge-token`) should be
+  mode 0600; nothing enforces it.
+
 ## Tests
 
 `node --test --test-concurrency=1 test/slack.test.mjs` - fake socket and web clients, no

@@ -72,6 +72,27 @@ class CloseProject(Project):
     pass
 
 
+class ArchiveProject(Project):
+    """Hide ONE project from the owner's project list; every row is kept.
+
+    The OWNER's door (`archive-is-an-owner-door`): it is accepted only with the
+    credential the dashboard/owner path uses, i.e. the same admin verdict
+    `retire_context_run_protection` is documented with, and a driver credential
+    is refused BY NAME rather than silently doing nothing.
+    """
+
+    reason: str | None = Field(default=None, max_length=4000, description=(
+        "Why this project is being hidden, recorded on the access row and in the "
+        "project_archived event. Presentation/history only; it grants nothing."))
+
+
+class UnarchiveProject(Project):
+    """The counterpart of `ArchiveProject`: list the project again, unchanged."""
+
+    reason: str | None = Field(default=None, max_length=4000, description=(
+        "Optional note for the project_unarchived event; it grants nothing."))
+
+
 class ProjectVisibility(Project):
     pass
 
@@ -988,6 +1009,9 @@ class ProjectCatalog(Request):
     repo_path: str | None = None
     after: str = ""
     limit: int = 100
+    include_archived: bool = Field(default=False, description=(
+        "Owner listing only: include projects the owner archived. The anonymous "
+        "listing never applies the archive filter, so this changes nothing there."))
 
 
 class ProjectAttempts(Project):
@@ -1334,6 +1358,7 @@ WRITE_REQUESTS = {
     "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
     "open_project": OpenProject, "close_project": CloseProject,
+    "archive_project": ArchiveProject, "unarchive_project": UnarchiveProject,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
     "set_node_priority": SetNodePriority,
     "start_attempt": StartAttempt, "request_attempt_base": RequestAttemptBase,
@@ -1673,6 +1698,8 @@ def _handlers(service) -> dict:
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "open_project": service.open_project, "close_project": service.close_project,
+        "archive_project": service.portfolio.archive_project,
+        "unarchive_project": service.portfolio.unarchive_project,
         "project_visibility": service.project_visibility,
         "revise_node": service.revise_node, "split_node": service.split_node,
         "supersede_node": service.supersede_node, "set_node_facet": service.set_node_facet,
@@ -1738,6 +1765,7 @@ def _director_schema(service):
 # project-level administration must name the project they act on.
 _NO_PROJECT_DEFAULT = frozenset({
     "create_project", "open_project", "close_project", "refresh_project",
+    "archive_project", "unarchive_project",
     "retire_context_run_protection", "set_dispatch", "bind_source", "import_tasks"})
 
 

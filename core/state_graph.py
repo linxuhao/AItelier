@@ -412,7 +412,33 @@ CREATE TABLE IF NOT EXISTS state_project_access (
     opened_by TEXT, opened_at TEXT, changed_by TEXT NOT NULL, changed_at TEXT NOT NULL,
     FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
 );
+-- The owner's ARCHIVE of one project's listing (ARCHIVED_PROJECT_SQL). A single
+-- row per project: `archived` is the state, the rest is who decided it, when and
+-- why. Unarchiving flips the flag back and keeps the row, so neither direction
+-- deletes anything - absence of a row is simply "not archived", the same
+-- default-by-absence the access table above uses. Created additively: a database
+-- written by the previous code gains an EMPTY table and therefore an identical
+-- project list.
+CREATE TABLE IF NOT EXISTS state_project_archive (
+    project_id TEXT PRIMARY KEY,
+    archived INTEGER NOT NULL CHECK(archived IN (0,1)),
+    reason TEXT NOT NULL, actor TEXT NOT NULL, updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
+);
 """
+
+# A project is ARCHIVED while its `state_project_archive` row says so. The row
+# is the owner's LISTING decision - recorded with who decided, when and why, like
+# `state_project_access` beside it - and nothing else in the database moves: every
+# state_projects, state_nodes, state_attempts, state_evidence and access row stays
+# exactly where it is, and get_project / get_graph / project_overview keep
+# resolving. It is deliberately NOT a third visibility: archiving is not
+# unpublishing (`close_project` is), which is why the predicate below is applied
+# by the TRUSTED listing only and the public listing keeps its untouched SQL. And
+# it is its own table rather than a column, so the one-writer rule the access
+# table is tested for ("only set_project_access writes it") still holds.
+ARCHIVED_PROJECT_SQL = ("NOT EXISTS(SELECT 1 FROM state_project_archive a "
+                        "WHERE a.project_id=p.project_id AND a.archived=1)")
 
 
 def _refuse_issue_work_edges(nodes: dict, deps) -> None:
@@ -617,17 +643,23 @@ class StateGraphStore:
         On an untrusted store ``public_only`` is always on, whatever the caller
         passes: silence is not trust, and an undeclared store - the one a
         rebuilt leaf would hand out - cannot name a project nobody opened. A
-        trusted store lists everything unless asked otherwise. With ``public_only``,
-        visibility is part of the SQL itself: the rows an anonymous caller must
-        not know about are excluded BEFORE any caller pages or counts, so a
-        page's size, cursor and emptiness are byte-identical whether or not
-        private projects exist in this database."""
+        trusted store lists everything it has not been asked to hide: an
+        ARCHIVED project (``ARCHIVED_PROJECT_SQL``) is left out of the TRUSTED
+        answer, because hiding it from the owner's own list is the whole point of
+        archiving. With ``public_only``, visibility is part of the SQL itself:
+        the rows an anonymous caller must not know about are excluded BEFORE any
+        caller pages or counts, so a page's size, cursor and emptiness are
+        byte-identical whether or not private projects exist in this database.
+        The PUBLIC answer is deliberately the same SQL it was before archiving
+        existed: archiving is not unpublishing.
+        """
         if not self.project_read_trusted:
             public_only = True
         elif public_only is None:
             public_only = False
         where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "
-                 "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only else ""
+                 "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only \
+            else f"WHERE {ARCHIVED_PROJECT_SQL}"
         with self.transaction() as conn:
             return [dict(r) for r in conn.execute(
                 f"SELECT * FROM state_projects p {where} ORDER BY p.project_id")]
@@ -678,7 +710,11 @@ class StateGraphStore:
     def set_project_access(self, project_id: str, visibility: str, actor: str) -> dict:
         """The ONLY writer of the visibility table, so no other action can open a
         project as a side effect. Recording who and when makes it a decision,
-        not a flag; closing is the same kind of recorded write."""
+        not a flag; closing is the same kind of recorded write.
+
+        Archiving is the other listing decision and deliberately does NOT share
+        this table: `set_project_archive` writes `state_project_archive`, so this
+        rule keeps holding and an archive can never open or close a project."""
         if visibility not in {"private", "public"}:
             raise StateGraphError("visibility must be 'private' or 'public'")
         pid = key(project_id)
@@ -702,6 +738,61 @@ class StateGraphStore:
                         "project_opened" if visibility == "public" else "project_closed",
                         {"visibility": visibility, "actor": actor})
             return self._access(conn, pid)
+
+    def is_project_archived(self, project_id: str) -> bool:
+        """Whether the owner has archived this project's listing entry."""
+        with self.transaction() as conn:
+            return self._archived(conn, project_id)
+
+    @staticmethod
+    def _archived(conn, project_id) -> bool:
+        row = conn.execute("SELECT archived FROM state_project_archive WHERE project_id=?",
+                           (key(project_id),)).fetchone()
+        return bool(row and row["archived"])
+
+    def _archive_record(self, conn, project_id, changed: bool) -> dict:
+        row = conn.execute("SELECT * FROM state_project_archive WHERE project_id=?",
+                           (key(project_id),)).fetchone()
+        record = {} if row is None else {key_: row[key_] for key_ in
+                                         ("project_id", "reason", "actor", "updated_at")}
+        return {**record, "project_id": key(project_id),
+                "archived": bool(row and row["archived"]), "changed": changed}
+
+    def set_project_archive(self, project_id: str, archived: bool, actor: str, reason: str = "") -> dict:
+        """Record (or clear) the owner's ARCHIVE of one project's listing.
+
+        The sibling of ``set_project_access`` - a recorded LISTING decision, not a
+        change to any project fact: the node, attempt, evidence, dependency and
+        access rows are untouched, so an archived project keeps resolving through
+        ``get_project``/``get_graph``/``project_overview`` and is simply not
+        returned by ``list_projects`` (or, with the same predicate, the trusted
+        paged catalog). Unarchiving flips the flag back; the row records who
+        decided last, when and why, and the event log keeps every decision, so
+        neither direction deletes anything.
+
+        A decision that changes nothing is a no-op: the row and the event log are
+        left exactly as they were. It cannot open or close a project - this is a
+        different table from ``state_project_access``, whose visibility this write
+        never touches.
+        """
+        if type(archived) is not bool:
+            raise StateGraphError("archived must be a boolean")
+        actor = text(actor, "actor", 320)
+        pid = key(project_id)
+        stamp = now()
+        with self.transaction(write=True) as conn:
+            self._project(conn, pid)
+            if self._archived(conn, pid) == archived:
+                return self._archive_record(conn, pid, changed=False)
+            conn.execute(
+                "INSERT INTO state_project_archive(project_id,archived,reason,actor,updated_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET archived=excluded.archived,"
+                "reason=excluded.reason,actor=excluded.actor,updated_at=excluded.updated_at",
+                (pid, int(archived), reason, actor, stamp))
+            self._event(conn, pid, None,
+                        "project_archived" if archived else "project_unarchived",
+                        {"archived": archived, "reason": reason, "actor": actor})
+            return self._archive_record(conn, pid, changed=True)
 
     def project_for_attempt(self, attempt_id: str):
         with self.transaction() as conn:

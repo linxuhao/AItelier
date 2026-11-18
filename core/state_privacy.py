@@ -104,6 +104,15 @@ PUBLIC_STATE_TABLES = frozenset({
     "state_design_bindings", "state_issues", "state_issue_nodes",
     "state_project_policy", "state_project_enforcement", "state_node_holds", "state_source_bindings",
     "state_history_links",
+    # The owner's ARCHIVE of a project's listing (iss-174f3100129b457f): one row
+    # saying the owner hid this project from their own project list, with the
+    # reason, the actor and the time. It is the same KIND of record as
+    # `state_project_policy` beside it - project-level administrative policy,
+    # owner-supplied text included - and it is public for the same measured
+    # reason: no read ever surfaces it to an anonymous caller (the anonymous
+    # project listing deliberately does not apply the archive predicate), so it
+    # holds no row a public read can return and needs no projection of its own.
+    "state_project_archive",
 })
 
 

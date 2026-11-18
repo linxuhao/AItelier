@@ -159,10 +159,24 @@ export async function replyToLetter({ request, project, me, inbox, deliveryId, t
   const answer = inbox === 'private'
     ? request('/api/state/commands/send_driver_message', { request_key: key, subject, body: text.trim(),
       target_driver_id: letter.sender, reply_to_delivery_id: deliveryId }, signal)
+    // A reply names exactly ONE destination: the cited delivery. Sending target_project_id
+    // as well is refused ("choose exactly one destination; replies omit target_project_id"),
+    // and the server already derives the recipient from the letter the delivery belongs to.
     : request('/api/state/commands/send_director_message', { protocol_version: 'v3', sender_project_id: project,
-      director_identity: me, request_key: key, subject, body: text.trim(), target_project_id: letter.sender,
+      director_identity: me, request_key: key, subject, body: text.trim(),
       reply_to_delivery_id: deliveryId }, signal);
-  return answer.then(r => ({ replied: true, inbox, to: letter.sender, ...(r.result ?? r) }), refusedBy);
+  // A refusal can arrive as a 200 with isError=false and a code inside the result, so the
+  // answer decides the outcome: reported as a success, the steward believes a letter it
+  // never answered went out (measured 2026-11-17, issue iss-8ba3f8ce4b254704).
+  return answer.then(r => {
+    const result = r?.result ?? r ?? {};
+    const code = result.code ?? result.refused ?? result.error?.code;
+    if (code) {
+      const detail = result.detail?.message ?? result.detail ?? result.message ?? result.error?.message ?? null;
+      return { refused: String(code), inbox, to: letter.sender, ...(detail ? { reason: String(detail).slice(0, 500) } : {}) };
+    }
+    return { replied: true, inbox, to: letter.sender, ...result };
+  }, refusedBy);
 }
 
 // ---- every owner message gets an answer (owner 2026-11-17: 管家需要事事有回应) ----

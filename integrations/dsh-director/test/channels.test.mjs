@@ -5,7 +5,7 @@
  *  host.d.ts `channels` shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOwnerChannels, CHANNEL_NAMES } from '../lib/channels.mjs';
+import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies } from '../lib/channels.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,9 +44,10 @@ function fakeChannel(name, { fail } = {}) {
     async send(text, options) { sent.push({ text, options }); if (fail) throw new Error(fail); return { ref: `${name}-ref-${sent.length}` }; } } };
 }
 
-const setup = options => {
+const setup = (options, limits) => {
   const fake = fakeHost(options), logs = [];
-  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]) });
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    ...(limits ? { limits: { ...CHANNEL_LIMITS, ...limits } } : {}) });
   channels.ready();
   const slack = fakeChannel('slack'), wechat = fakeChannel('wechat');
   channels.service.register(slack.channel);
@@ -128,10 +129,24 @@ test('refusals: a stranger is never answered; the bound owner is told about too 
   s.host.next = { refused: 'rate_limited' };
   await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-2', text: 'hi' });
   assert.equal(s.slack.sent.length, 1, 'a second line within the minute is not sent');
-  // Any other refusal is silent for the owner too.
-  s.host.next = { refused: 'invalid_channel' };
+  // On a channel it is not bound to, U-OWNER is a stranger: silent.
+  s.host.next = { refused: 'invalid_request' };
   await s.inbound({ channel: 'wechat', senderRef: 'U-OWNER', messageRef: 'o-3', text: 'hi' });
   assert.equal(s.wechat.sent.length, 0);
+});
+
+test('refusals: any other refusal of the bound owner\'s message (the credential guard, an empty body) is one "not delivered" line', async () => {
+  for (const refused of ['invalid_request', 'empty_body', 'idempotency_conflict']) {
+    const s = setup();
+    s.host.next = { refused };
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: BODY }), { accepted: false, reason: refused });
+    assert.deepEqual(s.slack.sent, [{ text: channelReplies.refused(refused), options: { replyToRef: 'o-1', to: 'U-OWNER' } }]);
+    assert.match(s.slack.sent[0].text, /^Not delivered/);
+    assert.ok(!s.slack.sent[0].text.includes('SECRET_BODY_TEXT'));
+    s.host.next = { refused };
+    await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'x-1', text: BODY });
+    assert.equal(s.slack.sent.length, 1, 'a stranger is told nothing');
+  }
 });
 
 test('an approval the host executed is answered with one line of its outcome; a redelivered message is not answered again', async () => {
@@ -153,6 +168,55 @@ test('an approval the host executed is answered with one line of its outcome; a 
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-0', text: '同意 proposal p-1' }),
     { accepted: true, duplicate: true });
   assert.equal(s.slack.sent.length, 4);
+  // The backend replays a redelivery under the same request key as the first result,
+  // duplicate: false included: the message is still answered only once.
+  s.host.next = approval('approve', 'executed');
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' }), { accepted: true });
+  assert.equal(s.slack.sent.length, 4);
+  // The same ref on another channel is another message.
+  const w = setup({ bindings: { wechat: 'U-OWNER' } });
+  w.host.next = approval('approve', 'executed');
+  await w.inbound({ channel: 'wechat', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' });
+  assert.equal(w.wechat.sent.length, 1);
+});
+
+test('binding attempts are bounded per channel and minute: past the bound, six digits are relayed like any message, and nobody is answered', async () => {
+  const s = setup({ bindings: {} });
+  s.host.bindResult = { refused: 'invalid_code' };
+  for (let i = 0; i < CHANNEL_LIMITS.bindPerMinute + 3; i++)
+    await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'b-' + i, text: String(100000 + i) });
+  assert.equal(only(s.calls, 'bind').length, CHANNEL_LIMITS.bindPerMinute);
+  assert.equal(only(s.calls, 'list').length, CHANNEL_LIMITS.bindPerMinute, 'no binding read past the bound');
+  assert.equal(s.slack.sent.length, CHANNEL_LIMITS.bindPerMinute, 'no answer past the bound');
+  assert.equal(only(s.calls, 'relay').length, 3);
+  assert.equal(s.logs.filter(([event]) => event === 'channel_bind_throttled').length, 3);
+  // Another channel has its own bound.
+  await s.inbound({ channel: 'wechat', senderRef: 'wx', messageRef: 'w-1', text: '222222' });
+  assert.equal(only(s.calls, 'bind').length, CHANNEL_LIMITS.bindPerMinute + 1);
+});
+
+test('a channel\'s messages reach the host one at a time, in the order they were handed in', async () => {
+  const s = setup();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const relay = s.host.relay;
+  s.host.relay = async message => { if (message.messageRef === 'first') await gate; return relay(message); };
+  const first = s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'first', text: 'one' });
+  const second = s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'second', text: 'two' });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(only(s.calls, 'relay'), [], 'the second did not overtake the first');
+  release();
+  assert.deepEqual(await Promise.all([first, second]), [{ accepted: true }, { accepted: true }]);
+  assert.deepEqual(only(s.calls, 'relay').map(m => m.messageRef), ['first', 'second']);
+});
+
+test('a host that never becomes ready: a message is refused as unavailable after the bound, not held forever', async () => {
+  const fake = fakeHost();
+  const channels = createOwnerChannels({ host: fake.host, limits: { ...CHANNEL_LIMITS, readyMs: 30 } });
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: 'hi' }),
+    { accepted: false, reason: 'unavailable' });
+  assert.deepEqual(await channels.ownerMessageSent('m-1', 'x'), { mirrored: false, reason: 'unavailable' });
+  assert.deepEqual(fake.calls, []);
 });
 
 test('no log line carries a message body; a malformed message or a failing host is refused, never thrown', async () => {
@@ -217,6 +281,57 @@ test('a failed send is recorded once with its error and never retried; a channel
   assert.deepEqual(await channels.ownerMessageSent('out-2', 'answer', 'in-2'), { mirrored: false, reason: 'send_failed', channel: 'wechat' });
   assert.deepEqual(only(fake.calls, 'recordDelivery'), [{ messageId: 'out-1', channel: 'slack', error: 'socket closed' },
     { messageId: 'out-2', channel: 'wechat', error: 'channel_not_connected' }]);
+});
+
+test('once per message across a restart: a fresh process finds the delivery row and sends nothing', async () => {
+  const fake = fakeHost();
+  fake.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
+  fake.sources.set('m-out', { direction: 'out', channel: 'slack', sender_ref: null, channel_message_ref: 'slack-ref-1', at: 'a', error: null });
+  const channels = createOwnerChannels({ host: fake.host });
+  channels.ready();
+  const slack = fakeChannel('slack');
+  channels.service.register(slack.channel);
+  assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(slack.sent.length, 0);
+  assert.equal(only(fake.calls, 'recordDelivery').length, 0);
+});
+
+test('once per message within a process: a delivery that could not be recorded is still not sent again', async () => {
+  const fake = fakeHost(), logs = [];
+  fake.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
+  fake.host.recordDelivery = async delivery => { fake.calls.push(['recordDelivery', delivery]); throw new Error('backend down'); };
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]) });
+  channels.ready();
+  const slack = fakeChannel('slack');
+  channels.service.register(slack.channel);
+  assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(slack.sent.length, 1);
+  assert.deepEqual(logs.filter(([event]) => event === 'channel_record_failed').map(([, f]) => f.message_id), ['m-out']);
+  // A delivery the host refuses to record is logged by its code.
+  fake.host.recordDelivery = async () => ({ refused: 'delivery_recorded' });
+  await channels.ownerMessageSent('m-out-2', 'answer', 'm-in');
+  assert.deepEqual(logs.filter(([event]) => event === 'channel_record_refused').map(([, f]) => [f.message_id, f.reason]), [['m-out-2', 'delivery_recorded']]);
+});
+
+test('a send that never answers is given up after the bound: recorded as failed, and the next message is mirrored', async () => {
+  const fake = fakeHost({ defaultChannel: 'slack' });
+  const channels = createOwnerChannels({ host: fake.host, log: () => {}, limits: { ...CHANNEL_LIMITS, sendMs: 30 } });
+  channels.ready();
+  const sent = [];
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }), send(text) {
+    sent.push(text); return text === 'hangs' ? new Promise(() => {}) : Promise.resolve({ ref: 'r-' + text }); } });
+  const one = channels.ownerMessageSent('o-1', 'hangs'), two = channels.ownerMessageSent('o-2', 'next');
+  assert.deepEqual(await one, { mirrored: false, reason: 'send_failed', channel: 'slack' });
+  assert.deepEqual(await two, { mirrored: true, channel: 'slack' });
+  assert.deepEqual(only(fake.calls, 'recordDelivery'), [{ messageId: 'o-1', channel: 'slack', error: 'send_timeout' },
+    { messageId: 'o-2', channel: 'slack', channelMessageRef: 'r-next' }]);
+  // An answer on the channel is bounded the same way: the inbound call still returns.
+  const hung = createOwnerChannels({ host: fakeHost().host, log: () => {}, limits: { ...CHANNEL_LIMITS, sendMs: 30 } });
+  hung.ready();
+  hung.service.register({ name: 'slack', status: () => ({ connected: true }), send: () => new Promise(() => {}) });
+  assert.deepEqual(await hung.service.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'b-1', text: '123456' }),
+    { accepted: true });
 });
 
 test('mirrors run one at a time, in the order the messages were written; a failing host never rejects', async () => {

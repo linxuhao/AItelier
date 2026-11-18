@@ -60,7 +60,15 @@ async def test_real_db_concurrent_hungcheck_shared_then_new_invocation(env,monke
     twin=asyncio.create_task(sc.poll_and_execute_owner('owned'))
     try:
         await asyncio.wait_for(sc._check_hung_claims(),.5)
-        assert seen==[main] and len(e.calls)==1 and e.calls[0]!=main
+        # One real reaper invocation, exactly one maintenance sweep — and the
+        # thread it ran on asserted the way 2026-11-18 requires: `seen` used to
+        # have to equal `main`, the LOOP thread. A worker thread holds the
+        # engine's global lock for the whole of its own engine call, so running
+        # the reaper on the loop thread is what froze HTTP, SSE and /health for
+        # minutes. It must now be off the loop (measured directly in
+        # tests/unit/test_scheduler_hung_claims_off_loop.py), and everything else
+        # this test pins — shared connection, claim row preserved — is unchanged.
+        assert len(seen)==1 and seen[0]!=main and len(e.calls)==1 and e.calls[0]!=main
         row=e.sf._conn.execute('SELECT status,retry_count FROM skillflow_steps WHERE id=?',(claim.token.step_instance_id,)).fetchone()
         assert row['status']=='claimed' and row['retry_count']==0
         assert not e.finished.is_set()

@@ -255,6 +255,16 @@ async def lifespan(app: FastAPI):
 
     sf.notifications.subscribe(_on_skillflow_event)
 
+    # The first dashboard read should not be the request that pays for the
+    # process's warm-up: on this tree it cost 14,249.4 ms, 4,527.5 ms of it the
+    # engine's first boot and 8,205.1 ms the cache-stats trace pass (see
+    # warm_first_dashboard_read and the investigation it cites). Started here,
+    # while the rest of startup still runs, on a DAEMON thread that nothing
+    # awaits and nothing fails on — startup time is unchanged and a test app
+    # never reaches this branch.
+    _threading.Thread(target=warm_first_dashboard_read,
+                      name="first-dashboard-read", daemon=True).start()
+
     # State claim tables: run their one-time schema migration (the taken_over
     # status) now, before serving, instead of inside the first request. A
     # failure is logged and only switches claim takeover off.
@@ -317,6 +327,76 @@ async def lifespan(app: FastAPI):
 
 
 _mcp_endpoint = MCPEndpoint()
+
+
+def warm_first_dashboard_read():
+    """Build the engine and the default `GET /api/runs` answer, OFF the request path.
+
+    Measured on this tree (docs/investigations/run-cold-read-20261118): the first
+    `GET /api/runs` of a process cost **14,249.4 ms**, of which **4,527.5 ms** was
+    the process's first `get_skillflow()` (reached through FastAPI's dependency
+    resolution for `Depends(get_config_registry)`) and 8,205.1 ms the cache-stats
+    trace pass. Both are once-per-process work that a HTTP request should never
+    have been the first to ask for: a cold process makes every dashboard visitor
+    after a restart pay them, in the one process that also drives live runs.
+
+    So the lifespan starts this on a DAEMON thread and does not wait for it.
+    Three rules, all of them the difference between "warm the cache" and "turn
+    startup into a request":
+
+    * **It never raises.** Everything is caught and logged at WARNING: an
+      unreachable database, a failing engine boot or a broken run must leave the
+      backend starting normally, with the first `/api/runs` merely as expensive
+      as it was before this existed.
+    * **It never blocks startup.** The thread is started before the lifespan
+      yields, and nothing joins it — `TestClient`-style startups return at once,
+      and a test app (`_test_mode`) never reaches this code at all, because it is
+      in the served backend's branch only.
+    * **It warms the SAME key the request path reads** (`api/run_routers`'s
+      `("runs", owner, include_all)` for an anonymous caller with the default
+      window), through `api/_read_cache.cached`, so a request that arrives while
+      this is still running WAITS for this one pass instead of starting a second
+      (`_read_cache`'s per-key lock is what makes a miss cost one computation).
+
+    Returns a small dict of the two spans on success, None on failure — for a
+    probe to read, never for a caller to depend on.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    if getattr(app, "dependency_overrides", None):
+        # A composed app (tests swap the DB/registry underneath these routes) is
+        # not the production composition, and this function builds its value
+        # from the SINGLETONS — warming a key that the overridden routes would
+        # answer differently is worse than not warming at all.
+        _log.info("first-dashboard-read prefetch skipped: this app carries "
+                  "dependency overrides")
+        return None
+    started = _time.monotonic()
+    try:
+        from api.dependencies import (get_config_registry, get_db_manager,
+                                      get_skillflow)
+        engine_started = _time.monotonic()
+        get_skillflow()
+        engine_ms = round((_time.monotonic() - engine_started) * 1000.0, 1)
+        from api import run_routers
+        cutoff = run_routers._window_cutoff()
+        _read_cache.cached(
+            ("runs", None, False),
+            lambda: run_routers._list_all_runs_uncached(
+                None, get_db_manager(), get_config_registry(), cutoff=cutoff),
+        )
+    except Exception:  # noqa: BLE001 - startup must never fail because of this
+        _log.warning(
+            "first-dashboard-read prefetch failed; the first GET /api/runs will "
+            "compute inline exactly as it did before this existed",
+            exc_info=True)
+        return None
+    spans = {"engine_ms": engine_ms,
+             "warm_ms": round((_time.monotonic() - started) * 1000.0, 1)}
+    _log.info("first-dashboard-read prefetch done: engine %.1f ms, "
+              "/api/runs %.1f ms total", spans["engine_ms"], spans["warm_ms"])
+    return spans
+
 
 app = FastAPI(
     title="AItelier Engine API",

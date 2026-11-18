@@ -3,12 +3,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createBridge, splitText, SEND_CHUNK, HOST } from './bridge.mjs';
+import { createBridge, splitText, superviseLogin, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
 const types = { Message: { Text: 7, Image: 6 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
   ScanStatus: { Cancel: 1, Waiting: 2, Scanned: 3, Confirmed: 4, Timeout: 5 } };
 const TOKEN = 'test-token-123';
+
+const until = async (check, ms = 3000) => {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error('timed out waiting');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+};
 
 function fakeBot({ known = ['wxid_owner'] } = {}) {
   const bot = new EventEmitter();
@@ -49,6 +57,23 @@ test('listens on 127.0.0.1 only', async () => {
   try {
     assert.equal(HOST, '127.0.0.1');
     assert.equal(address.address, '127.0.0.1');
+  } finally { await bridge.close(); }
+});
+
+test('the bind address is loopback unless the bridge runs in its container', async () => {
+  assert.equal(bindHost(undefined, false), '127.0.0.1');
+  assert.equal(bindHost('', true), '127.0.0.1');
+  assert.equal(bindHost('127.0.0.1', true), '127.0.0.1');
+  assert.equal(bindHost('0.0.0.0', true), '0.0.0.0', 'the container interface, published on the host loopback only');
+  assert.throws(() => bindHost('0.0.0.0', false), /refused: bind address/, 'never every interface outside a container');
+  for (const other of ['::', '192.168.1.5', 'localhost', '0.0.0.0 ']) assert.throws(() => bindHost(other, true), /refused/);
+  // The listener takes that address.
+  const bridge = createBridge({ bot: fakeBot(), types, token: TOKEN });
+  try {
+    const address = await bridge.listen(0, bindHost(CONTAINER_HOST, true));
+    assert.equal(address.address, '0.0.0.0');
+    const r = await fetch(`http://127.0.0.1:${address.port}/status`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    assert.equal(r.status, 200);
   } finally { await bridge.close(); }
 });
 
@@ -135,6 +160,20 @@ test('a long poll returns as soon as a message arrives, and empty with the same 
   } finally { await bridge.close(); }
 });
 
+test('a long poll the client abandons releases its waiter and timer', async () => {
+  const { bridge, call } = await started();
+  try {
+    const abort = new AbortController();
+    const polled = fetch(`http://${HOST}:${bridge.server.address().port}/events?after=0&wait=20`,
+      { headers: { authorization: `Bearer ${TOKEN}` }, signal: abort.signal }).catch(() => 'aborted');
+    await until(() => bridge.waiting === 1);
+    abort.abort();
+    assert.equal(await polled, 'aborted');
+    await until(() => bridge.waiting === 0, 2000);
+    assert.equal((await call('/status')).status, 200);
+  } finally { await bridge.close(); }
+});
+
 test('a long poll never waits longer than the cap', async () => {
   const { bridge, json } = await started({ maxWaitSeconds: 1 });
   try {
@@ -206,6 +245,58 @@ test('send answers a bad body with 400 and a failed send with send_failed', asyn
     assert.equal(status, 502);
     assert.equal(body.error, 'send_failed');
   } finally { await bridge.close(); }
+});
+
+test('a body over 64 KiB is refused with 413 and nothing is sent', async () => {
+  const { bot, bridge, json } = await started();
+  try {
+    bot.emit('login', { id: 'wxid_bot' });
+    const big = { to: 'wxid_owner', text: 'x'.repeat(64 * 1024) };
+    assert.deepEqual(await json('/send', { method: 'POST', body: big }), [413, { error: 'body_too_large' }]);
+    assert.deepEqual(bot.said, []);
+    const fits = { to: 'wxid_owner', text: 'x'.repeat(60 * 1024) };
+    assert.equal((await json('/send', { method: 'POST', body: fits }))[0], 200);
+  } finally { await bridge.close(); }
+});
+
+test('a peer neo no longer knows is recipient_unknown, not a failed send', async () => {
+  const { bot, bridge, json } = await started();
+  try {
+    bot.emit('login', { id: 'wxid_bot' });
+    bot.sayError = new Error('Neo supports text to an observed peer or group');
+    assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'hi' } }), [409, { error: 'recipient_unknown' }]);
+  } finally { await bridge.close(); }
+});
+
+test('superviseLogin ends the process when the login cannot go on, and only then', () => {
+  const bot = new EventEmitter();
+  const stops = [];
+  const lines = [];
+  superviseLogin({ bot, types, stop: (reason, code) => stops.push([reason, code]), log: line => lines.push(line) });
+  bot.emit('scan', 'qr', types.ScanStatus.Waiting);
+  bot.emit('scan', '', types.ScanStatus.Scanned);
+  assert.deepEqual(stops, []);
+  // neo's native session fails before any QR: no logout, no scan timeout follows.
+  bot.emit('error', new Error('Neo session failed'));
+  assert.deepEqual(stops, [['the puppet failed before a login', 75]]);
+
+  stops.length = 0;
+  const loggedIn = new EventEmitter();
+  superviseLogin({ bot: loggedIn, types, stop: (reason, code) => stops.push([reason, code]) });
+  loggedIn.emit('login', { id: 'wxid_bot' });
+  loggedIn.emit('error', new Error('message not found for id: m1'));
+  assert.deepEqual(stops, [], 'an error while logged in is only logged');
+  loggedIn.emit('logout', { id: 'wxid_bot' });
+  assert.deepEqual(stops, [['logged out', 75]]);
+
+  for (const status of [types.ScanStatus.Timeout, types.ScanStatus.Cancel]) {
+    const scanning = new EventEmitter();
+    stops.length = 0;
+    superviseLogin({ bot: scanning, types, stop: (reason, code) => stops.push([reason, code]) });
+    scanning.emit('scan', '', status);
+    assert.deepEqual(stops, [['login QR ended without a login', 75]]);
+  }
+  assert.ok(lines.some(line => line.startsWith('error: Neo session failed')));
 });
 
 test('splitText keeps surrogate pairs whole', () => {

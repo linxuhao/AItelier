@@ -12,9 +12,13 @@
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-// Loopback only, and not configurable: the token is the only lock, so the socket
-// must not be reachable from another machine even by a mistaken setting.
+// Loopback by default: the token is the only lock, so the socket must not be
+// reachable from another machine. Inside its container the bridge has to listen on
+// the container's interface (its loopback cannot be published); there, and only
+// there, WECHAT_BRIDGE_BIND=0.0.0.0 is accepted, and the run script publishes the
+// port on the host's 127.0.0.1 only.
 export const HOST = '127.0.0.1';
+export const CONTAINER_HOST = '0.0.0.0';
 export const DEFAULT_PORT = 18731;
 export const RING_SIZE = 500;
 export const MAX_WAIT_SECONDS = 25;
@@ -29,6 +33,14 @@ export function splitText(text, size = SEND_CHUNK) {
   const parts = [];
   for (let i = 0; i < points.length; i += size) parts.push(points.slice(i, i + size).join(''));
   return parts.length ? parts : [''];
+}
+
+/** The address to listen on: `value` (WECHAT_BRIDGE_BIND) unset or 127.0.0.1 is
+ *  loopback; 0.0.0.0 only when `inContainer`; anything else is refused. */
+export function bindHost(value, inContainer) {
+  if (!value || value === HOST) return HOST;
+  if (value === CONTAINER_HOST && inContainer) return CONTAINER_HOST;
+  throw new Error(`wechat-bridge refused: bind address ${JSON.stringify(value)} (only ${HOST}, or ${CONTAINER_HOST} inside the container)`);
 }
 
 const digest = value => createHash('sha256').update(String(value)).digest();
@@ -107,7 +119,14 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
     if (!contact) return [409, { error: 'recipient_unknown' }];
     let ref = null;
     for (const part of splitText(text)) {
-      const sent = await contact.say(part);
+      let sent;
+      try { sent = await contact.say(part); }
+      catch (error) {
+        // Wechaty can still hold a contact that neo has dropped from its own list of
+        // observed peers; neo then refuses the peer, which is not a failed send.
+        if (ref === null && /observed peer/.test(String(error?.message))) return [409, { error: 'recipient_unknown' }];
+        throw error;
+      }
       ref ??= sent?.id ?? null;
     }
     return [200, { ref }];
@@ -122,11 +141,14 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
     const chunks = [];
     let size = 0;
     request.on('data', chunk => {
+      if (size > MAX_BODY_BYTES) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) { reject(Object.assign(new Error('body_too_large'), { status: 413 })); request.destroy(); return; }
+      // The rest of an oversized body is read and dropped, so the 413 reaches the client.
+      if (size > MAX_BODY_BYTES) { chunks.length = 0; reject(Object.assign(new Error('body_too_large'), { status: 413 })); return; }
       chunks.push(chunk);
     });
     request.on('end', () => {
+      if (size > MAX_BODY_BYTES) return;
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
       catch { reject(Object.assign(new Error('bad_request'), { status: 400 })); }
     });
@@ -175,9 +197,11 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
   return {
     server,
     state,
-    listen: (port = DEFAULT_PORT) => new Promise((resolve, reject) => {
+    /** Long polls waiting now (each holds a timer until it is answered or closed). */
+    get waiting() { return waiters.size; },
+    listen: (port = DEFAULT_PORT, host = HOST) => new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, HOST, () => { server.off('error', reject); resolve(server.address()); });
+      server.listen(port, host, () => { server.off('error', reject); resolve(server.address()); });
     }),
     close: () => new Promise(resolve => {
       for (const wake of waiters) wake();
@@ -185,4 +209,25 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
       server.close(() => resolve());
     }),
   };
+}
+
+/** Ends the process (through `stop(reason, 75)`) whenever this login cannot go on:
+ *  puppet-neo needs a fresh start for a new QR. That is a logout, a QR nobody scanned
+ *  in time (or cancelled), and a puppet error before any login: neo then gives up its
+ *  session without a logout event, and without this the bridge would stay up with no
+ *  login and no QR. Errors while logged in are only logged (Wechaty reports message
+ *  handling failures that way). Whether and how often to start again is the
+ *  container's restart policy. */
+export function superviseLogin({ bot, types, stop, log = () => {} }) {
+  let loggedIn = false;
+  bot.on('scan', (_qrcode, status) => {
+    if (status === types.ScanStatus.Waiting) log('login QR waiting (GET /status carries it)');
+    if (status === types.ScanStatus.Timeout || status === types.ScanStatus.Cancel) void stop('login QR ended without a login', 75);
+  });
+  bot.on('login', () => { loggedIn = true; log('logged in'); });
+  bot.on('logout', () => { loggedIn = false; void stop('logged out', 75); });
+  bot.on('error', error => {
+    log('error: ' + String(error?.message ?? error).slice(0, 200));
+    if (!loggedIn) void stop('the puppet failed before a login', 75);
+  });
 }

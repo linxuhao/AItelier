@@ -8,12 +8,21 @@ Why a separate process: puppet-neo keeps the login in memory only, so a restart 
 a new QR scan. Holding the login here means a steward or host restart does not log
 WeChat out.
 
-## Install
+## Image
+
+The bridge runs in its own container, built here (owner, 2026-11-18: not as a host
+service):
 
 ```sh
-cd integrations/wechat-bridge
-npm ci --ignore-scripts
+docker build -t aitelier-wechat-bridge:local integrations/wechat-bridge
 ```
+
+`Dockerfile`: the node binary from `node:24-bookworm-slim` (the stage AItelier's own
+Dockerfile uses) on `python:3.12-slim` (Debian trixie, glibc 2.41; puppet-neo needs
+glibc ≥ 2.38, bookworm has 2.36). npm exists only in the build stage, which runs
+`npm ci --omit=dev --ignore-scripts` from the committed `package-lock.json` (exact
+pins); the final image has node, the app and its `node_modules`, no npm and no
+compilers, and runs as uid 1000 (`bridge`).
 
 `--ignore-scripts` is enough. puppet-neo has no install scripts: its native addon
 (`native/<platform>/neo.node`, all four platforms, ~45 MB unpacked) comes inside its npm
@@ -25,38 +34,60 @@ fits; `prebuilds/linux-x64` ships in the package) and `protobufjs` postinstall (
 version-scheme warning). The rest are `prepare` scripts, which npm does not run for
 registry installs.
 
-Requirements of puppet-neo: Linux x64 with glibc ≥ 2.38 (this host: 2.39) and, per its
-`engines`, Node ≥ 26.
+What the build checks, and what it found (2026-11-18, log in
+`~/.AItelier/artifacts/aitelier/dsh-director-plugin-20261114/s19-wechat-image-build.txt`):
+
+- `ldd` on `neo.node`: it needs only `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and
+  `ld-linux-x86-64.so.2`, all resolved (OpenSSL and the rest are linked in
+  statically); its newest glibc symbol version is `GLIBC_2.38`; the image has 2.41.
+- puppet-neo 0.1.1 declares `engines: node >=26`; the image's node is v24.22.3 (npm
+  prints `EBADENGINE` and goes on). Its JavaScript uses nothing newer than node 24, and
+  the build loads `wechaty` and `wechaty-puppet-neo` and opens and closes a native
+  session the way the puppet does (`new PuppetNeo().createSession()`), with no network
+  (`RUN --network=none`): it works on node 24. A real login was not tried.
 
 ## Run
 
-Secret: `~/.aitelier-secrets/wechat-bridge-token` (one line, any random string). The
-same file is read by the channel plugin. Without it the bridge does not start (exit 78)
-and the plugin stays disabled.
+Secret: `~/.aitelier-secrets/wechat-bridge-token` (one line, any random string, owned
+by uid 1000). The same file is read by the channel plugin. Without it the bridge does
+not start (exit 78) and the plugin stays disabled.
 
-As a systemd user unit (`aitelier-wechat-bridge.service`, not installed by anything):
+`run.sh` starts the container (nothing runs it for you):
 
-```sh
-cp aitelier-wechat-bridge.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user start aitelier-wechat-bridge
-```
+- non-root (uid 1000), `--read-only` with a 16 MB tmpfs on `/tmp`, `--cap-drop ALL`,
+  `--security-opt no-new-privileges`, `--memory 512m --cpus 1 --pids-limit 256`;
+- publishes only `127.0.0.1:18731:18731`; inside, the bridge listens on `0.0.0.0`
+  (`WECHAT_BRIDGE_BIND`, set by the image; the bridge accepts `0.0.0.0` only inside a
+  container and otherwise listens on `127.0.0.1`);
+- the token file read-only is the only host mount; outbound network is allowed (WeChat's
+  servers);
+- `--restart on-failure:5`.
 
 Then scan the QR: `GET /status` carries it as `qr`, and the channel plugin reports it in
-its status detail. A QR nobody scans, or a logout, ends the process so the next start
-shows a fresh QR; the unit allows five starts an hour.
+its status detail. The QR is a live login token for this bridge: whatever shows or logs
+that status must not log it. A QR nobody scans, a logout, or a puppet failure before
+any login ends the process (exit 75), so the next start shows a fresh QR; Docker starts
+it again at most five times, then it stays exited until
+`docker start aitelier-wechat-bridge`, so an unattended bridge does not keep asking
+WeChat for QRs. The login lives in the container's memory only: a restart means a new
+scan. Wechaty keeps no memory-card file (the bot has no `name`), so nothing is written
+to disk.
 
-Hardening: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict` with the state dir
-(`~/.local/state/aitelier-wechat-bridge`, also the working directory, where Wechaty
-writes its memory card) as the only writable path, and `RestrictAddressFamilies=AF_INET
-AF_INET6 AF_UNIX`.
+On this host port 18731 was already taken on 2026-11-18 by an unrelated
+`python3 -m http.server 18731 --bind 127.0.0.1` (running since 2026-11-06); it has to
+be stopped, or both `run.sh` and the plugin given another port
+(`WECHAT_BRIDGE_PORT`), before the bridge can be published there.
 
-Not in a container, for now: puppet-neo's prebuilt addon needs glibc ≥ 2.38 and no
-local image has it; pulling one needs the owner's approval.
+Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API and never
+starts the puppet. With the `run.sh` flags, a throwaway token and host port 18741, on
+2026-11-18 `GET /status` answered `200 {"logged_in":false,...}`, without the token `401`,
+`/events` `200`, `/send` `409 not_logged_in`, and the root filesystem refused writes
+(log: `s19-wechat-image-startcheck.txt` next to the build log).
 
 ## API
 
-Listens on `127.0.0.1` only (port `WECHAT_BRIDGE_PORT`, default 18731). Every request
+Listens on `127.0.0.1` (or `0.0.0.0` inside its container, published on the host's
+`127.0.0.1` only), port `WECHAT_BRIDGE_PORT`, default 18731. Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
 - `GET /status` → `{logged_in, user_id?, qr?, since}`. `qr` only while a QR can be
@@ -71,7 +102,8 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   consecutive messages; `ref` is the first part's message id, or `null` when the puppet
   returns none (puppet-neo does not). Refusals: `409 not_logged_in`, `409
   recipient_unknown` (puppet-neo can only write to a peer that has written to this
-  login since it started), `400 bad_request`, `502 send_failed`.
+  login since it started, and only the last 2048 of them), `400 bad_request`, `413
+  body_too_large` (over 64 KiB), `502 send_failed`.
 
 Message texts are never logged.
 

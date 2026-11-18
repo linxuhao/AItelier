@@ -457,7 +457,8 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
         # step 19's owner chat channels, core/state_channels.py)
         tables = sorted(row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'") if row[0].startswith("state_"))
-        later = {"state_owner_channels", "state_owner_channel_codes", "state_message_sources"}
+        later = {"state_owner_channels", "state_owner_channel_codes", "state_message_sources",
+                 "state_owner_channel_status"}
         assert sorted(set(tables) - {"state_project_archive"} - later) == previous["tables"]
         assert access_columns(path) == previous["access_columns"]
     # the list served afterwards equals the list served before, exactly

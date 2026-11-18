@@ -192,7 +192,11 @@ export interface DirectorHost {
    *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
    *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
    *    channel's own ref) or failed (`error`).
-   *  - list: every channel's binding and the default channel for unprompted messages. */
+   *  - list: every channel's binding and the default channel for unprompted messages.
+ *  - reportStatus (optional): a channel's status changed - connected or not, a detail line
+ *    (at most 300 characters), and while a login needs a scan its QR as an SVG document
+ *    (`qrSvg`, a login token: shown to the owner, never logged). Called only on a change;
+ *    {refused: code} when the host will not take it. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string }, signal?: AbortSignal):
       Promise<{ message_id: string; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
@@ -205,6 +209,8 @@ export interface DirectorHost {
       signal?: AbortSignal): Promise<object>;
     list(signal?: AbortSignal): Promise<{ channels: Array<{ channel: 'slack' | 'wechat'; bound: boolean; sender_ref: string | null;
       bound_at: string | null; revoked_at: string | null; is_default: boolean }>; default_channel: 'slack' | 'wechat' | null }>;
+    reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
+      Promise<object>;
   };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
@@ -228,10 +234,12 @@ export interface DirectorHost {
  *  answers when there is one; it resolves with the channel's own ref for the sent message.
  *  `inbound` is one message that arrived; a text of exactly six digits from an account
  *  that is not bound is a binding attempt. Nothing but the root's own message to its owner
- *  and one-line answers about the sender's own message is ever sent. */
+ *  and one-line answers about the sender's own message is ever sent. `status` is read when
+ *  the channel registers and every 30 s after; `qrSvg` is a login QR drawn as an SVG while
+ *  the channel needs a scan (it goes to the host's optional channels.reportStatus). */
 export interface OwnerChannels {
   register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
-    status(): { connected: boolean; detail?: string } }): () => void;
+    status(): { connected: boolean; detail?: string; qrSvg?: string } }): () => void;
   inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
     Promise<{ accepted: boolean; reason?: string }>;
 }

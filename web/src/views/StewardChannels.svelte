@@ -7,7 +7,8 @@
   // The owner's chat channels (design 7.2): who is bound on Slack / WeChat, the
   // one-time bind code, unbind, and where the steward's unprompted messages go.
   // Binding happens off this page (the owner sends the code to the bot), so while
-  // a code is live the list is re-read on a short cadence to show the result.
+  // a code is live the list is re-read on a short cadence to show the result; the
+  // same while a login QR is shown (it is replaced, or scanned, off this page too).
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
   const BIND_POLL_MS = 5000;
   let rows = $state<OwnerChannel[]>([]), defaultChannel = $state<OwnerChannelName | null>(null);
@@ -65,11 +66,18 @@
     try { await setDefaultOwnerChannel(next); await load(); }
     catch (e) { defaultChannel = prior; failed(e); }
   }
+  // The QR as an image: a data URL, never markup in the page (the SVG is never parsed
+  // into the DOM, so nothing in it can run).
+  function svgImage(svg: string): string {
+    let binary = '';
+    for (const byte of new TextEncoder().encode(svg)) binary += String.fromCharCode(byte);
+    return 'data:image/svg+xml;base64,' + btoa(binary);
+  }
   function remaining(expires: number): string {
     const s = Math.max(0, Math.ceil((expires - now) / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
-  const waiting = $derived(CHANNELS.some(c => (codes[c]?.expires ?? 0) > now));
+  const waiting = $derived(CHANNELS.some(c => (codes[c]?.expires ?? 0) > now) || rows.some(r => r.qr_svg));
   onMount(() => {
     alive = true;
     void load();
@@ -95,9 +103,16 @@
           {#if r.status}
             <span class="mark" class:off={!r.status.connected} data-channel-status={r.status.connected ? 'connected' : 'disconnected'}>
               {r.status.connected ? t('steward.chanConnected') : t('steward.chanDisconnected')}</span>
+            {#if r.status.at}<small class="at" data-channel-at>{new Date(r.status.at).toLocaleString()}</small>{/if}
           {/if}
         </header>
         {#if r.status?.detail}<p class="detail" data-channel-detail>{r.status.detail}</p>{/if}
+        {#if r.qr_svg}
+          <figure class="qr" data-channel-qr>
+            <img src={svgImage(r.qr_svg)} alt={t('steward.chanScanQr')} width="220" height="220" />
+            <figcaption>{t('steward.chanScanQr')}</figcaption>
+          </figure>
+        {/if}
         <p class="account" data-channel-account>
           {#if r.bound}{t('steward.chanBoundAs')} <code>{r.sender_ref}</code>{:else}{t('steward.chanNotBound')}{/if}
         </p>
@@ -136,6 +151,9 @@
   .mark{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);}
   .mark.off{background:var(--pico-del-color, #c62828);color:#fff;}
   .detail{color:var(--pico-muted-color);overflow-wrap:anywhere;margin:0 0 6px;}
+  .at{color:var(--pico-muted-color);font-size:11px;}
+  .qr{margin:0 0 8px;}.qr img{display:block;max-width:100%;height:auto;background:#fff;border-radius:6px;}
+  .qr figcaption{margin:4px 0 0;}
   .account{margin:0 0 6px;overflow-wrap:anywhere;}
   .code{margin:0 0 8px;padding:8px 10px;border-radius:6px;background:var(--pico-code-background-color);}
   .code p{margin:4px 0 0;}

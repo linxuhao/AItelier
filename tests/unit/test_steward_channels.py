@@ -12,6 +12,7 @@ import json
 import logging
 import sys
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -306,6 +307,97 @@ def test_a_delivery_is_recorded_once_for_the_stewards_own_message(world):
                  "error": "send failed"}, allow_write=True)
 
 
+# --- channel status (the host's report, the owner's dashboard) ---------------------------------
+
+QR = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges">'
+      '<path fill="#fff" d="M0 0h29v29H0z"/><path d="M4 4h7v1H4zM4 5h1v1H4z"/></svg>')
+
+
+def report(world, key, service=None, **fields):
+    return execute(service or world.steward, "report_channel_status",
+                   {"request_key": key, "project_id": HOME, "channel": "wechat", "connected": False, **fields},
+                   allow_write=True)
+
+
+def test_the_hosts_status_report_reaches_the_owners_list_and_only_there(world):
+    assert all(c["status"] is None and c["qr_svg"] is None
+               for c in world.owner.channels.list_owner_channels(with_status=True)["channels"]), "nothing reported"
+    out = report(world, "s1", detail="scan needed", qr_svg=QR)
+    assert out == {"recorded": True, "channel": "wechat", "connected": False, "at": out["at"]}
+    assert report(world, "s1", detail="scan needed", qr_svg=QR) == out, "a replay"
+    listed = {c["channel"]: c for c in world.owner.channels.list_owner_channels(with_status=True)["channels"]}
+    assert listed["wechat"]["status"] == {"connected": False, "detail": "scan needed", "at": out["at"]}
+    assert listed["wechat"]["qr_svg"] == QR
+    assert listed["slack"]["status"] is None and listed["slack"]["qr_svg"] is None
+    # A later report replaces the row: logged in, the QR is gone.
+    report(world, "s2", connected=True)
+    wechat = world.owner.channels.list_owner_channels(with_status=True)["channels"][1]
+    assert wechat["status"]["connected"] is True and wechat["status"]["detail"] is None and wechat["qr_svg"] is None
+    # The State query (the steward's, and the owner's) never carries the status or the QR.
+    for caller in (world.steward, world.owner):
+        assert all("status" not in c and "qr_svg" not in c
+                   for c in execute(caller, "list_owner_channels", {})["channels"])
+    refused(lambda: world.steward.channels.list_owner_channels(with_status=True), "owner_session_required")
+
+
+def test_the_wechat_bridges_own_drawing_of_a_login_qr_is_accepted(world):
+    # integrations/wechat-bridge/qr-svg.test.mjs pins this file to the bridge's real output.
+    drawn = (Path(__file__).resolve().parents[2] / "integrations" / "wechat-bridge" / "test-fixtures"
+             / "login-qr.svg").read_text(encoding="utf-8")
+    report(world, "real", detail="scan needed", qr_svg=drawn)
+    assert world.owner.channels.list_owner_channels(with_status=True)["channels"][1]["qr_svg"] == drawn
+
+
+def test_only_the_steward_reports_a_status(world):
+    assert "report_channel_status" in STEWARD_WRITE_ACTIONS
+    for caller in (world.owner, world.director):
+        refused(lambda: report(world, "x", service=caller, qr_svg=QR), "steward_role_required")
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_owner_channel_status").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("svg", [
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><svg:script>alert(1)</svg:script></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><rect ONCLICK = "x"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.com"><rect/></a></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><use xlink:href="#x"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div/></foreignObject></svg>',
+    '<!DOCTYPE svg [<!ENTITY x "&#60;script&#62;">]><svg>&x;</svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><!ENTITY x "y"></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><?xml-stylesheet href="x.css"?></svg>',
+    '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    '<html><svg></svg></html>', '<svgx></svgx>', 'not an image', '<svg xmlns="x">',
+])
+def test_a_qr_that_is_not_a_plain_svg_is_refused_and_never_quoted(world, svg, caplog):
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(StateGraphError) as caught:
+        report(world, "bad", qr_svg=svg)
+    assert str(caught.value).startswith("qr_svg_refused"), str(caught.value)
+    assert svg not in str(caught.value) and svg not in caplog.text
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_owner_channel_status").fetchone()[0] == 0
+
+
+def test_the_status_is_bounded_and_its_contents_are_never_logged(world, caplog):
+    caplog.set_level(logging.DEBUG)
+    head, tail = '<svg xmlns="http://www.w3.org/2000/svg">', "</svg>"
+    largest = head + "<g/>" * ((state_channels.QR_SVG_MAX_BYTES - len(head) - len(tail)) // 4) + tail
+    largest += " " * (state_channels.QR_SVG_MAX_BYTES - len(largest))
+    assert len(largest.encode()) == state_channels.QR_SVG_MAX_BYTES
+    report(world, "big", qr_svg=largest)
+    refused(lambda: report(world, "bigger", qr_svg=largest + " "), "qr_svg_too_large")
+    report(world, "d300", detail="d" * 300)
+    refused(lambda: report(world, "d301", detail="SECRET-DETAIL" + "d" * 288), "detail_too_long")
+    with pytest.raises(StateGraphError, match="'field': 'connected'"):
+        execute(world.steward, "report_channel_status", {"request_key": "c", "project_id": HOME, "channel": "wechat",
+                                                         "connected": "yes"},
+                allow_write=True)
+    report(world, "fine", detail="SECRET-DETAIL scan needed", qr_svg=QR)
+    assert "SECRET-DETAIL" not in caplog.text and QR not in caplog.text and "<svg" not in caplog.text
+
+
 # --- chat approval -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("body", [
@@ -500,6 +592,26 @@ def test_the_channel_routes_are_the_owner_sessions_alone(world, client):
     assert client.get("/api/steward/message-sources?ids=a,b", headers=OWNER_HEADERS).json() == {"sources": {}}
     too_many = ",".join(f"m{i}" for i in range(201))
     assert client.get(f"/api/steward/message-sources?ids={too_many}", headers=OWNER_HEADERS).status_code == 422
+
+
+def test_the_owner_sees_the_reported_status_and_qr_over_http_and_no_one_else_does(world, client):
+    steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
+    r = client.post("/api/state/commands/report_channel_status", headers=steward,
+                    json={"request_key": "s", "channel": "wechat", "connected": False, "detail": "scan needed",
+                          "qr_svg": QR})
+    assert r.status_code == 200, r.text
+    bad = client.post("/api/state/commands/report_channel_status", headers=steward,
+                      json={"request_key": "s2", "channel": "wechat", "connected": False,
+                            "qr_svg": '<svg onload="x"></svg>'})
+    assert bad.status_code == 422 and bad.json()["detail"].startswith("qr_svg_refused"), bad.text
+    for name in ("steward", "director"):
+        r = client.get("/api/steward/channels", headers={"X-AItelier-Driver-Token": world.tokens[name]})
+        assert r.status_code == 403 and "<svg" not in r.text, (name, r.text)
+    wechat = client.get("/api/steward/channels", headers=OWNER_HEADERS).json()["channels"][1]
+    assert wechat["channel"] == "wechat" and wechat["qr_svg"] == QR
+    assert wechat["status"]["connected"] is False and wechat["status"]["detail"] == "scan needed"
+    r = client.post("/api/state/query/list_owner_channels", headers=steward, json={})
+    assert r.status_code == 200 and "<svg" not in r.text and "scan needed" not in r.text, r.text
 
 
 def test_a_relayed_start_approval_runs_the_driver_manager_on_the_apps_loop(world, client, monkeypatch):

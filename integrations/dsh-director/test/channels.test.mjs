@@ -369,3 +369,129 @@ test('the channels capability is validated like the other object-shaped ones', (
     /capability declared but not implemented: channels \(relay, bind, sourceOf, recordDelivery and list must all be functions\)/);
   assert.throws(() => validateHost({ ...host, capabilities: [] }), /implemented but not declared: channels/);
 });
+
+// ---- status: what a channel reports reaches the host's optional reportStatus, on a change only
+
+const QR_SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
+
+/** A fake host that takes status reports (`answer` decides each answer), and one channel
+ *  whose status the test sets. */
+function statusSetup({ limits, answer = () => ({ recorded: true }) } = {}) {
+  const fake = fakeHost(), logs = [], reports = [];
+  fake.host.reportStatus = async status => { reports.push(status); return answer(status); };
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, ...limits } });
+  const wechat = { now: { connected: false, detail: 'bridge not reached yet' } };
+  const channel = { name: 'wechat', status: () => wechat.now, async send() { return {}; } };
+  return { ...fake, channels, logs, reports, wechat, channel };
+}
+
+test('status: read when the channel registers, then reported to the host only when it changes', async () => {
+  const { channels, reports, wechat, channel, logs } = statusSetup();
+  channels.ready();
+  try {
+    const unregister = channels.service.register(channel);
+    await channels.pollStatus();
+    assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet' }]);
+    await channels.pollStatus();
+    await channels.pollStatus();
+    assert.equal(reports.length, 1, 'the same status is not reported again');
+    wechat.now = { connected: false, detail: 'scan needed', qrSvg: QR_SVG };
+    await channels.pollStatus();
+    wechat.now = { connected: false, detail: 'scan needed', qrSvg: QR_SVG };
+    await channels.pollStatus();
+    wechat.now = { connected: true };
+    await channels.pollStatus();
+    await channels.pollStatus();
+    assert.deepEqual(reports.slice(1), [{ channel: 'wechat', connected: false, detail: 'scan needed', qrSvg: QR_SVG },
+      { channel: 'wechat', connected: true }]);
+    // Taken back (the channel plugin stops): disconnected, once.
+    unregister();
+    unregister();
+    await channels.pollStatus();
+    assert.deepEqual(reports.slice(3), [{ channel: 'wechat', connected: false, detail: 'channel plugin stopped' }]);
+    // Logged: the channel and whether it is connected - never the detail or the QR.
+    assert.deepEqual(logs.filter(([event]) => event.startsWith('channel_status')).map(([, fields]) => fields),
+      [{ channel: 'wechat', connected: false }, { channel: 'wechat', connected: false }, { channel: 'wechat', connected: true },
+        { channel: 'wechat', connected: false }]);
+    assert.ok(!JSON.stringify(logs).includes('<svg') && !JSON.stringify(logs).includes('scan needed'));
+  } finally { channels.stop(); }
+});
+
+test('status: nothing reaches the host before it is ready; the poll runs on its own every statusMs until stop()', async () => {
+  const { channels, reports, wechat, channel } = statusSetup({ limits: { statusMs: 15 } });
+  channels.service.register(channel);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.deepEqual(reports, [], 'the host is not ready yet');
+  channels.ready();
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet' }]);
+  wechat.now = { connected: true };
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(reports.at(-1), { channel: 'wechat', connected: true }, 'picked up by the timer, no explicit poll');
+  channels.stop();
+  const count = reports.length;
+  wechat.now = { connected: false, detail: 'later' };
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(reports.length, count, 'stopped: no more polls');
+});
+
+test('status: a host that cannot be reached is asked again at the next poll; a refusal is its answer and is not repeated', async () => {
+  let mode = 'fail';
+  const { channels, reports, wechat, channel, logs } = statusSetup({ answer: () => {
+    if (mode === 'fail') throw new Error('HTTP 503');
+    return mode === 'refuse' ? { refused: 'qr_svg_refused' } : { recorded: true };
+  } });
+  channels.ready();
+  channels.service.register(channel);
+  await channels.pollStatus();
+  assert.equal(reports.length, 2, 'a failure is tried again at the next poll');
+  mode = 'refuse';
+  await channels.pollStatus();
+  await channels.pollStatus();
+  assert.equal(reports.length, 3, 'a refusal is not repeated');
+  mode = 'ok';
+  wechat.now = { connected: true };
+  await channels.pollStatus();
+  assert.equal(reports.length, 4);
+  assert.deepEqual(logs.filter(([event]) => event.startsWith('channel_status')).map(([event]) => event),
+    ['channel_status_failed', 'channel_status_failed', 'channel_status_refused', 'channel_status_reported']);
+  channels.stop();
+});
+
+test('status: a status() that throws reads as disconnected; a long detail is cut; junk fields are dropped', async () => {
+  const { channels, reports, wechat, channel } = statusSetup();
+  channels.ready();
+  wechat.now = { connected: 'yes', detail: 'd'.repeat(400), qrSvg: 42, extra: 'x' };
+  channels.service.register(channel);
+  await channels.pollStatus();
+  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'd'.repeat(300) }]);
+  channels.service.register({ name: 'slack', status: () => { throw new Error('boom'); }, async send() { return {}; } });
+  await channels.pollStatus();
+  assert.deepEqual(reports.at(-1), { channel: 'slack', connected: false, detail: 'status unavailable' });
+  channels.stop();
+});
+
+test('status: a host without reportStatus is never asked, and nothing polls', async () => {
+  const fake = fakeHost();
+  let read = 0;
+  const channels = createOwnerChannels({ host: fake.host, limits: { ...CHANNEL_LIMITS, statusMs: 5 } });
+  channels.ready();
+  channels.service.register({ name: 'wechat', status: () => { read++; return { connected: true }; }, async send() { return {}; } });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  await channels.pollStatus();
+  assert.deepEqual(fake.calls, []);
+  assert.ok(read <= 2, `status() was read ${read} times`);
+  channels.stop();
+});
+
+test('the channels capability may implement reportStatus or not', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-director-roles-'));
+  const role = prompt => ({ route: 'r', reasoning_effort: 'high', compaction: { thresholdRatio: 0.5 }, prompt, presented: ['bash'], forbidden: [] });
+  writeFileSync(join(dir, 'roles.json'), JSON.stringify({ version: 1, director: role('director.md'), worker: role('worker.md') }));
+  writeFileSync(join(dir, 'director.md'), 'd'); writeFileSync(join(dir, 'worker.md'), 'w');
+  const host = { version: '1.2.0', capabilities: ['channels'], channels: { ...fakeHost().host, reportStatus: async () => ({}) },
+    config: { sessionId: 's', provider: 'p', model: 'm', stateDir: '/tmp/x', dshEntry: '/x', rolesFile: join(dir, 'roles.json'),
+      todo: { module: 'dsh_todo', stateDirEnv: 'X' } }, context: async () => '', events: async () => ({ stop() {} }) };
+  assert.ok(validateHost(host));
+});

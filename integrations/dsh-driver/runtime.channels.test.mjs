@@ -4,7 +4,8 @@
  *  relay_owner_message with the channel's identity; (2) sends six digits from a stranger -
  *  bind_owner_channel answers 422 invalid_code and the stranger alone gets one line back;
  *  and the steward's send_user_message replying to the relayed message (3) goes out on slack,
- *  to that message, with exactly its text, and (4) is recorded with record_channel_delivery.
+ *  to that message, with exactly its text, and (4) is recorded with record_channel_delivery;
+ *  and (5) the plugin's status reaches report_channel_status, once, with nothing logged.
  *  A director's runtime declares no channels: the same plugin never loads there. The State
  *  here is a fake HTTP server; nothing reaches a real chat service. */
 import { test } from 'node:test';
@@ -59,7 +60,7 @@ export const name = 'fixture-channel';
 export const inject = ['ownerChannels'];
 const post = (path, body) => fetch(process.env.AITELIER_URL + path, { method: 'POST', body: JSON.stringify(body) }).catch(() => {});
 export function apply(ctx) {
-  const off = ctx.ownerChannels.register({ name: 'slack', status: () => ({ connected: true }),
+  const off = ctx.ownerChannels.register({ name: 'slack', status: () => ({ connected: true, detail: 'FIXTURE_STATUS_DETAIL' }),
     async send(text, options) { await post('/test/channel-send', { text, options }); return { ref: 'slack-out-ts' }; } });
   ctx.on('dispose', off);
   void post('/test/channel-loaded', {});
@@ -107,6 +108,7 @@ async function run(t, { steward, mode = 'tool' }) {
       if (name === 'send_user_message') return send({ message_id: 'm-out-1', project_id: project });
       if (name === 'complete_steward_memory_request') return send({});
       if (name === 'record_channel_delivery') return send({ message_id: body.message_id, recorded: true });
+      if (name === 'report_channel_status') return send({ recorded: true, channel: body.channel, connected: body.connected, at: 't' });
       return send({ detail: 'unexpected ' + name }, 422);
     }
     if (url.startsWith('/api/state/query/')) {
@@ -195,6 +197,11 @@ test('real pinned DSH, the steward: a channel plugin loads, its messages reach r
     await new Promise(resolve => setTimeout(resolve, 1000));
     assert.equal(seen.sends.length, 2);
     assert.ok(!r.output().includes('hello from slack'), 'a message body reached the log');
+    // The channel's status reached the host once (it did not change), and its detail no log.
+    assert.deepEqual(command('report_channel_status').map(({ request_key, ...rest }) => rest),
+      [{ channel: 'slack', connected: true, detail: 'FIXTURE_STATUS_DETAIL' }]);
+    assert.match(command('report_channel_status')[0].request_key, /^channel-status:slack:\d+:[0-9a-f]{16}$/);
+    assert.ok(!r.output().includes('FIXTURE_STATUS_DETAIL'), 'a status detail reached the log');
   } finally { await r.close(); }
 });
 
@@ -241,5 +248,6 @@ test('real pinned DSH, a director: no channels capability, so ownerChannels is n
     assert.equal(seen.loaded, 0);
     assert.deepEqual(seen.inbound, []);
     assert.deepEqual(seen.queries.filter(([name]) => ['list_owner_channels', 'message_sources'].includes(name)), []);
+    assert.deepEqual(seen.commands.filter(([name]) => name === 'report_channel_status'), []);
   } finally { await r.close(); }
 });

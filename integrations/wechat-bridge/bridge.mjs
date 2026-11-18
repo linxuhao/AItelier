@@ -8,7 +8,8 @@
  *  This file is the HTTP layer and the event filter, with no dependency of its own:
  *  `bot` is a Wechaty instance (or a fake with the same events and Contact.find) and
  *  `types` is Wechaty's `types`, both handed in by main.mjs, so the tests never load
- *  the real puppet. */
+ *  the real puppet. `renderQr` (qr-svg.mjs, also handed in) draws the login QR as an
+ *  SVG for the dashboard. */
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
@@ -59,7 +60,7 @@ export function isOwnerCandidate(message, types) {
 }
 
 export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
-  log = () => {} }) {
+  log = () => {}, renderQr = () => undefined }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   const expected = digest(token.trim());
   const ring = [];
@@ -68,15 +69,21 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
   // new messages behind an old cursor (and needs no reset rule).
   let seq = now().getTime();
   let waiters = new Set();
-  const state = { logged_in: false, user_id: undefined, qr: undefined, since: now().toISOString() };
+  const state = { logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined, since: now().toISOString() };
   const setState = change => Object.assign(state, change, { since: now().toISOString() });
 
+  // The QR as an image, or undefined when it cannot be drawn (never logged: it is a login token).
+  const drawn = qrcode => {
+    try { return renderQr(qrcode) || undefined; }
+    catch { log('the login QR could not be drawn'); return undefined; }
+  };
   bot.on('scan', (qrcode, status) => {
     // Only a waiting QR can be scanned; once scanned, timed out or cancelled it is gone.
-    setState({ logged_in: false, user_id: undefined, qr: status === types.ScanStatus.Waiting && qrcode ? qrcode : undefined });
+    const qr = status === types.ScanStatus.Waiting && qrcode ? qrcode : undefined;
+    setState({ logged_in: false, user_id: undefined, qr, qr_svg: qr ? drawn(qr) : undefined });
   });
-  bot.on('login', user => setState({ logged_in: true, user_id: user?.id, qr: undefined }));
-  bot.on('logout', () => setState({ logged_in: false, user_id: undefined, qr: undefined }));
+  bot.on('login', user => setState({ logged_in: true, user_id: user?.id, qr: undefined, qr_svg: undefined }));
+  bot.on('logout', () => setState({ logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined }));
   bot.on('message', message => {
     try {
       if (!isOwnerCandidate(message, types)) return;
@@ -169,6 +176,7 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
         const body = { logged_in: state.logged_in, since: state.since };
         if (state.user_id) body.user_id = state.user_id;
         if (state.qr) body.qr = state.qr;
+        if (state.qr_svg) body.qr_svg = state.qr_svg;
         return reply(response, 200, body);
       }
       if (request.method === 'GET' && url.pathname === '/events') {

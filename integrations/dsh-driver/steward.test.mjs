@@ -213,7 +213,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
-  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'list', 'recordDelivery', 'relay', 'sourceOf']);
+  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'list', 'recordDelivery', 'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
@@ -670,6 +670,29 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
   // A 200 that carries a code is a refusal too.
   assert.deepEqual(await channelOps(async () => ({ result: { code: 'invalid_code' } })).bind({ channel: 'slack', senderRef: 'U', code: '1', messageRef: 'z' }),
     { refused: 'invalid_code' });
+});
+
+test('chat channels: a status change is one report_channel_status, each under its own key; its refusals are answers', async () => {
+  const calls = [];
+  let answer = { result: { recorded: true, channel: 'wechat', connected: false, at: 't' } };
+  const request = async (path, body) => { calls.push([path, body]); if (answer instanceof Error) throw answer; return answer; };
+  const channels = channelOps(request);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
+  assert.deepEqual(await channels.reportStatus({ channel: 'wechat', connected: false, detail: 'scan needed', qrSvg: svg }), answer.result);
+  await new Promise(resolve => setTimeout(resolve, 2));
+  await channels.reportStatus({ channel: 'wechat', connected: true });
+  await new Promise(resolve => setTimeout(resolve, 2));
+  await channels.reportStatus({ channel: 'wechat', connected: false, detail: 'scan needed', qrSvg: svg });
+  assert.deepEqual(calls.map(([path, { request_key, ...body }]) => [path, body]), [
+    ['/api/state/commands/report_channel_status', { channel: 'wechat', connected: false, detail: 'scan needed', qr_svg: svg }],
+    ['/api/state/commands/report_channel_status', { channel: 'wechat', connected: true }],
+    ['/api/state/commands/report_channel_status', { channel: 'wechat', connected: false, detail: 'scan needed', qr_svg: svg }]]);
+  assert.equal(new Set(calls.map(([, body]) => body.request_key)).size, 3, 'a status that comes back is a new report, not a replay');
+  assert.ok(calls.every(([, body]) => body.request_key.length <= 320 && !body.request_key.includes('svg')));
+  answer = Object.assign(new Error('AItelier /api/state/commands/report_channel_status: HTTP 422 "qr_svg_refused: no"'), { status: 422 });
+  assert.deepEqual(await channels.reportStatus({ channel: 'wechat', connected: false, qrSvg: '<svg onload="x"></svg>' }), { refused: 'qr_svg_refused' });
+  answer = Object.assign(new Error('AItelier /api/state/commands/report_channel_status: HTTP 503'), { status: 503 });
+  await assert.rejects(channels.reportStatus({ channel: 'slack', connected: true }), /HTTP 503/);
 });
 
 test('owner memory requests (step 14): each kind runs against the store as the owner; results go back; an unwritten result runs again', async () => {

@@ -659,9 +659,11 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # (a driver-inbox delivery carrying the result) - refuses the anonymous identity
 # and delivers neither canary. Step 16 adds state_steward_schedules: its list
 # query and the owner's schedule routes. Step 19 adds the three channel tables:
-# both channel queries, the owner's channel routes and the steward's channel commands.
+# both channel queries, the owner's channel routes and the steward's channel commands;
+# and the channels' status table: the owner's channel list with status, and the report.
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
-                  "state_owner_channels", "state_owner_channel_codes", "state_message_sources")
+                  "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
+                  "state_owner_channel_status")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -697,6 +699,7 @@ def _steward_calls(svc):
         "execute list_owner_channels": lambda: execute(svc, "list_owner_channels", {}),
         "execute message_sources": lambda: execute(svc, "message_sources", {"message_ids": [C.CHANNEL_MESSAGE]}),
         "list_owner_channels": lambda: svc.channels.list_owner_channels(),
+        "list_owner_channels with status": lambda: svc.channels.list_owner_channels(with_status=True),
         "message_sources": lambda: svc.channels.message_sources([C.CHANNEL_MESSAGE]),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
@@ -769,6 +772,8 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/commands/record_channel_delivery",
              {"project_id": steward_project(), "request_key": "d", "channel": "slack",
               "message_id": C.CHANNEL_MESSAGE}),
+            ("POST", "/api/state/commands/report_channel_status",
+             {"project_id": steward_project(), "request_key": "s", "channel": "wechat", "connected": True}),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -797,6 +802,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
                 == [(C.canary("state_owner_channel_codes"),)]
             assert [tuple(r) for r in conn.execute("SELECT message_id FROM state_message_sources")] \
                 == [(C.CHANNEL_MESSAGE,)]
+            assert [tuple(r) for r in conn.execute("SELECT channel, connected, detail FROM "
+                                                   "state_owner_channel_status")] \
+                == [("wechat", 0, C.canary("state_owner_channel_status"))]
 
 
 def _trusted_db(anonymous):

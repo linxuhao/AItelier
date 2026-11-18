@@ -2,7 +2,9 @@
  *  (dsh-director). The WeChat login itself lives in the wechat-bridge process
  *  (integrations/wechat-bridge), which survives restarts of this one; this plugin
  *  only long-polls its /events into ownerChannels.inbound, sends through its /send
- *  and reports its /status.
+ *  and reports its /status (while a scan is needed: detail 'scan needed' and the login
+ *  QR as the bridge drew it, `qrSvg`, which the host shows the owner on the dashboard;
+ *  the QR is a login token and is never logged, nor put into the detail).
  *
  *  Config (all optional): `url` of the bridge (default http://127.0.0.1:<port>, port
  *  from WECHAT_BRIDGE_PORT or 18731) and `tokenFile` (default
@@ -63,7 +65,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     try {
       const body = await call('/status');
       status = body.logged_in ? { connected: true }
-        : { connected: false, detail: body.qr ? `scan needed: ${body.qr}` : 'scan needed' };
+        : { connected: false, detail: 'scan needed', ...(typeof body.qr_svg === 'string' && body.qr_svg ? { qrSvg: body.qr_svg } : {}) };
     } catch (error) {
       if (stopping.signal.aborted) return;
       status = { connected: false, detail: error.status === 401 ? 'bridge refused the token' : 'bridge unreachable' };

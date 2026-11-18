@@ -491,15 +491,19 @@ export function refusalCode(error) {
 /** The refusals the step 19 commands answer with. Any other 4xx (an auth failure, say) is
  *  not something the sender did: it is thrown, logged as a failure, never hidden as a refusal. */
 export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'body_too_long', 'invalid_request', 'rate_limited',
-  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'unknown_message', 'delivery_recorded']);
+  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'unknown_message', 'delivery_recorded',
+  'detail_too_long', 'qr_svg_too_large', 'qr_svg_refused']);
 
 /** Design-steward 7.2: the host side of the owner's chat channels, over the State commands
  *  and queries of step 19 (relay_owner_message, bind_owner_channel, record_channel_delivery,
- *  list_owner_channels, message_sources). The server checks everything again - the binding,
- *  the bounds, the approval phrase; this only maps the plugin's calls onto it. A refusal is
- *  {refused: code}; a failure that is not one (5xx, transport) is thrown for the plugin to log.
+ *  report_channel_status, list_owner_channels, message_sources). The server checks
+ *  everything again - the binding, the bounds, the approval phrase, the QR image; this only
+ *  maps the plugin's calls onto it. A refusal is {refused: code}; a failure that is not one
+ *  (5xx, transport) is thrown for the plugin to log.
  *  Request keys derive from the channel's own message identity, so a redelivered channel
- *  message is State's replay, never a second owner message. */
+ *  message is State's replay, never a second owner message. A status report is called only
+ *  on a change (the plugin's ownerChannels), so each gets its own key: a status that comes
+ *  back later is a new report, not a replay of the first. Its detail and QR are never logged. */
 export function channelOps(request) {
   const refused = error => {
     const code = refusalCode(error);
@@ -526,6 +530,10 @@ export function channelOps(request) {
       ...(channelMessageRef ? { channel_message_ref: channelMessageRef } : {}), ...(error ? { error: String(error).slice(0, 500) } : {}) }, signal)
       .then(answered, refused),
     list: signal => request('/api/state/query/list_owner_channels', {}, signal).then(r => r?.result ?? r),
+    reportStatus: ({ channel, connected, detail, qrSvg }, signal) => request('/api/state/commands/report_channel_status', {
+      request_key: `channel-status:${channel}:${Date.now()}:${digest(JSON.stringify([connected, detail ?? null, qrSvg ?? null]))}`,
+      channel, connected: connected === true, ...(typeof detail === 'string' && detail ? { detail } : {}),
+      ...(typeof qrSvg === 'string' && qrSvg ? { qr_svg: qrSvg } : {}) }, signal).then(answered, refused),
   };
 }
 

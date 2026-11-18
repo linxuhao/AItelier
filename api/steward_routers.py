@@ -234,10 +234,11 @@ class DefaultChannel(BaseModel):
 
 @router.get("/channels", dependencies=[Depends(authz.require_reader)])
 def list_channels(service=Depends(get_service)):
-    """Both channels, bound or not, and the default one. (A channel's live status is
-    the host's to report; none is reported to the backend yet.)"""
+    """Both channels, bound or not, and the default one; each with the status the
+    steward's host last reported ({connected, detail, at}, or None) and, while the WeChat
+    login needs a scan, its QR as an SVG (`qr_svg`, else None)."""
     _owner(service)
-    return service.channels.list_owner_channels()
+    return service.channels.list_owner_channels(with_status=True)
 
 
 @router.put("/channels/default", dependencies=[Depends(authz.require_writer)])

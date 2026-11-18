@@ -25,7 +25,12 @@ case folding, no full-width spaces, no synonyms, and it must never be widened in
 a fuzzy match. The model never decides: no steward command approves; this code does,
 on the owner's exact words.
 
-All three tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
+The host also reports each channel's status (`report_channel_status`, steward only:
+connected or not, a short detail, and the WeChat login QR as an SVG while a scan is
+needed) into `state_owner_channel_status`, one row per channel, which only the owner's
+dashboard reads. Neither the detail nor the QR is ever logged.
+
+All four tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -68,6 +74,10 @@ CREATE TABLE IF NOT EXISTS state_message_sources (
 CREATE UNIQUE INDEX IF NOT EXISTS state_message_sources_inbound ON state_message_sources(channel,channel_message_ref)
  WHERE direction='in';
 CREATE INDEX IF NOT EXISTS state_message_sources_rate ON state_message_sources(channel,direction,at);
+CREATE TABLE IF NOT EXISTS state_owner_channel_status (
+ channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
+ connected INTEGER NOT NULL CHECK(connected IN (0,1)),
+ detail TEXT, qr_svg TEXT, at TEXT NOT NULL);
 """
 
 BODY_MAX_BYTES = 4096
@@ -75,6 +85,18 @@ CODE_TTL = timedelta(minutes=10)
 MESSAGE_SOURCES_MAX = 200
 APPROVE, DECLINE = "同意 proposal ", "拒绝 proposal "
 DRIVER_KINDS = ("start_driver", "stop_driver")
+# A channel's status as its host last reported it (report_channel_status): a short
+# detail line, and the WeChat login QR as an SVG while a scan is needed.
+STATUS_DETAIL_MAX = 300
+QR_SVG_MAX_BYTES = 64 * 1024
+_SVG_DOCUMENT = re.compile(r"\s*<svg[\s>][\s\S]*</svg>\s*")
+# What an SVG must not carry, so the dashboard can show it as an image and nothing
+# else: scripts, event handler attributes, links, embedded HTML, and any declaration or
+# processing instruction (an entity defined in a DOCTYPE can expand into markup this
+# check never saw). Element and attribute names may carry a namespace prefix.
+_SVG_FORBIDDEN = re.compile(r"<\s*(?:[\w.-]+:)?(?:script|foreignobject)\b"
+                            r"|[\s/\"'](?:[\w.-]+:)?(?:on[\w.-]*|href)\s*="
+                            r"|<[!?]", re.IGNORECASE)
 
 
 def rate_limits() -> tuple[int, int]:
@@ -116,6 +138,19 @@ def match_phrase(conn, body):
                 return {"action": action, "proposal_id": phrase[len(prefix):], "expected_version": row[0],
                         "phrase": phrase}
     return None
+
+
+def check_qr_svg(svg):
+    """Refuse a QR image that is not a plain SVG document of at most QR_SVG_MAX_BYTES.
+    The refusal never quotes the image (it is a live login token)."""
+    if not isinstance(svg, str):
+        raise StateGraphError("qr_svg_refused: qr_svg must be an SVG document")
+    size = len(svg.encode("utf-8"))
+    if size > QR_SVG_MAX_BYTES:
+        raise StateGraphError(f"qr_svg_too_large: {size} bytes; at most {QR_SVG_MAX_BYTES} bytes")
+    if not _SVG_DOCUMENT.fullmatch(svg) or _SVG_FORBIDDEN.search(svg):
+        raise StateGraphError("qr_svg_refused: qr_svg must be one <svg> document with no script, event handler, "
+                              "link, foreignObject, declaration or processing instruction")
 
 
 def _refusal(exc) -> str:
@@ -256,6 +291,32 @@ class StateChannels:
             return self.steward._record(conn, "record_channel_delivery", request_key, request_hash,
                                         {"recorded": True, "message_id": message_id, "channel": channel})
 
+    def report_channel_status(self, project_id, request_key, channel, connected, detail=None, qr_svg=None):
+        """The host's latest view of a channel: connected or not, a short detail and,
+        while the WeChat login needs a scan, its QR as an SVG. The row is replaced each
+        time; the dashboard shows it (the owner's GET /api/steward/channels). Neither the
+        detail nor the image is ever logged."""
+        request_hash = _hash([channel, connected, detail, qr_svg])
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "report_channel_status", request_key, request_hash)
+            if replay is not None:
+                return replay
+            if channel not in CHANNELS:
+                raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
+            if detail is not None and len(detail) > STATUS_DETAIL_MAX:
+                raise StateGraphError(f"detail_too_long: {len(detail)} characters; at most {STATUS_DETAIL_MAX}")
+            if qr_svg is not None:
+                check_qr_svg(qr_svg)
+            stamp = _now().isoformat()
+            conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) VALUES(?,?,?,?,?) "
+                         "ON CONFLICT(channel) DO UPDATE SET connected=excluded.connected,detail=excluded.detail,"
+                         "qr_svg=excluded.qr_svg,at=excluded.at",
+                         (channel, int(bool(connected)), detail, qr_svg, stamp))
+            return self.steward._record(conn, "report_channel_status", request_key, request_hash,
+                                        {"recorded": True, "channel": channel, "connected": bool(connected),
+                                         "at": stamp})
+
     # ---------------------------------------------------------------- reads (owner or steward)
     def _reader(self, conn):
         if not self.steward.is_owner_session():
@@ -265,10 +326,16 @@ class StateChannels:
                 raise StateGraphError("owner_or_steward_required") from None
 
     @writer_only_read("list_owner_channels")
-    def list_owner_channels(self):
+    def list_owner_channels(self, with_status=False):
+        """`with_status` (the owner's dashboard only, never a State query): each channel
+        also carries the status its host last reported, or None, and the login QR."""
+        if with_status:
+            self.steward._owner()
         with self.store.transaction() as conn:
             self._reader(conn)
             rows = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channels")}
+            statuses = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channel_status")} \
+                if with_status else {}
         channels, default = [], None
         for channel in CHANNELS:
             row = rows.get(channel)
@@ -279,6 +346,12 @@ class StateChannels:
                              "bound_at": row["bound_at"] if row else None,
                              "revoked_at": row["revoked_at"] if row else None,
                              "is_default": bool(row is not None and row["is_default"])})
+            if with_status:
+                status = statuses.get(channel)
+                channels[-1].update(
+                    status={"connected": bool(status["connected"]), "detail": status["detail"], "at": status["at"]}
+                    if status is not None else None,
+                    qr_svg=status["qr_svg"] if status is not None else None)
         return {"channels": channels, "default_channel": default}
 
     @writer_only_read("message_sources")

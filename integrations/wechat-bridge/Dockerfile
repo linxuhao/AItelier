@@ -20,7 +20,7 @@ RUN node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev --ignore-s
 RUN ldd --version | head -n 1 \
     && ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \
     && ! ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node | grep -q 'not found'
-COPY bridge.mjs main.mjs ./
+COPY bridge.mjs main.mjs qr-svg.mjs ./
 # puppet-neo declares node >= 26; this is node 24. Load both packages and open (then
 # close) a native session the way the puppet does, with no network: proves the addon
 # loads and runs on this node and this glibc without logging in to anything.

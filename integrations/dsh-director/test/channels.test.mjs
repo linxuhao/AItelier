@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies } from '../lib/channels.mjs';
 import { validateHost } from '../lib/host.mjs';
+import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -203,6 +204,37 @@ test('an approval the host executed is answered with one line of its outcome; a 
   w.host.next = approval('approve', 'executed');
   await w.inbound({ channel: 'wechat', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' });
   assert.equal(w.wechat.sent.length, 1);
+});
+
+test("an executed decision's line names the host's kind and target in both languages; an unknown kind reads as itself; a long target is cut", () => {
+  const line = (action, kind, target) => channelReplies.approval({ proposal_id: 'prop-x', action, outcome: 'executed', kind, target });
+  assert.equal(line('approve', 'stop_driver', 'alpha'),
+    'proposal prop-x: approved and done - stop director of alpha. 已同意并执行：停止 alpha 项目的导演。');
+  assert.equal(line('decline', 'stop_driver', 'alpha'), 'proposal prop-x: declined - stop director of alpha. 已拒绝：停止 alpha 项目的导演。');
+  const each = { create_project: ['create project alpha', '创建 alpha 项目'], start_driver: ['start director of alpha', '启动 alpha 项目的导演'],
+    stop_driver: ['stop director of alpha', '停止 alpha 项目的导演'], archive_project: ['archive project alpha', '归档 alpha 项目'],
+    unarchive_project: ['unarchive project alpha', '取消归档 alpha 项目'] };
+  assert.deepEqual(Object.keys(each).sort(), [...PROPOSAL_KINDS].sort(), 'every proposal kind has its phrase');
+  for (const [kind, [en, zh]] of Object.entries(each)) {
+    assert.equal(line('approve', kind, 'alpha'), `proposal prop-x: approved and done - ${en}. 已同意并执行：${zh}。`);
+    assert.equal(line('decline', kind, 'alpha'), `proposal prop-x: declined - ${en}. 已拒绝：${zh}。`);
+  }
+  assert.equal(line('approve', 'rename_project', 'alpha'), 'proposal prop-x: approved and done - rename_project alpha. 已同意并执行：rename_project alpha。');
+  const long = line('approve', 'archive_project', 'a'.repeat(5000));
+  assert.ok(long.length < 200 && long.includes('a'.repeat(59) + '…') && !long.includes('a'.repeat(60)), long);
+  assert.ok(line('approve', 'k'.repeat(5000), 'alpha').length < 200, 'an unknown long kind is cut too');
+  // No kind from the host: the plain line as before; a refusal line is unchanged by a kind.
+  assert.equal(line('approve'), 'proposal prop-x: approved and done. 已同意并执行。');
+  assert.equal(channelReplies.approval({ proposal_id: 'prop-x', action: 'approve', outcome: 'refused', refusal: 'proposal_not_open',
+    kind: 'stop_driver', target: 'alpha' }), 'proposal prop-x: not done (proposal_not_open). 未执行（proposal_not_open）。');
+});
+
+test('the decided line reaches the bound sender with the kind and target the relay answered', async () => {
+  const s = setup();
+  s.host.next = { message_id: 'm', duplicate: false,
+    approval: { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'alpha', result: {} } };
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'k-1', text: '同意 proposal p-1' });
+  assert.equal(s.slack.sent.at(-1).text, 'proposal p-1: approved and done - start director of alpha. 已同意并执行：启动 alpha 项目的导演。');
 });
 
 test('binding attempts are bounded per channel and minute: past the bound, six digits are relayed like any message, and nobody is answered', async () => {

@@ -186,7 +186,8 @@ export interface DirectorHost {
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
    *    {refused: code}. When the text is exactly an approval phrase the host executes it
-   *    in code and says so in `approval`; the model never does.
+   *    in code and says so in `approval`; the model never does. An executed decision
+   *    names the decided proposal's `kind` and `target` from the host's own record of it.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
    *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
    *    more than two minutes ahead of the host's clock (approval_clock_skew).
@@ -208,7 +209,7 @@ export interface DirectorHost {
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
       Promise<{ message_id: string | null; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
-        outcome: 'executed' | 'refused'; refusal?: string; result?: object } } | { refused: string; reason?: string }>;
+        outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object } } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
       Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;
     sourceOf(messageId: string, signal?: AbortSignal): Promise<null | { direction: 'in' | 'out'; channel: 'slack' | 'wechat';

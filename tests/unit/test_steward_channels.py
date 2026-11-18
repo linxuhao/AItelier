@@ -675,6 +675,20 @@ def test_the_decline_phrase_declines_as_the_bound_account(world):
     assert row["result"]["phrase"] == "拒绝 proposal p-1"
 
 
+def test_an_executed_decision_names_the_stored_proposals_kind_and_target(world):
+    """The channel's answer line says what was decided: the kind and project the stored
+    proposal row carries, nothing taken from the message."""
+    bind(world)
+    plant_proposal(world, "p-1")
+    plant_proposal(world, "p-2", kind="archive_project", payload={"project_id": "alpha"})
+    approved = relay(world, "同意 proposal p-1", "ts-1")["approval"]
+    assert (approved["outcome"], approved["kind"], approved["target"]) == ("executed", "create_project", "gamma")
+    declined = relay(world, "拒绝 proposal p-2", "ts-2")["approval"]
+    assert (declined["outcome"], declined["kind"], declined["target"]) == ("executed", "archive_project", "alpha")
+    refused_again = relay(world, "同意 proposal p-2", "ts-3")["approval"]
+    assert refused_again["outcome"] == "refused" and "kind" not in refused_again and "target" not in refused_again
+
+
 def test_a_decided_or_changed_proposal_is_refused_and_left_as_it_is(world, monkeypatch):
     bind(world)
     plant_proposal(world, "p-1")

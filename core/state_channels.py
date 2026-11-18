@@ -171,6 +171,11 @@ def match_phrase(conn, body):
     return None
 
 
+def _subject(proposal):
+    """What a decided proposal was about, from its stored row: {kind, target}."""
+    return {"kind": proposal["kind"], "target": proposal["payload"].get("project_id")}
+
+
 def check_qr_svg(svg):
     """Refuse a QR image that is not a plain SVG document of at most QR_SVG_MAX_BYTES
     (the allowlist above). The refusal never quotes the image (it is a live login token)."""
@@ -574,7 +579,9 @@ class StateChannels:
         phrase. A refusal leaves the proposal as it was and is answered, not raised:
         the message itself was written. A phrase written more than APPROVAL_MAX_AGE
         before now (`written_at`, a channel's own time) is refused approval_too_old, one
-        dated more than APPROVAL_CLOCK_SKEW after now approval_clock_skew."""
+        dated more than APPROVAL_CLOCK_SKEW after now approval_clock_skew.
+        An executed decision also names the proposal's `kind` and `target` (its
+        project_id) from the stored row, for the channel's one-line answer."""
         steward, proposal_id = self.steward, matched["proposal_id"]
         version, carrier = matched["expected_version"], record if record.get("channel") else None
         out = {"proposal_id": proposal_id, "action": matched["action"]}
@@ -584,8 +591,8 @@ class StateChannels:
             return {**out, "outcome": "refused", "refusal": "approval_clock_skew"}
         try:
             if matched["action"] == "decline":
-                return {**out, "outcome": "executed",
-                        "result": steward.decide_decline(proposal_id, version, decided_by, record, carrier)}
+                declined = steward.decide_decline(proposal_id, version, decided_by, record, carrier)
+                return {**out, "outcome": "executed", **_subject(declined), "result": declined}
             with self.store.transaction() as conn:
                 row = steward._get(conn, proposal_id)
                 impact = None
@@ -615,4 +622,4 @@ class StateChannels:
                 result = steward.fail(proposal_id, f"{type(exc).__name__}: {exc}")
             else:
                 result = steward.finish(proposal_id, "done", {"driver": driver})
-        return {**out, "outcome": "executed", "result": result}
+        return {**out, "outcome": "executed", **_subject(row), "result": result}

@@ -22,6 +22,23 @@
 
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
+/** What an executed decision was about, in both languages: the host's own record of the
+ *  proposal (its kind and target), never the message. An unknown kind reads as itself; a
+ *  long target or kind is cut, so the line stays one short line. */
+const DECIDED = Object.freeze({
+  create_project: t => [`create project ${t}`, `创建 ${t} 项目`],
+  start_driver: t => [`start director of ${t}`, `启动 ${t} 项目的导演`],
+  stop_driver: t => [`stop director of ${t}`, `停止 ${t} 项目的导演`],
+  archive_project: t => [`archive project ${t}`, `归档 ${t} 项目`],
+  unarchive_project: t => [`unarchive project ${t}`, `取消归档 ${t} 项目`],
+});
+const cut = (value, max) => { const s = String(value ?? ''); return s.length > max ? s.slice(0, max - 1) + '…' : s; };
+const decided = ({ kind, target }) => {
+  if (!text(kind)) return null;
+  const t = cut(target, 60), known = Object.hasOwn(DECIDED, kind);
+  return known ? DECIDED[kind](t) : Array(2).fill(`${cut(kind, 40)}${t ? ' ' + t : ''}`);
+};
+
 /** The lines a sender is answered with on the channel: short, the same in both languages,
  *  never an echo of what they wrote. */
 export const channelReplies = Object.freeze({
@@ -30,8 +47,12 @@ export const channelReplies = Object.freeze({
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   rate_limited: 'Not delivered: too many messages, try again later. 未送达：消息太频繁，请稍后再发。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
-  approval({ proposal_id: id, action, outcome, refusal }) {
-    if (outcome === 'executed') return action === 'decline' ? `proposal ${id}: declined. 已拒绝。` : `proposal ${id}: approved and done. 已同意并执行。`;
+  approval({ proposal_id: id, action, outcome, refusal, kind, target }) {
+    if (outcome === 'executed') {
+      const [en, zh] = decided({ kind, target }) ?? [];
+      if (action === 'decline') return en ? `proposal ${id}: declined - ${en}. 已拒绝：${zh}。` : `proposal ${id}: declined. 已拒绝。`;
+      return en ? `proposal ${id}: approved and done - ${en}. 已同意并执行：${zh}。` : `proposal ${id}: approved and done. 已同意并执行。`;
+    }
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
     return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
   },

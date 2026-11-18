@@ -106,6 +106,9 @@ REFUSED = {
     "claim_node": {"project_id": "alpha", "node_key": "n1"},
     "start_attempt": {"project_id": "alpha", "node_key": "n1"},
     "create_project": {"project_id": "gamma", "title": "Gamma"},
+    # Owner 2026-11-18: the steward may only PROPOSE archive / unarchive; the write is the owner's.
+    "archive_project": {"project_id": "alpha"},
+    "unarchive_project": {"project_id": "alpha"},
     # The steward's inbox writes are ACKNOWLEDGEMENTS only (a letter can be answered and
     # marked read); resolve stays closed in both inboxes, even for its OWN deliveries.
     "resolve_director_message": {"project_id": HOME, "delivery_id": "0" * 36,
@@ -121,6 +124,7 @@ def test_the_steward_is_refused_every_write_outside_the_whitelist(world, action)
         execute(world.service(world.steward), action, REFUSED[action], allow_write=True)
     assert str(refused.value) == _refusal(action)
     assert "gamma" not in _project_ids(world)
+    assert not world.owner.store.is_project_archived("alpha")
 
 
 def test_the_steward_write_whitelist_is_exactly_these_actions():

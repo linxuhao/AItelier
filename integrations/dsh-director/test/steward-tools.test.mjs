@@ -79,13 +79,18 @@ test('proposals: propose passes kind, payload, reason (and supersedes); an unkno
   const proposals = { propose: async p => (calls.push(['propose', p]), { proposal_id: 'p-1' }), withdraw: async w => (calls.push(['withdraw', w]), { withdrawn: true }) };
   const tools = collect(registerProposalTools, { proposals });
   assert.deepEqual([...tools.keys()], ['propose', 'withdraw_proposal']);
-  assert.deepEqual(PROPOSAL_KINDS, ['create_project', 'start_driver', 'stop_driver']);
+  // Owner 2026-11-18: archive / unarchive are proposals too (the owner approves, the backend executes).
+  assert.deepEqual(PROPOSAL_KINDS, ['create_project', 'start_driver', 'stop_driver', 'archive_project', 'unarchive_project']);
+  const description = tools.get('propose').description;
+  for (const kind of ['archive_project {project_id, reason?}', 'unarchive_project {project_id, reason?}']) assert.ok(description.includes(kind), kind);
   assert.deepEqual(await tools.get('propose').execute({ kind: 'deploy', payload: {}, reason: 'r' }, exec), { refused: 'unknown_kind', kinds: PROPOSAL_KINDS });
   assert.equal(calls.length, 0);
+  await tools.get('propose').execute({ kind: 'archive_project', payload: { project_id: 'w', reason: 'done' }, reason: 'r' }, exec);
   await tools.get('propose').execute({ kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r' }, exec);
   await tools.get('propose').execute({ kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r2', supersedes: 'p-1' }, exec);
   await tools.get('withdraw_proposal').execute({ id: 'p-1', reason: 'gone' }, exec);
-  assert.deepEqual(calls, [['propose', { kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r' }],
+  assert.deepEqual(calls, [['propose', { kind: 'archive_project', payload: { project_id: 'w', reason: 'done' }, reason: 'r' }],
+    ['propose', { kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r' }],
     ['propose', { kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r2', supersedes: 'p-1' }],
     ['withdraw', { id: 'p-1', reason: 'gone' }]]);
 });

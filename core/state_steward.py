@@ -45,7 +45,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_steward_proposals (
  proposal_id TEXT PRIMARY KEY,
  version INTEGER NOT NULL CHECK(version>0),
- kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver')),
+ kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver','archive_project','unarchive_project')),
  payload_json TEXT NOT NULL, reason TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('open','executing','done','failed','declined','withdrawn','superseded')),
  created_by TEXT NOT NULL, created_at TEXT NOT NULL, supersedes TEXT,
@@ -72,7 +72,14 @@ CREATE TABLE IF NOT EXISTS state_steward_schedules (
 CREATE INDEX IF NOT EXISTS state_steward_schedules_next ON state_steward_schedules(deleted_at,next_run_at);
 """
 
-KINDS = ("create_project", "start_driver", "stop_driver")
+KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project")
+# Owner 2026-11-18: the steward may PROPOSE archiving / unarchiving a project; the
+# owner approves on the card and the backend writes it as that owner. The steward
+# itself keeps no archive permission (archive_project is not on its whitelist).
+ARCHIVE_KINDS = ("archive_project", "unarchive_project")
+# The kind CHECK a database created before the archive kinds carries; `_migrate_kinds`
+# rebuilds such a table once with SCHEMA's CHECK.
+OLD_KIND_CHECK = "CHECK(kind IN ('create_project','start_driver','stop_driver'))"
 MEMORY_KINDS = ("profile_read", "profile_update", "forgotten_list", "forget", "restore", "purge")
 # The payload keys each memory request kind may carry (memory-requests.mjs).
 _MEMORY_KEYS = {"profile_read": set(), "profile_update": {"text", "expected_version", "reason"},
@@ -353,6 +360,32 @@ class StateSteward:
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
                 conn.commit()
+            self._migrate_kinds()
+
+    def _migrate_kinds(self):
+        """A proposals table created with OLD_KIND_CHECK refuses the archive kinds:
+        rebuild it with SCHEMA's own CREATE TABLE (old table set aside, new one
+        created, rows copied, old dropped, index recreated) in ONE write transaction.
+        Checked again under the write lock; a table already migrated is never touched."""
+        def old(conn):
+            row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                               "AND name='state_steward_proposals'").fetchone()
+            return row is not None and OLD_KIND_CHECK in row[0]
+        with self.store.db.get_connection() as conn:
+            if not old(conn):
+                return
+        columns = ("proposal_id,version,kind,payload_json,reason,status,created_by,created_at,supersedes,"
+                   "decided_at,decided_by,result_json,notified_at")
+        with self.store.transaction(write=True) as conn:
+            if not old(conn):
+                return
+            conn.execute("ALTER TABLE state_steward_proposals RENAME TO state_steward_proposals_old_kinds")
+            conn.execute(SCHEMA.split(";", 1)[0])  # the proposals table, with the current kind CHECK
+            conn.execute(f"INSERT INTO state_steward_proposals({columns}) "
+                         f"SELECT {columns} FROM state_steward_proposals_old_kinds")
+            conn.execute("DROP TABLE state_steward_proposals_old_kinds")
+            conn.execute("CREATE INDEX IF NOT EXISTS state_steward_proposals_status "
+                         "ON state_steward_proposals(status,created_at)")
 
     # ---------------------------------------------------------------- identity
     def _steward(self, conn, project_id=None):
@@ -431,7 +464,10 @@ class StateSteward:
             # add_nodes' own node shape: {key, goal, acceptance, ...}.
             seed_nodes: list[NewNode] = Field(default_factory=list, max_length=200)
 
-        model = CreateProject if kind == "create_project" else Driver
+        class Archive(Driver):
+            reason: str | None = Field(default=None, max_length=4000)
+
+        model = CreateProject if kind == "create_project" else Archive if kind in ARCHIVE_KINDS else Driver
         try:
             parsed = model.model_validate(payload)
         except ValidationError as exc:
@@ -441,6 +477,10 @@ class StateSteward:
         out = parsed.model_dump()
         if kind == "create_project":
             out["seed_nodes"] = [node.model_dump(exclude_unset=True) for node in parsed.seed_nodes]
+        if kind in ARCHIVE_KINDS:
+            # The same rule archive_project applies to its reason; absent stays absent.
+            out = {"project_id": out["project_id"],
+                   **({"reason": text(out["reason"], "archive reason", 4000)} if out["reason"] is not None else {})}
         return out
 
     def _get(self, conn, proposal_id):
@@ -465,6 +505,8 @@ class StateSteward:
             if replay is not None:
                 return replay
             target = payload["project_id"]
+            if kind in ARCHIVE_KINDS and target == steward_project():
+                raise StateGraphError(f"invalid_project: {target} is the steward's own project")
             exists = conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (target,)).fetchone()
             if kind == "create_project" and exists:
                 raise StateConflict(f"project_exists: {target} is already a project")
@@ -473,6 +515,12 @@ class StateSteward:
             if kind == "stop_driver":
                 # What it would interrupt as the steward saw it; recomputed at approval.
                 payload["impact"] = stop_impact(conn, target)
+            if kind in ARCHIVE_KINDS:
+                archived = self.store._archived(conn, target)
+                if kind == "archive_project" and archived:
+                    raise StateConflict(f"already_archived: {target} is already archived")
+                if kind == "unarchive_project" and not archived:
+                    raise StateConflict(f"not_archived: {target} is not archived")
             stamp, proposal_id = now(), "prop-" + uuid4().hex[:20]
             if supersedes is not None:
                 old = self._get(conn, supersedes)
@@ -586,6 +634,31 @@ class StateSteward:
         self._notify()
         return out
 
+    def execute_archive(self, proposal_id):
+        """Run an EXECUTING archive_project / unarchive_project proposal: the archive
+        state checked again, the store's archive write (recorded as the owner who
+        approved it) and the proposal's `done` in ONE transaction. A project whose
+        state changed since the proposal fails it (separately), untouched."""
+        try:
+            with self.store.transaction(write=True) as conn:
+                row = self._get(conn, proposal_id)
+                if row["status"] != "executing" or row["kind"] not in ARCHIVE_KINDS:
+                    return _proposal(row)
+                payload = json.loads(row["payload_json"])
+                project_id, archived = payload["project_id"], row["kind"] == "archive_project"
+                if self.store._archived(conn, project_id) == archived:
+                    raise StateConflict(f"already_archived: {project_id} is already archived" if archived
+                                        else f"not_archived: {project_id} is not archived")
+                self.store._set_project_archive(conn, project_id, archived, row["decided_by"],
+                                                payload.get("reason", ""))
+                self._finish(conn, proposal_id, "done", {"archived": archived, "project_id": project_id})
+                out = _proposal(self._get(conn, proposal_id))
+        except Exception as exc:  # noqa: BLE001 - any failure is the proposal's result
+            return self.fail(proposal_id, f"{type(exc).__name__}: {exc}" if not isinstance(exc, StateGraphError)
+                             else str(exc))
+        self._notify()
+        return out
+
     def finish(self, proposal_id, status, result):
         """Write the terminal state of an EXECUTING proposal (and wake the steward)."""
         with self.store.transaction(write=True) as conn:
@@ -651,7 +724,9 @@ class StateSteward:
         terminal result no steward received. create_project runs again under "only
         if the project does not exist" (its execution was one transaction, so a crash
         left no half-made project); start/stop_driver are judged by the driver's
-        current phase, else failed. `drivers` is the DshDrivers manager (or None)."""
+        current phase, else failed; archive/unarchive by the project's archive state
+        (done if it already matches, else run again - also one transaction).
+        `drivers` is the DshDrivers manager (or None)."""
         with self.store.transaction() as conn:
             rows = [dict(r) for r in conn.execute(
                 "SELECT proposal_id,kind,payload_json FROM state_steward_proposals WHERE status='executing'")]
@@ -660,6 +735,14 @@ class StateSteward:
                 self.execute_create_project(row["proposal_id"])
                 continue
             target = json.loads(row["payload_json"])["project_id"]
+            if row["kind"] in ARCHIVE_KINDS:
+                archived = row["kind"] == "archive_project"
+                if self.store.is_project_archived(target) == archived:
+                    self.finish(row["proposal_id"], "done",
+                                {"archived": archived, "project_id": target, "recovered": True})
+                else:
+                    self.execute_archive(row["proposal_id"])
+                continue
             current = drivers.get(target) if drivers is not None else None
             if current is not None and row["kind"] == "start_driver" and current["enabled"] \
                     and current["phase"] in LIVE_PHASES:

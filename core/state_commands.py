@@ -1147,10 +1147,12 @@ class CreateStewardProposal(Project):
     its proposals and the owner's memory requests live; it is not the target."""
 
     request_key: str = Field(min_length=1, max_length=320)
-    kind: Literal["create_project", "start_driver", "stop_driver"]
+    kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project"]
     payload: dict[str, Any] = Field(description=(
         "create_project {project_id, title, goal, seed_nodes: [add_nodes node: {key, goal, acceptance, ...}]}; "
-        "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server)."))
+        "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server); "
+        "archive_project / unarchive_project {project_id, reason?} (hide a project from the owner's list, or "
+        "list it again; never the steward's own project; the project must currently be listed / archived)."))
     reason: str = Field(min_length=1, max_length=4000)
     supersedes: str | None = Field(default=None, min_length=1, max_length=200, description=(
         "One of your OPEN proposals that this one replaces; it becomes superseded."))

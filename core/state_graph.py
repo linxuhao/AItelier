@@ -775,24 +775,29 @@ class StateGraphStore:
         different table from ``state_project_access``, whose visibility this write
         never touches.
         """
+        with self.transaction(write=True) as conn:
+            return self._set_project_archive(conn, project_id, archived, actor, reason)
+
+    def _set_project_archive(self, conn, project_id: str, archived: bool, actor: str, reason: str = "") -> dict:
+        """`set_project_archive` on the caller's write transaction: the steward's
+        approved archive proposal writes it together with the proposal's result."""
         if type(archived) is not bool:
             raise StateGraphError("archived must be a boolean")
         actor = text(actor, "actor", 320)
         pid = key(project_id)
         stamp = now()
-        with self.transaction(write=True) as conn:
-            self._project(conn, pid)
-            if self._archived(conn, pid) == archived:
-                return self._archive_record(conn, pid, changed=False)
-            conn.execute(
-                "INSERT INTO state_project_archive(project_id,archived,reason,actor,updated_at) "
-                "VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET archived=excluded.archived,"
-                "reason=excluded.reason,actor=excluded.actor,updated_at=excluded.updated_at",
-                (pid, int(archived), reason, actor, stamp))
-            self._event(conn, pid, None,
-                        "project_archived" if archived else "project_unarchived",
-                        {"archived": archived, "reason": reason, "actor": actor})
-            return self._archive_record(conn, pid, changed=True)
+        self._project(conn, pid)
+        if self._archived(conn, pid) == archived:
+            return self._archive_record(conn, pid, changed=False)
+        conn.execute(
+            "INSERT INTO state_project_archive(project_id,archived,reason,actor,updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET archived=excluded.archived,"
+            "reason=excluded.reason,actor=excluded.actor,updated_at=excluded.updated_at",
+            (pid, int(archived), reason, actor, stamp))
+        self._event(conn, pid, None,
+                    "project_archived" if archived else "project_unarchived",
+                    {"archived": archived, "reason": reason, "actor": actor})
+        return self._archive_record(conn, pid, changed=True)
 
     def project_for_attempt(self, attempt_id: str):
         with self.transaction() as conn:

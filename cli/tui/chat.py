@@ -1,13 +1,15 @@
 # cli/tui/chat.py
 # Chat zone — the input pane and its history/context management.
-# The butler chat backend it used to stream from is retired; a send now answers
-# with one message naming the replacement entry point (see
-# BUTLER_CHAT_RETIRED_NOTICE). Includes /-command completion candidates display.
+# The butler chat backend it used to stream from is retired; a send now writes
+# the user's half of the pane's project driver conversation and reads the
+# driver's answer back from that same thread. Includes /-command completion
+# candidates display.
 
 import json
 import os
 import time
 import asyncio
+import uuid
 from pathlib import Path
 
 import httpx
@@ -668,15 +670,67 @@ class BriefReviewModal(ModalScreen[bool]):
             pass
 
 
-# The butler chat backend was retired on the owner's 2026-11-17 ruling, so no chat
-# request goes out from this pane any more. Saying nothing would read as a broken
-# input; this is the one visible answer a send produces, and it names where the
-# conversation lives now: a project's driver conversation in the dashboard.
-BUTLER_CHAT_RETIRED_NOTICE = (
-    "Butler chat has been retired: this message was not sent. The replacement is a "
-    "project's driver conversation in the dashboard — "
-    "GET /api/dsh-drivers/{project_id}/conversation."
-)
+# ── The project's driver conversation ────────────────────────────
+#
+# The replacement for the retired butler chat already exists, and these two
+# endpoints are the whole conversation: ONE durable State command writes the
+# user's half of a project's thread, and the driver's own messages are read back
+# from the persisted thread the dashboard shows. The pane talks to nothing else.
+
+# The command that writes a user message; the read is
+# GET /api/dsh-drivers/{project_id}/conversation.
+SEND_CONVERSATION_MESSAGE = "/api/state/commands/send_user_conversation_message"
+# How many times ONE send reads the conversation before it stops waiting for an
+# answer. The driver writes into the thread on its own schedule, so the first
+# read usually finds only the user's own row.
+CONVERSATION_READS = 3
+CONVERSATION_READ_INTERVAL = 2.0
+
+
+def _server_sentence(response) -> str:
+    """The sentence the server itself wrote for a failed response, if any.
+
+    A State command refuses with `{"detail": "<sentence>"}`. Echoing that beats
+    a transport-level "422 Unprocessable Entity", which tells the user nothing
+    about what was refused.
+    """
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, str):
+        return detail.strip()
+    if detail:
+        return json.dumps(detail, ensure_ascii=False)[:300]
+    return ""
+
+
+def _failure_text(exc: Exception, response) -> str:
+    """What to show for a failed request: the server's own words first."""
+    return _server_sentence(response) or f"{type(exc).__name__}: {exc}"
+
+
+def _conversation_text(entry: dict) -> str:
+    """The text ONE conversation entry shows, as the dashboard renders it.
+
+    `body` is the whole message; a message sent with an empty body but tagged
+    `segments` shows its block texts instead, so no text is lost. `subject` is
+    the driver's own heading and reads above it.
+    """
+    body = str(entry.get("body") or "").strip()
+    if not body:
+        body = "\n".join(
+            str(block.get("text") or "").strip()
+            for block in (entry.get("segments") or [])
+            if isinstance(block, dict) and str(block.get("text") or "").strip()
+        )
+    subject = str(entry.get("subject") or "").strip()
+    if subject and body:
+        return f"{subject}\n{body}"
+    return subject or body
 
 
 class ChatZone(Container):
@@ -703,6 +757,10 @@ class ChatZone(Container):
         self._queued_message: str | None = None
         self._last_agent_event_at: float | None = None
         self._stall_warned = False
+        # The driver messages this pane has already mounted, by `message_id`: a
+        # later read of the same thread returns them again, and one message must
+        # never be rendered twice.
+        self._rendered_driver_messages: set[str] = set()
         self._completion_matches: list[tuple] = []
         self._completion_index: int = 0
         self._skip_next_submit: bool = False
@@ -1897,13 +1955,16 @@ class ChatZone(Container):
 
     @work(exclusive=True, group=_STREAM_GROUP)
     async def _stream_agent_response(self, message: str):
-        """Answer the send instead of calling a backend.
+        """Send `message` to this project's driver conversation, then read the answer.
 
-        The butler chat backend was retired (owner ruling 2026-11-17), so there
-        is nothing to POST to and nothing to stream: the turn emits exactly one
-        visible message naming the replacement entry point. The
-        worker/queue/stall scaffolding around it is kept because it is the shape
-        the replacement wiring needs.
+        The butler chat backend was retired (owner ruling 2026-11-17), and the
+        replacement is already live: ONE `send_user_conversation_message` State
+        command writes the user's half of the pane's project conversation, and the
+        driver's own messages are read back from the persisted thread - the same
+        thread the dashboard shows. The worker, the queue and the stall watchdog
+        are kept: the driver writes its answer on its own schedule, so the turn
+        reads the thread again after the POST instead of expecting the answer in
+        the POST's reply.
 
         Callers must not start this while `_agent_streaming` is set — being exclusive,
         starting it cancels the turn in flight. `on_input_submitted` queues instead;
@@ -1918,7 +1979,19 @@ class ChatZone(Container):
         self._stall_warned = False
 
         try:
-            self._add_system(BUTLER_CHAT_RETIRED_NOTICE)
+            project_id = self.current_project
+            if not project_id:
+                # A conversation belongs to ONE project, so there is nothing to
+                # post to yet. Posting nothing must not look like a message that
+                # was sent, so the refusal is the whole answer.
+                self._add_error(
+                    "No project selected — select a project first (/project <id> "
+                    "or /projects). Your message was NOT sent: a driver "
+                    "conversation belongs to one project."
+                )
+                self._scroll_to_bottom()
+                return
+            await self._send_to_driver_conversation(project_id, message)
             self._scroll_to_bottom()
         finally:
             self._agent_streaming = False
@@ -1929,6 +2002,89 @@ class ChatZone(Container):
             # group), and work started from a dying task is not reliably scheduled.
             if self._queued_message:
                 self.set_timer(0.05, self._flush_queued_message)
+
+    async def _send_to_driver_conversation(self, project_id: str, message: str) -> None:
+        """Write the user's half of the conversation, then show the driver's.
+
+        Two separate calls on purpose: the POST is the send, the GET only READS
+        what the driver wrote. So a failed POST says the message was NOT sent,
+        and a failed GET says it WAS sent and the answer could not be read.
+        """
+        response = None
+        try:
+            response = await self.app.http.post(
+                SEND_CONVERSATION_MESSAGE,
+                json={"request_key": str(uuid.uuid4()), "project_id": project_id,
+                      "body": message},
+                timeout=30.0,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self._add_error(
+                f"Your message was NOT sent to {project_id}'s driver conversation: "
+                f"{_failure_text(exc, response)}"
+            )
+            return
+        await self._read_driver_answers(project_id)
+
+    async def _read_driver_answers(self, project_id: str) -> None:
+        """Mount the driver's messages this pane has not shown yet.
+
+        One page (`limit=30`, newest first, both senders, each entry carrying
+        `sender_kind`) is read now and again a couple of times: the driver writes
+        its answer after the POST returns, so the first read usually holds only
+        the user's own row. Only `driver` rows are the answer - the user's own
+        rows are echoed where they were typed.
+        """
+        for read in range(CONVERSATION_READS):
+            if read:
+                await asyncio.sleep(CONVERSATION_READ_INTERVAL)
+            response = None
+            try:
+                response = await self.app.http.get(
+                    f"/api/dsh-drivers/{project_id}/conversation",
+                    params={"limit": 30}, timeout=30.0,
+                )
+                response.raise_for_status()
+                page = response.json()
+            except Exception as exc:
+                self._add_error(
+                    f"Your message was sent to {project_id}'s driver conversation, "
+                    f"but the answer could not be read: {_failure_text(exc, response)}"
+                )
+                return
+            if self._mount_new_driver_messages(page):
+                return
+            # A read that found nothing is still activity: the pane is waiting on
+            # the driver, not dead, so the stall watchdog must not call it dead.
+            self._last_agent_event_at = time.monotonic()
+            self._stall_warned = False
+
+    def _mount_new_driver_messages(self, page) -> int:
+        """Mount one conversation page's fresh driver messages, oldest first.
+
+        The page is newest first and keyset-paged, so it is reversed to read
+        oldest -> newest; a `message_id` already rendered is skipped, and ids are
+        recorded as they are mounted, so a later read of the same thread cannot
+        show one message twice. Returns how many were mounted.
+        """
+        entries = page.get("messages") if isinstance(page, dict) else None
+        if not isinstance(entries, list):
+            return 0
+        fresh: list[str] = []
+        for entry in reversed(entries):
+            if not isinstance(entry, dict) or entry.get("sender_kind") != "driver":
+                continue
+            message_id = entry.get("message_id")
+            text = _conversation_text(entry)
+            if not message_id or not text or message_id in self._rendered_driver_messages:
+                continue
+            self._rendered_driver_messages.add(message_id)
+            fresh.append(text)
+        log = self.query_one("#chat-log")
+        for text in fresh:
+            log.mount(Static(f"Driver: {text}", classes="chat-agent"))
+        return len(fresh)
 
     # ── Context management ───────────────────────────────────────
 

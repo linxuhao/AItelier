@@ -16,6 +16,7 @@ import uuid
 
 from core.driver_credentials import read_token_file
 from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
+from core.off_loop_sqlite import retry_while_locked
 from core.state_graph import now
 from core.state_schema_migration import add_column_if_missing
 
@@ -841,7 +842,21 @@ class DshDrivers:
         Neither column ever holds `route`: an endpoint equal to the alias is
         stored as unknown (NULL / absent from the list), here, so no caller can
         get it wrong by passing `served_by=gateway.model`.
+
+        A HELD WRITE LOCK is retried a bounded three times: this call is
+        best-effort - the turn is already answered and paid for - but losing it
+        to another writer that is mid-transaction costs the owner a turn of
+        usage/cost accounting, which is what `iss-0297fe77883241b5` measured
+        twice in three hours. Every attempt is a whole transaction from BEGIN
+        IMMEDIATE, so a retried attempt cannot double-count `calls`; a lock that
+        outlives the window still raises to the caller, which is what keeps the
+        `served unrecorded` warning (api/dsh_driver_routers.py) in place.
         """
+        retry_while_locked(lambda: self._record_model_call_once(
+            project_id, session_id, route=route, served_by=served_by))
+
+    def _record_model_call_once(self, project_id, session_id, *, route, served_by):
+        """ONE attempt: open, BEGIN IMMEDIATE, merge, COMMIT. See above."""
         endpoint = self._named_endpoint(served_by, route)
         stamp = now()
         with self.db.get_connection() as conn:

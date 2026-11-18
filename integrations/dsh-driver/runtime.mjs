@@ -605,7 +605,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       }));
       // The steward answers the letters directors send it, in its project inbox and its
       // private inbox (owner 2026-11-17); it never starts a private message itself.
-      // Marking a project letter read is portfolio_inbox_acknowledge (steward-host.mjs).
+      // Marking a letter read is portfolio_inbox_acknowledge for a project letter and
+      // private_inbox_acknowledge for a private one (steward-host.mjs; the server allows
+      // the steward acknowledgement only, in either box).
       if (steward) {
         const json = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
         const inbox = { type: 'string', required: true, enum: ['project', 'private'] };
@@ -631,7 +633,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (args, exec) => deleteSchedule(request, args, exec.signal).then(changed),
         }));
         scope.tools.register(defineTool({ name: 'reply_to_director',
-          description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox. delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
+          description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox (mark them read with private_inbox_acknowledge, in the answer or once you are done with it). delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
           parameters: { inbox, delivery_id: { type: 'string', required: true }, text: { type: 'string', required: true } }, output: json,
           execute: (args, exec) => replyToLetter({ request, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal }),
         }));

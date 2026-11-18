@@ -31,7 +31,7 @@
     "prompt": "steward.md",
     "presented": ["memory_search", "memory_read", "memory_note", "memory_profile_update", "memory_forget",
                   "portfolio_projects", "portfolio_project", "portfolio_conversation", "portfolio_inbox",
-                  "portfolio_inbox_acknowledge",
+                  "portfolio_inbox_acknowledge", "private_inbox_acknowledge",
                   "propose", "withdraw_proposal",
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history"],
     "presented_only": true,

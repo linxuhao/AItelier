@@ -35,6 +35,7 @@
 # mutation too — `test_run_tests_unmeasured_declaration.py` measures it by
 # re-applying both halves to the REAL reader and asserting the reading flips —
 # so nothing here rests on the claim that a behavioural witness is impossible.
+import ast
 from pathlib import Path
 
 import pytest
@@ -254,15 +255,49 @@ def test_the_absent_terminal_checker_wording_is_not_self_contradictory():
 # ── the call sites, read off the tree ──────────────────────────────────────
 
 def test_S1_the_tick_call_site_is_present_in_the_tree():
-    """Kills S1 (delete the deferral skip in the tick; 0/33 in review)."""
+    """Kills S1 (delete the deferral skip in the tick; 0/33 in review).
+
+    The call is pinned on the AST, not on its spelling. An off-loop fix
+    legitimately moved the same read to
+    `await asyncio.to_thread(gate_deferral.observe_run, sf, run_id)`, and the
+    text pin turned that behaviour-preserving change into a red suite — while a
+    text pin can also be satisfied by a comment naming the call.
+    """
     text = _source(_SCHEDULER)
     missing = [name for name in (
-        'gate_deferral.observe_run(sf, run_id)',
         'if deferral["state"] == "silent":',
         'if deferral["state"] == "expired":',
         "gate_absence_terminal",
     ) if name not in text]
     assert missing == [], f"S1: the tick no longer reads the deferral: {missing}"
+
+    tree = ast.parse(text, filename=str(_SCHEDULER))
+    references = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "observe_run"
+        and isinstance(node.value, ast.Name) and node.value.id == "gate_deferral"
+    ]
+    assert references, (
+        "S1: nothing in core/scheduler.py names gate_deferral.observe_run")
+
+    # Both spellings the tree has used: `gate_deferral.observe_run(sf, run_id)`
+    # and `asyncio.to_thread(gate_deferral.observe_run, sf, run_id)`. What is
+    # pinned is that the read still RUNS with this run's (sf, run_id).
+    passing = []
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        arguments = None
+        if any(call.func is reference for reference in references):
+            arguments = call.args
+        else:
+            for index, argument in enumerate(call.args):
+                if any(argument is reference for reference in references):
+                    arguments = call.args[index + 1:]
+                    break
+        if arguments is not None:
+            passing.append([arg.id for arg in arguments if isinstance(arg, ast.Name)])
+
+    assert ["sf", "run_id"] in passing, (
+        f"S1: the deferral read no longer runs with (sf, run_id): {passing}")
 
 
 def test_H2_the_host_hold_is_present_in_the_tree():

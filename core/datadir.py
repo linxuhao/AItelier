@@ -84,6 +84,19 @@ def meta_dir() -> Path:
     return aitelier_home() / "meta"
 
 
+def cache_stats_sidecar_path() -> Path:
+    """Derived per-run token/cache aggregates for the dashboard (api/_cache_stats).
+
+    A SIDECAR on purpose, not a table in the State database: this file holds
+    nothing but values derived from the per-project trace databases, it is
+    written on the read path, and a dashboard read must never contend with a
+    State write for the state_* tables' lock. Deleting it costs one inline
+    recomputation and nothing else (api/_cache_stats.py documents the contract).
+    """
+    return Path(os.getenv("AITELIER_CACHE_STATS_DB")
+                or aitelier_home() / "cache-stats.db")
+
+
 def scratch_dir() -> Path:
     return aitelier_home() / "scratch"
 

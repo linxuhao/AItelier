@@ -16,7 +16,7 @@ from core import ai_router
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers, completion_route
 from core.state_commands import ProjectPrivate, execute
-from core.state_graph import StateGraphError, StateNotFound
+from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
 
 router = APIRouter(prefix="/api/dsh-drivers", tags=["DSH drivers"])
@@ -248,16 +248,31 @@ async def activity(project_id: str, body: Activity, request: Request, runtime=De
     return {"ok": True}
 
 
+def _renewable_attempts(service, project_id: str, driver_id: str):
+    """This driver's active attempts on nodes that can still accept a report."""
+    # A CLOSED node can never accept a report, so renewing its attempt would push
+    # its lease expiry - and with it the design §4.4 reclaim deadline (expiry +
+    # 900 s grace) - forward forever: the attempt never becomes reclaimable and a
+    # non-admin director can neither abandon nor take it over. Hence the join on
+    # state_nodes; the filters on the attempt itself are unchanged.
+    closed = ",".join("?" * len(CLOSED_STATUSES))
+    with service.db.get_connection() as conn:
+        return [dict(r) for r in conn.execute(
+            f"SELECT a.attempt_id,a.owner_fence AS fence FROM state_attempts a "
+            f"JOIN state_nodes n ON n.project_id=a.project_id AND n.node_key=a.node_key "
+            f"WHERE a.project_id=? AND a.owner_driver_id=? "
+            f"AND a.status IN ('reserved','launching','running','paused','unknown') "
+            f"AND n.status NOT IN ({closed}) LIMIT 100",
+            (project_id, driver_id, *sorted(CLOSED_STATUSES)))]
+
+
 @router.post("/{project_id}/heartbeat", dependencies=[Depends(authz.require_writer)])
 def heartbeat(project_id: str, request: Request, runtime=Depends(manager), service=Depends(get_service)):
     row = owned(project_id, request, runtime)
     if not row["enabled"] or not runtime.running(project_id):
         raise HTTPException(409, "driver is stopped")
     claims = execute(service, "list_claims", {"project_id": project_id, "driver_id": row["driver_id"], "limit": 100})["claims"]
-    with service.db.get_connection() as conn:
-        attempts = [dict(r) for r in conn.execute("SELECT attempt_id,owner_fence AS fence FROM state_attempts "
-            "WHERE project_id=? AND owner_driver_id=? AND status IN ('reserved','launching','running','paused','unknown') LIMIT 100",
-            (project_id, row["driver_id"]))]
+    attempts = _renewable_attempts(service, project_id, row["driver_id"])
     items = [("claims", {"claim_id": c["claim_id"], "fence": c["fence"]}) for c in claims]
     items += [("attempts", a) for a in attempts]
     results = []

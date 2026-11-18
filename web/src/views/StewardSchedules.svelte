@@ -75,6 +75,9 @@
       <header>
         <strong>{row.title}</strong>
         {#if row.updated_by === 'steward'}<span class="mark" data-steward-edited>{t('steward.schedStewardEdited')}</span>{/if}
+        <!-- Review 337: a stopped scheduler must not look healthy. Past its time by more than
+             five minutes (the steward's clock fires within seconds and re-looks every 4 min). -->
+        {#if on && (row.overdue_seconds ?? 0) > 300}<span class="mark overdue" data-overdue>{t('steward.schedOverdue').replace('{minutes}', String(Math.round((row.overdue_seconds ?? 0) / 60)))}</span>{/if}
         <label class="switch"><input type="checkbox" role="switch" checked={on} disabled={busyId === row.schedule_id}
           onchange={(event) => void toggle(row, event.currentTarget)} /> {t('steward.schedEnabled')}</label>
       </header>
@@ -108,6 +111,7 @@
   .schedule.disabled{opacity:.65;}
   header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;padding:0;background:none;border:0;}
   .mark{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);}
+  .mark.overdue{background:var(--pico-del-color, #c62828);color:#fff;}
   .switch{margin:0 0 0 auto;font-size:12px;display:flex;gap:6px;align-items:center;}.switch input{margin:0;}
   .when{margin:0 0 6px;}.when small{color:var(--pico-muted-color);}
   dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;margin:0 0 8px;}

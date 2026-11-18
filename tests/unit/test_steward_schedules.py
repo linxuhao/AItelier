@@ -356,7 +356,7 @@ def test_a_deleted_row_is_never_listed_and_never_fires(world, clock):
     assert out == {"deleted": True, "schedule_id": row["schedule_id"]}
     assert execute(world.steward, "list_steward_schedules", {})["schedules"] == []
     clock.moment = utc(2027, 1, 2)
-    assert fire(world.steward, row["schedule_id"], row["next_run_at"]) == {"fired": False, "schedule": None}
+    assert fire(world.steward, row["schedule_id"], row["next_run_at"]) == {"fired": False, "reason": "deleted", "schedule": None}
 
 
 # --- versions ----------------------------------------------------------------------------------
@@ -407,7 +407,7 @@ def test_the_owner_round_trip_over_http(world, client):
     assert row["next_run_at"] == "2027-01-04T14:00:00+00:00"
     assert set(row) == {"schedule_id", "version", "title", "instruction", "schedule", "tz", "enabled", "next_run_at",
                         "last_run_at", "last_missed", "created_by", "updated_by", "last_fired_by", "created_at",
-                        "updated_at"}
+                        "updated_at", "overdue_seconds"}
     listed = client.get("/api/steward/schedules", headers=OWNER_HEADERS)
     assert listed.status_code == 200 and listed.json()["schedules"] == [row], listed.text
     # The steward reads it too, and may change the owner's row: updated_by says so.
@@ -504,3 +504,53 @@ def test_every_change_emits_the_event_and_nothing_else_does(world, client, clock
     r = client.delete(f"/api/steward/schedules/{sid}?expected_version=4", headers=OWNER_HEADERS)
     assert r.status_code == 200, r.text
     assert events(world)[4:] == [{"schedule_id": owner_row["schedule_id"]}, {"schedule_id": sid}]
+
+
+# --- review 337: fire reasons, bounds, overdue, once in the DST gap ----------------------------
+
+def test_a_refused_fire_names_why(world, clock):
+    """Review 337 ask 1: compared as instants (a reformatted timestamp still matches), and a
+    refusal says which of moved / not due / disabled / deleted it is."""
+    row = create(world)                                   # next 2027-01-01T08:00:00+00:00
+    clock.moment = utc(2027, 1, 1, 7, 0)
+    assert fire(world.steward, row["schedule_id"], row["next_run_at"])["reason"] == "not_due"
+    clock.moment = utc(2027, 1, 1, 8, 0, 5)
+    assert fire(world.steward, row["schedule_id"], "2027-01-01T07:30:00+00:00", key="m")["reason"] == "schedule_moved"
+    same_instant = "2027-01-01T09:00:00+01:00"            # the same instant, written in Paris time
+    assert fire(world.steward, row["schedule_id"], same_instant, key="i")["fired"] is True
+    off = create(world, key="c-off", title="off", enabled=False)
+    assert fire(world.steward, off["schedule_id"], row["next_run_at"], key="o")["reason"] == "disabled"
+
+
+def test_at_most_fifty_live_reminders(world, clock):
+    """Review 337 ask 2: a bounded number of rows (deleted ones do not count)."""
+    rows = [create(world, key=f"c{i}", title=f"r{i}") for i in range(state_steward.SCHEDULES_MAX)]
+    with pytest.raises(ScheduleInvalid, match="too_many_schedules"):
+        create(world, key="c-many", title="one too many")
+    execute(world.steward, "delete_steward_schedule", {"request_key": "d", "schedule_id": rows[0]["schedule_id"],
+            "expected_version": 1}, allow_write=True)
+    assert create(world, key="c-room", title="room again")["title"] == "room again"
+
+
+def test_an_overdue_row_says_how_late(world, clock):
+    """Review 337 ask 3: a stopped clock is visible - an enabled row past its next run carries
+    overdue_seconds on every read (owner page included)."""
+    row = create(world)
+    assert row["overdue_seconds"] == 0
+    clock.moment = utc(2027, 1, 1, 8, 0) + timedelta(minutes=30)
+    listed = execute(world.steward, "list_steward_schedules", {})["schedules"][0]
+    assert listed["overdue_seconds"] == 1800
+    off = create(world, key="c-off2", title="off", enabled=False)
+    assert off["overdue_seconds"] == 0
+
+
+def test_a_once_time_the_clocks_skip_is_refused(world, clock):
+    """Review 337 ask 4: 2027-03-28 02:30 does not exist in Europe/Paris (02:00 -> 03:00). A
+    naive wall time there is refused, never moved; an offset-bearing time is an instant."""
+    with pytest.raises(ScheduleInvalid, match="at_in_dst_gap"):
+        create(world, {"kind": "once", "at": "2027-03-28T02:30:00"}, key="c-gap", tz="Europe/Paris")
+    ok = create(world, {"kind": "once", "at": "2027-03-28T01:30:00+00:00"}, key="c-inst", tz="Europe/Paris", title="instant")
+    assert ok["next_run_at"] == "2027-03-28T01:30:00+00:00"
+    # The repeated hour of fall-back is its first instant (summer time, +02:00).
+    first = create(world, {"kind": "once", "at": "2027-10-31T02:30:00"}, key="c-fold", tz="Europe/Paris", title="fold")
+    assert first["next_run_at"] == "2027-10-31T00:30:00+00:00"

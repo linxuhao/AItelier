@@ -869,6 +869,8 @@ export interface StewardSchedule {
   next_run_at: string | null; last_run_at: string | null; last_missed: number;
   created_by: 'owner' | 'steward'; updated_by: 'owner' | 'steward'; last_fired_by: string | null;
   created_at: string; updated_at: string;
+  /** Seconds an enabled row is past its next run (backend); > OVERDUE_AFTER_S means its clock stopped. */
+  overdue_seconds?: number;
 }
 export interface StewardScheduleFields {
   title?: string; instruction?: string; schedule?: StewardScheduleSpec; tz?: string; enabled?: boolean;

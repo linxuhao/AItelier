@@ -155,6 +155,8 @@ SCHEDULE_FLOOR = timedelta(minutes=15)
 PREVIEW_RUNS = 5
 # Counting the runs a long outage skipped stops here (inside a write transaction).
 MISSED_CAP = 10000
+# At most this many live reminders (design 7.4: a wake must stay bounded).
+SCHEDULES_MAX = 50
 
 
 def _now() -> datetime:
@@ -291,7 +293,12 @@ def _shape(schedule, zone):
     except ValueError:
         raise ScheduleInvalid("invalid_schedule", "at must be an ISO 8601 time") from None
     if at.tzinfo is None:
-        at = at.replace(tzinfo=zone)
+        wall = at.replace(microsecond=0)
+        at = wall.replace(tzinfo=zone)
+        # A wall time the zone skips (spring forward) does not exist: refused, never
+        # silently moved (design 7.4). A repeated one (fall back) is its first instant.
+        if at.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != wall:
+            raise ScheduleInvalid("at_in_dst_gap", f"{schedule['at']} does not exist in {zone.key}: the clocks skip it")
     return "once", _iso(at.replace(microsecond=0)), None
 
 
@@ -321,13 +328,21 @@ def preview_schedule(schedule, tz) -> dict:
     return {"next_runs": [run.astimezone(zone).isoformat() for run in _upcoming(kind, at, expr, zone, _now())]}
 
 
+def _overdue(row) -> int:
+    """Seconds an enabled row is past its next run (0 when not): a stopped clock shows here."""
+    if not row["enabled"] or row["next_run_at"] is None:
+        return 0
+    return max(0, int((_now() - datetime.fromisoformat(row["next_run_at"])).total_seconds()))
+
+
 def _schedule(row) -> dict:
     schedule = {"kind": "once", "at": row["at"]} if row["kind"] == "once" else {"kind": "cron", "expr": row["expr"]}
     return {"schedule_id": row["schedule_id"], "version": row["version"], "title": row["title"],
             "instruction": row["instruction"], "schedule": schedule, "tz": row["tz"],
             "enabled": bool(row["enabled"]), "next_run_at": row["next_run_at"], "last_run_at": row["last_run_at"],
             "last_missed": row["last_missed"], "created_by": row["created_by"], "updated_by": row["updated_by"],
-            "last_fired_by": row["last_fired_by"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            "last_fired_by": row["last_fired_by"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "overdue_seconds": _overdue(row)}
 
 
 class StateSteward:
@@ -785,6 +800,9 @@ class StateSteward:
                 return replay
             moment = _now()
             runs = _upcoming(kind, at, expr, zone, moment)
+            live = conn.execute("SELECT COUNT(*) FROM state_steward_schedules WHERE deleted_at IS NULL").fetchone()[0]
+            if live >= SCHEDULES_MAX:
+                raise ScheduleInvalid("too_many_schedules", f"at most {SCHEDULES_MAX} reminders; delete one first")
             schedule_id, stamp = "sch-" + uuid4().hex[:12], _iso(moment)
             conn.execute("INSERT INTO state_steward_schedules(schedule_id,version,title,instruction,kind,at,expr,tz,"
                          "enabled,next_run_at,created_by,updated_by,created_at,updated_at) "
@@ -870,9 +888,12 @@ class StateSteward:
             row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=? AND deleted_at IS NULL",
                                (schedule_id,)).fetchone()
             moment = _now()
-            if (row is None or not row["enabled"] or row["next_run_at"] is None
-                    or datetime.fromisoformat(row["next_run_at"]) != expected or expected > moment):
-                result = {"fired": False, "schedule": _schedule(row) if row is not None else None}
+            # Compared as instants, never as strings: a reformatted timestamp still matches.
+            reason = ("deleted" if row is None else "disabled" if not row["enabled"] or row["next_run_at"] is None
+                      else "schedule_moved" if datetime.fromisoformat(row["next_run_at"]) != expected
+                      else "not_due" if expected > moment else None)
+            if reason is not None:
+                result = {"fired": False, "reason": reason, "schedule": _schedule(row) if row is not None else None}
                 return self._record(conn, "fire_steward_schedule", request_key, request_hash, result) \
                     if request_key is not None else result
             missed, next_run = 0, None

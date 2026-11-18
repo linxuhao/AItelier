@@ -11,6 +11,9 @@
 export const SCHEDULE_EVENTS = new Set(['steward_schedule_changed']);
 /** The longest the timer sleeps before it looks again (the pump's own cadence). */
 export const RECHECK_MS = 4 * 60 * 1000;
+/** At most this many reminders in one wake; the rest fire on the next look, oldest due first
+ *  (design 7.4: a wake stays bounded). */
+export const WAKE_MAX = 10;
 
 const unwrap = r => r?.result ?? r;
 const refused = error => ({ refused: 'state_refused', reason: String(error?.message ?? error).slice(0, 500) });
@@ -38,9 +41,12 @@ export function deleteSchedule(request, { schedule_id, expected_version }, signa
 
 /** Fire every enabled row whose next_run_at has come; return the ones the backend says fired.
  *  The request key names the run, so a retried fire of the same run is State's replay. */
-export async function fireDue(request, rows, now = Date.now(), signal) {
+export async function fireDue(request, rows, now = Date.now(), signal, max = WAKE_MAX) {
   const fired = [];
-  for (const row of rows.filter(r => r.enabled && r.next_run_at && Date.parse(r.next_run_at) <= now)) {
+  const due = rows.filter(r => r.enabled && r.next_run_at && Date.parse(r.next_run_at) <= now)
+    .sort((a, b) => Date.parse(a.next_run_at) - Date.parse(b.next_run_at) || (a.schedule_id < b.schedule_id ? -1 : 1));
+  for (const row of due) {
+    if (fired.length >= max) break;
     const answer = unwrap(await request('/api/state/commands/fire_steward_schedule', { request_key: `fire:${row.schedule_id}:${row.next_run_at}`,
       schedule_id: row.schedule_id, expected_next_run_at: row.next_run_at }, signal));
     if (answer?.fired) fired.push({ ...answer, schedule: answer.schedule ?? row, due_at: answer.due_at ?? row.next_run_at });
@@ -59,7 +65,9 @@ export function wakeText(fired) {
   return '定时提醒到了：\n\n' + fired.map(f => {
     const s = f.schedule, late = Number(f.late_seconds) > 90 ? `，晚了 ${minutes(Number(f.late_seconds))}` : '';
     const missed = Number(f.missed) > 0 ? `，期间错过 ${f.missed} 次` : '';
-    return `定时提醒 ${s.title}（${s.schedule_id}），本应 ${local(f.due_at, s.tz)} 触发${late}${missed}：${s.instruction}`;
+    // Who last changed it, so a reminder its owner did not write explains itself (review 337).
+    const by = s.updated_by === 'steward' ? '（最后由你修改）' : '';
+    return `定时提醒 ${s.title}（${s.schedule_id}）${by}，本应 ${local(f.due_at, s.tz)} 触发${late}${missed}：${s.instruction}`;
   }).join('\n\n');
 }
 

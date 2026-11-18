@@ -468,6 +468,19 @@ describe('reminders', () => {
   const form = () => ({onchange: vi.fn(), onclose: vi.fn()});
   beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); });
 
+  it('review 337: a reminder past its time by more than five minutes is marked overdue (a stopped clock shows)', async () => {
+    api.listStewardSchedules.mockResolvedValue([
+      schedule({overdue_seconds: 1800}),
+      schedule({schedule_id: 'sch-2', title: 'Just due', overdue_seconds: 40}),
+      schedule({schedule_id: 'sch-3', title: 'Off', enabled: false, overdue_seconds: 0}),
+    ]);
+    const view = render(StewardSchedules);
+    await view.findByText('Morning check');
+    expect(card(view.container, 'sch-1').querySelector('[data-overdue]')?.textContent).toBe('Overdue by 30 min');
+    expect(card(view.container, 'sch-2').querySelector('[data-overdue]')).toBeNull();
+    expect(card(view.container, 'sch-3').querySelector('[data-overdue]')).toBeNull();
+  });
+
   it('lists each reminder with its schedule, runs, author, the steward-edit mark and disabled rows', async () => {
     api.listStewardSchedules.mockResolvedValue([
       schedule({updated_by: 'steward'}),

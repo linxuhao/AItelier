@@ -3,7 +3,7 @@
  *  what is due, one durable wake per run, the timer at the next due row, the tools' shapes. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RECHECK_MS, ScheduleTimer, deleteSchedule, fireDue, setSchedule, wakeText } from './schedules.mjs';
+import { RECHECK_MS, ScheduleTimer, WAKE_MAX, deleteSchedule, fireDue, setSchedule, wakeText } from './schedules.mjs';
 
 const row = (id, next, extra = {}) => ({ schedule_id: id, version: 1, title: 'T' + id, instruction: '看一眼各项目', schedule: { kind: 'cron', expr: '0 9 * * 1-5' },
   tz: 'Europe/Paris', enabled: true, next_run_at: next, ...extra });
@@ -86,4 +86,22 @@ test('the tools: create, change with the version seen, delete; a change without 
     ['update_steward_schedule', { request_key: undefined, schedule_id: 'sch-1', expected_version: 2, enabled: false }],
     ['delete_steward_schedule', { request_key: undefined, schedule_id: 'sch-1', expected_version: 3 }]]);
   assert.ok(new Set(calls.map(([, body]) => body.request_key)).size === 3, 'each change its own request key');
+});
+
+test('review 337: one wake holds at most WAKE_MAX reminders, oldest due first; the rest come on the next look', async () => {
+  let clock = Date.parse('2026-11-18T09:30:00Z');
+  const rows = Array.from({ length: WAKE_MAX + 3 }, (_, i) => row('r' + String(i).padStart(2, '0'), `2026-11-18T09:${String(i).padStart(2, '0')}:00Z`));
+  const { request } = backend(rows, () => clock);
+  const delivered = [], timers = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, deliver: async (text, id) => delivered.push([id, text]),
+    setTimer: (fn, ms) => (timers.push(ms), {}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.equal((delivered[0][1].match(/定时提醒 T/g) ?? []).length, WAKE_MAX);
+  assert.match(delivered[0][0], /^schedule:r00:/, 'oldest due first');
+  assert.equal(timers.at(-1), 1000, 'more are due: look again right away');
+  await timer.refresh();
+  assert.equal((delivered[1][1].match(/定时提醒 T/g) ?? []).length, 3);
+  assert.match(wakeText([{ schedule: row('x', null, { updated_by: 'steward' }), due_at: '2026-11-18T09:00:00Z', late_seconds: 0, missed: 0 }]),
+    /（最后由你修改）/);
+  timer.close();
 });

@@ -233,15 +233,18 @@ test('an inbound that throws is retried the same way', async () => {
 
 test('a refusal other than `unavailable` is final: not retried', async () => {
   const bridge = await fakeBridge();
-  const channels = fakeChannels({ answer: m => m.messageRef === 'm1'
-    ? { accepted: false, reason: 'channel_sender_not_bound' } : { accepted: true } });
-  bridge.events.push(event(1), event(2));
+  // invalid_request: what the host answers a deterministic 4xx with (a field over its bound) -
+  // retrying it would hold the lane for 10 minutes and fail the same way every time.
+  const refusals = { m1: 'channel_sender_not_bound', m2: 'invalid_request' };
+  const channels = fakeChannels({ answer: m => refusals[m.messageRef]
+    ? { accepted: false, reason: refusals[m.messageRef] } : { accepted: true } });
+  bridge.events.push(event(1), event(2), event(3));
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
     waitSeconds: 1, retryMs: 10 });
   try {
-    await until(() => channels.received.length === 2);
+    await until(() => channels.received.length === 3);
     await new Promise(resolve => setTimeout(resolve, 100));
-    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm2']);
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm2', 'm3']);
   } finally { await channel.stop(); await bridge.close(); }
 });
 

@@ -670,6 +670,24 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
   thrown = failing(422, '"code_retired"');
   assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'z' }), { refused: 'code_retired' },
     'a retired code is a refusal the stranger is answered once for, not an outage (a WeChat message would be held and retried)');
+  // A 4xx that names no code - a validation 422 whose detail is a list (a sender_ref over 200
+  // characters) - is deterministic: refused invalid_request, never 'unavailable' (which the
+  // WeChat plugin retries for 10 minutes, holding the lane behind that one message).
+  for (const detail of [`"[{'field': 'sender_ref', 'error': 'String should have at most 200 characters'}]"`,
+    '[{"type":"string_too_long","loc":["body","channel_message_ref"],"msg":"too long"}]', '"Not A Code"', ''])
+    for (const call of [() => channels.relay({ channel: 'slack', senderRef: 'U'.repeat(201), messageRef: 'x', text: 'hi' }),
+      () => channels.bind({ channel: 'slack', senderRef: 'U'.repeat(201), code: '111111', messageRef: 'y' }),
+      () => channels.recordDelivery({ messageId: 'm-1', channel: 'slack', channelMessageRef: 'r'.repeat(201) })]) {
+      thrown = failing(422, detail);
+      assert.deepEqual(await call(), { refused: 'invalid_request' }, detail);
+    }
+  thrown = failing(400, '');
+  assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), { refused: 'invalid_request' });
+  for (const status of [401, 403]) {
+    thrown = failing(status, '"Not authenticated"');
+    await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), new RegExp(`HTTP ${status}`),
+      'an auth failure without a code is still a failure, never a refusal');
+  }
   thrown = failing(503, '"busy"');
   await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 503/);
   // A 4xx that is not a channel refusal (a misconfigured token, say) is a failure to log, never hidden as one.

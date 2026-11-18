@@ -488,8 +488,9 @@ export function refusalCode(error) {
   return error?.status >= 400 && error?.status < 500 && named ? named[1] : undefined;
 }
 
-/** The refusals the step 19 commands answer with. Any other 4xx (an auth failure, say) is
- *  not something the sender did: it is thrown, logged as a failure, never hidden as a refusal. */
+/** The refusals the step 19 commands answer with. Any other named code, and an auth failure
+ *  (401/403), is not something the sender did: it is thrown, logged as a failure, never hidden
+ *  as a refusal (a 4xx that names no code is invalid_request: channelOps). */
 export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'invalid_body', 'body_too_long', 'invalid_request', 'rate_limited',
   'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'code_retired', 'unknown_message', 'delivery_recorded',
   'detail_too_long', 'qr_svg_too_large', 'qr_svg_refused']);
@@ -508,8 +509,16 @@ export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'inval
 export function channelOps(request) {
   const refused = error => {
     const code = refusalCode(error);
-    if (!CHANNEL_REFUSALS.has(code)) throw error;
-    return { refused: code };
+    if (CHANNEL_REFUSALS.has(code)) return { refused: code };
+    // A 4xx that names no code at all - a validation 422 whose detail is a list of field
+    // errors (a sender_ref over 200 characters, say) - fails the same way every time it is
+    // sent: it is the request's own fault, refused invalid_request, so a channel moves on
+    // instead of retrying that one message and holding its lane. A named code these
+    // commands never answer, and an auth failure (401/403), stay errors as above.
+    const status = error?.status;
+    if (code === undefined && status >= 400 && status < 500 && status !== 401 && status !== 403)
+      return { refused: 'invalid_request' };
+    throw error;
   };
   const answered = response => {
     const result = response?.result ?? response ?? {};

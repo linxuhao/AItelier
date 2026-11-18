@@ -1420,10 +1420,21 @@ async def _run_skillflow_tick(project_id: str, loop):
         # here parks the loop thread in an un-timed wait. That is the
         # 2026-11-18 outage (see `_check_hung_claims`'s docstring): the loop
         # served nothing for minutes while `_check_hung_claims` waited in that
-        # lock. The one exception is `release_claim_on_cancel` in the
-        # `CancelledError` arm below, which must stay synchronous: it runs while
-        # this task is being cancelled, and an await there would be re-cancelled
-        # before it could hand the claim back.
+        # lock.
+        #
+        # ONE SITE IS STILL ON THE LOOP, and the reason it used to give is
+        # measured FALSE: `release_claim_on_cancel` in the `CancelledError` arm
+        # below was defended with "an await there would be re-cancelled before it
+        # could hand the claim back". Measured 2026-11-18 (this arm awaiting
+        # `asyncio.to_thread` beside a 0.4 s release, cancelled once and twice):
+        # a re-cancelled await loses only the AWAIT — the thread still ran the
+        # release to completion and handed the claim back in BOTH cases
+        # ("arm await was RE-CANCELLED", then "release-finished(thread)"), so the
+        # sentence justified nothing. The site stays on the loop as a KNOWN
+        # BOUNDARY, not as a claim: it runs only while this task is already being
+        # cancelled, and offloading it owes its own witness (a tick cancelled
+        # while a worker holds the engine lock). It is the one on-loop engine
+        # call left in this function; every other one is a thread hop.
         run_id = await asyncio.to_thread(_get_or_create_skillflow_run, project_id)
     except Exception as e:
         import logging

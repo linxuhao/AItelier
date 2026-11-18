@@ -68,9 +68,11 @@ SAFETY_S = 20.0
 #: needs ~50 ms of loop time.
 WAIT_FOR_S = 90.0
 
-#: The engine calls `_check_hung_claims` makes on its own thread. One case per
-#: site, so a regression that re-freezes the loop at ANY of them is caught, not
-#: just at the one the 2026-11-18 dump happened to catch.
+#: The calls `_check_hung_claims` makes that can WAIT for the engine lock: its
+#: own engine calls, plus the host's claim scan, which takes `sf._lock` through
+#: `_sf_statement_lock` before it issues its statement. One case per site, so a
+#: regression that re-freezes the loop at ANY of them is caught, not just at the
+#: one the 2026-11-18 dump happened to catch.
 SITES = (
     "reconcile_active_operations",
     "audit_operation_owners",
@@ -78,6 +80,7 @@ SITES = (
     "get_run",
     "list_runs",
     "_get_resolver_for_run",
+    "claim_scan",
 )
 
 RUN_ID = "run-1118-loopblock"
@@ -187,7 +190,10 @@ class _EngineBase:
 
     def list_runs(self, **kwargs):
         self._enter("list_runs")
-        if self._stalls == "_get_resolver_for_run":
+        # Both of these sites are reached only through a run row: the resolver is
+        # asked about the claimed step of a run, and the claim scan needs a run to
+        # scan. Every other case scans nothing, so its stall is the whole job.
+        if self._stalls in ("_get_resolver_for_run", "claim_scan"):
             return [{"id": RUN_ID, "project_id": PROJECT_ID}]
         return []
 
@@ -197,6 +203,14 @@ class _EngineBase:
 
     @property
     def _conn(self):
+        if self._stalls == "claim_scan":
+            # The scan reached the connection, i.e. it ALREADY waited for the
+            # holder: `_claimed_step_row` enters `_sf_statement_lock(sf)` before
+            # it reads `sf._conn`. Reading this property is how that wait is
+            # confirmed, and it must not take `self._lock` again — the test's
+            # Lock is not re-entrant and the scan already holds it.
+            self.reached.set()
+            self.acquired_at = time.monotonic()
         return _Conn()
 
 
@@ -271,12 +285,19 @@ async def tick_with_engine_lock_held(site: str, *, margin: int = MARGIN,
                 _until(lambda: holder.counter[0] >= margin), timeout=wait_for_s)
         finally:
             holder.release()
-            witness.reached_engine = engine.reached.is_set()
             try:
                 await asyncio.wait_for(tick, timeout=wait_for_s)
                 witness.completed = True
             except Exception as exc:                      # noqa: BLE001
                 witness.error = f"{type(exc).__name__}: {exc}"
+            # Sampled AFTER the supervisor finished, not at the instant the lock
+            # was released. An offloaded site is WOKEN by that release: on the
+            # delivered tree the claim scan waits for `sf._lock` on a worker
+            # before the resolver is ever reached, so a sample taken at release
+            # time measures the wake-up latency and calls a site unreachable that
+            # ran milliseconds later (measured 2026-11-18 on the merged tree,
+            # where it was the only red in the 58-test trial selection).
+            witness.reached_engine = engine.reached.is_set()
             counter.cancel()
             await asyncio.gather(counter, return_exceptions=True)
 

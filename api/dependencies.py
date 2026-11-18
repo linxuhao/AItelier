@@ -154,6 +154,12 @@ _tool_loader_instance = None
 _config_registry_instance = None
 _agent_configs_cache: dict[str, dict] = {}
 
+# Serialises the ONE-AND-ONLY engine boot (see get_skillflow). RLock, not Lock:
+# the boot body calls `get_config_registry`, capability definitions and the
+# generated-config loaders, any of which could ask for the engine again on this
+# same thread, and a plain Lock would deadlock the boot against itself.
+_skillflow_boot_lock = threading.RLock()
+
 
 def _load_and_register_agent_configs(sf):
     """Load agent configs from YAML and register them into skillflow.
@@ -217,7 +223,28 @@ def get_skillflow():
 
     Created lazily on first access so that the DB and workspace managers
     are already initialised.
+
+    ONE boot per process, guaranteed by ``_skillflow_boot_lock``. That lock
+    became load-bearing the moment the boot moved off the request path
+    (api/main.py's lifespan starts `warm_first_dashboard_read`): the prefetch
+    thread and the first request that needs the engine would otherwise both see
+    `None` and each construct a full AItelierSkillFlow (tool loader scan,
+    capability definitions, graph registration — 4.5 s, and its own copy of every
+    registry), with one of the two silently thrown away. The check-then-set was
+    already racy for two concurrent requests; the lock makes the prefetch safe to
+    have.
     """
+    global _skillflow_instance
+    if _skillflow_instance is not None:
+        return _skillflow_instance
+    with _skillflow_boot_lock:
+        if _skillflow_instance is not None:
+            return _skillflow_instance
+        return _boot_skillflow()
+
+
+def _boot_skillflow():
+    """Build the singleton. The caller holds ``_skillflow_boot_lock``."""
     global _skillflow_instance
     if _skillflow_instance is None:
         from skillflow import PipelineGraph

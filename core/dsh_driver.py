@@ -14,6 +14,7 @@ import sys
 import time
 import uuid
 
+from core.datadir import owner_secrets_dir
 from core.driver_credentials import read_token_file
 from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.off_loop_sqlite import retry_while_locked
@@ -310,7 +311,7 @@ def enabled_channel_plugins(checkout=None):
     # Fixed to ~/.aitelier-secrets on purpose: the channel plugins read their tokens there
     # (step 19 contract C, D), whatever AITELIER_SECRETS_DIR says for the rest of the DSH
     # host (deploy/install_dsh_host.py). Moving one means moving all three together.
-    secrets = Path.home() / ".aitelier-secrets"
+    secrets = owner_secrets_dir()
     entries = []
     for plugin, files in CHANNEL_PLUGINS.items():
         entry = checkout / "integrations" / plugin / "index.mjs"

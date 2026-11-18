@@ -127,3 +127,12 @@ def driver_tokens_dir() -> Path:
     ``<driver_id>.token`` (0600) per LAN driver in a 0700 directory. Not part of
     the server data dir: the server stores only HMAC hashes."""
     return Path(os.getenv("AITELIER_DRIVER_TOKENS_DIR") or Path.home() / ".aitelier-drivers")
+
+
+def owner_secrets_dir() -> Path:
+    """The owner's ``~/.aitelier-secrets`` as the steward's chat channel plugins read it
+    (step 19: integrations/dsh-channel-slack and dsh-channel-wechat take their tokens
+    from ``homedir()``/.aitelier-secrets). Deliberately no env override: the plugins
+    honour none, so an override here would load a plugin whose tokens it cannot find.
+    Tests isolate it by setting HOME, which Path.home() follows."""
+    return Path.home() / ".aitelier-secrets"

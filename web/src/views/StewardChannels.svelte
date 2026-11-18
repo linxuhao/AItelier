@@ -9,8 +9,12 @@
   // Binding happens off this page (the owner sends the code to the bot), so while
   // a code is live the list is re-read on a short cadence to show the result; the
   // same while a login QR is shown (it is replaced, or scanned, off this page too).
+  // While any channel is not connected (or has reported nothing yet) and the tab is
+  // visible, the list is also re-read slowly: a WeChat login QR can first appear
+  // after this page loaded (the host reports it up to about a minute late), and the
+  // owner must see it without reloading.
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
-  const BIND_POLL_MS = 5000;
+  const BIND_POLL_MS = 5000, OFFLINE_POLL_MS = 15000;
   let rows = $state<OwnerChannel[]>([]), defaultChannel = $state<OwnerChannelName | null>(null);
   let loaded = $state(false), error = $state(''), notice = $state(''), busy = $state('');
   // A live code per channel, with the binding it was issued against: a different
@@ -78,12 +82,15 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
   const waiting = $derived(CHANNELS.some(c => (codes[c]?.expires ?? 0) > now) || rows.some(r => r.qr_svg));
+  const offline = $derived(CHANNELS.some(c => !row(c).status?.connected));
   onMount(() => {
     alive = true;
     void load();
     const timer = setInterval(() => {
       now = Date.now();
-      if (waiting && now - lastLoad >= BIND_POLL_MS) void load();
+      const every = waiting ? BIND_POLL_MS
+        : offline && document.visibilityState === 'visible' ? OFFLINE_POLL_MS : 0;
+      if (every && now - lastLoad >= every) void load();
     }, 1000);
     return () => { alive = false; clearInterval(timer); };
   });

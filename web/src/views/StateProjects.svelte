@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { authStore } from '../stores/auth';
-  import { driverStatus, dshDriverConversationUnread, listStewardProposals, stateProjects, type DriverStatusResponse } from '../lib/api';
+  import { driverStatus, dshDriverConversationUnread, listStewardProposals, stateProjectArchive, stateProjects, type DriverStatusResponse } from '../lib/api';
   import { isArchived, stateProjectHref, type StateProjectRow } from '../lib/stateGraph';
   import { rememberProject } from '../lib/navigation.svelte';
   import { sortDagRows } from '../lib/driverList';
@@ -15,6 +15,7 @@
   const { params = {} }: {params?: {repoPath?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
+  let archiveError = $state(''), archiveBusy = $state('');
   let generation = 0;
   // The project catalog is a public read; only the write affordances need
   // `canWrite`.
@@ -23,8 +24,13 @@
   // the ordinary projects; a direct link to it still opens it (StateProject).
   const ordinary = $derived(rows.filter(p => !isStewardProject(p.project_id, drivers)));
   const visible = $derived(showArchived ? ordinary : ordinary.filter(p => !isArchived(p)));
-  const archivedHidden = $derived(ordinary.length - visible.length);
   const filtered = $derived(visible.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+  // Rows the SERVER returned that this page is not putting on screen. It is
+  // derived from the response the list was rendered from - never from a flag or
+  // an archive count the client invented - so the number can only restate what
+  // was returned. The steward's own row is not one of the projects, so it is not
+  // counted; the search box narrows this list further and does not change it.
+  const archivedHidden = $derived(ordinary.length - visible.length);
   // Per-DAG driver state and the two persisted badges: unread driver messages,
   // and the open questions no reply has answered yet. Read from State and then
   // ordered by the SAME running-first rule the driver table uses.
@@ -54,14 +60,28 @@
     } catch { if (driverMounted) pendingProposals = null; }
   }
   function openProject(id: string) { stewardOpen = false; paneSelection = id; rememberProject(id); }
+  // The archive control on a card: one State write, then re-read the page so the
+  // list reflects the server's answer. A REFUSED write (the owner's door only
+  // lets an admin archive) changes nothing here except the message: the error the
+  // server sent is shown, and the project stays listed exactly as it was.
+  async function setArchived(project: StateProjectRow, archived: boolean) {
+    if (archiveBusy) return;
+    archiveBusy = project.project_id; archiveError = '';
+    try {
+      await stateProjectArchive(project.project_id, archived);
+      retry++;
+    } catch (e) {
+      archiveError = String(e instanceof Error ? e.message : e);
+    } finally { archiveBusy = ''; }
+  }
   $effect(() => { if ($authStore.permissionResolved && $authStore.canWrite && driverMounted) void loadDriverState(); });
   $effect(() => {
-    const permitted = canRead, repo = params.repoPath; void retry;
+    const permitted = canRead, repo = params.repoPath, withArchived = showArchived; void retry;
     const version = ++generation;
     rows = []; next = null; error = '';
     if (!permitted) { loading = false; return; }
     loading = true;
-    stateProjects(repo).then(result => {
+    stateProjects(repo, '', withArchived).then(result => {
       if (version !== generation) return;
       rows = result.projects; next = result.next_after;
     }).catch(e => { if (version === generation) error = String(e.message ?? e); })
@@ -79,7 +99,7 @@
     if (!next || loading) return;
     const version = generation; loading = true; error = '';
     try {
-      const result = await stateProjects(params.repoPath, next);
+      const result = await stateProjects(params.repoPath, next, showArchived);
       if (version === generation) { rows = [...rows, ...result.projects]; next = result.next_after; }
     } catch (e) { if (version === generation) error = String(e instanceof Error ? e.message : e); }
     finally { if (version === generation) loading = false; }
@@ -87,7 +107,7 @@
 </script>
 {#snippet projectFilters()}
     <label>{st('projectSearch')}<input type="search" bind:value={query} placeholder={st('projectSearch')} /></label>
-    <label class="archived-toggle"><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
+    <label class="archived-toggle" data-archived-hidden={archivedHidden}><input type="checkbox" bind:checked={showArchived} /> {st('showArchived')}{#if archivedHidden} · {st('archivedHidden')}: {archivedHidden}{/if}</label>
 {/snippet}
 <div class="dag-split" class:workbench={$authStore.canWrite && canRead && (visible.length > 0 || (hasSteward && stewardOpen))}>
 <section class="state-projects">
@@ -108,6 +128,13 @@
     </div>
     {#if params.repoPath}<p><code>{params.repoPath}</code></p>{/if}
     {#if error}<div role="alert"><p>{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button></div>{/if}
+    <!-- The server's OWN answer to the last archive/restore write. A refusal is
+         shown as the sentence the server sent (its "admin required" door names
+         the action), and the list below it is untouched: nothing was written. -->
+    {#if archiveError}<div role="alert" class="archive-error" data-archive-refusal>
+      <p>{archiveError}</p>
+      <button class="outline" onclick={() => { archiveError = ''; }}>{st('archiveDismiss')}</button>
+    </div>{/if}
     {#if loading && !rows.length}<p aria-live="polite">{st('loading')}</p>
     {:else if !rows.length && !error}<article><p>{st('empty')}</p></article>{/if}
     {#if hasSteward}
@@ -126,12 +153,16 @@
       {#each ordered as project (project.project_id)}
         {@const phase = drivers?.projects[project.project_id]?.managed?.phase}
         {@const activity = drivers?.projects[project.project_id]}
+        {@const archived = isArchived(project)}
+        <div class="project-cell">
         <button type="button" class="project-card" aria-pressed={!stewardOpen && paneSelection === project.project_id}
+          data-archived={archived}
           onclick={() => {
             if (!$authStore.canWrite) { window.location.hash = stateProjectHref(project.project_id).slice(1); return; }
             openProject(project.project_id);
           }}>
           <div class="card-top"><span>{project.project_id}</span><span class:held={project.policy.dispatch !== 'active'}>{project.policy.dispatch}</span></div>
+          {#if archived}<span class="archived-badge">{st('archivedBadge')}</span>{/if}
           <h2>{project.title}</h2>
           {#if $authStore.canWrite}
             <!-- Everything the driver is doing for THIS project, on the button
@@ -156,6 +187,19 @@
           {#if project.policy.dispatch !== 'active'}<p class="hold-reason">⏸ {project.policy.reason}</p>{/if}
           {#if !$authStore.canWrite}<span class="open">{st('graph')} →</span>{/if}
         </button>
+        <!-- The owner's two listing decisions, OFF the card button on purpose: a
+             control nested in the card would inherit its click. Which one is
+             offered is the row's own archive fact, so a hidden row restores and a
+             listed one archives. -->
+        {#if $authStore.canWrite}
+          <button type="button" class="outline archive-control" data-archive-control={project.project_id}
+            disabled={archiveBusy === project.project_id}
+            aria-label={(archived ? st('restoreProject') : st('archiveProject')) + ' ' + project.project_id}
+            onclick={() => void setArchived(project, !archived)}>
+            {archived ? st('restoreProject') : st('archiveProject')}
+          </button>
+        {/if}
+        </div>
       {/each}
     </div>
     {#if visible.length && !filtered.length}<p>{st('noMatch')}</p>{/if}
@@ -183,6 +227,11 @@
   .archived-toggle input{margin:0;flex-shrink:0;}
   .project-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr));gap:10px;}
   .workbench .project-grid{grid-template-columns:minmax(0,1fr);gap:6px;}
+  .project-cell{display:flex;flex-direction:column;gap:4px;min-width:0;}
+  .archive-control{align-self:flex-end;width:auto;margin:0;padding:2px 10px;font-size:11px;}
+  .archive-error{margin:0 0 10px;padding:8px 10px;font-size:12px;}
+  .archive-error button{width:auto;margin:4px 0 0;padding:2px 10px;font-size:11px;}
+  .archived-badge{display:inline-block;padding:1px 6px;border-radius:5px;font-size:11px;line-height:1.5;background:light-dark(#eef0f3,#2f333a);color:var(--pico-muted-color);}
   .project-card{display:block;width:100%;min-width:0;margin:0;padding:14px;text-align:left;font:inherit;border:1px solid var(--pico-muted-border-color);border-radius:8px;background:var(--pico-card-background-color);color:inherit;box-shadow:none;overflow-wrap:anywhere;}
   .workbench .project-card{padding:10px;border-color:transparent;background:transparent;}
   .project-card:hover,.project-card:focus-visible{border-color:var(--pico-primary);}

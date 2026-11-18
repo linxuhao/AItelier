@@ -637,10 +637,24 @@ export function getRepo(repoPath: string): Promise<RepoDetail> {
 export function runWorkflowGraph(runId: string): Promise<Record<string, any>> {
   return _get('/api/runs/' + encodeURIComponent(runId) + '/graph');
 }
-export function stateProjects(repoPath?: string, after = ''): Promise<{projects: import('./stateGraph').StateProjectRow[]; next_after: string | null}> {
+/** The paged project catalog. `includeArchived` is the OWNER asking for the rows
+ *  the archive hid: the request then carries `include_archived=true` and every
+ *  returned row carries its `archived` fact. Asking for nothing keeps the request
+ *  byte-identical to the one this client always made. */
+export function stateProjects(repoPath?: string, after = '', includeArchived = false): Promise<{projects: import('./stateGraph').StateProjectRow[]; next_after: string | null}> {
   const query = new URLSearchParams({limit: '100', after});
   if (repoPath) query.set('repo_path', repoPath);
+  if (includeArchived) query.set('include_archived', 'true');
   return _get('/api/state/projects?' + query.toString());
+}
+/** Hide (`archived`) or restore one project's listing entry: the State write the
+ *  projects page's archive/restore control issues. The server owns the door - a
+ *  credential that may not archive is REFUSED with its own message, surfaced to
+ *  the caller instead of being swallowed. */
+export function stateProjectArchive(projectId: string, archived: boolean, reason?: string): Promise<unknown> {
+  const args: Record<string, unknown> = {project_id: projectId};
+  if (reason) args.reason = reason;
+  return _post('/api/state/commands/' + (archived ? 'archive_project' : 'unarchive_project'), args);
 }
 export interface DriverActivity {
   total: number; online: number; running_subagents: number; running_pipelines: number;

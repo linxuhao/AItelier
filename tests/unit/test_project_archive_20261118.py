@@ -22,6 +22,10 @@ c) `test_the_change_migrates_a_database_written_by_the_previous_code` - a
    with `git archive` and run as a subprocess) keeps every row count, every
    project row and the exact project list after the new code applies its
    additive column, twice.
+d) `test_the_catalog_reports_which_rows_are_archived` - the project catalog
+   ACTION and the `/api/state/projects` ROUTE report the archive fact on the
+   rows of a page that asked for archived rows (`include_archived=true`), on no
+   row of a page that did not, and never to an anonymous caller.
 """
 from __future__ import annotations
 
@@ -304,6 +308,49 @@ def test_the_anonymous_list_is_untouched_by_archiving(world, monkeypatch):
     assert (public_before.status_code, public_before.content) == \
            (anonymous.get("/api/state/projects").status_code,
             anonymous.get("/api/state/projects").content)
+
+
+# ── (d) the catalog says which rows it was asked to hide ─────────────────────
+def test_the_catalog_reports_which_rows_are_archived(world, monkeypatch):
+    """catalog-reports-which-rows-are-archived, through the action and the route.
+
+    The archive fact is reported by the READ that lifts the archive filter, on
+    every row it returns (literally true or false, never a missing key), and by
+    no other answer: the default page carries no fact at all, and the anonymous
+    page - which never applies the filter - is not told what the owner hid.
+    """
+    owner, pid = world.owner, world.archived
+    write(owner, "archive_project", project_id=pid, reason="Unused fixture")
+
+    # the ACTION: the default page omits the archived project, the page that ASKS
+    # returns it carrying the fact - on that row and on no other
+    default = read(owner, "project_catalog")["projects"]
+    asked = read(owner, "project_catalog", include_archived=True)["projects"]
+    assert [p["project_id"] for p in default] == ["live"]
+    assert [p["project_id"] for p in asked] == ["live", pid]
+    assert {p["project_id"]: p["archived"] for p in asked} == {"live": False, pid: True}
+    assert all(type(p["archived"]) is bool for p in asked)
+    # a page that did not ask keeps the bytes it always had: no fact, no key
+    assert all("archived" not in p for p in default)
+
+    # the ROUTE returns the same two answers, row for row
+    owner_client = client_for(owner_service(world.db), monkeypatch)
+    route_default = owner_client.get("/api/state/projects")
+    route_asked = owner_client.get("/api/state/projects?include_archived=true")
+    assert route_default.status_code == 200, route_default.text
+    assert route_asked.status_code == 200, route_asked.text
+    assert route_default.json()["projects"] == default
+    assert route_asked.json()["projects"] == asked
+
+    # ...and the anonymous answer is untouched by the fact and by the argument:
+    # archiving is not unpublishing, and which listings the owner hid is theirs
+    anonymous = client_for(anonymous_service(world.db), monkeypatch)
+    public_default = anonymous.get("/api/state/projects")
+    public_asked = anonymous.get("/api/state/projects?include_archived=true")
+    assert (public_default.status_code, public_default.content) == \
+           (public_asked.status_code, public_asked.content)
+    assert [p["project_id"] for p in public_asked.json()["projects"]] == ["live"]
+    assert all("archived" not in p for p in public_asked.json()["projects"])
 
 
 # ── (c) the change preserves a database written by the previous code ────────

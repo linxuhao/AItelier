@@ -37,7 +37,7 @@
 <DriverConversationPane projects={self} {status} selected={projectId} bind:mode {tabs} {prefill} {onread} {onrefresh} ack>
   {#snippet panel(tab: string)}
     {#if tab === 'proposals'}<StewardProposals onchange={onrefresh} onrevise={revise} />
-    {:else if tab === 'questions'}<StewardQuestions {questions} {projects} onanswer={answer} />
+    {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />
     {:else if tab === 'schedules'}<StewardSchedules />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}

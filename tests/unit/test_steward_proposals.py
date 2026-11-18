@@ -26,7 +26,9 @@ from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
-from core.state_steward import INTERRUPTED, ProposalConflict
+import sqlite3
+
+from core.state_steward import INTERRUPTED, OLD_KIND_CHECK, SCHEMA, ProposalConflict
 
 HOME = "aitelier-home"
 OWNER = "owner@example.com"
@@ -436,3 +438,149 @@ def test_a_delivered_result_is_still_unread_after_a_restart(world):
     import asyncio
     result = asyncio.run(result) if hasattr(result, "__await__") else result
     assert any(pid in m["subject"] for m in result["driver_inbox"]), result
+
+
+# --- archive / unarchive (owner 2026-11-18): proposed by the steward, executed as the owner --
+
+def archived(world, project_id="alpha"):
+    with world.db.get_connection() as conn:
+        found = conn.execute("SELECT * FROM state_project_archive WHERE project_id=?", (project_id,)).fetchone()
+    return dict(found) if found else None
+
+
+def test_archive_proposals_are_refused_unless_they_would_change_something(world):
+    archive = {"project_id": "alpha"}
+    with pytest.raises(StateGraphError, match="invalid_project"):
+        propose(world, kind="archive_project", payload={"project_id": HOME})
+    with pytest.raises(StateGraphError, match="invalid_project"):
+        propose(world, kind="unarchive_project", payload={"project_id": HOME})
+    with pytest.raises(StateGraphError, match="unknown_project"):
+        propose(world, kind="archive_project", payload={"project_id": "nope"})
+    with pytest.raises(StateGraphError, match="not_archived"):
+        propose(world, kind="unarchive_project", payload=archive)
+    with pytest.raises(StateGraphError, match="invalid_payload"):
+        propose(world, kind="archive_project", payload={**archive, "reason": "x" * 4001})
+    with pytest.raises(StateGraphError, match="invalid_payload"):
+        propose(world, kind="archive_project", payload={**archive, "extra": 1})
+    with pytest.raises(StateGraphError, match="archive reason must be nonempty"):
+        propose(world, kind="archive_project", payload={**archive, "reason": "  "})
+    world.owner.store.set_project_archive("alpha", True, "owner:" + OWNER)
+    with pytest.raises(StateGraphError, match="already_archived"):
+        propose(world, kind="archive_project", payload=archive)
+    out = propose(world, kind="unarchive_project", payload={**archive, "reason": " back "})
+    assert json.loads(row(world, out["proposal_id"])["payload_json"]) == {"project_id": "alpha", "reason": "back"}
+    assert archived(world)["archived"] == 1, "a proposal executes nothing"
+
+
+def test_approving_archive_then_unarchive_writes_it_as_the_owner_and_wakes_the_steward(world, client):
+    pid = propose(world, kind="archive_project", payload={"project_id": "alpha", "reason": "finished"})["proposal_id"]
+    r = approve(client, pid)
+    assert r.status_code == 200, r.text
+    done = r.json()
+    assert done["status"] == "done" and done["decided_by"] == "owner:" + OWNER
+    assert done["result"] == {"archived": True, "project_id": "alpha"}
+    record = archived(world)
+    assert record["archived"] == 1 and record["actor"] == "owner:" + OWNER and record["reason"] == "finished"
+    assert world.owner.store.is_project_archived("alpha")
+    assert approve(client, pid, version=done["version"]).status_code == 409, "never executed twice"
+    back = propose(world, key="k2", kind="unarchive_project", payload={"project_id": "alpha"})["proposal_id"]
+    r = approve(client, back)
+    assert r.status_code == 200 and r.json()["status"] == "done", r.text
+    assert r.json()["result"] == {"archived": False, "project_id": "alpha"}
+    assert not world.owner.store.is_project_archived("alpha")
+    assert archived(world)["actor"] == "owner:" + OWNER and archived(world)["reason"] == ""
+    with world.db.get_connection() as conn:
+        events = [r[0] for r in conn.execute("SELECT event_type FROM state_events WHERE project_id='alpha' "
+                                             "AND event_type LIKE 'project_%archived' ORDER BY seq")]
+    assert events == ["project_archived", "project_unarchived"]
+    for proposal in (pid, back):
+        wakes = [m for m in steward_inbox(world) if proposal in m["subject"]]
+        assert len(wakes) == 1 and "done" in wakes[0]["body"] and "alpha" in wakes[0]["body"], proposal
+
+
+@pytest.mark.parametrize("kind, before, error", [("archive_project", False, "already_archived"),
+                                                 ("unarchive_project", True, "not_archived")])
+def test_an_archive_state_changed_since_the_proposal_fails_it(world, client, kind, before, error):
+    if before:
+        world.owner.store.set_project_archive("alpha", True, "owner:" + OWNER, "first")
+    pid = propose(world, kind=kind, payload={"project_id": "alpha"})["proposal_id"]
+    world.owner.store.set_project_archive("alpha", not before, "owner:" + OWNER, "meanwhile")
+    r = approve(client, pid)
+    assert r.status_code == 200 and r.json()["status"] == "failed", r.text
+    assert error in r.json()["result"]["error"]
+    assert archived(world)["reason"] == "meanwhile", "the owner's own decision is left alone"
+    wakes = [m for m in steward_inbox(world) if pid in m["subject"]]
+    assert len(wakes) == 1 and "failed" in wakes[0]["body"] and error in wakes[0]["body"]
+
+
+def test_declined_or_withdrawn_archive_proposals_change_nothing(world, client):
+    declined = propose(world, kind="archive_project", payload={"project_id": "alpha"})["proposal_id"]
+    r = client.post(f"/api/steward/proposals/{declined}/decline", json={"expected_version": 1, "reason": "keep it"},
+                    headers=OWNER_HEADERS)
+    assert r.status_code == 200 and r.json()["status"] == "declined", r.text
+    withdrawn = propose(world, key="k2", kind="archive_project", payload={"project_id": "alpha"})["proposal_id"]
+    execute(world.steward, "withdraw_steward_proposal",
+            {"request_key": "w", "proposal_id": withdrawn, "reason": "r"}, allow_write=True)
+    assert row(world, withdrawn)["status"] == "withdrawn"
+    for pid in (declined, withdrawn):
+        assert approve(client, pid, version=row(world, pid)["version"]).status_code == 409
+    assert archived(world) is None
+    assert any(declined in m["subject"] and "declined" in m["body"] for m in steward_inbox(world))
+
+
+def test_recovery_settles_an_executing_archive_proposal_by_the_projects_state(world):
+    world.owner.store.create_project("beta", "Beta")
+    matched = propose(world, kind="archive_project", payload={"project_id": "alpha"})["proposal_id"]
+    rerun = propose(world, key="k2", kind="archive_project", payload={"project_id": "beta"})["proposal_id"]
+    for pid in (matched, rerun):
+        world.owner.steward.begin_approval(pid, 1)
+    world.owner.store.set_project_archive("alpha", True, "owner:" + OWNER, "already")
+    StateService(world.db, actor="steward-recovery", project_read_trusted=True).steward.recover(world.runtime)
+    assert row(world, matched)["status"] == "done"
+    assert json.loads(row(world, matched)["result_json"]) == {"archived": True, "project_id": "alpha",
+                                                              "recovered": True}
+    assert archived(world)["reason"] == "already", "a state that already matches is not written again"
+    assert row(world, rerun)["status"] == "done"
+    assert json.loads(row(world, rerun)["result_json"]) == {"archived": True, "project_id": "beta"}
+    assert archived(world, "beta")["actor"] == "owner:" + OWNER, "re-executed as the owner who approved it"
+    assert all(any(pid in m["subject"] for m in steward_inbox(world)) for pid in (matched, rerun))
+
+
+def test_a_proposals_table_with_the_old_kind_check_is_migrated_once(tmp_path):
+    path = str(tmp_path / "old.sqlite")
+    old_schema = SCHEMA.replace(SCHEMA[SCHEMA.index("CHECK(kind IN ("):SCHEMA.index("),\n payload_json") + 1],
+                                OLD_KIND_CHECK, 1)
+    assert OLD_KIND_CHECK in old_schema and "archive_project" not in old_schema.split(";")[0]
+    with sqlite3.connect(path) as conn:
+        conn.executescript(old_schema)
+        conn.execute("INSERT INTO state_steward_proposals VALUES('prop-a',3,'stop_driver',?,?,'done','driver:s',"
+                     "'2026-11-01T00:00:00+00:00',NULL,'2026-11-02','owner:o',?,'2026-11-02')",
+                     ('{"project_id":"alpha"}', "why \u00e9\n", '{"driver":{}}'))
+        conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+                     "created_by,created_at) VALUES('prop-b',1,'create_project','{}','r','open','driver:s','2026-11-03')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+                         "created_by,created_at) VALUES('x',1,'archive_project','{}','r','open','s','t')")
+        before = conn.execute("SELECT * FROM state_steward_proposals ORDER BY proposal_id").fetchall()
+    db = StateDatabase(path)
+    StateService(db, actor="fixture", project_read_trusted=True)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT * FROM state_steward_proposals ORDER BY proposal_id").fetchall() == before
+        table = conn.execute("SELECT sql FROM sqlite_master WHERE name='state_steward_proposals'").fetchone()[0]
+        assert OLD_KIND_CHECK not in table and "'unarchive_project'" in table
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                            "AND name='state_steward_proposals_status'").fetchone()
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%old_kinds%'").fetchone()
+        for kind in ("archive_project", "unarchive_project"):
+            conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+                         "created_by,created_at) VALUES(?,1,?,'{}','r','open','s','t')", ("new-" + kind, kind))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,status,"
+                         "created_by,created_at) VALUES('y',1,'deploy','{}','r','open','s','t')")
+        conn.commit()
+        rows = conn.execute("SELECT * FROM state_steward_proposals ORDER BY proposal_id").fetchall()
+    # Migrated already: a second start leaves the table (and its rows) exactly as they are.
+    StateService(StateDatabase(path), actor="fixture", project_read_trusted=True)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT sql FROM sqlite_master WHERE name='state_steward_proposals'").fetchone()[0] == table
+        assert conn.execute("SELECT * FROM state_steward_proposals ORDER BY proposal_id").fetchall() == rows

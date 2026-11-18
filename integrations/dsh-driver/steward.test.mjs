@@ -954,3 +954,12 @@ test('step 17 layer 2: open threads from data - the unanswered owner messages an
   assert.deepEqual(threads.handoffs_last_7_days, []);
   void now;
 });
+
+test('review 340 (a): every tool the adapter adds to the steward\'s presented list is one runtime.mjs registers', () => {
+  const effective = aitelierRoles(table);
+  const added = effective.steward.presented.filter(name => !table.steward.presented.includes(name));
+  const source = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  const registered = new Set([...source.matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
+  assert.ok(added.length >= 5, JSON.stringify(added));
+  assert.deepEqual(added.filter(name => !registered.has(name)), [], 'presented to the steward but never registered');
+});

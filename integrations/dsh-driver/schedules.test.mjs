@@ -105,3 +105,26 @@ test('review 337: one wake holds at most WAKE_MAX reminders, oldest due first; t
     /（最后由你修改）/);
   timer.close();
 });
+
+test('review 340 (b): one row whose fire fails is skipped and logged; the others still fire and the clock is re-armed', async () => {
+  const clock = Date.parse('2026-11-18T09:00:30Z');
+  const rows = [row('bad', '2026-11-18T09:00:00Z'), row('good', '2026-11-18T09:00:00Z')];
+  const { request: base } = backend(rows, () => clock);
+  const request = async (path, body) => {
+    if (path.endsWith('/fire_steward_schedule') && body.schedule_id === 'bad') throw new Error('AItelier fire: HTTP 503');
+    return base(path, body);
+  };
+  const delivered = [], timers = [], logged = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, log: line => logged.push(line),
+    deliver: async (text, id) => delivered.push(id), setTimer: (fn, ms) => (timers.push(ms), {}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.deepEqual(delivered, ['schedule:good:2026-11-18T09:00:00Z']);
+  assert.match(logged[0], /schedule bad: fire failed \(AItelier fire: HTTP 503\)/);
+  assert.equal(timers.length, 1, 'armed again');
+  // Even a failed list (the backend away) re-arms the clock.
+  const away = new ScheduleTimer({ request: async () => { throw new Error('down'); }, now: () => clock, log: () => {},
+    deliver: async () => {}, setTimer: (fn, ms) => (timers.push(ms), {}), clearTimer: () => {} });
+  await away.refresh();
+  assert.equal(timers.at(-1), RECHECK_MS);
+  timer.close(); away.close();
+});

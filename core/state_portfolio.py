@@ -9,7 +9,8 @@ from collections import Counter
 from pathlib import Path
 
 from core.state_graph import (
-    CLOSED_STATUSES, StateConflict, StateGraphError, digest, integer, key, now, ready_action_counts, text,
+    ARCHIVED_PROJECT_SQL, CLOSED_STATUSES, StateConflict, StateGraphError, digest, integer, key, now,
+    ready_action_counts, text,
 )
 from core.state_metadata import node_hold, project_policy
 
@@ -60,6 +61,40 @@ class StatePortfolio:
             self.store._event(conn, project_id, None, "source_bound", {"revision": actual + 1,
                               "repo_path": repo_path, "common_dir": common_dir, "actor": self.actor})
             return dict(conn.execute("SELECT * FROM state_source_bindings WHERE project_id=?", (project_id,)).fetchone())
+
+    def _require_admin(self, action):
+        """The owner door, with the SAME mechanism as `retire_context_run_protection`.
+
+        Owner (an allowlisted Access email) or an `is_admin` driver, derived once
+        per request from the raw credential by `api.authz.request_identity` and
+        carried on the service (`api/state_graph_routers.authenticated_is_admin`),
+        plus the trusted read level that same credential carries. A driver
+        credential without `is_admin` is REFUSED by name - never a silent no-op -
+        so a director cannot hide another project from its owner. Fail closed: an
+        object that never declared `is_admin` is not an admin.
+        """
+        from core.state_claims import ClaimError
+        if (getattr(self.service, "is_admin", False) is not True
+                or getattr(self.service, "project_read_trusted", False) is not True):
+            raise ClaimError("admin_required", f"only an authenticated admin may {action}")
+
+    def archive_project(self, project_id, reason=None):
+        """Hide ONE project from the owner's project list. Nothing is deleted.
+
+        The write itself is `StateGraphStore.set_project_archive` (it owns the
+        access row); this method is the owner door in front of it. Archiving says
+        nothing about dispatch, visibility, nodes, attempts, evidence or history,
+        so every one of those keeps working unchanged.
+        """
+        self._require_admin("archive_project")
+        return self.store.set_project_archive(
+            project_id, True, self.actor, "" if reason is None else text(reason, "archive reason", 4000))
+
+    def unarchive_project(self, project_id, reason=None):
+        """Reverse `archive_project`: the project is listed again, unchanged."""
+        self._require_admin("unarchive_project")
+        return self.store.set_project_archive(
+            project_id, False, self.actor, "" if reason is None else text(reason, "archive reason", 4000))
 
     def set_dispatch(self, project_id, dispatch, expected_revision, reason):
         if not isinstance(dispatch, str) or dispatch not in {"active", "hold", "archive"}:
@@ -286,10 +321,12 @@ class StatePortfolio:
                     row["protection_retirement"] = dict(audit) if audit else None
             return {"references": rows[:limit], "next_after": rows[limit - 1]["reference_id"] if len(rows) > limit else None}
 
-    def projects(self, repo_path=None, after="", limit=100):
+    def projects(self, repo_path=None, after="", limit=100, include_archived=False):
         integer(limit, "limit", 1, 200)
         if after:
             key(after, "after")
+        if type(include_archived) is not bool:
+            raise StateGraphError("include_archived must be a boolean")
         if repo_path is not None:
             repo_path = str(Path(text(repo_path, "repo_path", 4000)).expanduser().resolve())
         with self.store.transaction() as conn:
@@ -298,10 +335,20 @@ class StatePortfolio:
             # turned a whole page empty and shifted every later cursor, which let
             # a reviewer reconstruct an unopened id character by character. Fail
             # closed: with no owning service the caller is treated as anonymous.
+            #
+            # The OWNER's list hides archived projects by the same rule and in the
+            # same place (`ARCHIVED_PROJECT_SQL`), so a page's size and cursor stay
+            # a function of the caller's own rows. It is the trusted half only:
+            # the anonymous listing must behave exactly as it did before archive
+            # existed (archiving is not unpublishing), and `include_archived` is
+            # the owner asking for the hidden ones back - which the anonymous
+            # caller cannot do, because that branch never applies the predicate.
             where, params = "p.project_id>?", [after]
             if not getattr(self.service, "project_read_trusted", False):
                 where += (" AND EXISTS(SELECT 1 FROM state_project_access a "
                           "WHERE a.project_id=p.project_id AND a.visibility='public')")
+            elif not include_archived:
+                where += " AND " + ARCHIVED_PROJECT_SQL
             rows = conn.execute("SELECT p.*,COUNT(n.node_key) AS node_count,"
                                 "COALESCE(SUM(n.status='VERIFIED'),0) AS verified_count "
                                 "FROM state_projects p LEFT JOIN state_nodes n ON n.project_id=p.project_id AND n.issue_id IS NULL "

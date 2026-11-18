@@ -345,8 +345,11 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     _declare(router.post("/director-messages/{action}")(director_message), "director")
 
-    def projects(repo_path: str | None = None, after: str = "", limit: int = 100, service=Depends(service_dependency)):
-        return _call(service, "project_catalog", {"repo_path": repo_path, "after": after, "limit": limit})
+    def projects(repo_path: str | None = None, after: str = "", limit: int = 100,
+                 include_archived: bool = False, service=Depends(service_dependency)):
+        return _call(service, "project_catalog", {"repo_path": repo_path, "after": after,
+                                                  "limit": limit,
+                                                  "include_archived": include_archived})
 
     # The declaration names the action this handler SERVES (`project_catalog`, the
     # paged catalog), not a sibling public read it resembles: `list_projects` is a

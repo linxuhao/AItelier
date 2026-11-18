@@ -322,6 +322,15 @@ class StatePortfolio:
             return {"references": rows[:limit], "next_after": rows[limit - 1]["reference_id"] if len(rows) > limit else None}
 
     def projects(self, repo_path=None, after="", limit=100, include_archived=False):
+        """The paged project catalog, filtered by the caller's OWN visibility rules.
+
+        `include_archived` is the owner asking for the rows the archive hid: the
+        trusted page then returns them AND carries each row's archive fact
+        (`archived`, literally true or false) so a caller can tell a hidden
+        listing from a live one without another read. It changes nothing for the
+        anonymous caller, whose page is the same bytes it was before archiving
+        existed (archiving is not unpublishing).
+        """
         integer(limit, "limit", 1, 200)
         if after:
             key(after, "after")
@@ -344,7 +353,14 @@ class StatePortfolio:
             # the owner asking for the hidden ones back - which the anonymous
             # caller cannot do, because that branch never applies the predicate.
             where, params = "p.project_id>?", [after]
-            if not getattr(self.service, "project_read_trusted", False):
+            trusted = getattr(self.service, "project_read_trusted", False) is True
+            # The owners' archive RECORD, read once for the page. It is what the
+            # asks-for-archived answer LABELS each row with; a row whose archive
+            # fact the caller cannot be told is simply not labeled (see below).
+            archives = ({r["project_id"]: bool(r["archived"]) for r in conn.execute(
+                "SELECT project_id,archived FROM state_project_archive")}
+                if trusted and include_archived else {})
+            if not trusted:
                 where += (" AND EXISTS(SELECT 1 FROM state_project_access a "
                           "WHERE a.project_id=p.project_id AND a.visibility='public')")
             elif not include_archived:
@@ -359,7 +375,16 @@ class StatePortfolio:
                 source = self._source(conn, p)
                 if repo_path and source["repo_path"] != repo_path:
                     continue
-                result.append({**p, "source": source, "policy": project_policy(conn, p["project_id"])})
+                # The archive FACT, only where the archive FILTER was the caller's
+                # to lift: asking for the archived rows is exactly asking which
+                # rows those are, so every returned row says (false is the fact
+                # too, never a missing key). A page that did not ask keeps the
+                # bytes it always had, and the anonymous answer is deliberately
+                # left alone - archiving is not unpublishing, and which listings
+                # the owner hid is the owner's own bookkeeping.
+                fact = {"archived": archives.get(p["project_id"], False)} if archives else {}
+                result.append({**p, **fact, "source": source,
+                               "policy": project_policy(conn, p["project_id"])})
                 if len(result) > limit:
                     break
             return {"projects": result[:limit], "next_after": result[limit - 1]["project_id"] if len(result) > limit else None}

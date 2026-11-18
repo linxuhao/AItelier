@@ -257,6 +257,84 @@ describe('the open-questions summary', () => {
   });
 });
 
+describe('answering in the summary itself', () => {
+  const summary = (onanswered = vi.fn()) => render(StewardQuestions, {questions: {alpha: 2, beta: 1},
+    projects: [row('alpha', 'Alpha'), row('beta', 'Beta')] as never, status: table() as never, onanswer: vi.fn(), onanswered});
+  const item = async (container: HTMLElement, k: string) => waitFor(() => {
+    const el = container.querySelector(`[data-question="${k}"]`) as HTMLElement;
+    expect(el).not.toBeNull();
+    return el;
+  });
+  const write = async (li: HTMLElement, text: string) => {
+    await fireEvent.click(within(li).getByRole('button', {name: 'Answer'}));
+    await fireEvent.input(within(li).getByRole('textbox', {name: 'Your answer'}), {target: {value: text}});
+  };
+
+  it('sends to that project, with the body and the answers ref the project conversation sends', async () => {
+    const onanswered = vi.fn();
+    const view = summary(onanswered);
+    const li = await item(view.container, 'a1:q2');
+    await write(li, '  use the second one  ');
+    await fireEvent.click(within(li).getByRole('button', {name: 'Send'}));
+    await waitFor(() => expect(api.sendDriverConversationMessage).toHaveBeenCalledTimes(1));
+    expect(api.sendDriverConversationMessage).toHaveBeenCalledWith('alpha', 'use the second one', {
+      replyToMessageId: 'a1', targetDriverId: 'dsh-running', answers: [{message_id: 'a1', segment_id: 'q2'}]});
+    // The answered question leaves the list at once, and the host re-reads the badges.
+    await waitFor(() => expect(view.container.querySelector('[data-question="a1:q2"]')).toBeNull());
+    expect(view.container.querySelector('[data-question="a2:q3"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-summary-project="alpha"] [data-summary-count]')?.textContent).toBe('1');
+    expect(onanswered).toHaveBeenCalledTimes(1);
+  });
+
+  it('an error keeps the text, shows the message and keeps the question', async () => {
+    api.sendDriverConversationMessage.mockRejectedValue(new Error('driver inbox unavailable'));
+    const onanswered = vi.fn();
+    const view = summary(onanswered);
+    const li = await item(view.container, 'b1:q1');
+    await write(li, 'yes, ship it');
+    await fireEvent.click(within(li).getByRole('button', {name: 'Send'}));
+    expect((await within(li).findByRole('alert')).textContent).toContain('driver inbox unavailable');
+    expect((within(li).getByRole('textbox', {name: 'Your answer'}) as HTMLTextAreaElement).value).toBe('yes, ship it');
+    expect(view.container.querySelector('[data-question="b1:q1"]')).not.toBeNull();
+    expect(onanswered).not.toHaveBeenCalled();
+  });
+
+  it('in the steward pane: the answered question leaves and every count follows the badges', async () => {
+    const view = render(StateProjects);
+    const pinned = await waitFor(() => {
+      const el = view.container.querySelector('[data-steward-card]') as HTMLElement;
+      expect(el?.querySelector('[data-steward-fact="questions"]')?.textContent).toBe('3');
+      return el;
+    });
+    await fireEvent.click(pinned);
+    await fireEvent.click(await view.findByRole('tab', {name: 'Open questions by project'}));
+    const li = await item(view.container, 'a2:q3');
+    // What the server holds once the reply is stored.
+    api.sendDriverConversationMessage.mockImplementation(async (project: string, body: string,
+      options: {answers: {message_id: string; segment_id: string}[]}) => {
+      conversations[project] = [...conversations[project], {...answer(project, 'a4', [], '2026-01-01T00:00:04Z'),
+        body, answers: options.answers}];
+      api.dshDriverConversationUnread.mockResolvedValue({projects: {}, total: 0, questions: {alpha: 1, beta: 1}, questions_total: 2});
+      return {};
+    });
+    const before = conversations.alpha;
+    try {
+      await write(li, 'the third');
+      await fireEvent.click(within(li).getByRole('button', {name: 'Send'}));
+      await waitFor(() => {
+        expect(view.container.querySelector('[data-summary-total]')?.textContent).toBe('2');
+        expect(view.container.querySelector('[data-steward-card] [data-steward-fact="questions"]')?.textContent).toBe('2');
+        expect(view.container.querySelector('[data-summary-project="alpha"] [data-summary-count]')?.textContent).toBe('1');
+      });
+      expect(view.container.querySelector('[data-question="a2:q3"]')).toBeNull();
+      expect(openQuestions(conversations.alpha)).toHaveLength(1);
+      // "Go answer" is still there for a question that needs its context.
+      const alpha = view.container.querySelector('[data-summary-project="alpha"]') as HTMLElement;
+      expect(within(alpha).getByRole('button', {name: 'Go answer'})).toBeTruthy();
+    } finally { conversations.alpha = before; }
+  });
+});
+
 describe('a proposal card', () => {
   const props = (p: StewardProposal) => ({proposal: p, onupdate: vi.fn(), onreload: vi.fn(), onrevise: vi.fn()});
   const buttons = (container: HTMLElement) => [...container.querySelectorAll('.actions button')] as HTMLButtonElement[];
@@ -327,6 +405,23 @@ describe('a proposal card', () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(409);
     expect(error.detail).toEqual(current);
+  });
+
+  it.each([['archive_project', 'Archive a project beta', '归档项目 beta'],
+    ['unarchive_project', 'Restore a project beta', '恢复项目 beta']] as const)('%s: titled with the project, its reason shown, decided like any other', async (kind, en, zh) => {
+    const p = props(proposal({kind, payload: {project_id: 'beta', reason: 'the launch is over'}, reason: 'no activity for a month'}));
+    api.approveStewardProposal.mockResolvedValue(proposal({kind, status: 'executing', version: 4}));
+    const view = render(StewardProposalCard, p);
+    expect(view.container.querySelector('header strong')?.textContent).toBe(en);
+    expect(view.container.textContent).toContain('no activity for a month');
+    expect(view.container.querySelector('[data-archive-reason]')?.textContent).toBe('the launch is over');
+    expect(buttons(view.container).map(b => [b.textContent, b.disabled])).toEqual(
+      [['Approve', false], ['Decline', false], ['Change it', false]]);
+    await fireEvent.click(view.getByRole('button', {name: 'Approve'}));
+    await waitFor(() => expect(p.onupdate).toHaveBeenCalledWith(expect.objectContaining({status: 'executing'})));
+    expect(api.approveStewardProposal).toHaveBeenCalledWith('p1', 3, false);
+    langStore.set('zh-CN');
+    await waitFor(() => expect(view.container.querySelector('header strong')?.textContent).toBe(zh));
   });
 
   it('"Change it" hands the row to the host', async () => {

@@ -20,6 +20,8 @@
   // impact in the payload is what the steward saw when it proposed.
   let impact = $state<StewardImpact | null>(null), impactState = $state<'loading' | 'ready' | 'failed'>('loading');
   const isStop = $derived(proposal.kind === 'stop_driver');
+  // Archiving names its project in the title: the payload is only {project_id, reason?}.
+  const isArchive = $derived(proposal.kind === 'archive_project' || proposal.kind === 'unarchive_project');
   const recorded = $derived(proposal.payload?.impact as Partial<StewardImpact> | undefined);
   // Unknown (the read failed) is treated like "something would be interrupted":
   // the owner ticks the box, and the server checks again either way.
@@ -84,7 +86,7 @@
 {/snippet}
 <article class="proposal" data-proposal={proposal.proposal_id} data-status={proposal.status}>
   <header>
-    <strong>{t('steward.kind.' + proposal.kind)}</strong>
+    <strong>{t('steward.kind.' + proposal.kind)}{#if isArchive && proposal.payload?.project_id}{' ' + proposal.payload.project_id}{/if}</strong>
     <span class="status status-{proposal.status}">{t('steward.status.' + proposal.status)}</span>
   </header>
   <dl>
@@ -97,6 +99,9 @@
       <dd><ul>{#each proposal.payload.seed_nodes as node, i (i)}<li>{node.key ? `${node.key}: ${node.goal ?? ''}` : node.title ?? node.node_key ?? show(node)}</li>{/each}</ul></dd>
     {/if}
     {#if proposal.reason}<dt>{t('steward.reason')}</dt><dd>{proposal.reason}</dd>{/if}
+    {#if isArchive && proposal.payload?.reason && proposal.payload.reason !== proposal.reason}
+      <dt>{t('steward.archiveReason')}</dt><dd data-archive-reason>{proposal.payload.reason}</dd>
+    {/if}
   </dl>
   {#if isStop}
     <section class="impact" aria-label={t('steward.impactHeading')}>

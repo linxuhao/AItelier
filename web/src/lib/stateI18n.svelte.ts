@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { langStore } from '../stores/i18n';
 let lang = $state(get(langStore));
 langStore.subscribe(value => { lang = value; });
-const en: Record<string, string> = {
+export const en: Record<string, string> = {
   newProject:'New project', newProjectId:'Project id (letters, digits, . _ -)', newProjectTitle:'Title', newProjectGoal:'Goal (sent to the driver as your first message)', newProjectSource:'Source project id (optional)', newProjectStartDriver:'Start its driver now', newProjectPrivateNote:'The project is private: it is not published. You can open it later.', newProjectCreate:'Create', newProjectCancel:'Cancel', newProjectCreated:'Project created.', newProjectCreatedWithErrors:'Project created, but:', newProjectGoalFailed:'the goal was not sent', newProjectStartFailed:'the driver did not start',
   driverLive:'Live', driverReconnecting:'Reconnecting…', driverMessage:'Message driver', driverMessageSend:'Send', driverMessageSent:'Sent to driver inbox', driverHistory:'Run history', driverHistoryOlder:'Older records', driverHistoryRefresh:'Refresh', driverHistoryEmpty:'No persisted records yet', driverHistoryClose:'Close history', driverTotal:'Total', driverOnline:'Online', driverRunning:'Running', driverStart:'Start driver', driverStop:'Stop driver', driverMessages:'Messages to you', driverMessagesEmpty:'No message from this driver yet', driverMessagesClose:'Close messages', driverMessagesFrom:'from', driverMessagesSent:'Sent', driverMessagesOlder:'Only the newest are shown',
   driverConversation:'Conversation', driverConversationEmpty:'No messages yet. Say something to your driver.',
@@ -99,7 +99,7 @@ const en: Record<string, string> = {
   archiveProject: 'Archive', restoreProject: 'Restore', archivedBadge: 'archived', archiveDismiss: 'Dismiss',
   archiveConfirm: 'Archive this project? It disappears from the list until you show archived projects.', archiveConfirmYes: 'Yes, archive', archiveConfirmCancel: 'Cancel, keep it listed',
 };
-const zh: Record<string, string> = {
+export const zh: Record<string, string> = {
   newProject:'新建项目', newProjectId:'项目 id（字母、数字、. _ -）', newProjectTitle:'标题', newProjectGoal:'目标（作为你的第一条消息发给 driver）', newProjectSource:'源项目 id（可选）', newProjectStartDriver:'立即启动它的 driver', newProjectPrivateNote:'项目是私有的，不会公开，以后可以再公开。', newProjectCreate:'创建', newProjectCancel:'取消', newProjectCreated:'项目已创建。', newProjectCreatedWithErrors:'项目已创建，但：', newProjectGoalFailed:'目标没有发出', newProjectStartFailed:'driver 没有启动',
   driverLive:'实时', driverReconnecting:'重新连接中…', driverMessage:'给 driver 发消息', driverMessageSend:'发送', driverMessageSent:'已发送到 driver 收件箱', driverHistory:'运行记录', driverHistoryOlder:'更早记录', driverHistoryRefresh:'刷新', driverHistoryEmpty:'暂无已保存记录', driverHistoryClose:'关闭记录', driverTotal:'总数', driverOnline:'在线', driverRunning:'运行中', driverStart:'启动 driver', driverStop:'停止 driver', driverMessages:'发给你的消息', driverMessagesEmpty:'该 driver 还没有发来消息', driverMessagesClose:'关闭消息', driverMessagesFrom:'来自', driverMessagesSent:'发送于', driverMessagesOlder:'仅显示最新消息',
   driverConversation:'对话', driverConversationEmpty:'还没有消息，和你的 driver 说点什么吧。',
@@ -160,7 +160,7 @@ const zh: Record<string, string> = {
   externalShort:'外部执行', externalJob:'外部任务标识', reporter:'已认证提交者', externalNoRun:'自有 harness 执行，不需要 SkillFlow Run。', externalObservations:'外部执行报告', quiescent:'执行已静止（提交者声明）', externalTruncated:'显示最近100条外部报告。', acceptanceProvenance:'验收执行来源',
   attemptShort:'最近尝试', notStarted:'尚未执行',
   projects:'项目 · State DAG', project:'长期项目', dashboard:'仓库与执行记录', intro:'长期目标独立于每一次工作流执行。',
-  private:'项目状态为私有数据，请使用有写入权限的账号登录后查看。', loading:'正在读取…', retry:'重试', reload:'刷新视图',
+  private:'项目状态为私有数据，请使用有写入权限的账号登录后查看。', workingNotes:'工作笔记', loading:'正在读取…', retry:'重试', reload:'刷新视图',
   sync:'同步 Run 结果', syncMore:'同步下一批', syncNote:'仅更新观测状态，不启动、不审批、不验收。', syncDone:'Run 状态已同步',
   failures:'观测错误', staleView:'刷新失败，当前显示的快照可能已过期。',
   empty:'尚无 State Project。请通过 State DAG 工具创建或准备迁移；旧 Run 不会自动变成项目目标。',
@@ -187,7 +187,7 @@ const zh: Record<string, string> = {
   archiveProject:'归档', restoreProject:'恢复', archivedBadge:'已归档', archiveDismiss:'关闭',
   archiveConfirm:'确定要归档这个项目吗？归档后它会从列表中消失，直到你显示已归档项目。', archiveConfirmYes:'确认归档', archiveConfirmCancel:'取消，保持列出',
 };
-const fr: Record<string, string> = {
+export const fr: Record<string, string> = {
   newProject:'Nouveau projet', newProjectId:'Identifiant du projet (lettres, chiffres, . _ -)', newProjectTitle:'Titre', newProjectGoal:'Objectif (envoyé au driver comme votre premier message)', newProjectSource:'Identifiant du projet source (facultatif)', newProjectStartDriver:'Démarrer son driver maintenant', newProjectPrivateNote:'Le projet est privé : il n’est pas publié. Vous pourrez l’ouvrir plus tard.', newProjectCreate:'Créer', newProjectCancel:'Annuler', newProjectCreated:'Projet créé.', newProjectCreatedWithErrors:'Projet créé, mais :', newProjectGoalFailed:'l’objectif n’a pas été envoyé', newProjectStartFailed:'le driver n’a pas démarré',
   driverLive:'En direct', driverReconnecting:'Reconnexion…', driverMessage:'Message au driver', driverMessageSend:'Envoyer', driverMessageSent:'Envoyé à la boîte du driver', driverHistory:'Historique', driverHistoryOlder:'Plus ancien', driverHistoryRefresh:'Actualiser', driverHistoryEmpty:'Aucun enregistrement', driverHistoryClose:'Fermer', driverTotal:'Total', driverOnline:'En ligne', driverRunning:'En cours', driverStart:'Démarrer', driverStop:'Arrêter', driverMessages:'Messages pour vous', driverMessagesEmpty:'Aucun message de ce driver', driverMessagesClose:'Fermer les messages', driverMessagesFrom:'de', driverMessagesSent:'Envoyé', driverMessagesOlder:'Seuls les plus récents sont affichés',
   driverConversation:'Conversation', driverConversationEmpty:'Aucun message. Écrivez à votre driver.',
@@ -248,7 +248,7 @@ const fr: Record<string, string> = {
   externalShort:'Externe', externalJob:'Exécution externe', reporter:'Déclarant authentifié', externalNoRun:'Harness externe : aucun Run SkillFlow requis.', externalObservations:'Observations externes', quiescent:'Travail terminé (déclaré)', externalTruncated:'Les 100 dernières observations sont affichées.', acceptanceProvenance:'Provenance de validation',
   attemptShort:'Tentative', notStarted:'Non commencée',
   projects:'Projets · State DAG', project:'Projet durable', dashboard:'Dépôts et exécutions',
-  intro:'Les objectifs persistent indépendamment des exécutions.', private:'État privé : connectez-vous avec un accès en écriture.',
+  intro:'Les objectifs persistent indépendamment des exécutions.', private:'État privé : connectez-vous avec un accès en écriture.', workingNotes:'Notes de travail',
   loading:'Chargement…', retry:'Réessayer', reload:'Actualiser la vue', sync:'Synchroniser les résultats', syncMore:'Lot suivant',
   syncNote:'Observation uniquement : aucun lancement, approbation ou validation.', syncDone:'Observations actualisées',
   failures:'Erreurs d’observation', staleView:'Actualisation échouée ; la vue affichée peut être périmée.',

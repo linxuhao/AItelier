@@ -7,7 +7,7 @@ import re
 import time
 from uuid import uuid4
 from core.driver_questions import CONVERSATION, all_questions, conversation_rows, open_question_count
-from core.drivers import recipient_presence_block, touch_driver
+from core.drivers import CLI_OWNER_ACTOR, recipient_presence_block, touch_driver
 from core.message_body_guard import refuse_credential_body
 from core.message_secret_guard import refuse_credential_values
 from core.state_graph import StateGraphError, now
@@ -565,6 +565,29 @@ class DriverInbox:
                                 {"withdrawn": True, "project_id": project_id, "message_id": message_id,
                                  "segment_id": segment_id, "withdrawal_message_id": mid, "created_at": created})
 
+    def _project_user(self) -> bool:
+        """Whether THIS session is the project's user — the writer of the user's half.
+
+        Two sessions are the project's user:
+
+        * the owner's browser (`owner:<email>`, api.authz's Cloudflare Access
+          branch), and
+        * the owner's own TERMINAL: the local CLI presenting its own env admin
+          token (kind 'cli_owner', actor `core.drivers.CLI_OWNER_ACTOR`). The
+          owner ruled it so (2026-11-18): the CLI already is the fixed cli owner,
+          so it keeps that permission and speaks as the owner in the manager
+          conversation. Note the actor carries no "owner:" prefix — that prefix
+          opens every OTHER owner-only surface, and this terminal opens exactly
+          these two doors.
+
+        A DRIVER is never the user: it writes the other half of the thread
+        (`send_user_message`), so a session carrying a driver_id is refused
+        whatever its actor looks like. An unreadable project is refused too.
+        """
+        if not self.project_read_trusted or self.driver_id:
+            return False
+        return self.actor.startswith("owner:") or self.actor == CLI_OWNER_ACTOR
+
     def send_user_conversation_message(self, request_key, project_id, body, subject=None,
                                        reply_to_message_id=None, target_driver_id=None, answers=None):
         """Record one message from the project's USER to its driver.
@@ -599,7 +622,7 @@ class DriverInbox:
         # The one guard call for this writer: subject, body and the answer refs
         # that land in answers_json, before the INSERT below.
         refuse_credential_body(subject, body, answers)
-        if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
+        if not self._project_user():
             raise StateGraphError("user_identity_required")
         answers = self._answers(answers)
         # The answers are appended only when there are some, so the payload of
@@ -786,7 +809,7 @@ class DriverInbox:
         """
         if not isinstance(message_id, str) or not message_id:
             raise StateGraphError("invalid_request")
-        if self.driver_id or not self.project_read_trusted or not self.actor.startswith("owner:"):
+        if not self._project_user():
             raise StateGraphError("user_identity_required")
         with self.store.transaction(write=True) as conn:
             self.store._project(conn, project_id)

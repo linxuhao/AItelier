@@ -39,6 +39,17 @@ FEATURE_ENV = "AITELIER_DRIVER_IDENTITY"
 LEGACY_ACTOR = "authorized-state-operator"
 PUBLIC_DRIVER_ID = "public"
 OWNER_CLI_DRIVER_ID = "owner-cli"
+# The local CLI's OWN credential (the env AITELIER_ADMIN_TOKEN presented
+# off-Cloudflare) is the OWNER'S TERMINAL, not one more registered driver. The
+# owner ruled it so on 2026-11-18: the CLI already IS the fixed cli owner, so it
+# keeps that permission and now speaks as the owner in the manager conversation.
+# The actor deliberately carries NO "owner:" prefix: that prefix is the door of
+# every OTHER owner-only surface (the steward's approve/decline, the private
+# notebook and director-message calls), and the terminal must open exactly the
+# two conversation doors (core.driver_inbox.DriverInbox._project_user) and
+# nothing else.
+CLI_OWNER_KIND = "cli_owner"
+CLI_OWNER_ACTOR = "cli-owner"
 TOKEN_PREFIX = "aitd_"
 LAST_SEEN_THROTTLE_SECONDS = 60
 LAST_SEEN_RETRY_SECONDS = 5          # long polls only; the request path keeps the full throttle
@@ -117,7 +128,9 @@ class Identity:
     """Who a request is, derived from the raw credential (never from arguments).
 
     ``kind``: 'driver' (a registered driver), 'owner' (allowlisted Cloudflare
-    Access email), 'legacy' (feature off: the pre-P0 actor strings).
+    Access email), 'cli_owner' (the owner's own terminal: the local CLI's env
+    admin token, minted off-Cloudflare with no driver row behind it), 'legacy'
+    (feature off: the pre-P0 actor strings).
     """
     kind: str
     actor: str

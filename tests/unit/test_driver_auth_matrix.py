@@ -117,10 +117,14 @@ class TestFeatureOnMatrix:
         r = client.post("/probe/write", headers=_adm(tokens["grok"]))
         assert r.json() == {"actor": "driver:grok-bot", "driver_id": "grok-bot"}
 
-    def test_legacy_admin_token_is_owner_cli(self, on):
+    def test_legacy_admin_token_is_the_owners_terminal(self, on):
+        # Owner ruling 2026-11-18: the CLI's own credential is the fixed cli
+        # owner - the OWNER's terminal, not one more registered driver. It keeps
+        # `owner-cli`'s admin permission (is_admin, above) and carries no
+        # driver_id, so driver-scoped pinning does not apply to it.
         client, _, _ = on
         r = client.post("/probe/write", headers=_adm(LEGACY))
-        assert r.json() == {"actor": "driver:owner-cli", "driver_id": "owner-cli"}
+        assert r.json() == {"actor": "cli-owner", "driver_id": None}
 
     def test_driver_token_through_cloudflare_is_refused(self, on):
         client, _, tokens = on
@@ -191,7 +195,9 @@ class TestRegistryRoutes:
         assert r.status_code == 200 and r.json()["status"] == "suspended"
         audit = client.get("/api/drivers/claude/audit", headers=h).json()["audit"]
         assert [a["operation"] for a in audit] == ["suspend", "rotate", "register"]
-        assert all(a["actor"] == "driver:owner-cli" for a in audit)
+        # The CLI's own credential writes as the owner's terminal (see
+        # test_legacy_admin_token_is_the_owners_terminal).
+        assert all(a["actor"] == "cli-owner" for a in audit)
 
     def test_ordinary_driver_cannot_administer(self, on):
         client, _, tokens = on
@@ -234,7 +240,7 @@ class TestMcpMatrix:
         (_, _, tokens), mcp_router = mcp_on
         assert self._authorize(mcp_router, monkeypatch, _drv(tokens["codex"])) == "driver:codex"
         assert self._authorize(mcp_router, monkeypatch, _adm(tokens["codex"])) == "driver:codex"
-        assert self._authorize(mcp_router, monkeypatch, _adm(LEGACY)) == "driver:owner-cli"
+        assert self._authorize(mcp_router, monkeypatch, _adm(LEGACY)) == "cli-owner"
 
     def test_driver_token_via_cloudflare_is_refused(self, mcp_on, monkeypatch):
         (_, _, tokens), mcp_router = mcp_on

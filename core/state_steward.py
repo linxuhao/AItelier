@@ -384,8 +384,15 @@ class StateSteward:
         return True
 
     def is_owner_session(self) -> bool:
-        """The owner's own session: an `owner:` actor that is no driver (the check
-        driver_inbox.send_user_conversation_message makes)."""
+        """The owner's own BROWSER session: an `owner:` actor that is no driver.
+
+        The conversation doors (core.driver_inbox.DriverInbox._project_user) are
+        deliberately WIDER: they also admit the owner's terminal, the local CLI's
+        own credential (kind 'cli_owner', actor core.drivers.CLI_OWNER_ACTOR),
+        whose actor carries no `owner:` prefix. Approving or declining a steward
+        proposal stays the browser session's alone - that is the whole point of
+        keying this door on the prefix.
+        """
         return (not self.driver_id and self.project_read_trusted is True
                 and isinstance(self.actor, str) and self.actor.startswith("owner:"))
 

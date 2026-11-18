@@ -73,13 +73,14 @@ class AItelierApp(App):
     async def _reconcile_checkpoints(self):
         """Pop a CheckpointModal for any paused-at-checkpoint project that has
         no modal currently shown (recovers a missed SSE pop)."""
+        from cli.client import raise_for_refusal
         # Don't stack a second modal over an existing one.
         for screen in self.screen_stack:
             if isinstance(screen, CheckpointModal):
                 return
         try:
             resp = await self.http.get("/api/projects", timeout=5.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             projects = resp.json()
         except Exception:
             return
@@ -122,9 +123,10 @@ class AItelierApp(App):
         and the paused project would be invisible until they navigated to
         the dashboard manually.
         """
+        from cli.client import raise_for_refusal
         try:
             resp = await self.http.get("/api/projects", timeout=10.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             projects = resp.json()
         except Exception:
             return  # best-effort; dashboard will still show them

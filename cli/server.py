@@ -340,6 +340,7 @@ def _compose_up(*, no_deps: bool = False):
 
 def _live_runtime_observation(base_url: str, *, compose_root: str | Path | None = None) -> dict:
     """Fetch initialized live facts and bind them to the backend this CLI operates."""
+    from cli.client import raise_for_refusal
     from urllib.parse import urlsplit
     from cli.client import _auth_headers
     from core import deployment_quiescence as dq
@@ -357,7 +358,7 @@ def _live_runtime_observation(base_url: str, *, compose_root: str | Path | None 
                 f"Live runtime observation POST {observation_path} was refused with HTTP "
                 f"{response.status_code}: an active off-tunnel driver credential is "
                 "required; the admin role is not required")
-        response.raise_for_status()
+        raise_for_refusal(response)
         facts = dq._validated_runtime_facts(response.json())
     container = _compose("ps", "-q", _COMPOSE_SERVICE,
                          capture_output=True, text=True, timeout=15,

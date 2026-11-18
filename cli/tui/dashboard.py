@@ -108,6 +108,7 @@ class DashboardZone(Static):
 
     @work(exclusive=True)
     async def _fetch_projects(self):
+        from cli.client import raise_for_refusal
         self._fetch_gen += 1
         gen = self._fetch_gen
         try:
@@ -115,8 +116,8 @@ class DashboardZone(Static):
                 self.app.http.get("/api/configs", timeout=10.0),
                 self.app.http.get("/api/runs", timeout=10.0),
             )
-            cfg_resp.raise_for_status()
-            runs_resp.raise_for_status()
+            raise_for_refusal(cfg_resp)
+            raise_for_refusal(runs_resp)
             configs = cfg_resp.json().get("configs", [])
             runs = runs_resp.json().get("runs", [])
         except Exception:
@@ -128,6 +129,7 @@ class DashboardZone(Static):
 
     @work(exclusive=True)
     async def _fetch_tasks(self):
+        from cli.client import raise_for_refusal
         if not self._current_project:
             return
         self._fetch_gen += 1
@@ -136,7 +138,7 @@ class DashboardZone(Static):
             resp = await self.app.http.get(
                 f"/api/projects/{self._current_project}/tasks", timeout=10.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
         except Exception:
             self._flash_error("Failed to fetch tasks — API unreachable")

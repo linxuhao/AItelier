@@ -348,6 +348,7 @@ class CheckpointModal(ModalScreen[bool]):
 
     @work(exclusive=True, group="fetch")
     async def _fetch_and_display(self):
+        from cli.client import raise_for_refusal
         content_area = self.query_one("#cp-content")
         url = f"/api/meta/{self.project_id}/checkpoint"
 
@@ -359,7 +360,7 @@ class CheckpointModal(ModalScreen[bool]):
             if resp.status_code == 404:
                 self._dismiss_resolved()
                 return
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
         except Exception as e:
                 content_area.mount(Static(f"Failed to load checkpoint content: {e}"))
@@ -473,6 +474,7 @@ class CheckpointModal(ModalScreen[bool]):
 
     @work(exclusive=True, group="approve")
     async def _do_approve(self):
+        from cli.client import raise_for_refusal
         success = False
         error_msg = None
         url = f"/api/meta/{self.project_id}/checkpoint/approve"
@@ -485,7 +487,7 @@ class CheckpointModal(ModalScreen[bool]):
 
         try:
             resp = await self.app.http.post(url, json=body, timeout=45.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             success = True
         except Exception as e:
             # A lost response does not prove acceptance. The retained decision
@@ -513,6 +515,7 @@ class CheckpointModal(ModalScreen[bool]):
 
     @work(exclusive=True, group="approve")
     async def _do_reject(self, feedback: str):
+        from cli.client import raise_for_refusal
         success = False
         url = f"/api/meta/{self.project_id}/checkpoint/reject"
         observed = self._observation or {}
@@ -521,7 +524,7 @@ class CheckpointModal(ModalScreen[bool]):
 
         try:
             resp = await self.app.http.post(url, json=body, timeout=45.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             success = True
         except Exception:
             pass
@@ -624,9 +627,10 @@ class BriefReviewModal(ModalScreen[bool]):
 
     async def _run_async_post(self, path: str, body: dict) -> tuple[bool, str]:
         """Execute HTTP POST using the app's shared async client."""
+        from cli.client import raise_for_refusal
         try:
             resp = await self.app.http.post(path, json=body, timeout=30.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             # The submit endpoint answers 201 even for refusals — the verdict
             # is in the body's `status`. Trusting the HTTP code alone showed
             # "submitted — pipeline starting" for every refusal seed_and_trigger
@@ -1296,6 +1300,7 @@ class ChatZone(Container):
 
     def _handle_project_cmd(self, arg: str):
         """Handle /project <number|id>."""
+        from cli.client import raise_for_refusal
         if not arg:
             if self.current_project:
                 self._add_system(f"Current project: {self.current_project}")
@@ -1308,7 +1313,7 @@ class ChatZone(Container):
             idx = int(arg) - 1
             import httpx
             resp = httpx.get(f"{self.server_url}/api/projects", timeout=5.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             projects = resp.json()
             if 0 <= idx < len(projects):
                 pid = projects[idx]["project_id"]
@@ -1327,6 +1332,7 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _show_status(self):
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_system("No project selected. Use /project <# or id> first.")
             return
@@ -1334,7 +1340,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/projects/{self.current_project}/tasks", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             tasks = resp.json()
             if not tasks:
                 self._add_system("No tasks yet.")
@@ -1352,6 +1358,7 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _show_checkpoint(self):
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_system("No project selected. Use /project <# or id> first.")
             return
@@ -1360,7 +1367,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/meta/{self.current_project}/checkpoint", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
         except Exception as e:
             self._add_error(f"Failed to fetch checkpoint: {e}")
@@ -1397,6 +1404,7 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _reject_checkpoint(self, feedback: str):
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_system("No project selected. Use /project <# or id> first.")
             return
@@ -1411,7 +1419,7 @@ class ChatZone(Container):
                 json={"project_id": self.current_project, "checkpoint": "", "feedback": feedback},
                 timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             pid = self.current_project
             self._add_system(f"Changes requested — step will redo with your feedback.")
             flash_bar = self.app.query_one("#flash-bar")
@@ -1425,6 +1433,7 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _handle_delete(self, arg: str):
+        from cli.client import raise_for_refusal
         target = arg.strip() or self.current_project
         if not target:
             self._add_error("Usage: /delete <project_id or #>")
@@ -1435,7 +1444,7 @@ class ChatZone(Container):
             idx = int(target)
             import httpx
             resp = httpx.get(f"{self.server_url}/api/projects", timeout=5.0)
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             projects = resp.json()
             if 0 <= idx < len(projects):
                 target = projects[idx]["project_id"]
@@ -1450,7 +1459,7 @@ class ChatZone(Container):
             resp = await self.app.http.delete(
                 f"/api/projects/{target}?cascade=true", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Project '{target}' deleted.")
             if self.current_project == target:
                 self.set_current_project(None)
@@ -1461,6 +1470,7 @@ class ChatZone(Container):
 
     @work(exclusive=True)
     async def _handle_logs(self, arg: str):
+        from cli.client import raise_for_refusal
         task_id = arg.strip()
         if not task_id:
             self._add_error("Usage: /logs <task_id>")
@@ -1469,7 +1479,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/tasks/{task_id}/logs", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
             logs = data.get("logs", data.get("entries", []))
             if isinstance(logs, list):
@@ -1490,6 +1500,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _show_runs(self):
         """Handle /runs — list pipeline runs for current project."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1497,7 +1508,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/projects/{self.current_project}/runs", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
             runs = data.get("runs", [])
             if not runs:
@@ -1519,6 +1530,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _show_trace(self, arg: str):
         """Handle /trace [run_id] [category] — show execution traces."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1533,7 +1545,7 @@ class ChatZone(Container):
                 resp = await self.app.http.get(
                     f"/api/projects/{self.current_project}/runs", timeout=5.0
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 runs = resp.json().get("runs", [])
                 if not runs:
                     self._add_system("No runs found.")
@@ -1550,7 +1562,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/runs/{run_id}/trace", params=params, timeout=10.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
             traces = data.get("traces", [])
             if not traces:
@@ -1580,6 +1592,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _show_tree(self, arg: str):
         """Handle /tree [subdir] — browse workspace directory tree."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1591,7 +1604,7 @@ class ChatZone(Container):
                 f"/api/projects/{self.current_project}/workspace/tree",
                 params=params, timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             data = resp.json()
             tree = data.get("tree", [])
             if not tree:
@@ -1609,6 +1622,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_cat_cmd(self, arg: str):
         """Handle /cat <path> — read a workspace file."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1620,7 +1634,7 @@ class ChatZone(Container):
                 f"/api/projects/{self.current_project}/workspace/file",
                 params={"path": arg}, timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             content = resp.json().get("content", "")
             self._add_system(f"--- {arg} ---\n{content[:3000]}")
         except Exception as e:
@@ -1629,6 +1643,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_output_cmd(self, arg: str):
         """Handle /output <task_id> [step_id] — view step output."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1647,7 +1662,7 @@ class ChatZone(Container):
                 resp = await self.app.http.get(
                     f"/api/tasks/{task_id}/steps/{step_id}/output", timeout=5.0
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 data = resp.json()
                 files = data.get("files", {})
                 if not files:
@@ -1662,7 +1677,7 @@ class ChatZone(Container):
                 resp = await self.app.http.get(
                     f"/api/tasks/{task_id}", timeout=5.0
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 task = resp.json()
                 completed = task.get("completed_steps", [])
                 current = task.get("current_step", "")
@@ -1677,6 +1692,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _show_errors(self):
         """Handle /errors — show last pipeline error."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1684,7 +1700,7 @@ class ChatZone(Container):
             resp = await self.app.http.get(
                 f"/api/projects/{self.current_project}", timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             project = resp.json()
             meta_state = project.get("meta_state")
             if meta_state:
@@ -1709,6 +1725,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_pause_cmd(self):
         """Handle /pause — pause the current project."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1717,7 +1734,7 @@ class ChatZone(Container):
                 f"/api/projects/{self.current_project}",
                 params={"status": "paused"}, timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Project '{self.current_project}' paused.")
             self.app.query_one("#dashboard-zone")._fetch_projects()
         except Exception as e:
@@ -1726,6 +1743,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_resume_cmd(self):
         """Handle /resume — resume a paused project."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1734,7 +1752,7 @@ class ChatZone(Container):
                 f"/api/projects/{self.current_project}",
                 params={"status": "executing"}, timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Project '{self.current_project}' resumed.")
             self.app.query_one("#dashboard-zone")._fetch_projects()
         except Exception as e:
@@ -1743,6 +1761,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_retry_cmd(self, arg: str):
         """Handle /retry [task_id] — retry a failed task or project."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1752,13 +1771,13 @@ class ChatZone(Container):
                 resp = await self.app.http.post(
                     f"/api/tasks/{task_id}/retry", timeout=5.0,
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 self._add_system(f"Task #{task_id} retry triggered.")
             else:
                 resp = await self.app.http.post(
                     f"/api/projects/{self.current_project}/retry", timeout=5.0,
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 self._add_system(f"Project '{self.current_project}' retry triggered.")
             self.app.query_one("#dashboard-zone")._fetch_projects()
         except Exception as e:
@@ -1767,6 +1786,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_rollback_cmd(self, arg: str):
         """Handle /rollback <task_id> <commit_hash>."""
+        from cli.client import raise_for_refusal
         parts = arg.split()
         if len(parts) < 2:
             self._add_error("Usage: /rollback <task_id> <commit_hash>")
@@ -1782,7 +1802,7 @@ class ChatZone(Container):
                 f"/api/tasks/{task_id}/rollback",
                 json={"commit_hash": commit_hash}, timeout=10.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Task #{task_id} rolled back to {commit_hash}.")
         except Exception as e:
             self._add_error(f"Rollback failed: {e}")
@@ -1790,6 +1810,7 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_cancel_task_cmd(self, arg: str):
         """Handle /cancel-task [task_id]."""
+        from cli.client import raise_for_refusal
         if not self.current_project:
             self._add_error("No project selected.")
             return
@@ -1799,7 +1820,7 @@ class ChatZone(Container):
                 resp = await self.app.http.get(
                     f"/api/projects/{self.current_project}/tasks", timeout=5.0
                 )
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 tasks = resp.json()
                 cancellable = [t for t in tasks if t.get("status") in ("pending", "running")]
                 if not cancellable:
@@ -1819,7 +1840,7 @@ class ChatZone(Container):
             resp = await self.app.http.patch(
                 f"/api/tasks/{task_id}", params={"status": "failed"}, timeout=5.0,
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Task #{task_id} cancelled.")
         except Exception as e:
             self._add_error(f"Failed to cancel task: {e}")
@@ -1845,11 +1866,12 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_frequency_cmd(self, arg: str):
         """Handle /frequency [slow|medium|high|Xs|Xm]."""
+        from cli.client import raise_for_refusal
         freq_map = {"slow": 30, "medium": 10, "high": 5}
         try:
             if not arg:
                 resp = await self.app.http.get("/api/settings/scheduler", timeout=5.0)
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 s = resp.json()
                 self._add_system(
                     f"Scheduler: {s.get('scheduler_type', '?')} — "
@@ -1872,7 +1894,7 @@ class ChatZone(Container):
             resp = await self.app.http.post(
                 "/api/settings/scheduler", json=body, timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Scheduler frequency set to {body['scheduler_interval']}s.")
         except Exception as e:
             self._add_error(f"Failed to update frequency: {e}")
@@ -1880,10 +1902,11 @@ class ChatZone(Container):
     @work(exclusive=True)
     async def _handle_cron_cmd(self, arg: str):
         """Handle /cron [5-field expression]."""
+        from cli.client import raise_for_refusal
         try:
             if not arg:
                 resp = await self.app.http.get("/api/settings/scheduler", timeout=5.0)
-                resp.raise_for_status()
+                raise_for_refusal(resp)
                 s = resp.json()
                 self._add_system(
                     f"Scheduler: {s.get('scheduler_type', '?')} — "
@@ -1894,7 +1917,7 @@ class ChatZone(Container):
             resp = await self.app.http.post(
                 "/api/settings/scheduler", json=body, timeout=5.0
             )
-            resp.raise_for_status()
+            raise_for_refusal(resp)
             self._add_system(f"Cron schedule set to: {arg}")
         except Exception as e:
             self._add_error(f"Failed to set cron: {e}")
@@ -2010,6 +2033,7 @@ class ChatZone(Container):
         what the driver wrote. So a failed POST says the message was NOT sent,
         and a failed GET says it WAS sent and the answer could not be read.
         """
+        from cli.client import raise_for_refusal
         response = None
         try:
             response = await self.app.http.post(
@@ -2018,7 +2042,7 @@ class ChatZone(Container):
                       "body": message},
                 timeout=30.0,
             )
-            response.raise_for_status()
+            raise_for_refusal(response)
         except Exception as exc:
             self._add_error(
                 f"Your message was NOT sent to {project_id}'s driver conversation: "
@@ -2036,6 +2060,7 @@ class ChatZone(Container):
         the user's own row. Only `driver` rows are the answer - the user's own
         rows are echoed where they were typed.
         """
+        from cli.client import raise_for_refusal
         for read in range(CONVERSATION_READS):
             if read:
                 await asyncio.sleep(CONVERSATION_READ_INTERVAL)
@@ -2045,7 +2070,7 @@ class ChatZone(Container):
                     f"/api/dsh-drivers/{project_id}/conversation",
                     params={"limit": 30}, timeout=30.0,
                 )
-                response.raise_for_status()
+                raise_for_refusal(response)
                 page = response.json()
             except Exception as exc:
                 self._add_error(

@@ -12,8 +12,6 @@
 # so these tests pin what actually goes out (and what does not) rather than
 # "the code looks like it does".
 
-import json
-
 import httpx
 import pytest
 from textual.app import App
@@ -26,24 +24,22 @@ SEND_PATH = "/api/state/commands/send_user_conversation_message"
 CONVERSATION_PATH = "/api/dsh-drivers/{project_id}/conversation"
 
 
-class _Response:
-    """What the pane gets back: as much of an httpx response as it reads."""
+class _Response(httpx.Response):
+    """What the pane gets back: a REAL httpx response over the scripted body.
+
+    It used to hand-roll `status_code`/`json` plus its own `raise_for_status`,
+    which stopped being enough once the pane checks a response with
+    `cli.client.raise_for_refusal` (the refusal check reads the status, the body
+    AND the headers). Hand-rolling that surface is how this double drifted from
+    what the pane really reads, so it is an httpx response now.
+    """
 
     def __init__(self, payload: dict, status_code: int = 200):
-        self._payload = payload
-        self.status_code = status_code
-        self.text = json.dumps(payload)
-
-    def raise_for_status(self) -> None:
-        if self.status_code < 400:
-            return
-        request = httpx.Request("POST", "http://testserver")
-        raise httpx.HTTPStatusError(
-            f"{self.status_code} from the server",
-            request=request, response=httpx.Response(self.status_code, request=request))
-
-    def json(self) -> dict:
-        return self._payload
+        super().__init__(
+            status_code,
+            json=payload,
+            request=httpx.Request("POST", "http://testserver"),
+        )
 
 
 def _conversation(*entries: dict, project_id: str = "alpha") -> dict:

@@ -12,6 +12,7 @@
 
 import asyncio
 
+import httpx
 import pytest
 from textual.app import App
 
@@ -21,19 +22,27 @@ from cli.tui.chat import CheckpointModal
 LONG_OUTPUT = "\n".join(f"line {i}: " + "x" * 60 for i in range(400))
 
 
-class _FakeResponse:
-    status_code = 200
+class _FakeResponse(httpx.Response):
+    """A REAL httpx response over the modal's scripted checkpoint body.
 
-    def raise_for_status(self):
-        return None
+    It used to hand-roll `status_code`/`json` plus a no-op `raise_for_status`,
+    which stopped being a faithful double once the modal checks a response with
+    `cli.client.raise_for_refusal` -- that reads the status the way httpx does
+    (`is_success`) and, on a refusal, the body and the headers. So the double is
+    an httpx response rather than a guess at the parts of one.
+    """
 
-    def json(self):
-        return {
-            "checkpoint": "2_review", "step": "2_review", "run_id": "reviewed-run",
-            "decision_id": "same-decision", "expected_checkpoint": {"step_instance_id":42,
-                "version":3, "completion_seq":1, "outputs_sha256":"a"*64},
-            "step_output": {"files": {"design.md": LONG_OUTPUT}},
-        }
+    def __init__(self):
+        super().__init__(
+            200,
+            json={
+                "checkpoint": "2_review", "step": "2_review", "run_id": "reviewed-run",
+                "decision_id": "same-decision", "expected_checkpoint": {"step_instance_id":42,
+                    "version":3, "completion_seq":1, "outputs_sha256":"a"*64},
+                "step_output": {"files": {"design.md": LONG_OUTPUT}},
+            },
+            request=httpx.Request("GET", "http://testserver"),
+        )
 
 
 class _FakeHTTP:
@@ -175,7 +184,6 @@ async def test_tab_and_left_right_cycle_the_selection():
 
 @pytest.mark.asyncio
 async def test_modal_retries_the_displayed_decision_after_a_lost_response():
-    import httpx
     app = _Harness()
     sent = []
     async def post(url, json=None, timeout=None):

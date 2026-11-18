@@ -21,6 +21,15 @@ from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
 
 router = APIRouter(prefix="/api/dsh-drivers", tags=["DSH drivers"])
 
+# How often `POST /{project_id}/completion` writes one whitespace byte while the
+# model answer is outstanding, so a slow turn survives the client's transport
+# timeouts (undici's `headersTimeout` and `bodyTimeout` are both 300 s by
+# default; a single keepalive would only cover the first). Same 15 s the
+# sibling `/work` endpoint uses. A module constant, not an inline literal, so a
+# witness can shorten it instead of waiting it out.
+_DSH_COMPLETION_KEEPALIVE_SEC = 15.0
+
+
 def _runtime_skill() -> str:
     """The director's runtime instructions as the driver gets them: the generic
     director.md (dsh-director) followed by AItelier's state.md (plugin step 4)."""
@@ -312,9 +321,23 @@ async def project_work(project_id: str, body: ProjectWork, request: Request,
 
 @router.post("/{project_id}/completion", dependencies=[Depends(authz.require_writer)])
 async def completion(project_id: str, body: Completion, request: Request, runtime=Depends(manager)):
-    """The managed driver uses the same router, credentials and failover as pipelines."""
+    """The managed driver uses the same router, credentials and failover as pipelines.
+
+    STREAMED, and for one measured reason: this used to await
+    `gateway.generate_native` and only then return a dict, so no response
+    header was sent until the model had answered. The resident driver calls
+    this with Node's `fetch`, whose undici default `headersTimeout` is 300 s -
+    a turn measured 2026-11-18 ended at exactly 300 s with `fetch failed` while
+    the backend's own row showed the answer had arrived at 309 s, so a paid
+    answer was discarded. The body is therefore the sibling `/work` endpoint's
+    shape: one whitespace keepalive immediately (Starlette sends
+    `http.response.start` before the first chunk, so the headers go out at
+    once), another at every `_DSH_COMPLETION_KEEPALIVE_SEC` while the call is
+    outstanding, and the SAME JSON object as the last chunk.
+    """
     import asyncio
     from core.ai_router import AIGateway
+    from fastapi.responses import StreamingResponse
     from starlette.concurrency import run_in_threadpool
     row = await owned_off_loop(project_id, request, runtime)
     if not row["enabled"] or not runtime.running(project_id):
@@ -332,56 +355,92 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
                             max_output_tokens=body.max_tokens)
         sessions[body.session_id] = (gateway, asyncio.Lock())
     gateway, lock = sessions[body.session_id]
-    async with lock:
-        gateway.max_output_tokens = body.max_tokens
-        gateway.thinking_effort = body.reasoning_effort
-        gateway.enable_thinking = body.reasoning_effort != "off"
-        # A session's gateway lives as long as the session; without this a
-        # failover onto the paid fallback would stick until a restart. But
-        # moving to another endpoint throws away the provider's prompt cache:
-        # the next call re-sends the whole context uncached (~130k tokens for
-        # a director, measured). So an earlier endpoint is retaken only when
-        # the cache is cold anyway - the conversation prefix changed (a
-        # compaction, which also skips the post-failover interval; only a
-        # parked endpoint is still refused) or the session sat idle for the
-        # probe interval. A failover on an error still moves at once.
-        prefix = hashlib.sha256(json.dumps(body.messages[:2], sort_keys=True, default=str)
-                                .encode()).hexdigest()
-        if prefix != getattr(gateway, "_dsh_prefix", None):
-            gateway.return_to_earlier(cold=True)
-        elif time.time() - getattr(gateway, "_dsh_last_call", 0.0) >= ai_router._RETURN_PROBE_EVERY_S:
-            gateway.return_to_earlier()
-        gateway._dsh_prefix = prefix
-        turn = await run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools)
-        gateway._dsh_last_call = time.time()
-        # Persisted here, where the endpoint was chosen, and with the concrete
-        # model that answered (`active_model` is the same value returned as
-        # `served_by`): the child's own session file only keeps the route alias.
-        # BEST-EFFORT: the model has already answered and the turn is already
-        # paid for, so a bookkeeping write that fails (a locked SQLite file past
-        # the busy timeout, a read-only or full disk) must not turn an answer
-        # the driver is owed into a 500. `Exception`, not `BaseException`: a
-        # cancellation still propagates. The failure is reported, not swallowed
-        # - an unrecorded turn has to be visible to an operator.
-        #
-        # OFF THE EVENT LOOP, and still AWAITED. `record_model_call` ends in an
-        # explicit `COMMIT`, which in WAL mode fsyncs: measured holding the loop
-        # thread in uninterruptible disk sleep (wchan `jbd2_log_wait_commit`) for
-        # seconds, 8 of 10 captured loop-blocking stacks and 64 of 70 sampled
-        # episodes (`iss-ecea53516eb543c4`). The write runs in a worker thread,
-        # so what the loop waits for is the write's DURATION, never its disk
-        # sleep - and it is still the same awaited call, so the row is committed
-        # before this response goes out and a failure is still reported below
-        # rather than fired and forgotten. The connection that write closes is
-        # handed to the closer thread by `core/off_loop_sqlite`.
-        try:
-            await asyncio.to_thread(runtime.record_model_call, project_id,
-                                    body.session_id, route=route,
-                                    served_by=gateway.active_model)
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "dsh driver: could not record the answering model for project %s "
-                "session %s (%s: %s) - the turn is served unrecorded",
-                project_id, body.session_id, type(exc).__name__, exc)
-        return {"text": turn.text, "tool_calls": turn.tool_calls, "reasoning_content": turn.reasoning_content,
-                "truncated": turn.truncated, "usage": gateway.last_usage, "served_by": gateway.active_model}
+    async def stream():
+        # The lock is taken HERE, inside the body being streamed - not around
+        # the `return` that builds the response. Returning a StreamingResponse
+        # from inside `async with lock:` would release the lock when the handler
+        # returns, i.e. BEFORE the generator runs, and two concurrent turns of
+        # one session would share the gateway (its endpoint rotation, its
+        # `_dsh_prefix`, its budget) at exactly the moment they must not.
+        async with lock:
+            gateway.max_output_tokens = body.max_tokens
+            gateway.thinking_effort = body.reasoning_effort
+            gateway.enable_thinking = body.reasoning_effort != "off"
+            # A session's gateway lives as long as the session; without this a
+            # failover onto the paid fallback would stick until a restart. But
+            # moving to another endpoint throws away the provider's prompt cache:
+            # the next call re-sends the whole context uncached (~130k tokens for
+            # a director, measured). So an earlier endpoint is retaken only when
+            # the cache is cold anyway - the conversation prefix changed (a
+            # compaction, which also skips the post-failover interval; only a
+            # parked endpoint is still refused) or the session sat idle for the
+            # probe interval. A failover on an error still moves at once.
+            prefix = hashlib.sha256(json.dumps(body.messages[:2], sort_keys=True, default=str)
+                                    .encode()).hexdigest()
+            if prefix != getattr(gateway, "_dsh_prefix", None):
+                gateway.return_to_earlier(cold=True)
+            elif time.time() - getattr(gateway, "_dsh_last_call", 0.0) >= ai_router._RETURN_PROBE_EVERY_S:
+                gateway.return_to_earlier()
+            gateway._dsh_prefix = prefix
+            # The model call, in a worker thread, as a TASK rather than an
+            # awaited coroutine: while it is outstanding the generator below
+            # keeps writing a whitespace keepalive, which is what holds the
+            # client's connection open (the sibling `/work` endpoint's shape).
+            task = asyncio.create_task(
+                run_in_threadpool(gateway.generate_native, body.messages, tools=body.tools))
+            # HEADERS GO OUT NOW, with the first byte, and the connection is
+            # kept alive through Node's fetch while the model thinks. Measured
+            # 2026-11-18: undici's default `headersTimeout` (300 s) killed a
+            # turn at exactly 300 s with `fetch failed` while the backend's own
+            # row showed the model answered at 309 s - a paid answer thrown
+            # away. `bodyTimeout` is ALSO 300 s, which is why the keepalive has
+            # to REPEAT at a fixed interval instead of being sent once. A single
+            # space is ordinary JSON whitespace, so the body still parses as
+            # the one object yielded at the end.
+            yield " "
+            while not task.done():
+                await asyncio.wait({task}, timeout=_DSH_COMPLETION_KEEPALIVE_SEC)
+                if not task.done():
+                    yield " "
+            # Same propagation as the awaited call it replaces: an error out of
+            # `generate_native` reaches the client as a failed body, not as a
+            # turn with empty text.
+            turn = task.result()
+            gateway._dsh_last_call = time.time()
+            # Persisted here, where the endpoint was chosen, and with the concrete
+            # model that answered (`active_model` is the same value returned as
+            # `served_by`): the child's own session file only keeps the route alias.
+            # BEST-EFFORT: the model has already answered and the turn is already
+            # paid for, so a bookkeeping write that fails (a locked SQLite file past
+            # the busy timeout, a read-only or full disk) must not turn an answer
+            # the driver is owed into a 500. `Exception`, not `BaseException`: a
+            # cancellation still propagates. The failure is reported, not swallowed
+            # - an unrecorded turn has to be visible to an operator.
+            #
+            # OFF THE EVENT LOOP, and still AWAITED. `record_model_call` ends in an
+            # explicit `COMMIT`, which in WAL mode fsyncs: measured holding the loop
+            # thread in uninterruptible disk sleep (wchan `jbd2_log_wait_commit`) for
+            # seconds, 8 of 10 captured loop-blocking stacks and 64 of 70 sampled
+            # episodes (`iss-ecea53516eb543c4`). The write runs in a worker thread,
+            # so what the loop waits for is the write's DURATION, never its disk
+            # sleep - and it is still the same awaited call, so the row is committed
+            # before this response goes out and a failure is still reported below
+            # rather than fired and forgotten. The connection that write closes is
+            # handed to the closer thread by `core/off_loop_sqlite`.
+            try:
+                await asyncio.to_thread(runtime.record_model_call, project_id,
+                                        body.session_id, route=route,
+                                        served_by=gateway.active_model)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "dsh driver: could not record the answering model for project %s "
+                    "session %s (%s: %s) - the turn is served unrecorded",
+                    project_id, body.session_id, type(exc).__name__, exc)
+            # The JSON object this endpoint has always returned: same six keys,
+            # same values. Everything above still happens BEFORE it is written,
+            # so the record is committed by the time the driver gets the turn.
+            yield json.dumps({"text": turn.text, "tool_calls": turn.tool_calls,
+                              "reasoning_content": turn.reasoning_content,
+                              "truncated": turn.truncated, "usage": gateway.last_usage,
+                              "served_by": gateway.active_model})
+    return StreamingResponse(stream(), media_type="application/json")

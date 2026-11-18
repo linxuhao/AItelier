@@ -624,10 +624,15 @@ test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the direc
     const named = (text.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? []).filter(word => anyTool.has(word));
     assert.deepEqual(named.filter(word => !presented.has(word)), [], `${key} names a tool the steward does not have`);
   }
-  // It asks the steward for what it can do.
+  // It asks the steward for what it can do, and the table has to present every one of them:
+  // `named` above is filtered by `anyTool`, which is itself built from that table, so a tool
+  // the table loses drops out of the comparison and goes quiet instead of red (measured
+  // 2026-11-18: deleting private_inbox_acknowledge from roles.json reds nothing without this).
   for (const tool of ['send_user_message', 'reply_to_director', 'portfolio_inbox_acknowledge',
-    'private_inbox_acknowledge', 'handoff', 'ask_owner'])
+    'private_inbox_acknowledge', 'handoff', 'ask_owner']) {
     assert.ok(steward.continuationQuestion.includes(tool) || steward.askTheUser.includes(tool), tool);
+    assert.ok(presented.has(tool), 'roles.json and the adapter present ' + tool);
+  }
   assert.match(steward.tools.idle_dormant, /Nothing is expected of you until your owner or a director writes/);
   assert.notEqual(director.tools.idle_dormant, steward.tools.idle_dormant);
 });

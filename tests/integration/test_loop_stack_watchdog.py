@@ -230,11 +230,24 @@ class _StalledLoop:
     `os.read` on a pipe with exactly one writer (this object) blocks in the
     kernel until `release()` writes and closes; that is a real block, not a
     mocked clock and not a busy wait.
+
+    `park_gate` holds the stand-in loop in its BEATING phase until the test
+    sets it, so a test can build the process it needs (>=100 live threads)
+    BEFORE the silence starts. That ordering matters: this thread must exist
+    first to be the OLDEST non-main thread (faulthandler's cap drops the
+    oldest), while the spare threads that have to survive the cap must be
+    created after it - and the watchdog's incident admits only
+    `max_dumps_per_incident` dumps, spaced by doubling silence, so a test that
+    races them against the first dumps loses whenever thread creation is
+    slower than that budget (measured on a loaded host: three dumps at 0.202 /
+    0.500 / 0.999 s of silence, with 9 / 20 / 38 live threads).
     """
 
-    def __init__(self, watchdog: LoopStackWatchdog, *, beat_for: float = 0.25):
+    def __init__(self, watchdog: LoopStackWatchdog, *, beat_for: float = 0.25,
+                 park_gate: threading.Event | None = None):
         self.watchdog = watchdog
         self.beat_for = beat_for
+        self.park_gate = park_gate
         self.pthread_id = None
         self.ident = None
         self.error = None
@@ -253,8 +266,15 @@ class _StalledLoop:
             self.pthread_id = _pthread_self_hex()
             self.ident = threading.get_ident()
             deadline = time.monotonic() + self.beat_for
-            while time.monotonic() < deadline:
+            # Beat until the minimum beat window has passed AND, when a gate
+            # was given, until the test has built the process it wants. No
+            # silence accrues while this loop beats, so no dump is written
+            # before the park.
+            while True:
                 self.watchdog.beat()
+                if time.monotonic() >= deadline and (
+                        self.park_gate is None or self.park_gate.is_set()):
+                    break
                 time.sleep(0.01)
             self.parked.set()
             self._park_in_a_real_syscall()
@@ -403,15 +423,18 @@ def test_dump_names_the_watched_loop_thread_past_100_live_threads(tmp_path):
     watchdog = LoopStackWatchdog(budget_s=_BUDGET, check_interval_s=_CHECK,
                                  dump_dir=dump_dir,
                                  max_dumps_per_incident=3)
-    watchdog.start()
     spares_stop = threading.Event()
     spares = []
     stall = None
+    park_gate = threading.Event()
     try:
-        stall = _StalledLoop(watchdog).start()
-        assert stall.parked.wait(timeout=5), "the stand-in loop never parked"
-        # Created AFTER the watched thread, so they are the NEWER threads: a
-        # capped dump is the one that keeps them and drops the watched loop.
+        # ORDER IS THE MEASUREMENT HERE. The watched thread starts FIRST (so it
+        # is the oldest non-main thread: the one faulthandler's cap drops), but
+        # it keeps BEATING until `park_gate`, so the >=100-thread process is a
+        # precondition of the silence instead of a race against the first
+        # dumps. Created AFTER the watched thread, they are the NEWER threads:
+        # a capped dump is the one that keeps them and drops the watched loop.
+        stall = _StalledLoop(watchdog, park_gate=park_gate).start()
         for index in range(120):
             spare = threading.Thread(
                 target=spares_stop.wait, name=f"spare-{index}", daemon=True)
@@ -420,10 +443,18 @@ def test_dump_names_the_watched_loop_thread_past_100_live_threads(tmp_path):
         live = threading.active_count()
         assert live >= 100, f"only {live} live threads: the cap is not reached"
 
-        # The dump is written after the budget expires, and the incident allows
-        # three of them, so a block written before all the spares existed is
-        # simply not the one asserted on.
-        ready = _wait_for(lambda: _capped_block(dump_dir), timeout=15.0)
+        # Armed only now: the witness sees a process that already has its 120
+        # spare threads and a loop that is still turning, so the incident this
+        # test reads starts at the park, not at a dump written while the
+        # process was still growing.
+        watchdog.start()
+        park_gate.set()
+        assert stall.parked.wait(timeout=10), "the stand-in loop never parked"
+
+        # The dump is written after the budget expires. Every dump of the
+        # incident now sees all `live` threads, so the first one already is
+        # the capped block this test asserts on.
+        ready = _wait_for(lambda: _capped_block(dump_dir), timeout=20.0)
         assert ready is not None, (
             f"no completed dump block carried 100 all-thread sections after "
             f"the loop was silent for {watchdog.silent_seconds()}s; "
@@ -491,6 +522,10 @@ def test_dump_names_the_watched_loop_thread_past_100_live_threads(tmp_path):
         for spare in spares:
             spare.join(timeout=5)
         if stall is not None:
+            # Open the gate first: a failure before it was set left the
+            # stand-in loop still beating, and `release()` alone would then
+            # join a thread that has not parked yet.
+            park_gate.set()
             stall.release()
         watchdog.stop()
         assert stall is not None and stall.exited.is_set()

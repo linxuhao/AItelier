@@ -19,6 +19,7 @@ from typing import Callable
 # deliberately does NOT load it at import time; this module IS a boot entry, so
 # it says so explicitly (core/dotenv_boot.py holds the one parser).
 from core.dotenv_boot import load_repo_dotenv
+from core.driver_credentials import CredentialError
 
 load_repo_dotenv()
 
@@ -416,6 +417,12 @@ def _require_deployment_clearance(
                 runtime_facts=facts,
                 sidecar_db=datadir.semantic_index_control_dir() / "control.sqlite3",
             )
+        except CredentialError:
+            # The caller's own credential is unusable. That is not a measurement
+            # failure to report as one: the CLI funnel owns this exception and
+            # prints its sentence (exit 2, stderr). The surrounding handler below
+            # releases the cutover fence on the way out.
+            raise
         except Exception as exc:  # noqa: BLE001 -- unavailable measurement blocks and persists
             observation = dq.failed_observation(
                 f"deployment quiescence measurement could not start: "

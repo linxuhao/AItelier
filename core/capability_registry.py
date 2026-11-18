@@ -113,9 +113,17 @@ def _normalize_tools(tools) -> list[str]:
 
 
 def _release_graph_update_error(sf, name: str, candidate: dict) -> str:
-    """Reject a capability edit that would invalidate a live or persisted graph."""
+    """Reject a capability edit that would invalidate a live or persisted graph.
+
+    The persisted ``gen_*.yaml`` files are read through
+    `core.output_migration.generated_configs`, which parses each of them (and its
+    `.roles.json` sidecar) at most once per build: this validation runs once per
+    host capability, so parsing the directory here made the deployment pay 62
+    YAML parses per host capability — 186 of the build's 434 — for one answer.
+    """
     import yaml
     from core import pipeline_registry
+    from core.output_migration import generated_configs
     from core.release_gate_migration import (
         release_gate_ownership_error, release_graph_uses_capability)
 
@@ -133,19 +141,18 @@ def _release_graph_update_error(sf, name: str, candidate: dict) -> str:
             return f"capability {name!r} would invalidate live graph " \
                    f"{graph_name!r}: {error}"
 
-    config_dir = pipeline_registry.generated_configs_dir()
-    for path in sorted(config_dir.glob("gen_*.yaml")):
+    configs = generated_configs(pipeline_registry.generated_configs_dir())
+    for path in configs.paths:
         try:
-            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            document = configs.document(path)
         except (OSError, UnicodeError, yaml.YAMLError):
             continue
         if not release_graph_uses_capability(document, name):
             continue
         roles = None
-        roles_path = path.with_suffix(".roles.json")
-        if roles_path.exists():
+        if configs.has_roles(path):
             try:
-                roles = json.loads(roles_path.read_text(encoding="utf-8"))
+                roles = configs.roles(path)
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 return (f"capability {name!r} cannot inspect persisted graph "
                         f"{path.name!r} roles: {exc}")

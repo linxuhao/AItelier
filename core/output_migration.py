@@ -5,12 +5,14 @@ ambiguous legacy copy contracts fail rather than guessing a destination.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -86,6 +88,163 @@ README.md belongs to the earlier delivery_documenter step. Do not call README
 writers, generic code mutators, optional-path code writers, or edit any candidate
 file. The resolved candidate and README are hashed immediately before and after
 this verifier; any byte change is a hard failure."""
+
+
+# ---------------------------------------------------------------------------
+# One parse per generated config per build
+# ---------------------------------------------------------------------------
+#: Every ``~/.AItelier/configs/gen_*.yaml`` (and its ``.roles.json`` sidecar) used
+#: to be parsed once per READER that wanted it, and the readers are many: the
+#: capability validator looped the whole directory once per host capability (3 in
+#: the deployment), the output-target migration in three more passes and the
+#: release-gate migration in a fourth. Measured 2026-11-18 in the live container
+#: over 62 saved configs: 434 graph parses (186 of them from the capability
+#: validator alone) and 55 sidecar parses, 1.6 s of the 3.3 s first
+#: ``get_skillflow()``.
+#:
+#: The parsed artifacts belong to a BUILD, not to a reader, so they are parsed
+#: once and shared. Keyed on the IDENTITY of the directory — ``(name,
+#: st_mtime_ns, st_size)`` for every config and every sidecar — never on a call
+#: count or on process start: the forge and the butler write ``gen_*.yaml`` while
+#: the server runs, and a new or changed file must be seen by the very next
+#: reader rather than at the next restart. An unchanged directory therefore costs
+#: one glob+stat pass and no parse at all.
+#:
+#: The document a reader gets back is SHARED with every other reader of the same
+#: build, so a reader that mutates it must ask for ``mutable=True`` (a private
+#: deep copy) — that is what the two migration writers do. A file a migration
+#: rewrites changes the directory identity, so the next reader re-parses rather
+#: than seeing the pre-migration dict.
+GENERATED_CONFIG_PATTERN = "gen_*.yaml"
+GENERATED_ROLES_PATTERN = "gen_*.roles.json"
+
+#: Directories kept by the parse cache. The deployment uses exactly one
+#: (`~/.AItelier/configs`); tests use a throwaway directory each, so the cache
+#: must not grow with them.
+MAX_CACHED_CONFIG_DIRS = 8
+
+_GENERATED_CONFIGS_CACHE: dict[str, "GeneratedConfigs"] = {}
+
+
+def _parse_generated_config(path) -> Any:
+    """Parse one ``gen_*.yaml``. The ONLY parse path, so a test can count it."""
+    return yaml.safe_load(Path(path).read_bytes())
+
+
+def _parse_generated_roles(path) -> Any:
+    """Parse one ``gen_*.roles.json`` sidecar. The ONLY parse path."""
+    return json.loads(Path(path).read_bytes())
+
+
+def _scan_generated_configs(
+        config_dir: Path) -> tuple[tuple[tuple[str, int, int], ...],
+                                  tuple[Path, ...], tuple[str, ...]]:
+    """``(identity, yaml paths, sidecar names)`` for one configs directory.
+
+    A file that cannot be stat()ed (removed between the glob and the stat) is
+    left out; the next scan then sees a different identity and re-reads.
+    """
+    identity: list[tuple[str, int, int]] = []
+    paths: list[Path] = []
+    sidecars: list[str] = []
+    for pattern in (GENERATED_CONFIG_PATTERN, GENERATED_ROLES_PATTERN):
+        try:
+            files = sorted(config_dir.glob(pattern))
+        except OSError:
+            continue
+        for f in files:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            identity.append((f.name, st.st_mtime_ns, st.st_size))
+            if pattern == GENERATED_CONFIG_PATTERN:
+                paths.append(f)
+            else:
+                sidecars.append(f.name)
+    return tuple(identity), tuple(paths), tuple(sidecars)
+
+
+class GeneratedConfigs:
+    """One generated-configs directory, parsed at most once per version of it.
+
+    Obtained from :func:`generated_configs`, which revalidates the directory by
+    identity. Every accessor here is a dict lookup after the first call.
+    """
+
+    def __init__(self, config_dir: Path, identity: tuple, paths: tuple[Path, ...],
+                 sidecars: tuple[str, ...]) -> None:
+        self.config_dir = Path(config_dir)
+        self.identity = identity
+        self._paths = tuple(paths)
+        self._sidecars = frozenset(sidecars)
+        self._documents: dict[str, Any] = {}
+        self._roles: dict[str, Any] = {}
+
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        """Every ``gen_*.yaml``, in name order."""
+        return self._paths
+
+    @property
+    def roles_paths(self) -> tuple[Path, ...]:
+        """Every ``gen_*.roles.json`` sidecar, in name order."""
+        return tuple(self.config_dir / name for name in sorted(self._sidecars))
+
+    @staticmethod
+    def sidecar(path) -> Path:
+        """The ``.roles.json`` sidecar paired with a config or a sidecar path."""
+        path = Path(path)
+        return (path if path.name.endswith(".roles.json")
+                else path.with_suffix(".roles.json"))
+
+    def has_roles(self, path) -> bool:
+        """Whether the paired sidecar existed when the directory was scanned."""
+        return self.sidecar(path).name in self._sidecars
+
+    def document(self, path, *, mutable: bool = False) -> Any:
+        """The parsed config. Shared unless ``mutable``; raises on a bad file."""
+        name = Path(path).name
+        if name not in self._documents:
+            self._documents[name] = _parse_generated_config(Path(path))
+        document = self._documents[name]
+        return copy.deepcopy(document) if mutable else document
+
+    def roles(self, path, *, mutable: bool = False) -> Any:
+        """The parsed sidecar of a config, or None when it has none.
+
+        ``path`` may be the ``gen_*.yaml`` config or the sidecar itself; both name
+        the same cached parse, so a build never parses one sidecar twice.
+        """
+        sidecar = self.sidecar(path)
+        name = sidecar.name
+        if name not in self._roles:
+            self._roles[name] = (_parse_generated_roles(sidecar)
+                                 if sidecar.exists() else None)
+        roles = self._roles[name]
+        return copy.deepcopy(roles) if mutable else roles
+
+
+def generated_configs(config_dir) -> GeneratedConfigs:
+    """The parsed view of one generated-configs directory.
+
+    An unchanged directory returns the SAME object (one glob+stat pass, no
+    parse); any added, removed or rewritten config — or sidecar — parses the
+    directory again on the next call. See the cache note above.
+    """
+    config_dir = Path(config_dir)
+    identity, paths, sidecars = _scan_generated_configs(config_dir)
+    key = str(config_dir)
+    cached = _GENERATED_CONFIGS_CACHE.get(key)
+    if cached is not None and cached.identity == identity:
+        return cached
+    snapshot = GeneratedConfigs(config_dir, identity, paths, sidecars)
+    _GENERATED_CONFIGS_CACHE[key] = snapshot
+    while len(_GENERATED_CONFIGS_CACHE) > MAX_CACHED_CONFIG_DIRS:
+        # Never evict the snapshot we were just asked for.
+        stale = next(other for other in _GENERATED_CONFIGS_CACHE if other != key)
+        _GENERATED_CONFIGS_CACHE.pop(stale)
+    return snapshot
 
 
 def _tools(value):
@@ -599,11 +758,12 @@ def _code_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
             for child in value.values():
                 visit(child)
 
-    for path in sorted(config_dir.glob("gen_*.yaml")):
+    configs = generated_configs(config_dir)
+    for path in configs.paths:
         if path.stem in skip_configs:
             continue
         try:
-            document = yaml.safe_load(path.read_bytes())
+            document = configs.document(path)
         except (yaml.YAMLError, UnicodeError):
             continue
         visit(document)
@@ -612,11 +772,12 @@ def _code_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
 
 def _readonly_verifier_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
     names = set()
-    for path in sorted(config_dir.glob("gen_*.yaml")):
+    configs = generated_configs(config_dir)
+    for path in configs.paths:
         if path.stem in skip_configs:
             continue
         try:
-            document = yaml.safe_load(path.read_bytes())
+            document = configs.document(path)
         except (yaml.YAMLError, UnicodeError):
             continue
         for step in (document or {}).get("steps", []):
@@ -632,14 +793,17 @@ def _readonly_verifier_roles(config_dir: Path, skip_configs: set[str]) -> set[st
 def _migrate_generated_role_prompts(
         config_dir: Path, backup_dir: Path, skip_configs: set[str]) -> list[dict]:
     reports = []
+    configs = generated_configs(config_dir)
     code_roles = _code_roles(config_dir, skip_configs)
     verifier_roles = _readonly_verifier_roles(config_dir, skip_configs)
-    for path in sorted(config_dir.glob("gen_*.roles.json")):
+    for path in configs.roles_paths:
         if path.name.removesuffix(".roles.json") in skip_configs:
             continue
         original = path.read_bytes()
         try:
-            roles = json.loads(original)
+            # Private copy: the loop below rewrites the role dicts, and the
+            # parsed sidecar is shared with the other readers of this build.
+            roles = configs.roles(path, mutable=True)
         except (json.JSONDecodeError, UnicodeError):
             continue  # normal registration reports invalid role sidecars
         if not isinstance(roles, dict):
@@ -693,12 +857,15 @@ def migrate_generated_outputs(
     skip_configs = skip_configs or set()
     backup_dir = config_dir.parent / "migration_backups" / "readonly-verifier-v2"
     reports = []
-    for path in sorted(config_dir.glob("gen_*.yaml")):
+    configs = generated_configs(config_dir)
+    for path in configs.paths:
         if path.stem in skip_configs:
             continue
         original = path.read_bytes()
         try:
-            document = yaml.safe_load(original)
+            # Private copy: `migrate_document` rewrites the dict it is given, and
+            # the parsed config is shared with the other readers of this build.
+            document = configs.document(path, mutable=True)
         except yaml.YAMLError:
             continue  # normal registration reports a malformed pre-existing file
         if not isinstance(document, dict):

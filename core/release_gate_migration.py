@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from core.output_migration import write_migrated_config
+from core.output_migration import generated_configs, write_migrated_config
 
 _LOG = logging.getLogger(__name__)
 
@@ -493,16 +493,19 @@ def migrate_generated_release_gates(
     skip_configs = skip_configs or set()
     backup_dir = config_dir.parent / "migration_backups" / "release-fail-fast-v3"
     reports = []
-    for path in sorted(config_dir.glob("gen_*.yaml")):
+    configs = generated_configs(config_dir)
+    for path in configs.paths:
         if path.stem in skip_configs:
             continue
         try:
             original = path.read_bytes()
-            document = yaml.safe_load(original)
+            # Private copies: `migrate_release_document` rewrites the dict it is
+            # given, and both parses are shared with the other readers of this
+            # build (the capability validator, the output-target migration).
+            document = configs.document(path, mutable=True)
             roles = None
-            roles_path = path.with_suffix(".roles.json")
-            if roles_path.exists():
-                roles = json.loads(roles_path.read_text(encoding="utf-8"))
+            if configs.has_roles(path):
+                roles = configs.roles(path, mutable=True)
                 if not isinstance(roles, dict):
                     raise ValueError("generated roles file is not a mapping")
             changes = migrate_release_document(document, roles=roles)

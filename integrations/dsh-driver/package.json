@@ -6,6 +6,8 @@
     "test": "node --test runtime.test.mjs model.test.mjs tool-discovery.test.mjs runtime.user-message.test.mjs runtime.smoke.test.mjs runtime.todo.test.mjs runtime.batch.test.mjs runtime.goalseed.test.mjs runtime.dormancy.test.mjs runtime.continuation.test.mjs runtime.live-children.test.mjs runtime.wake-echo.test.mjs dsh-entry.test.mjs runtime.terminal-plan.test.mjs runtime.finished-plan.test.mjs suite-composition.test.mjs history.test.mjs roles.test.mjs runtime.roles.test.mjs host-conformance.test.mjs runtime.local-host.test.mjs prompt-split.test.mjs runtime.standalone.test.mjs plugin-boundary.test.mjs exports.test.mjs runtime.capacity.test.mjs runtime.resume.test.mjs runtime.attention.test.mjs runtime.memory.test.mjs steward.test.mjs runtime.steward.test.mjs schedules.test.mjs"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "0.2.1-rc.5"
+    "@deepseek-ai/dsh": "0.2.1-rc.5",
+    "@slack/socket-mode": "3.1.1",
+    "@slack/web-api": "8.3.0"
   }
 }

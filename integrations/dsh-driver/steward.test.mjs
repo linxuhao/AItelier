@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { refusal, presentTools } from './tool-discovery.mjs';
+import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS } from './steward-host.mjs';
@@ -66,6 +66,31 @@ test('presented_only: the steward has exactly its presented tools; everything el
   assert.equal(refusal(effective.director, exec('some_new_tool')), undefined);
   assert.equal(refusal(effective.worker, exec('some_new_tool')), undefined);
   for (const role of ['director', 'worker']) assert.ok(!effective[role].presented.includes('portfolio_inbox'), role);
+});
+
+test('presented_only: the steward is shown no guidance for tools it cannot call', () => {
+  // Measured 2026-11-18: the steward's prompt described bash, read, write, edit, glob, grep,
+  // jobs, web_search, web_fetch, goals, subagent, search_tools and three MCP servers; its
+  // own self-check named them as tools it was told about and could not call.
+  const effective = aitelierRoles(table);
+  const discovery = defaultDiscoveryTexts.sectionName;
+  const names = ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot',
+    'tool:bash', 'tool:read', 'tool:write', 'tool:edit', 'tool:jobs', 'tool:web_search', 'tool:web_fetch', 'tool:goal',
+    'tool:subagent', 'tool:session-query', 'tool:idle_dormant', 'mcp-resource-servers', 'mcp:agentmcp', 'mcp:devmcp', 'mcp:zvec',
+    discovery, 'deployment:persona-suffix'];
+  const sections = names.map(name => ({ name, text: name }));
+  assert.deepEqual(presentSections(sections, effective.steward, discovery).map(s => s.name),
+    ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot', 'tool:idle_dormant',
+      'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
+  // Every other role is shown every section, as before.
+  for (const role of ['director', 'worker'])
+    assert.equal(presentSections(sections, effective[role], discovery), sections, role);
+  // The rule follows the role, not a list of names: a presented_only role that presents an
+  // MCP tool and search_tools keeps the MCP and discovery guidance.
+  const open = { ...effective.steward, presented: [...effective.steward.presented, 'search_tools', 'mcp__x__y'] };
+  for (const name of ['mcp:agentmcp', 'mcp-resource-servers', discovery])
+    assert.ok(presentSections(sections, open, discovery).some(s => s.name === name), name);
+  assert.equal(presentSections(undefined, effective.steward, discovery), undefined, 'an assembly without sections is passed through');
 });
 
 test('the steward prompt names the tools it has: both inbox readers where it explains the excerpt', () => {

@@ -15,6 +15,27 @@ export function presentTools(tools, role) {
   return tools.filter(t => presented.has(t.name));
 }
 
+/** The prompt sections one session is shown. A presented_only role (the steward) has a
+ *  closed tool set, so the guidance other tools register for themselves is only noise to
+ *  it - and misleading noise: a steward told how to use bash, read, jobs or an MCP server
+ *  believes it can (measured 2026-11-18: its self-check listed eleven tools and three MCP
+ *  servers it cannot call). For such a role, a tool's own section (`tool:<name>`) stays
+ *  only when that tool is presented, the MCP server sections (`mcp:<server>`,
+ *  `mcp-resource-servers`) only when an MCP tool is presented, and the discovery section
+ *  only when search_tools is. Every other section - the persona, the role prompt, the
+ *  host's own - is kept, and every other role's sections are untouched. */
+export function presentSections(sections, role, discoverySection) {
+  if (!role?.presented_only || !Array.isArray(sections)) return sections;
+  const presented = new Set(role.presented);
+  const mcp = role.presented.some(name => name.startsWith('mcp__'));
+  return sections.filter(({ name }) => {
+    if (name === discoverySection) return presented.has('search_tools');
+    if (name.startsWith('tool:')) return presented.has(name.slice('tool:'.length));
+    if (name.startsWith('mcp:') || name === 'mcp-resource-servers') return mcp;
+    return true;
+  });
+}
+
 /** Why `role` may not run this call, or undefined. Refused: every tool the role
  *  forbids, and - for a tool listed in `allowed_actions` - any call whose `action`
  *  argument is not on that tool's list (a missing or non-string action included).
@@ -64,7 +85,9 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     const assembly = await next();
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
-    return { ...assembly, tools: presentTools(assembly.tools, roleFor(caller?.session?.id)) };
+    const role = roleFor(caller?.session?.id);
+    return { ...assembly, tools: presentTools(assembly.tools, role),
+      sections: presentSections(assembly.sections, role, wording.sectionName) };
   });
   ctx.systemPrompt.section({ name: wording.sectionName, order: 3090, interpolate: false, text: wording.section });
   ctx.tools.register(defineTool({ name: 'search_tools',

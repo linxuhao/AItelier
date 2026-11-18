@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as plugin from './index.mjs';
-import { startWechatChannel, REPLAY_WINDOW_MS } from './index.mjs';
+import { startWechatChannel, MAX_EVENT_AGE_MS } from './index.mjs';
 import { createBridge } from '../wechat-bridge/bridge.mjs';
 
 const TOKEN = 'plugin-test-token';
@@ -25,19 +25,22 @@ const until = async (check, ms = 3000) => {
   }
 };
 
-function fakeChannels({ accept = () => true, fail = 0 } = {}) {
-  const service = { registered: undefined, unregistered: false, received: [], failures: fail };
+/** `fail` inbounds throw; then `unavailable` inbounds answer like the real host does
+ *  when it or the backend cannot be reached; then `answer` decides. */
+function fakeChannels({ accept = () => true, fail = 0, unavailable = 0, answer } = {}) {
+  const service = { registered: undefined, unregistered: false, received: [], failures: fail, unavailable };
   service.register = channel => { service.registered = channel; return () => { service.unregistered = true; }; };
   service.inbound = async message => {
     service.received.push(message);
     if (service.failures > 0) { service.failures--; throw new Error('host down'); }
-    return { accepted: accept(message) };
+    if (service.unavailable > 0) { service.unavailable--; return { accepted: false, reason: 'unavailable' }; }
+    return answer ? answer(message) : { accepted: accept(message) };
   };
   return service;
 }
 
 /** A bridge stand-in: events are pushed by the test; every request is recorded. */
-async function fakeBridge({ status = { logged_in: true, since: 'x' } } = {}) {
+async function fakeBridge({ status = { logged_in: true, since: 'x' }, hangEvents = false } = {}) {
   const bridge = { events: [], requests: [], sent: [], status, sendAnswer: [200, { ref: null }] };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://x');
@@ -47,6 +50,7 @@ async function fakeBridge({ status = { logged_in: true, since: 'x' } } = {}) {
     if (request.headers.authorization !== `Bearer ${TOKEN}`) return reply(401, { error: 'unauthorized' });
     if (url.pathname === '/status') return reply(200, bridge.status);
     if (url.pathname === '/events') {
+      if (hangEvents) return; // accepted, never answered
       const after = Number(url.searchParams.get('after'));
       const found = bridge.events.filter(e => e.seq > after);
       if (!found.length) await new Promise(resolve => setTimeout(resolve, 20));
@@ -110,7 +114,7 @@ test('bridge messages reach ownerChannels.inbound with the channel fields, and t
 test('messages from well before this start are not replayed; recent ones are', async () => {
   const bridge = await fakeBridge();
   const channels = fakeChannels();
-  const old = new Date(Date.now() - REPLAY_WINDOW_MS - 60_000).toISOString();
+  const old = new Date(Date.now() - MAX_EVENT_AGE_MS - 60_000).toISOString();
   const recent = new Date(Date.now() - 60_000).toISOString();
   bridge.events.push(event(1, { at: old }), event(2, { at: recent }));
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
@@ -152,49 +156,119 @@ test('a wrong token shows as refused, not as a scan', async () => {
   } finally { await channel.stop(); await bridge.close(); }
 });
 
-test('send replies to the sender of the answered message, or to the last accepted sender when unprompted', async () => {
-  const bridge = await fakeBridge();
-  const channels = fakeChannels({ accept: m => m.senderRef !== 'wxid_stranger' });
-  bridge.events.push(event(1, { sender_ref: 'wxid_owner' }), event(2, { sender_ref: 'wxid_stranger' }));
-  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
-  try {
-    await until(() => channels.received.length === 2);
-    const { send } = channels.registered;
-    assert.deepEqual(await send('reply', { replyToRef: 'm1' }), {});
-    assert.deepEqual(await send('unprompted', {}), {}, 'a stranger who was not accepted is never written to');
-    bridge.sendAnswer = [200, { ref: 'r9' }];
-    assert.deepEqual(await send('told', { to: 'wxid_named' }), { ref: 'r9' });
-    assert.deepEqual(bridge.sent, [{ to: 'wxid_owner', text: 'reply' }, { to: 'wxid_owner', text: 'unprompted' },
-      { to: 'wxid_named', text: 'told' }]);
-    bridge.sendAnswer = [409, { error: 'recipient_unknown' }];
-    await assert.rejects(send('again', { replyToRef: 'm1' }), error => error.code === 'recipient_unknown');
-  } finally { await channel.stop(); await bridge.close(); }
-});
-
-test('send with no known recipient fails without calling the bridge', async () => {
+test('send writes to the recipient the host names, and never without one', async () => {
   const bridge = await fakeBridge();
   const channels = fakeChannels();
+  bridge.events.push(event(1, { sender_ref: 'wxid_owner' }));
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
   try {
-    await assert.rejects(channels.registered.send('hello', {}), error => error.code === 'recipient_unknown');
+    await until(() => channels.received.length === 1);
+    const { send } = channels.registered;
+    // An accepted sender is not remembered as a recipient: the binding may change.
+    for (const options of [{ replyToRef: 'm1' }, {}, undefined, { to: '' }]) {
+      await assert.rejects(send('no recipient', options), error => error.code === 'recipient_unknown');
+    }
     assert.deepEqual(bridge.sent, []);
+    assert.deepEqual(await send('reply', { replyToRef: 'm1', to: 'wxid_owner' }), {});
+    bridge.sendAnswer = [200, { ref: 'r9' }];
+    assert.deepEqual(await send('told', { to: 'wxid_named' }), { ref: 'r9' });
+    assert.deepEqual(bridge.sent, [{ to: 'wxid_owner', text: 'reply' }, { to: 'wxid_named', text: 'told' }]);
+    bridge.sendAnswer = [409, { error: 'recipient_unknown' }];
+    await assert.rejects(send('again', { to: 'wxid_owner' }), error => error.code === 'recipient_unknown');
   } finally { await channel.stop(); await bridge.close(); }
 });
 
-test('an inbound that throws is retried, then given up, and polling goes on', async () => {
+test('an inbound the host answers `unavailable` is held and retried, and nothing overtakes it', async () => {
   const bridge = await fakeBridge();
-  const channels = fakeChannels({ fail: 5 });
+  // The real host (dsh-director channels.inbound) never throws: it answers this.
+  const channels = fakeChannels({ unavailable: 2 });
   const warnings = [];
-  bridge.events.push(event(1, { text: 'secret body' }));
+  bridge.events.push(event(1, { text: '同意 proposal p-1' }), event(2));
   const channel = startWechatChannel({ ownerChannels: channels, logger: { warn: line => warnings.push(line) },
     config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10 });
   try {
-    await until(() => channels.received.length === 3);
-    bridge.events.push(event(2));
     await until(() => channels.received.some(m => m.messageRef === 'm2'));
-    assert.equal(channels.received.filter(m => m.messageRef === 'm1').length, 3);
-    assert.ok(warnings.length >= 3);
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm1', 'm1', 'm2'], 'm1 kept until accepted, in order');
+    const polls = bridge.requests.filter(r => r.path === '/events').map(r => r.query.after);
+    assert.equal(polls[0], '0');
+    assert.ok(!polls.includes('1'), 'the cursor never moved past the held message on its own');
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every(line => !line.includes('同意')), 'the text is never logged');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('an inbound that throws is retried the same way', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels({ fail: 3 });
+  const warnings = [];
+  bridge.events.push(event(1, { text: 'secret body' }), event(2));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: { warn: line => warnings.push(line) },
+    config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10 });
+  try {
+    await until(() => channels.received.some(m => m.messageRef === 'm2'));
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm1', 'm1', 'm1', 'm2']);
     assert.ok(warnings.every(line => !line.includes('secret body')), 'the text is never logged');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('a refusal other than `unavailable` is final: not retried', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels({ answer: m => m.messageRef === 'm1'
+    ? { accepted: false, reason: 'channel_sender_not_bound' } : { accepted: true } });
+  bridge.events.push(event(1), event(2));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
+    waitSeconds: 1, retryMs: 10 });
+  try {
+    await until(() => channels.received.length === 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm2']);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('a held message is given up once it is too old, and the next one goes on', async () => {
+  const bridge = await fakeBridge();
+  let offset = 0;
+  const channels = fakeChannels({ answer: m => {
+    if (m.messageRef !== 'm1') return { accepted: true };
+    offset = MAX_EVENT_AGE_MS + 1000; // the host stays down past the limit
+    return { accepted: false, reason: 'unavailable' };
+  } });
+  const warnings = [];
+  bridge.events.push(event(1), event(2, { at: new Date(Date.now() + MAX_EVENT_AGE_MS).toISOString() }));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: { warn: line => warnings.push(line) },
+    config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10, now: () => Date.now() + offset });
+  try {
+    await until(() => channels.received.some(m => m.messageRef === 'm2'));
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm2']);
+    assert.ok(warnings.some(line => line.includes('m1 not passed on')));
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('an old message from a bridge that logged in again is not passed on, however recently this plugin started', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels();
+  let offset = 0;
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
+    waitSeconds: 1, now: () => Date.now() + offset });
+  try {
+    await until(() => bridge.requests.some(r => r.path === '/events'));
+    // 20 min later the bridge rescans and neo delivers what was written 5 min before this plugin started.
+    offset = 20 * 60_000;
+    bridge.events.push(event(1, { at: new Date(Date.now() - 5 * 60_000).toISOString(), text: '同意 proposal p-1' }),
+      event(2, { at: new Date(Date.now() + offset).toISOString() }));
+    await until(() => channels.received.length === 1);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m2']);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('a poll the bridge accepts and never answers is given up and polled again', async () => {
+  const bridge = await fakeBridge({ hangEvents: true });
+  const channels = fakeChannels();
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
+    waitSeconds: 1, pollGraceMs: 50, retryMs: 20 });
+  try {
+    await until(() => bridge.requests.filter(r => r.path === '/events').length >= 2, 4000);
   } finally { await channel.stop(); await bridge.close(); }
 });
 
@@ -235,7 +309,7 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
     await until(() => channels.received.length === 1);
     assert.deepEqual({ ...channels.received[0], at: undefined },
       { channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'w1', text: '你好', at: undefined });
-    assert.deepEqual(await channels.registered.send('收到', { replyToRef: 'w1' }), {});
+    assert.deepEqual(await channels.registered.send('收到', { replyToRef: 'w1', to: 'wxid_owner' }), {});
     assert.deepEqual(said, [{ id: 'wxid_owner', text: '收到' }]);
   } finally { await channel.stop(); await bridge.close(); }
 });

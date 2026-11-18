@@ -109,6 +109,9 @@
         {#if r.status?.detail}<p class="detail" data-channel-detail>{r.status.detail}</p>{/if}
         {#if r.qr_svg}
           <figure class="qr" data-channel-qr>
+            <!-- The QR is a reported SVG: only ever an <img> data URL (no script, no external
+                 load), never inlined or rendered with {@html}. The backend's allowlist
+                 (core/state_channels.py check_qr_svg) is the second line, not the only one. -->
             <img src={svgImage(r.qr_svg)} alt={t('steward.chanScanQr')} width="220" height="220" />
             <figcaption>{t('steward.chanScanQr')}</figcaption>
           </figure>

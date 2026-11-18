@@ -41,6 +41,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from xml.etree import ElementTree
 
 from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
@@ -103,14 +104,18 @@ DRIVER_KINDS = ("start_driver", "stop_driver")
 # detail line, and the WeChat login QR as an SVG while a scan is needed.
 STATUS_DETAIL_MAX = 300
 QR_SVG_MAX_BYTES = 64 * 1024
-_SVG_DOCUMENT = re.compile(r"\s*<svg[\s>][\s\S]*</svg>\s*")
-# What an SVG must not carry, so the dashboard can show it as an image and nothing
-# else: scripts, event handler attributes, links, embedded HTML, and any declaration or
-# processing instruction (an entity defined in a DOCTYPE can expand into markup this
-# check never saw). Element and attribute names may carry a namespace prefix.
-_SVG_FORBIDDEN = re.compile(r"<\s*(?:[\w.-]+:)?(?:script|foreignobject)\b"
-                            r"|[\s/\"'](?:[\w.-]+:)?(?:on[\w.-]*|href)\s*="
-                            r"|<[!?]", re.IGNORECASE)
+# What a reported QR may be: an ALLOWLIST, never a list of known-bad markup (a denylist
+# let <style>@import url(...)>, style="fill:url(...)", <animate>/<set> retargeting an href,
+# xml:base, <iframe> and markup after </svg> through). One root <svg> in the SVG namespace
+# holding only shapes, each with only presentational attributes whose values are plain
+# numbers, path data and colours - so no url(, no scheme, no script, no styles. The
+# bridge's drawing (integrations/wechat-bridge/qr-svg.mjs) is <svg viewBox
+# shape-rendering> around two <path fill|stroke d>; g and rect are the other plain shapes.
+_SVG_NS = "{http://www.w3.org/2000/svg}"
+_QR_SHAPES = frozenset({"g", "path", "rect"})
+_QR_ATTRIBUTES = frozenset({"viewBox", "width", "height", "d", "fill", "stroke", "stroke-width",
+                            "shape-rendering", "x", "y"})
+_QR_VALUE = re.compile(r"[A-Za-z0-9#., -]*")
 
 
 def rate_limits() -> tuple[int, int]:
@@ -155,16 +160,31 @@ def match_phrase(conn, body):
 
 
 def check_qr_svg(svg):
-    """Refuse a QR image that is not a plain SVG document of at most QR_SVG_MAX_BYTES.
-    The refusal never quotes the image (it is a live login token)."""
+    """Refuse a QR image that is not a plain SVG document of at most QR_SVG_MAX_BYTES
+    (the allowlist above). The refusal never quotes the image (it is a live login token)."""
     if not isinstance(svg, str):
         raise StateGraphError("qr_svg_refused: qr_svg must be an SVG document")
     size = len(svg.encode("utf-8"))
     if size > QR_SVG_MAX_BYTES:
         raise StateGraphError(f"qr_svg_too_large: {size} bytes; at most {QR_SVG_MAX_BYTES} bytes")
-    if not _SVG_DOCUMENT.fullmatch(svg) or _SVG_FORBIDDEN.search(svg):
-        raise StateGraphError("qr_svg_refused: qr_svg must be one <svg> document with no script, event handler, "
-                              "link, foreignObject, declaration or processing instruction")
+    refusal = StateGraphError("qr_svg_refused: qr_svg must be one <svg> document of plain shapes (svg, g, path, "
+                              "rect) with presentational attributes only")
+    # No DOCTYPE, entity, character reference, comment, CDATA or processing instruction
+    # reaches the parser: without a DTD it defines no entity and resolves nothing.
+    if "<!" in svg or "<?" in svg or "&" in svg:
+        raise refusal
+    try:
+        root = ElementTree.fromstring(svg)  # one root element; anything after it is a ParseError
+    except ElementTree.ParseError:
+        raise refusal from None
+    for element in root.iter():
+        name = element.tag[len(_SVG_NS):] if element.tag.startswith(_SVG_NS) else None
+        allowed = name == "svg" if element is root else name in _QR_SHAPES
+        # Text inside an element (or between shapes) is content no QR drawing has.
+        text = (element.text or "").strip() or (element is not root and (element.tail or "").strip())
+        plain = all(key in _QR_ATTRIBUTES and _QR_VALUE.fullmatch(value) for key, value in element.attrib.items())
+        if not allowed or text or not plain:
+            raise refusal
 
 
 def _written_at(channel_at):

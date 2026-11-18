@@ -452,6 +452,18 @@ def test_the_wechat_bridges_own_drawing_of_a_login_qr_is_accepted(world):
     assert world.owner.channels.list_owner_channels(with_status=True)["channels"][1]["qr_svg"] == drawn
 
 
+@pytest.mark.parametrize("svg", [
+    QR,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="29" height="29"><g fill="#000"><rect x="4" y="4" width="7" '
+    'height="1"/></g></svg>',
+    '  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2">\n <path stroke="#000" stroke-width="1" '
+    'd="M0 0.5h2"/>\n</svg>\n',
+])
+def test_a_plain_svg_of_shapes_is_accepted(world, svg):
+    report(world, "plain", qr_svg=svg)
+    assert world.owner.channels.list_owner_channels(with_status=True)["channels"][1]["qr_svg"] == svg
+
+
 def test_only_the_steward_reports_a_status(world):
     assert "report_channel_status" in STEWARD_WRITE_ACTIONS
     for caller in (world.owner, world.director):
@@ -473,6 +485,25 @@ def test_only_the_steward_reports_a_status(world):
     '<svg xmlns="http://www.w3.org/2000/svg"><?xml-stylesheet href="x.css"?></svg>',
     '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>',
     '<html><svg></svg></html>', '<svgx></svgx>', 'not an image', '<svg xmlns="x">',
+    # What the old denylist let through (step 19 review): it is an allowlist now.
+    '<svg xmlns="http://www.w3.org/2000/svg"><style>@import url(https://example.com/x.css);</style></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(https://example.com/x)"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><path fill="url(https://example.com/x)" d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><animate attributeName="href" values="javascript:alert(1)"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+    '<set attributeName="xlink:href" to="javascript:alert(1)"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" xml:base="https://example.com/"><path d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><iframe src="https://example.com"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"></svg><p>x</p><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"></svg>trailing text',
+    '<svg xmlns="http://www.w3.org/2000/svg"><image width="1" height="1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><svg/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1">text</path></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><h:div xmlns:h="http://www.w3.org/1999/xhtml"/></svg>',
+    '<svg><path d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1" fill="&#35;000"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><!-- a comment --></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1" transform="rotate(1)"/></svg>',
 ])
 def test_a_qr_that_is_not_a_plain_svg_is_refused_and_never_quoted(world, svg, caplog):
     caplog.set_level(logging.DEBUG)

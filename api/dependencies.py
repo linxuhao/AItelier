@@ -377,8 +377,16 @@ def get_skillflow():
         # so a prior boot's registration lingers — drop the stale row so it can't
         # clutter the catalog or be run by mistake.
         try:
-            sf._conn.execute("DELETE FROM skillflow_graphs WHERE name = 'skill_converter'")
-            sf._conn.commit()
+            # Under the engine's own connection lock. Two reasons, one lock:
+            # the connection is shared by every scheduler thread
+            # (check_same_thread=False) and its statement cache is keyed by SQL
+            # text, so an unlocked statement can be handed the same prepared
+            # statement another thread is stepping; and this is a COMMIT —
+            # without the lock it can land inside a transaction another thread
+            # opened (`with sf._lock, sf._conn:` in core/run_driver.py).
+            with sf._lock:
+                sf._conn.execute("DELETE FROM skillflow_graphs WHERE name = 'skill_converter'")
+                sf._conn.commit()
         except Exception:
             pass
 

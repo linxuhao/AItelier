@@ -29,6 +29,7 @@ all pass with a reason. A budget gate that cannot compute has nothing to say.
 
 import json
 import math
+from contextlib import nullcontext
 from pathlib import Path
 
 # How many fix tasks one goal-loop round appends, as a fraction of the planned
@@ -124,12 +125,23 @@ def _completed_loop_items(project_id: str) -> set[str]:
         return set()
     try:
         from api.dependencies import get_skillflow
-        conn = get_skillflow()._conn
-        rows = conn.execute(
-            "SELECT ls.completed_items FROM skillflow_loop_state ls "
-            "JOIN skillflow_runs r ON r.id = ls.run_id "
-            "WHERE r.project_id = ? AND r.status NOT IN ('completed', 'failed')",
-            (project_id,)).fetchall()
+        sf = get_skillflow()
+        # This inline tool body runs inside a step's WORKER thread while the
+        # scheduler tick drives the same SkillFlow connection from another
+        # one. That connection is `check_same_thread=False` and its statement
+        # cache is keyed by SQL text, so an unlocked statement can be handed the
+        # same prepared statement another thread is stepping (measured
+        # 2026-11-18: `InterfaceError: bad parameter or other API misuse`), and
+        # the engine's own writes can commit a transaction opened here. So take
+        # the engine's own lock around the statement — a stand-in engine with no
+        # `_lock` (a test double) issues no sqlite statement to serialise.
+        lock = getattr(sf, "_lock", None)
+        with lock if lock is not None else nullcontext():
+            rows = sf._conn.execute(
+                "SELECT ls.completed_items FROM skillflow_loop_state ls "
+                "JOIN skillflow_runs r ON r.id = ls.run_id "
+                "WHERE r.project_id = ? AND r.status NOT IN ('completed', 'failed')",
+                (project_id,)).fetchall()
     except Exception:
         return set()
     done: set[str] = set()

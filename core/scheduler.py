@@ -8,6 +8,7 @@
 
 import logging
 import asyncio
+import contextlib
 import functools
 import json
 import threading
@@ -450,6 +451,35 @@ def _sync_task_manifest_to_db(project_id: str):
     except Exception:
         pass  # Best-effort; tasks remain file-only
 
+def _sf_statement_lock(sf):
+    """`sf._lock` — the only thing that serialises statements on `sf._conn`.
+
+    SkillFlow opens ONE connection for the whole process
+    (`sqlite3.connect(db_path, check_same_thread=False)`) and guards it with a
+    `threading.RLock`; the scheduler's prologue, the 30 s supervisor and inline
+    tools all issue statements on that one connection from different threads.
+    The connection's per-connection statement cache is keyed by SQL TEXT, so two
+    threads running the SAME text are handed the SAME prepared statement: one
+    thread's reset/bind/step lands inside the other, SQLite reports
+    SQLITE_MISUSE, and CPython raises `InterfaceError: bad parameter or other
+    API misuse` (measured 2026-11-18, issue iss-c79deaa9f8a84ad5 — two ticks for
+    two different free projects, both on `asyncio.to_thread` workers, both in
+    `_get_or_create_skillflow_run`). So every host statement on that connection
+    is issued inside this lock, and the lock is held for the statement only:
+    never across an `await`, never across the `/proc` owner probe, never across
+    `db.get_project` (a different database) and never across the engine's own
+    isolation calls. It is a re-entrant lock, so nesting inside a site that
+    already holds it (`_fail_unstarted_isolation_run`, registration) is safe.
+
+    A stand-in engine (a test double, an embedder's SDK object) has no `_lock`
+    and issues no sqlite statement to race on, so it gets a no-op context
+    instead of an AttributeError — the same capability dispatch
+    `core.skillflow_host.start_with_ledger` uses for a bare `SkillFlow`.
+    """
+    lock = getattr(sf, "_lock", None)
+    return lock if lock is not None else contextlib.nullcontext()
+
+
 def _get_or_create_skillflow_run(project_id: str) -> str | None:
     """Get the skillflow run_id for a project, creating or reactivating one if needed.
 
@@ -482,12 +512,13 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
     # after the pipeline run exists. Live: jinyong-turn, 2026-08-22 — a DPE run
     # created at 11:45 sat at gh_scaffold while a meta run finalized at 11:47
     # answered this query.
-    row = sf._conn.execute(
-        """SELECT id, status FROM skillflow_runs
-           WHERE project_id = ? AND graph_name = ?
-           ORDER BY created_at DESC LIMIT 1""",
-        (project_id, config_name),
-    ).fetchone()
+    with _sf_statement_lock(sf):
+        row = sf._conn.execute(
+            """SELECT id, status FROM skillflow_runs
+               WHERE project_id = ? AND graph_name = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (project_id, config_name),
+        ).fetchone()
     if row:
         run_id, status = row[0], row[1]
         if status in ("running", "paused"):
@@ -812,10 +843,14 @@ def recover_claims_on_startup():
 
 def _has_unsettled_operation(sf, run_id: str) -> bool:
     try:
-        return sf._conn.execute(
-            "SELECT 1 FROM skillflow_active_ops WHERE run_id = ? LIMIT 1",
-            (run_id,),
-        ).fetchone() is not None
+        # Statement only: see `_sf_statement_lock`. Reached from the tick's
+        # `asyncio.to_thread(_has_active_claim, ...)`, i.e. from an executor
+        # worker, and the text is identical for every run on every tick.
+        with _sf_statement_lock(sf):
+            return sf._conn.execute(
+                "SELECT 1 FROM skillflow_active_ops WHERE run_id = ? LIMIT 1",
+                (run_id,),
+            ).fetchone() is not None
     except Exception:
         return False
 
@@ -848,11 +883,18 @@ def _has_active_claim(sf, run_id: str) -> bool:
     if _has_unsettled_operation(sf, run_id):
         return True
     try:
-        row = sf._conn.execute(
-            "SELECT step_id, claimed_at, claimed_by FROM skillflow_steps "
-            "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
-            (run_id,),
-        ).fetchone()
+        # Statement only — the lock is NOT held across the `/proc` owner probe
+        # below (`owner_is_dead`), nor across the resolver lookup that follows
+        # it: both are slow and neither touches the connection's statement
+        # cache. Two ticks for two projects issue this identical text on two
+        # executor workers, which is the next collision after
+        # `_get_or_create_skillflow_run` (measured 2026-11-18).
+        with _sf_statement_lock(sf):
+            row = sf._conn.execute(
+                "SELECT step_id, claimed_at, claimed_by FROM skillflow_steps "
+                "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
+                (run_id,),
+            ).fetchone()
         if not row:
             return False
 
@@ -892,19 +934,38 @@ def _has_active_claim(sf, run_id: str) -> bool:
             "%Y-%m-%dT%H:%M:%SZ",
             _time.gmtime(_time.time() - window_s),
         )
-        claimed = sf._conn.execute(
-            "SELECT 1 FROM skillflow_steps "
-            "WHERE run_id = ? AND status = 'claimed'"
-            "  AND claimed_at > ? "
-            "LIMIT 1",
-            (run_id, threshold),
-        ).fetchone()
+        with _sf_statement_lock(sf):
+            claimed = sf._conn.execute(
+                "SELECT 1 FROM skillflow_steps "
+                "WHERE run_id = ? AND status = 'claimed'"
+                "  AND claimed_at > ? "
+                "LIMIT 1",
+                (run_id, threshold),
+            ).fetchone()
         return claimed is not None
     except Exception:
         return False
 
 
 # ── Hung-step detection ─────────────────────────────────────────────
+
+def _claimed_step_row(sf, run_id: str):
+    """This run's claimed step row: the statement, on a worker thread.
+
+    Split out of `_check_hung_claims` so BOTH halves hold: the read is issued
+    under `sf._lock` (`_sf_statement_lock` — the text repeats on every firing,
+    so a second thread can be handed the same prepared statement), and it is
+    issued off the event loop, so the loop never waits for a lock the engine may
+    be holding for a whole registration transaction.
+    """
+    with _sf_statement_lock(sf):
+        return sf._conn.execute(
+            "SELECT id AS step_instance_id, step_id, claimed_at "
+            "FROM skillflow_steps "
+            "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
+            (run_id,),
+        ).fetchone()
+
 
 async def _check_hung_claims():
     """Periodic supervisor: RECLAIM dead claims, warn about merely tardy ones.
@@ -942,6 +1003,15 @@ async def _check_hung_claims():
       Operation-owner reconciliation runs first. The reap follows, so anything
       the warning scan still finds 'claimed' is under the reclaim threshold.
       - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
+
+    The host's OWN statement here — the claim scan (site :1035) — runs off the
+    loop, in `_claimed_step_row`, under `sf._lock` (`_sf_statement_lock`): its
+    text repeats on every firing, so it is one of the statements two threads
+    can be handed the same prepared copy of, and a lock the loop can block on is
+    the stall the tick prologue was moved off the loop to avoid. The engine's
+    own calls below (`reconcile_active_operations`, `recover_stale_claims`,
+    `list_runs`) stay on this thread: they take the engine lock themselves and
+    are not the host's statements to move.
     """
     import time as _time
     import datetime as _dt
@@ -1032,12 +1102,12 @@ async def _check_hung_claims():
             # hung warnings included — to a no-op. Which is the real reason
             # nobody ever caught the orphan in the act.
             try:
-                row = sf._conn.execute(
-                    "SELECT id AS step_instance_id, step_id, claimed_at "
-                    "FROM skillflow_steps "
-                    "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
-                    (run_id,),
-                ).fetchone()
+                # OFF THE LOOP, under the engine's connection lock: the text is
+                # the same on every firing, so this is one of the statements two
+                # threads can be handed the same prepared copy of. Both halves
+                # matter — the lock makes it safe, the thread keeps the loop from
+                # ever waiting for it (`_claimed_step_row`).
+                row = await asyncio.to_thread(_claimed_step_row, sf, run_id)
             except Exception as e:
                 logger.warning("hung-claim scan failed for run %s: %s", run_id, e)
                 continue
@@ -1214,6 +1284,49 @@ def _parked_checkpoint(sf, run_id: str) -> dict | None:
     return waiter
 
 
+#: Messages that mean "another thread was inside the same SQLite connection",
+#: not "this graph is broken". `sqlite3.InterfaceError` is classified by TYPE
+#: below — CPython maps SQLITE_MISUSE onto it — and these cover the busy/lock
+#: side of the same accident when the engine lets it out as an OperationalError.
+_TRANSIENT_RUN_START_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "database is busy",
+    "sqlite_misuse",
+    "bad parameter or other api misuse",
+)
+
+
+def _is_transient_run_start_error(exc: BaseException) -> bool:
+    """Is this run-start failure a concurrency accident rather than a defect?
+
+    The question decides whether the tick records a TERMINAL project status or
+    a retryable observation (see the handler in `_run_skillflow_tick`). What
+    makes an error transient here is that the same call succeeds on the next
+    tick with nothing changed, because the collision — not the graph — was the
+    cause. Measured on the shared SkillFlow connection, 2026-11-18:
+
+      * `sqlite3.InterfaceError: bad parameter or other API misuse` — CPython's
+        rendering of SQLITE_MISUSE, produced when two threads are handed the
+        same prepared statement out of the connection's SQL-text statement
+        cache. Classified by TYPE: this defect is the one this issue fixes, and
+        a "bad parameter" raised inside `create_run` from a statement the host
+        did not write is not the host's bind bug.
+      * `database is locked` / `database table is locked` / `database is busy` —
+        WAL + `busy_timeout=5000` contention that outlived the timeout.
+
+    A UNIQUE constraint, a missing config or an isolation refusal keeps its
+    terminal status: those fail identically on every retry, and the terminal
+    arm exists so a user sees the reason instead of a project that never moves.
+    """
+    import sqlite3
+
+    if isinstance(exc, sqlite3.InterfaceError):
+        return True
+    message = " ".join(str(exc).lower().split())
+    return any(marker in message for marker in _TRANSIENT_RUN_START_MARKERS)
+
+
 async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
     held = _quota_hold_remaining()
@@ -1248,6 +1361,28 @@ async def _run_skillflow_tick(project_id: str, loop):
         # along (sqlite3.threadsafety == 3 here, so the module serializes).
         run_id = await asyncio.to_thread(_get_or_create_skillflow_run, project_id)
     except Exception as e:
+        import logging
+        if _is_transient_run_start_error(e):
+            # A CONCURRENCY accident is not a verdict on the project. Measured
+            # 2026-11-18 (issue iss-c79deaa9f8a84ad5): two ticks for two free
+            # projects reached the shared SkillFlow connection at the same
+            # instant, CPython's statement cache handed both threads the same
+            # prepared statement, and SQLITE_MISUSE surfaced here as
+            # `InterfaceError: bad parameter or other API misuse`. Writing
+            # `failed:could not start run — …` for that made the next tick treat
+            # a perfectly healthy project as terminal: the ONLY cure was a manual
+            # retry, and `get_next_active_project` stopped picking it. The same
+            # tick succeeds moments later, so record a retryable observation and
+            # leave the run to be started again — no status write, no terminal
+            # arm. The terminal arm below keeps the deterministic create_run
+            # defects it was added for (a UNIQUE constraint on
+            # skillflow_edge_counts, a missing config, an isolation refusal).
+            logging.getLogger("aitelier.scheduler").warning(
+                "transient run-start failure for %s (retryable, no terminal "
+                "status written): %s", project_id, e)
+            tick_log(project_id, "tick_error", op="run_start", retryable=True,
+                     error=str(e)[:160])
+            return
         # A run that dies inside create_run has no run row, so no trace and no
         # failed status to enrich — the project just sits at 'planning' forever
         # while every tick re-raises into APScheduler, and the only record is a
@@ -1255,7 +1390,6 @@ async def _run_skillflow_tick(project_id: str, loop):
         # pair does exactly this: UNIQUE constraint on skillflow_edge_counts.)
         # Write a terminal status so the user sees the reason and the project
         # stops being re-picked by get_next_active_project's planning guard.
-        import logging
         logging.getLogger("aitelier.scheduler").error(
             f"could not start a skillflow run for {project_id}: {e}", exc_info=True)
         try:
@@ -1270,7 +1404,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         # _sync_project_status_to_db marks running tasks as completed/failed
         # and bumps updated_at so the project no longer starves active
         # projects in get_next_active_project's ORDER BY updated_at ASC.
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         # Was the one tick outcome with no log line. A project that
         # get_next_active_project keeps handing us while this returns None reads
         # exactly like an idle scheduler — which is how a stalled run hid behind
@@ -1348,7 +1482,7 @@ async def _run_skillflow_tick(project_id: str, loop):
     if deferral["state"] == "expired":
         sf.fail_run(run_id, deferral["reason"])
         gate_deferral.LEDGER.clear(run_id)
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         tick_log(project_id, "gate_absence_terminal", run=run_id[:8],
                  reason=deferral["reason"])
         return
@@ -1379,7 +1513,7 @@ async def _run_skillflow_tick(project_id: str, loop):
             sf.fail_run(run_id, f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
                                 f"executions ({n_exec}) — likely a non-converging "
                                 f"loop (e.g. a verify gate that never passes).")
-            _sync_project_status_to_db(project_id)
+            await _sync_status_off_the_loop(project_id)
             return
         # …and bound re-execution of a SINGLE step instance, which trips far
         # earlier and on a sharper signal. A legitimate loop opens a NEW instance
@@ -1406,7 +1540,7 @@ async def _run_skillflow_tick(project_id: str, loop):
                         f"Aborted: step '{inst[0][0]}' (instance {inst[0][1]}) was "
                         f"re-executed {inst[0][2]} times without the run advancing "
                         f"— a terminal state is being resumed instead of ending.")
-            _sync_project_status_to_db(project_id)
+            await _sync_status_off_the_loop(project_id)
             return
     except Exception:
         pass  # never let the guard itself break a tick
@@ -1445,7 +1579,7 @@ async def _run_skillflow_tick(project_id: str, loop):
                      if run["status"] == "failed" else None)
             # skillflow notification bus emits checkpoint_paused / run_completed /
             # run_failed; we just sync the AItelier DB status.
-            _sync_project_status_to_db(project_id)
+            await _sync_status_off_the_loop(project_id)
             # A direct-mode run holds its checkout until it is over AND quiet.
             # This is the completion/failure path; cancel goes through stop_run
             # (butler + MCP) and a crash is caught by startup reconciliation.
@@ -1509,7 +1643,7 @@ async def _run_skillflow_tick(project_id: str, loop):
             sf.fail_run(run_id, f"Missing required input: {e}")
         except Exception:
             pass    # a fail_run failure must not mask the original error
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         tick_log(project_id, "claim_terminal", run=run_id[:8], error=str(e)[:160])
         return
     except RuntimeError as e:
@@ -1530,13 +1664,13 @@ async def _run_skillflow_tick(project_id: str, loop):
                      "claim_precondition_terminal" if settled
                      else "claim_precondition_retry",
                      run=run_id[:8], count=count, error=str(e)[:160])
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         return
     except Exception as e:
         # Non-RuntimeError claim failures retain the historical retry behavior,
         # but stay visible. RequiredContextMissing is handled terminally above.
         _record_tick_error(sf, run_id, project_id, e, "claim_failed")
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
         return
     if claimed is None:
@@ -1548,12 +1682,12 @@ async def _run_skillflow_tick(project_id: str, loop):
                      run=run_id[:8], node=recovery["successor"],
                      predecessor=recovery["predecessor"],
                      reason=recovery["reason"][:200])
-            _sync_project_status_to_db(project_id)
+            await _sync_status_off_the_loop(project_id)
             return
         tick_log(project_id, "no_claim", run=run_id[:8],
                  node=next_node if next_node is not None
                  else (sf.get_run(run_id) or {}).get("current_node"))
-        _sync_project_status_to_db(project_id)
+        await _sync_status_off_the_loop(project_id)
         return
 
     # Phase C+D: Execute
@@ -1638,7 +1772,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         sf.fail_step(claimed.token, str(e), retryable=True)
 
     # Sync project status to DB after each tick
-    _sync_project_status_to_db(project_id)
+    await _sync_status_off_the_loop(project_id)
     # A fenced tick already said `cancelled_mid_step`, with the reason. Adding
     # an `executed` line after it is not extra detail, it is a second line
     # contradicting the first.
@@ -1649,18 +1783,24 @@ async def _run_skillflow_tick(project_id: str, loop):
 
 
 def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str):
-    """Push a checkpoint_reached SSE event to the global stream."""
+    """Push a checkpoint_reached SSE event to the global stream.
+
+    Called from the status sync, which the tick runs on a worker thread
+    (`_sync_status_off_the_loop`) so that sync can wait for `sf._lock` without
+    stalling the loop. `api.sse_manager.push_global_event` is the SSE path's own
+    thread-safe door — it holds the loop captured at startup — where asking
+    THIS thread for "the event loop" (`asyncio.get_event_loop`) raised inside a
+    worker and dropped every checkpoint event silently.
+    """
     try:
-        from api.sse_manager import stream_manager
-        payload = json.dumps({
+        from api.sse_manager import push_global_event
+        push_global_event({
             "type": "checkpoint_reached",
             "project_id": project_id,
             "run_id": run_id,
             "step_id": step_id,
             "label": label,
         })
-        loop = asyncio.get_event_loop()
-        loop.create_task(stream_manager.push_log("__global__", payload))
     except Exception:
         pass  # Best-effort; checkpoint polling via GET still works
 
@@ -2486,6 +2626,25 @@ def _failure_reason(run: dict) -> str:
     return reason
 
 
+async def _sync_status_off_the_loop(project_id: str) -> None:
+    """`_sync_project_status_to_db` on a worker thread.
+
+    The tick's status sync is DB work top to bottom: the aitelier.db writes, the
+    manifest re-read, `sf.get_steps`, and — through `_sync_task_statuses` — a
+    read of the run's loop state on the SHARED SkillFlow connection. That read
+    is issued under `sf._lock` like every other host statement on that
+    connection (one connection, one lock: `_sf_statement_lock`), and a lock the
+    EVENT LOOP can block on is exactly the stall that moved this tick's prologue
+    onto threads in the first place (`_get_or_create_skillflow_run`'s call site:
+    4 of the 20 loop-stack dumps of 2026-11-17 name this same run of reads,
+    `_sync_project_status_to_db` → `sf.get_steps`). So the sync runs where it
+    can wait for the lock: on the executor. Nothing in it needs the loop —
+    `_emit_checkpoint_sse` hands its event to the SSE manager's own thread-safe
+    door instead of asking this thread for "the" loop.
+    """
+    await asyncio.to_thread(_sync_project_status_to_db, project_id)
+
+
 def _sync_project_status_to_db(project_id: str):
     """Write skillflow run status back to AItelier DB so the UI is not stale.
 
@@ -2681,10 +2840,16 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
     # Use completed_items (v2 set-based tracking) to compute the index.
     # current_index is deprecated and may be stale/absent.
     try:
-        row = sf._conn.execute(
-            "SELECT current_index, completed_items, items_json FROM skillflow_loop_state "
-            "WHERE run_id = ?", (run["id"],),
-        ).fetchone()
+        # Statement only, under the engine's connection lock: the tick path
+        # reaches this from `_sync_status_off_the_loop`, i.e. on a worker
+        # thread, and every project ticks this same text
+        # (`_sf_statement_lock`). Not held across the aitelier.db writes above
+        # or the task updates below.
+        with _sf_statement_lock(sf):
+            row = sf._conn.execute(
+                "SELECT current_index, completed_items, items_json FROM skillflow_loop_state "
+                "WHERE run_id = ?", (run["id"],),
+            ).fetchone()
     except Exception:
         row = None
     if not row:

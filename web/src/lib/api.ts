@@ -426,11 +426,32 @@ export function getTrace(
 //  All Runs (cross-project)
 // ═════════════════════════════════════════════════════════════════════
 
-/** List all runs across all projects, optionally filtered by status (e.g. 'running'). */
-export function listAllRuns(status?: string): Promise<{ runs: Record<string, unknown>[] }> {
-  let path = '/api/runs';
-  if (status) path += '?status=' + encodeURIComponent(status);
-  return _get(path);
+/**
+ * One page of the runs list. The server answers with a WINDOW by default —
+ * only the rows inside its own `window_days` — so the response carries the
+ * counts a reader needs to know what was left out: `total_count` is every row
+ * the server knows, `returned_count` is how many it put in `runs`. Nothing on
+ * the page may hardcode either the window or those numbers.
+ */
+export interface RunsList {
+  runs: Record<string, unknown>[];
+  window_days?: number | null;
+  total_count?: number | null;
+  returned_count?: number | null;
+}
+
+/**
+ * List runs across all projects, optionally filtered by status (e.g. 'running').
+ *
+ * With `includeAll` the server answers with EVERY row (same keys) instead of
+ * the default window. Callers that poll must not pass it: asking once for the
+ * archive must not turn a timed poll into a full-archive poll.
+ */
+export function listAllRuns(status?: string, includeAll?: boolean): Promise<RunsList> {
+  const params: string[] = [];
+  if (status) params.push('status=' + encodeURIComponent(status));
+  if (includeAll) params.push('include_all=true');
+  return _get('/api/runs' + (params.length > 0 ? '?' + params.join('&') : ''));
 }
 
 /** Catalog of runnable pipelines (built-in and generated): origin, addons, durable state. */

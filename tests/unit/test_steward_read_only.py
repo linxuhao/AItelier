@@ -127,7 +127,10 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
         "acknowledge_director_message",
         # Owner 2026-11-17: replies in the private inbox, reply-only (see the both-inboxes test).
-        "send_driver_message"}
+        "send_driver_message",
+        # Step 16 (design-steward 7.4): the steward's own scheduled reminders; the
+        # service writes only state_steward_schedules, for the steward of its own project.
+        "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert not {"acknowledge_driver_message", "resolve_driver_message"} & STEWARD_WRITE_ACTIONS
     assert "resolve_director_message" not in STEWARD_WRITE_ACTIONS
@@ -421,6 +424,12 @@ def test_the_enumeration_sees_every_kind_of_write_route():
     for owner_only in ("/api/steward/proposals/{proposal_id}/approve",
                        "/api/steward/proposals/{proposal_id}/decline", "/api/steward/memory-requests"):
         assert owner_only in paths and _klass(owner_only) == "other", owner_only
+    # Step 16: the owner's schedule routes, likewise owner only. The steward writes its
+    # schedules through the State commands (class "state"), never through these.
+    for method, owner_only in (("POST", "/api/steward/schedules"), ("POST", "/api/steward/schedules/preview"),
+                               ("PUT", "/api/steward/schedules/{schedule_id}"),
+                               ("DELETE", "/api/steward/schedules/{schedule_id}")):
+        assert (method, owner_only) in routes and _klass(owner_only) == "other", (method, owner_only)
 
 
 def test_every_write_route_with_a_steward_token(world, client):

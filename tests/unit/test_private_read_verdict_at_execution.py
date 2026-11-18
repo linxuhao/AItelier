@@ -64,6 +64,7 @@ _ARGS = {
                               "actionable_only": False},
     "list_steward_proposals": {"status": "all"},
     "list_steward_memory_requests": {},
+    "list_steward_schedules": {},
 }
 
 
@@ -89,8 +90,9 @@ def _services(tmp_path):
 
 
 def _steward_reader(trusted, tmp_path):
-    """The one trusted caller list_steward_memory_requests answers: the steward
-    of aitelier-home (plugin step 14). Every other trusted caller is refused
+    """The one trusted caller list_steward_memory_requests (and, besides the
+    owner's session, list_steward_schedules) answers: the steward of
+    aitelier-home (plugin steps 14, 16). Every other trusted driver is refused
     with steward_role_required, so the control needs this identity."""
     from core.drivers import DriverRegistry
     from core.dsh_driver import DshDrivers
@@ -103,7 +105,7 @@ def _steward_reader(trusted, tmp_path):
                         project_read_trusted=True)
 
 
-_STEWARD_ONLY_READS = {"list_steward_memory_requests"}
+_STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules"}
 
 
 def _classify(call):

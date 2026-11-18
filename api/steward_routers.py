@@ -6,6 +6,10 @@ is no driver (core.state_steward.StateSteward.is_owner_session), on top of the
 writer verdict. A steward token never reaches them: they are not on its write
 whitelist (api/authz._steward_denial). The impact read is the owner's or the
 steward's. Every answer is a private record: none is served to an anonymous caller.
+
+Scheduled reminders (step 16, design-steward 7.4): the owner creates, edits,
+deletes and previews them here; the list is the owner's or the steward's. The
+steward itself writes them through its State commands.
 """
 import asyncio
 
@@ -17,7 +21,8 @@ from api import authz
 from api.dsh_driver_routers import manager
 from api.state_graph_routers import get_service
 from core.state_graph import StateGraphError, StateNotFound
-from core.state_steward import ProposalConflict, impact_is_empty, stop_impact
+from core.state_steward import (ProposalConflict, ScheduleConflict, ScheduleInvalid, impact_is_empty,
+                                preview_schedule, stop_impact)
 
 router = APIRouter(prefix="/api/steward", tags=["Steward"])
 
@@ -130,3 +135,81 @@ def read_memory_request(request_id: str, service=Depends(get_service)):
         return service.steward.read_memory_request(request_id)
     except StateNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+# --- scheduled reminders (step 16) ---------------------------------------------------------
+
+class ScheduleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=200)
+    instruction: str = Field(min_length=1, max_length=2000)
+    schedule: dict
+    tz: str = Field(min_length=1, max_length=64)
+    enabled: bool = True
+
+
+class ScheduleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    instruction: str | None = Field(default=None, min_length=1, max_length=2000)
+    schedule: dict | None = None
+    tz: str | None = Field(default=None, min_length=1, max_length=64)
+    enabled: bool | None = None
+
+
+class SchedulePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schedule: dict
+    tz: str = Field(min_length=1, max_length=64)
+
+
+def _schedule_call(call, *args, **kwargs):
+    """One owner write; a refusal keeps its code (and a conflict the current row)."""
+    try:
+        return call(*args, **kwargs)
+    except ScheduleConflict as exc:
+        return JSONResponse({"detail": {"code": "version_conflict", "schedule": exc.row}}, status_code=409)
+    except ScheduleInvalid as exc:
+        return JSONResponse({"detail": {"code": exc.code, "reason": exc.reason}}, status_code=422)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
+
+
+@router.get("/schedules", dependencies=[Depends(authz.require_reader)])
+def list_schedules(service=Depends(get_service)):
+    """Every live schedule (the owner or the steward)."""
+    if not (service.steward.is_owner_session() or service.steward.is_steward()):
+        raise HTTPException(403, "owner_or_steward_required")
+    return service.steward.list_schedules()
+
+
+@router.post("/schedules", dependencies=[Depends(authz.require_writer)])
+def create_schedule(body: ScheduleCreate, service=Depends(get_service)):
+    _owner(service)
+    return _schedule_call(service.steward.create_schedule, body.title, body.instruction, body.schedule,
+                          tz=body.tz, enabled=body.enabled, as_owner=True)
+
+
+@router.post("/schedules/preview", dependencies=[Depends(authz.require_writer)])
+def preview(body: SchedulePreview, service=Depends(get_service)):
+    """The next runs the schedule would have if saved now, in its zone."""
+    _owner(service)
+    return _schedule_call(preview_schedule, body.schedule, body.tz)
+
+
+@router.put("/schedules/{schedule_id}", dependencies=[Depends(authz.require_writer)])
+def update_schedule(schedule_id: str, body: ScheduleUpdate, service=Depends(get_service)):
+    _owner(service)
+    return _schedule_call(service.steward.update_schedule, schedule_id, body.expected_version, title=body.title,
+                          instruction=body.instruction, schedule=body.schedule, tz=body.tz, enabled=body.enabled,
+                          as_owner=True)
+
+
+@router.delete("/schedules/{schedule_id}", dependencies=[Depends(authz.require_writer)])
+def delete_schedule(schedule_id: str, expected_version: int, service=Depends(get_service)):
+    _owner(service)
+    out = _schedule_call(service.steward.delete_schedule, schedule_id, expected_version, as_owner=True)
+    return {"deleted": True} if isinstance(out, dict) else out

@@ -183,9 +183,10 @@ export interface DirectorHost {
    *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
    *    (channel, messageRef): a redelivery answers the first result with duplicate: true.
    *    The host refuses a sender that is not the channel's current binding
-   *    (channel_sender_not_bound), a body over its bound (body_too_long) and too many
-   *    messages (rate_limited), as {refused: code}. When the text is exactly an approval
-   *    phrase the host executes it in code and says so in `approval`; the model never does.
+   *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
+   *    Unicode text (invalid_body), and too many messages (rate_limited), as
+   *    {refused: code}. When the text is exactly an approval phrase the host executes it
+   *    in code and says so in `approval`; the model never does.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
    *    too long ago decides nothing (approval refusal approval_too_old).
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;

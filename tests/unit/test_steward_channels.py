@@ -286,6 +286,42 @@ def test_an_empty_body_is_refused(world):
     refused(lambda: relay(world, " \n　", "ts"), "empty_body")
 
 
+def test_a_lone_surrogate_is_refused_as_bad_input_not_a_crash_that_holds_the_lane(world, caplog):
+    """JSON "\\ud800" decodes to a lone UTF-16 surrogate, which UTF-8 cannot encode: it
+    used to raise UnicodeEncodeError (a 500, which the host takes as an outage and the
+    WeChat plugin retries for 10 minutes, every later message held behind it). Now it is
+    refused like any other bad input, before anything is hashed, measured or stored."""
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    for sender in ("U-STRANGER", SLACK_USER):
+        refused(lambda: relay(world, "hi \ud800 secret", f"ts-{sender}", sender=sender), "invalid_body")
+    bind(world)
+    refused(lambda: relay(world, "hi \ud800 secret", "ts-b"), "invalid_body")
+    # The bounded fields are refused by their schema (a validation 422), never a crash.
+    for call in (lambda: relay(world, "hi", "ts-\udfff", key="k1"),
+                 lambda: relay(world, "hi", "ts-s", key="k2", sender="U\ud800"),
+                 lambda: execute(world.steward, "bind_owner_channel", {"request_key": "b", "channel": "slack",
+                                                                       "sender_ref": "U\ud800", "code": "123456"},
+                                 allow_write=True)):
+        with pytest.raises(StateGraphError, match="unable to parse raw data as a unicode string"):
+            call()
+    refused(lambda: report(world, "s1", detail="scan \ud800"), "invalid_request")
+    refused(lambda: report(world, "s2", qr_svg='<svg xmlns="http://www.w3.org/2000/svg">\ud800</svg>'),
+            "qr_svg_refused")
+    assert conversation(world) == []
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines and all("invalid_body" in line for line in lines) and not any("secret" in line for line in lines)
+    # A surrogate pair is ordinary text.
+    assert relay(world, "ok \U0001F600", "ts-ok")["message_id"]
+
+
+def test_a_lone_surrogate_over_http_is_a_422_refusal(world, client):
+    steward = {"X-AItelier-Driver-Token": world.tokens["steward"], "Content-Type": "application/json"}
+    raw = ('{"request_key": "r", "channel": "slack", "sender_ref": "U-STRANGER", "channel_message_ref": "ts", '
+           '"body": "hi \\ud800"}')
+    r = client.post("/api/state/commands/relay_owner_message", headers=steward, content=raw.encode())
+    assert r.status_code == 422 and r.json()["detail"].startswith("invalid_body"), r.text
+
+
 def test_the_rate_limit_counts_accepted_messages_per_channel(world, monkeypatch, caplog):
     caplog.set_level(logging.WARNING, logger="core.state_channels")
     bind(world)

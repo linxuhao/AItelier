@@ -173,6 +173,21 @@ def _written_at(channel_at):
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+def _require_utf8(field, value, code="invalid_request"):
+    """Refuse text that cannot be written as UTF-8: a lone UTF-16 surrogate (JSON's
+    "\\ud800" decodes to one). Hashing it, measuring it or binding it into SQLite raises
+    UnicodeEncodeError - a 500, which the host takes as an outage and retries, holding
+    the channel's lane behind that one message - so it is refused first, like any other
+    bad input. The refusal never quotes the value. Only the unbounded text fields need
+    it: a field with a pydantic length bound (sender_ref, channel_message_ref, code, ...)
+    is already refused there (pydantic cannot read a lone surrogate as a string)."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise StateGraphError(f"{code}: {field} is not valid Unicode text") from None
+
+
 def _refusal(exc) -> str:
     return str(exc).split(":", 1)[0]
 
@@ -197,6 +212,11 @@ class StateChannels:
         and is not part of the request's identity (a redelivery may stamp it anew)."""
         if channel not in CHANNELS:
             raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
+        try:
+            _require_utf8("body", body, "invalid_body")
+        except StateGraphError:
+            self._log_refusal("invalid_body", channel, sender_ref, len(body.encode("utf-8", "surrogatepass")))
+            raise
         if not isinstance(body, str) or not body.strip():
             raise StateGraphError("empty_body: body must be nonempty text")
         size = len(body.encode("utf-8"))
@@ -348,6 +368,8 @@ class StateChannels:
         while the WeChat login needs a scan, its QR as an SVG. The row is replaced each
         time; the dashboard shows it (the owner's GET /api/steward/channels). Neither the
         detail nor the image is ever logged."""
+        _require_utf8("detail", detail)
+        _require_utf8("qr_svg", qr_svg, "qr_svg_refused")
         request_hash = _hash([channel, connected, detail, qr_svg])
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)

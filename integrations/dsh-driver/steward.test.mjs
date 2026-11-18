@@ -658,6 +658,10 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
   let thrown = failing(422, '"channel_sender_not_bound: U9 is not bound"');
   const channels = channelOps(async () => { throw thrown; });
   assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), { refused: 'channel_sender_not_bound' });
+  // A body that is not valid Unicode text (a lone surrogate) is refused, not an outage: as an
+  // error the WeChat plugin would retry it for 10 minutes and hold the lane behind it.
+  thrown = failing(422, '"invalid_body: body is not valid Unicode text"');
+  assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi \ud800' }), { refused: 'invalid_body' });
   thrown = failing(422, '"code_expired"');
   assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'y' }), { refused: 'code_expired' });
   thrown = failing(422, '"code_retired"');

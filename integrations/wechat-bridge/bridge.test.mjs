@@ -3,6 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createBridge, splitText, superviseLogin, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
@@ -303,4 +308,20 @@ test('splitText keeps surrogate pairs whole', () => {
   const text = '😀'.repeat(5);
   const parts = splitText(text, 2);
   assert.deepEqual(parts, ['😀😀', '😀😀', '😀']);
+});
+
+test('run.sh publishes the container\'s 18731 on the host\'s 127.0.0.1:18741 only, or on WECHAT_BRIDGE_PORT', () => {
+  // A stand-in `docker` on PATH prints its arguments: nothing is started.
+  const home = mkdtempSync(join(tmpdir(), 'wechat-bridge-run-'));
+  mkdirSync(join(home, '.aitelier-secrets'));
+  writeFileSync(join(home, '.aitelier-secrets', 'wechat-bridge-token'), 'throwaway\n');
+  mkdirSync(join(home, 'bin'));
+  writeFileSync(join(home, 'bin', 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+  chmodSync(join(home, 'bin', 'docker'), 0o755);
+  const script = fileURLToPath(new URL('./run.sh', import.meta.url));
+  const run = extra => execFileSync('sh', [script], { encoding: 'utf8',
+    env: { PATH: `${join(home, 'bin')}:/usr/bin:/bin`, HOME: home, ...extra } }).split('\n');
+  const published = args => args.filter((arg, i) => args[i - 1] === '--publish');
+  assert.deepEqual(published(run({})), ['127.0.0.1:18741:18731']);
+  assert.deepEqual(published(run({ WECHAT_BRIDGE_PORT: '19999' })), ['127.0.0.1:19999:18731']);
 });

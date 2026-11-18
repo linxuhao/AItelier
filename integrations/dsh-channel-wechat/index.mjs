@@ -5,7 +5,8 @@
  *  and reports its /status.
  *
  *  Config (all optional): `url` of the bridge (default http://127.0.0.1:<port>, port
- *  from WECHAT_BRIDGE_PORT or 18731) and `tokenFile` (default
+ *  from WECHAT_BRIDGE_PORT or DEFAULT_BRIDGE_PORT: the host port run.sh publishes the
+ *  bridge's container on) and `tokenFile` (default
  *  ~/.aitelier-secrets/wechat-bridge-token). No token → the channel is registered as
  *  disconnected ("not configured") and nothing is polled. */
 import { readFileSync } from 'node:fs';
@@ -29,7 +30,10 @@ export const MAX_EVENT_AGE_MS = 10 * 60 * 1000;
 const RETRY_REASONS = new Set(['unavailable']);
 
 const defaultTokenFile = () => join(homedir(), '.aitelier-secrets', 'wechat-bridge-token');
-const defaultUrl = () => `http://127.0.0.1:${process.env.WECHAT_BRIDGE_PORT || 18731}`;
+// 18741, not the bridge's in-container 18731: on the owner's host 127.0.0.1:18731 is
+// taken by an unrelated service.
+export const DEFAULT_BRIDGE_PORT = 18741;
+const defaultUrl = () => `http://127.0.0.1:${process.env.WECHAT_BRIDGE_PORT || DEFAULT_BRIDGE_PORT}`;
 
 function readToken(file) {
   try { return readFileSync(file, 'utf8').trim(); } catch { return ''; }

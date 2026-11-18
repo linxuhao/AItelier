@@ -194,10 +194,21 @@ def check_qr_svg(svg):
     # reaches the parser: without a DTD it defines no entity and resolves nothing.
     if "<!" in svg or "<?" in svg or "&" in svg:
         raise refusal
+    # The parser takes namespace declarations out of the attributes, so they are read as
+    # events: the only one a QR has is the default SVG namespace (no prefix to hide an
+    # element or attribute behind, no other vocabulary declared).
+    parser, root = ElementTree.XMLPullParser(events=("start-ns", "end")), None
     try:
-        root = ElementTree.fromstring(svg)  # one root element; anything after it is a ParseError
+        parser.feed(svg)
+        parser.close()  # one root element; anything after it is a ParseError
+        for event, item in parser.read_events():
+            if event == "start-ns" and item != ("", _SVG_NS[1:-1]):
+                raise refusal
+            root = item if event == "end" else root
     except ElementTree.ParseError:
         raise refusal from None
+    if root is None:
+        raise refusal
     for element in root.iter():
         name = element.tag[len(_SVG_NS):] if element.tag.startswith(_SVG_NS) else None
         allowed = name == "svg" if element is root else name in _QR_SHAPES

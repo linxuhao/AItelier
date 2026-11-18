@@ -568,6 +568,12 @@ def test_only_the_steward_reports_a_status(world):
     '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1" fill="&#35;000"/></svg>',
     '<svg xmlns="http://www.w3.org/2000/svg"><!-- a comment --></svg>',
     '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1" transform="rotate(1)"/></svg>',
+    # Only the default SVG namespace is declared: no prefixed SVG, no other vocabulary.
+    '<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:path d="M0 0h1"/></s:svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:path d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><path d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M0 0h1"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg"><g xmlns:x="urn:x"><path d="M0 0h1"/></g></svg>',
 ])
 def test_a_qr_that_is_not_a_plain_svg_is_refused_and_never_quoted(world, svg, caplog):
     caplog.set_level(logging.DEBUG)

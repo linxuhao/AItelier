@@ -537,6 +537,77 @@ def _gate_harness_identity() -> dict:
     return {"path": str(path), "sha256": digest, "reason": None}
 
 
+# The repository modules the `source_identity` digest covers: the entry module
+# that serves /health, the write gate, the read cache and the Cloudflare Access
+# identity. All four are imported by THIS module at import time, so a process
+# able to answer /health necessarily loaded their code. Written out and fixed on
+# purpose - a set discovered at run time (walking the tree, or reading
+# sys.modules) would differ between two processes of the same commit and make
+# the digest incomparable, which is the only thing it is good for.
+SOURCE_IDENTITY_MODULES = ("api/main.py", "api/authz.py", "api/_read_cache.py",
+                           "core/cf_access.py")
+
+
+def _source_identity() -> dict:
+    """Which source bytes this process loaded: root, digest, and the moment.
+
+    Called ONCE, at import (``_SOURCE_IDENTITY`` below), because that is the only
+    moment where the code the interpreter runs and the bytes on disk are known to
+    be the same thing. Everything here is computed from that one reading and then
+    reported verbatim, never re-read per request.
+
+    `root` is the checkout this module was imported from - the directory the
+    `api` and `core` packages it belongs to live in - so the digest's file names
+    are repo-relative to it.
+
+    The digest covers exactly the files in SOURCE_IDENTITY_MODULES, in that
+    order, and nothing else. Each file contributes its own repo-relative path, a
+    NUL byte, the lowercase hex SHA-256 of its bytes and a newline, fed in that
+    order into one SHA-256; the reported `digest` is that outer hash, lowercase
+    hex. A reader recomputes it from any tree thus (root taken from the answer):
+
+        h = hashlib.sha256()
+        for rel in answer["files"]:
+            h.update(rel.encode() + b"\\0")
+            h.update(hashlib.sha256((root / rel).read_bytes()).hexdigest().encode() + b"\\n")
+        assert h.hexdigest() == answer["digest"]
+
+    What a reader compares it WITH: a digest computed the same way from the
+    commit they meant to deploy. A process started before a merge keeps
+    reporting the OLD digest after the disk holds the new bytes - that is the
+    witness this field exists to give, and the one thing `gate_harness` cannot
+    say, since that field is re-read per request and so follows the disk.
+    `process.started_at` says from when to compare.
+
+    A missing or unreadable file is DECLARED (null digest plus a reason naming
+    the path) and never raised: this runs at import, where raising would take the
+    whole backend down over a cosmetic field.
+    """
+    root = _Path(__file__).resolve().parent.parent
+    files = tuple(SOURCE_IDENTITY_MODULES)
+    captured_at = _datetime.fromtimestamp(
+        _time.time(), _timezone.utc).isoformat(timespec="milliseconds")
+    hasher = _hashlib.sha256()
+    for rel in files:
+        path = root / rel
+        try:
+            file_digest = _hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            return {"root": str(root), "digest": None, "captured_at": captured_at,
+                    "files": files,
+                    "reason": f"could not read {path}: {type(exc).__name__}"}
+        hasher.update(rel.encode() + b"\0")
+        hasher.update(file_digest.encode() + b"\n")
+    return {"root": str(root), "digest": hasher.hexdigest(),
+            "captured_at": captured_at, "files": files, "reason": None}
+
+
+# Captured at import, ONCE. This is the witness: a merge changes the files on
+# disk, but this value can only change by restarting the process, so a probe can
+# tell "the disk says X" (gate_harness) from "the process is running X" (here).
+_SOURCE_IDENTITY = _source_identity()
+
+
 def _process_age() -> dict:
     """When the serving process started and how long it has been up, read per request.
 
@@ -604,18 +675,33 @@ def health_check() -> dict:
     process, not of the container: a restart by Docker's restart policy resets it,
     and /health cannot count the restarts that came before.
 
+    `source_identity` reports the source this process actually IMPORTED - the
+    checkout root, a digest over the modules' files captured at import, and when
+    (see _source_identity, which names the covered files and how the digest is
+    ordered). It is deliberately NOT read fresh: that is what makes it a witness.
+    `gate_harness` follows the disk and therefore moves at a merge; this field
+    does not move until the process restarts, so a reader compares the TWO to
+    tell "the bytes on disk changed" from "the loaded code changed", and compares
+    it with a digest recomputed from the commit it meant to deploy.
+
     SYNCHRONOUS, and it BLOCKS: reading and sha256-ing the export and reading
     /proc/self/stat are short but they are still disk and syscall work. That is
     why the ROUTE (`health_probe`, below) never calls it on the event loop and
     never on a shared anyio slot - it hands it to the probe pool. This function
     keeps its name because a caller with no event loop can still ask it directly
-    (tests/unit/test_task_log_stream_is_gated.py does). Nothing here is cached:
-    the digest follows the file's CURRENT bytes and the uptime is THIS process's,
-    so both fields still track their live sources.
+    (tests/unit/test_task_log_stream_is_gated.py does). Nothing below is cached:
+    the gate digest follows the file's CURRENT bytes and the uptime is THIS
+    process's, so both fields still track their live sources. `source_identity`
+    is the exception ON PURPOSE: it is the value captured at import, handed over
+    as-is (a fresh dict and a fresh `files` list, so neither the captured record
+    nor a later answer can be edited by a caller), because a field re-read per
+    request cannot witness what was loaded.
     """
     return {"status": "ok", "engine": "DPE SOTA v3.0",
             "gate_harness": _gate_harness_identity(),
-            "process": _process_age()}
+            "process": _process_age(),
+            "source_identity": {**_SOURCE_IDENTITY,
+                                "files": list(_SOURCE_IDENTITY["files"])}}
 
 
 @app.get("/health")

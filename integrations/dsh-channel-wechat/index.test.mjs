@@ -125,16 +125,18 @@ test('messages from well before this start are not replayed; recent ones are', a
   } finally { await channel.stop(); await bridge.close(); }
 });
 
-test('status: connected when logged in, the QR in the detail when a scan is needed, unreachable when the bridge is down', async () => {
-  const bridge = await fakeBridge({ status: { logged_in: false, qr: 'https://login.weixin.qq.com/l/q1', since: 'x' } });
+test('status: connected when logged in, the drawn QR (never its payload) when a scan is needed, unreachable when the bridge is down', async () => {
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
+  const bridge = await fakeBridge({ status: { logged_in: false, qr: 'https://login.weixin.qq.com/l/q1', qr_svg: SVG, since: 'x' } });
   const channels = fakeChannels();
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
     waitSeconds: 1, statusEveryMs: 30, retryMs: 30 });
   try {
-    await until(() => channels.registered.status().detail?.startsWith('scan needed'));
-    assert.deepEqual(channels.registered.status(), { connected: false, detail: 'scan needed: https://login.weixin.qq.com/l/q1' });
+    await until(() => channels.registered.status().qrSvg);
+    assert.deepEqual(channels.registered.status(), { connected: false, detail: 'scan needed', qrSvg: SVG });
     bridge.status = { logged_in: false, since: 'x' };
-    await until(() => channels.registered.status().detail === 'scan needed');
+    await until(() => !channels.registered.status().qrSvg);
+    assert.deepEqual(channels.registered.status(), { connected: false, detail: 'scan needed' });
     bridge.status = { logged_in: true, user_id: 'wxid_bot', since: 'x' };
     await until(() => channels.registered.status().connected);
     assert.deepEqual(channels.registered.status(), { connected: true });

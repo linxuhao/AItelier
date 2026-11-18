@@ -146,7 +146,10 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # Step 19 (design-steward 7.2): the steward's HOST relays what an owner chat channel
         # received; each command checks the channel's bound account or the owner's code itself,
         # and none approves on the steward's say (tests/unit/test_steward_channels.py).
-        "relay_owner_message", "bind_owner_channel", "record_channel_delivery"}
+        "relay_owner_message", "bind_owner_channel", "record_channel_delivery",
+        # ...and reports each channel's status (a detail line, the WeChat login QR as a
+        # checked SVG) into its private status row, which only the owner's dashboard reads.
+        "report_channel_status"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

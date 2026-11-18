@@ -3,3 +3,4 @@ node_modules
 *.test.mjs
 README.md
 run.sh
+test-fixtures

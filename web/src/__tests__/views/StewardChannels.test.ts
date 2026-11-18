@@ -1,7 +1,8 @@
 /** The owner's chat channels on the dashboard (plugin step 19, design 7.2).
  *
  *  - the steward pane has a Channels tab: each channel shows its bound account or
- *    "not bound", and the host's status when it reported one;
+ *    "not bound", and the host's status when it reported one (with its time); a WeChat
+ *    login QR is an <img> of a data URL, never markup, with the scan line;
  *  - Bind asks the backend for a one-time code and shows it with a countdown and
  *    the instruction; the code goes away once the list shows a new binding;
  *  - Unbind asks first; the default-channel selector PUTs the choice (or null);
@@ -97,6 +98,67 @@ describe('the channels tab', () => {
     await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
     expect(card(view.container, 'slack').querySelector('[data-channel-status]')).toBeNull();
     expect(card(view.container, 'slack').dataset.bound).toBe('0');
+  });
+
+  it('shows when the host reported the status, and a login QR as an image (never as markup) with the scan line', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29"><path stroke="#000" d="M4 4.5h7"/></svg>';
+    const listed = channels();
+    listed.channels[1] = {...listed.channels[1], status: {connected: false, detail: 'scan needed', at: '2026-11-18T12:00:00Z'}, qr_svg: svg};
+    api.listOwnerChannels.mockResolvedValue(listed);
+    const view = render(StewardChannels);
+    const qr = await waitFor(() => {
+      const el = card(view.container, 'wechat').querySelector('[data-channel-qr]') as HTMLElement;
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(card(view.container, 'wechat').querySelector('[data-channel-at]')?.textContent)
+      .toBe(new Date('2026-11-18T12:00:00Z').toLocaleString());
+    const img = qr.querySelector('img') as HTMLImageElement;
+    const src = img.getAttribute('src') ?? '';
+    expect(src.startsWith('data:image/svg+xml;base64,')).toBe(true);
+    expect(new TextDecoder().decode(Uint8Array.from(atob(src.slice(src.indexOf(',') + 1)), c => c.charCodeAt(0)))).toBe(svg);
+    expect(img.getAttribute('alt')).toBe('Scan this with the WeChat account you want to bind to log it in');
+    expect(qr.textContent).toContain('Scan this with the WeChat account you want to bind to log it in');
+    expect(view.container.querySelector('svg')).toBeNull();
+    expect(card(view.container, 'slack').querySelector('[data-channel-qr]')).toBeNull();
+  });
+
+  it('the scan line is in Chinese for a Chinese owner, and a hostile SVG never becomes markup', async () => {
+    langStore.set('zh-CN');
+    const hostile = '<svg xmlns="http://www.w3.org/2000/svg" onload="window.pwned=1"><script>window.pwned=1</script></svg>';
+    const listed = channels();
+    listed.channels[1] = {...listed.channels[1], qr_svg: hostile};
+    api.listOwnerChannels.mockResolvedValue(listed);
+    const view = render(StewardChannels);
+    const qr = await waitFor(() => {
+      const el = card(view.container, 'wechat').querySelector('[data-channel-qr]') as HTMLElement;
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(qr.textContent).toContain('用要绑定的微信小号扫码登录');
+    expect(view.container.querySelector('script, svg, [onload]')).toBeNull();
+    expect(view.container.innerHTML).not.toContain('<script');
+    expect((window as unknown as {pwned?: number}).pwned).toBeUndefined();
+  });
+
+  it('while a login QR is shown the list is re-read, so a new QR or the login shows; then the re-reading stops', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
+    const scanning = channels();
+    scanning.channels[1] = {...scanning.channels[1], qr_svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>'};
+    api.listOwnerChannels.mockResolvedValue(scanning);
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr]')).not.toBeNull());
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(1);
+    const loggedIn = channels();
+    loggedIn.channels[1] = {...loggedIn.channels[1], status: {connected: true, at: '2026-11-18T12:00:20Z'}, qr_svg: null};
+    api.listOwnerChannels.mockResolvedValue(loggedIn);
+    await vi.advanceTimersByTimeAsync(6000);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr]')).toBeNull());
+    expect(card(view.container, 'wechat').querySelector('[data-channel-status]')?.getAttribute('data-channel-status')).toBe('connected');
+    const calls = api.listOwnerChannels.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(calls);
   });
 
   it('Bind shows the one-time code, the instruction and a countdown to its expiry', async () => {

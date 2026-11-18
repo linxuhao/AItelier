@@ -99,6 +99,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # table naming which channel each owner/steward message came from or went to.
     # No projection: never public.
     "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
+    # The channels' status as the steward's host reports it; the WeChat row can hold
+    # the login QR (a live login token while it is shown). No projection.
+    "state_owner_channel_status",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

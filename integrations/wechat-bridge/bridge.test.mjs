@@ -117,6 +117,43 @@ test('status follows scan, login and logout, and carries the QR only while it ca
   } finally { await bridge.close(); }
 });
 
+test('while a scan is needed, status carries the QR drawn as an SVG, and never logs it', async () => {
+  const QR = 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN';
+  const drawn = [], logs = [];
+  const renderQr = qr => { drawn.push(qr); return `<svg xmlns="http://www.w3.org/2000/svg">${drawn.length}</svg>`; };
+  const { bot, bridge, json } = await started({ renderQr, log: line => logs.push(line) });
+  try {
+    let [, body] = await json('/status');
+    assert.equal(body.qr_svg, undefined, 'no QR before a scan is asked for');
+    bot.emit('scan', QR, types.ScanStatus.Waiting);
+    [, body] = await json('/status');
+    assert.deepEqual([body.qr, body.qr_svg, drawn], [QR, '<svg xmlns="http://www.w3.org/2000/svg">1</svg>', [QR]]);
+    bot.emit('scan', '', types.ScanStatus.Scanned);
+    [, body] = await json('/status');
+    assert.equal(body.qr_svg, undefined, 'a scanned QR is not shown again');
+    bot.emit('scan', QR + '-2', types.ScanStatus.Waiting);
+    [, body] = await json('/status');
+    assert.equal(body.qr_svg, '<svg xmlns="http://www.w3.org/2000/svg">2</svg>', 'a new QR is drawn anew');
+    bot.emit('login', { id: 'wxid_bot' });
+    [, body] = await json('/status');
+    assert.deepEqual([body.logged_in, body.qr_svg], [true, undefined]);
+    assert.ok(!logs.some(line => line.includes('SECRET-LOGIN-TOKEN') || line.includes('<svg')), logs.join('\n'));
+  } finally { await bridge.close(); }
+});
+
+test('a QR that cannot be drawn leaves only the payload, and the failure is logged without it', async () => {
+  const logs = [];
+  const renderQr = () => { throw new Error('too long: SECRET-LOGIN-TOKEN'); };
+  const { bot, bridge, json } = await started({ renderQr, log: line => logs.push(line) });
+  try {
+    bot.emit('scan', 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN', types.ScanStatus.Waiting);
+    const [, body] = await json('/status');
+    assert.deepEqual([body.logged_in, body.qr_svg], [false, undefined]);
+    assert.ok(body.qr, 'the payload itself is still served');
+    assert.deepEqual(logs, ['the login QR could not be drawn']);
+  } finally { await bridge.close(); }
+});
+
 test('only 1:1 text messages from another contact become events', async () => {
   const { bot, bridge, json } = await started();
   try {

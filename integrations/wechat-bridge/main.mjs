@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { WechatyBuilder, types } from 'wechaty';
 import { PuppetNeo } from 'wechaty-puppet-neo';
 import { bindHost, createBridge, superviseLogin, DEFAULT_PORT } from './bridge.mjs';
+import { qrSvg } from './qr-svg.mjs';
 
 const tokenFile = join(homedir(), '.aitelier-secrets', 'wechat-bridge-token');
 const port = Number(process.env.WECHAT_BRIDGE_PORT || DEFAULT_PORT);
@@ -32,7 +33,7 @@ catch (error) { log(error.message); process.exit(78); }
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file
 // (the container's root filesystem is read-only; the login is in memory anyway).
 const bot = WechatyBuilder.build({ puppet: new PuppetNeo() });
-const bridge = createBridge({ bot, types, token, log });
+const bridge = createBridge({ bot, types, token, log, renderQr: qrSvg });
 
 let stopping = false;
 async function stop(reason, code) {

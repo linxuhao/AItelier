@@ -933,8 +933,10 @@ export type OwnerChannelName = 'slack' | 'wechat';
 export interface OwnerChannel {
   channel: OwnerChannelName; bound: boolean; sender_ref: string | null;
   bound_at: string | null; revoked_at: string | null; is_default: boolean | number;
-  /** What the steward's host last reported for this channel; absent when it reported nothing. */
-  status?: {connected: boolean; detail?: string} | null;
+  /** What the steward's host last reported for this channel (and when); null when it reported nothing. */
+  status?: {connected: boolean; detail?: string | null; at?: string} | null;
+  /** While a WeChat login needs a scan: its QR as an SVG document (the backend checked it). */
+  qr_svg?: string | null;
 }
 export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null }
 export function listOwnerChannels(): Promise<OwnerChannels> {

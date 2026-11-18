@@ -12,7 +12,13 @@
  *  Answers to a sender who is not the bound owner are deliberately few: a binding attempt
  *  gets one line (bound / not bound), anything else gets nothing, so a stranger learns
  *  nothing from probing (no oracle). Logs carry channel, sender, time and length, never a
- *  message body (B3). */
+ *  message body (B3).
+ *
+ *  Status: when the host can take it (the optional host.channels.reportStatus), each
+ *  registered channel's status() - connected, a detail line, and while a WeChat login
+ *  needs a scan its QR as an SVG (`qrSvg`) - is handed to the host when it changes: read
+ *  when the channel registers, every `statusMs` after, and as disconnected when it is
+ *  taken back. The detail and the QR are never logged (the QR is a login token). */
 
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
@@ -46,15 +52,18 @@ const within = (promise, ms, what) => {
 };
 /** Bounds: a channel's send, the wait for the host, and binding attempts per channel and
  *  minute (each costs a binding read, a bind write and a line through the owner's bot). */
-export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000 });
+export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
+  statusDetail: 300 });
 
-/** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list (host.d.ts).
+/** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
+ *    reportStatus (host.d.ts).
  *  @param log   (event, fields) => void; fields never carry a body.
- *  @returns { service, ownerMessageSent, ready }: `service` is what channel plugins get as
- *    `ownerChannels`; `ownerMessageSent` is the director's half (DirectorApi); `ready()` says
- *    the host can be called. The service exists from the plugin's apply on, so a channel
- *    plugin can hand a message in before the host has installed itself (measured: its
- *    caller did not exist yet); every call to the host waits for ready(). */
+ *  @returns { service, ownerMessageSent, ready, pollStatus, stop }: `service` is what channel
+ *    plugins get as `ownerChannels`; `ownerMessageSent` is the director's half (DirectorApi);
+ *    `ready()` says the host can be called (and starts the status poll); `stop()` ends that
+ *    poll. The service exists from the plugin's apply on, so a channel plugin can hand a
+ *    message in before the host has installed itself (measured: its caller did not exist
+ *    yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS }) {
   const registered = new Map(), told = new Map(), binds = new Map(), lanes = new Map(), answeredRefs = new Set();
   let ready;
@@ -85,6 +94,39 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return (listed?.channels ?? []).find(row => row.channel === channel && row.bound && !row.revoked_at && row.sender_ref);
   };
 
+  // A channel's status as the host takes it; a status() that throws reads as disconnected.
+  const statusOf = entry => {
+    let raw;
+    try { raw = entry.status(); } catch { raw = { connected: false, detail: 'status unavailable' }; }
+    return { connected: raw?.connected === true,
+      ...(text(raw?.detail) ? { detail: raw.detail.slice(0, limits.statusDetail) } : {}),
+      ...(text(raw?.qrSvg) ? { qrSvg: raw.qrSvg } : {}) };
+  };
+  // What the host last took per channel. One report at a time; only a change is reported.
+  // A refusal is the host's answer to that status (not reported again); a failure to reach
+  // it is tried again at the next poll.
+  const reported = new Map();
+  let statusQueue = Promise.resolve(), statusTimer;
+  const reportStatus = (channel, status) => {
+    if (typeof host.reportStatus !== 'function') return statusQueue;
+    statusQueue = statusQueue.then(async () => {
+      const key = JSON.stringify([status.connected, status.detail ?? null, status.qrSvg ?? null]);
+      if (reported.get(channel) === key) return;
+      try {
+        await hostReady();
+        const result = await host.reportStatus({ channel, ...status });
+        reported.set(channel, key);
+        if (result?.refused) log('channel_status_refused', { channel, connected: status.connected, reason: String(result.refused) });
+        else log('channel_status_reported', { channel, connected: status.connected });
+      } catch (error) { log('channel_status_failed', { channel, error: short(error) }); }
+    });
+    return statusQueue;
+  };
+  const pollStatus = () => {
+    for (const [channel, entry] of registered) void reportStatus(channel, statusOf(entry));
+    return statusQueue;
+  };
+
   const service = {
     /** A channel plugin announces itself; the returned function takes it back. */
     register(channel) {
@@ -95,7 +137,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       const entry = { send: channel.send, status: channel.status };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
-      return () => { if (registered.get(channel.name) === entry) registered.delete(channel.name); };
+      void reportStatus(channel.name, statusOf(entry));
+      return () => {
+        if (registered.get(channel.name) !== entry) return;
+        registered.delete(channel.name);
+        void reportStatus(channel.name, { connected: false, detail: 'channel plugin stopped' });
+      };
     },
 
     /** One message that arrived on a channel. A channel's messages reach the host one at a
@@ -205,5 +252,17 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return run;
   };
 
-  return { service, ownerMessageSent, ready: () => ready() };
+  return {
+    service, ownerMessageSent,
+    ready() {
+      ready();
+      if (!statusTimer && typeof host.reportStatus === 'function') {
+        statusTimer = setInterval(pollStatus, limits.statusMs);
+        statusTimer.unref?.();
+      }
+    },
+    /** Every registered channel's status now, reported if it changed (the poll's own step). */
+    pollStatus,
+    stop: () => { clearInterval(statusTimer); statusTimer = undefined; },
+  };
 }

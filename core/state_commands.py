@@ -1252,6 +1252,15 @@ class RecordChannelDelivery(Project):
     error: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
+class ReportChannelStatus(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    connected: bool = Field(strict=True)
+    # Bounded and checked by the service (detail_too_long, qr_svg_too_large, qr_svg_refused).
+    detail: str | None = None
+    qr_svg: str | None = None
+
+
 class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
@@ -1433,7 +1442,7 @@ WRITE_REQUESTS = {
     "delete_steward_schedule": DeleteStewardSchedule,
     "fire_steward_schedule": FireStewardSchedule,
     "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
-    "record_channel_delivery": RecordChannelDelivery,
+    "record_channel_delivery": RecordChannelDelivery, "report_channel_status": ReportChannelStatus,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1799,6 +1808,7 @@ def _handlers(service) -> dict:
         "relay_owner_message": service.channels.relay_owner_message,
         "bind_owner_channel": service.channels.bind_owner_channel,
         "record_channel_delivery": service.channels.record_channel_delivery,
+        "report_channel_status": service.channels.report_channel_status,
         "list_owner_channels": service.channels.list_owner_channels,
         "message_sources": service.channels.message_sources,
     }
@@ -1883,6 +1893,8 @@ def _driver_defaults(service, action, arguments):
 # decided by code, core.state_channels), bind_owner_channel binds only with a code the
 # owner issued on the dashboard, record_channel_delivery only notes where the steward's
 # own message went. None of them approves or declines on the steward's say.
+# report_channel_status (also the host's) only replaces a channel's status row
+# (connected, a detail line, the WeChat login QR as a checked SVG) for the dashboard.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1895,7 +1907,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # not re-injected on every wake. Acknowledgement only; resolve stays closed.
     "acknowledge_driver_message",
     "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
-    "relay_owner_message", "bind_owner_channel", "record_channel_delivery"})
+    "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

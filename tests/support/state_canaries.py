@@ -199,6 +199,11 @@ def _plan():
              "VALUES(?,'in','slack',?,?,?,?)"),
             (CHANNEL_MESSAGE, c("state_message_sources"), c("state_message_sources"), now,
              c("state_message_sources"))),
+        # The WeChat status as the host reported it: the canary in the detail and the QR.
+        "state_owner_channel_status": (
+            ("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) "
+             "VALUES('wechat',0,?,?,?)"),
+            (c("state_owner_channel_status"), c("state_owner_channel_status"), now)),
     }
 
 

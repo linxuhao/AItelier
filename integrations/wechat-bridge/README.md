@@ -63,9 +63,11 @@ not start (exit 78) and the plugin stays disabled.
   servers);
 - `--restart on-failure:5`.
 
-Then scan the QR: `GET /status` carries it as `qr`, and the channel plugin reports it in
-its status detail. The QR is a live login token for this bridge: whatever shows or logs
-that status must not log it. A QR nobody scans, a logout, or a puppet failure before
+Then scan the QR: `GET /status` carries it as `qr` and drawn as an SVG image as `qr_svg`
+(qr-svg.mjs, with the QR encoder qrcode-terminal ships, a package puppet-neo already
+pins); the channel plugin reports the image with its status, and the owner scans it on
+the dashboard's Channels tab. The QR is a live login token for this bridge: whatever
+shows or logs that status must not log it. A QR nobody scans, a logout, or a puppet failure before
 any login ends the process (exit 75), so the next start shows a fresh QR; Docker starts
 it again at most five times, then it stays exited until
 `docker start aitelier-wechat-bridge`, so an unattended bridge does not keep asking
@@ -90,8 +92,9 @@ Listens on `127.0.0.1` (or `0.0.0.0` inside its container, published on the host
 `127.0.0.1` only), port `WECHAT_BRIDGE_PORT`, default 18731. Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
-- `GET /status` → `{logged_in, user_id?, qr?, since}`. `qr` only while a QR can be
-  scanned; `since` is when the current login state began.
+- `GET /status` → `{logged_in, user_id?, qr?, qr_svg?, since}`. `qr` (the payload) and
+  `qr_svg` (it drawn as an SVG, absent if it cannot be drawn within 64 KiB) only while a
+  QR can be scanned; `since` is when the current login state began.
 - `GET /events?after=<n>&wait=<sec>` → `{events: [{seq, type: "message", sender_ref,
   message_ref, text, at}], next_after}`. Long-poll: waits up to `wait` seconds
   (capped at 25) for an event after `after`. Only 1:1 text messages from another

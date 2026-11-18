@@ -763,7 +763,7 @@ export function apply(ctx) {
   // service is owned by the fiber that applies the plugin. Without the host's `channels`
   // nothing is provided and no channel plugin loads.
   const channels = ownerChannelsFor(ctx, ctx.directorHost);
-  if (channels) ctx.provide('ownerChannels', channels.service);
+  if (channels) { ctx.provide('ownerChannels', channels.service); ctx.on('dispose', () => channels.stop()); }
   // Awaiting loader settlement inside apply would deadlock its own startup.
   void boot(ctx, { channels }).catch(error => { console.error('dsh-director startup:', String(error)); ctx.get('appExit')?.(1); });
 }

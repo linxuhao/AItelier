@@ -307,6 +307,9 @@ def enabled_channel_plugins(checkout=None):
     all exist (and whose plugin is in this checkout - a secret alone must not name a
     plugin DSH cannot load)."""
     checkout = Path(checkout or Path(__file__).resolve().parents[1])
+    # Fixed to ~/.aitelier-secrets on purpose: the channel plugins read their tokens there
+    # (step 19 contract C, D), whatever AITELIER_SECRETS_DIR says for the rest of the DSH
+    # host (deploy/install_dsh_host.py). Moving one means moving all three together.
     secrets = Path.home() / ".aitelier-secrets"
     entries = []
     for plugin, files in CHANNEL_PLUGINS.items():

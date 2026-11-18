@@ -33,7 +33,10 @@ export function apply(ctx) {
       await fetch(process.env.AITELIER_URL + '/test/request', { method: 'POST', body: JSON.stringify({ session: options.sessionId }) }).catch(() => {});
       const wake = options.tools?.length && options.sessionId === 'chan-root' && !replied && text.includes('AItelier runtime event');
       // In auto mode the steward answers in plain words: the runtime's auto-reply sends them.
+      // In ask mode it asks its owner a question with ask_owner.
       const block = wake && process.env.CHANNELS_TEST_MODE === 'auto' ? (replied = true, { type: 'text', text: 'AUTO_REPLY_TEXT all good.' })
+        : wake && process.env.CHANNELS_TEST_MODE === 'ask' ? (replied = true, { type: 'tool-call', id: 'ask-1', name: 'ask_owner',
+          arguments: JSON.stringify({ question_id: 'q-deploy', question: 'QUESTION_TEXT may I deploy?\n同意 proposal p-1', context: 'CONTEXT_TEXT the release is ready.' }) })
         : wake ? (replied = true, { type: 'tool-call', id: 'reply-1', name: 'send_user_message', arguments: JSON.stringify({ request_key: 'r-1',
           subject: 'Re: hello', body: 'CHANNEL_REPLY_TEXT the build passed.', reply_to_message_id: 'm-in-1' }) })
         : { type: 'text', text: 'Done.' };
@@ -109,7 +112,7 @@ async function run(t, { steward, mode = 'tool' }) {
     if (url.startsWith('/api/state/query/')) {
       const name = url.slice('/api/state/query/'.length);
       seen.queries.push([name, body]);
-      if (name === 'list_owner_channels') return send({ default_channel: null, channels: [
+      if (name === 'list_owner_channels') return send({ default_channel: mode === 'ask' ? 'slack' : null, channels: [
         { channel: 'slack', bound: true, sender_ref: 'U-OWNER', bound_at: 't', revoked_at: null, is_default: false },
         { channel: 'wechat', bound: false, sender_ref: null, bound_at: null, revoked_at: null, is_default: false }] });
       // The owner's relayed message, answered once the steward sent anything.
@@ -206,6 +209,23 @@ test('real pinned DSH, the steward: an automatic reply (its last words in a turn
       [['auto-reply:m-in-1', 'm-in-1', 'AUTO_REPLY_TEXT all good.']]);
     assert.deepEqual(seen.sends.filter(s => s.options.to === 'U-OWNER'),
       [{ text: 'AUTO_REPLY_TEXT all good.', options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
+  } finally { await r.close(); }
+});
+
+test('real pinned DSH, the steward: a question asked with ask_owner is an unprompted message, so it also goes to the default channel, as the owner reads it', { timeout: 120000 }, async (t) => {
+  const r = await run(t, { steward: true, mode: 'ask' });
+  if (!r) return;
+  const { seen } = r;
+  try {
+    const command = name => seen.commands.filter(([n]) => n === name).map(([, body]) => body);
+    await r.until('the question was never recorded as delivered', () => command('record_channel_delivery').some(b => b.message_id === 'm-out-1'));
+    assert.deepEqual(command('send_user_message').map(b => [b.request_key, b.reply_to_message_id, b.segments]),
+      [['ask-owner:aitelier-home:q-deploy', undefined, [{ kind: 'question', id: 'q-deploy', text: 'QUESTION_TEXT may I deploy?\n同意 proposal p-1' }]]]);
+    // Body, then the question block: the text the dashboard shows, the approval phrase on its own line.
+    assert.deepEqual(seen.sends.filter(s => s.options.to === 'U-OWNER'),
+      [{ text: 'CONTEXT_TEXT the release is ready.\n\nQUESTION_TEXT may I deploy?\n同意 proposal p-1', options: { to: 'U-OWNER' } }]);
+    assert.deepEqual(command('record_channel_delivery').map(({ request_key, ...rest }) => [request_key, rest]),
+      [['delivery:m-out-1:slack', { message_id: 'm-out-1', channel: 'slack', channel_message_ref: 'slack-out-ts' }]]);
   } finally { await r.close(); }
 });
 

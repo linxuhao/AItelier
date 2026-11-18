@@ -488,6 +488,11 @@ export function refusalCode(error) {
   return error?.status >= 400 && error?.status < 500 && named ? named[1] : undefined;
 }
 
+/** The refusals the step 19 commands answer with. Any other 4xx (an auth failure, say) is
+ *  not something the sender did: it is thrown, logged as a failure, never hidden as a refusal. */
+export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'body_too_long', 'invalid_request', 'rate_limited',
+  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'unknown_message', 'delivery_recorded']);
+
 /** Design-steward 7.2: the host side of the owner's chat channels, over the State commands
  *  and queries of step 19 (relay_owner_message, bind_owner_channel, record_channel_delivery,
  *  list_owner_channels, message_sources). The server checks everything again - the binding,
@@ -498,7 +503,7 @@ export function refusalCode(error) {
 export function channelOps(request) {
   const refused = error => {
     const code = refusalCode(error);
-    if (!code) throw error;
+    if (!CHANNEL_REFUSALS.has(code)) throw error;
     return { refused: code };
   };
   const answered = response => {

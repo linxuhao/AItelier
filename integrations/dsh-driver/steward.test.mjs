@@ -647,7 +647,7 @@ test('chat channels (step 19): each plugin call is one State request; the reques
   assert.deepEqual(calls.at(-1), ['/api/state/query/list_owner_channels', {}]);
 });
 
-test('chat channels: a 4xx is the refusal it names; a 5xx or a dropped connection is an error, not a refusal', async () => {
+test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped connection is an error, not a refusal', async () => {
   const failing = (status, detail) => Object.assign(new Error(`AItelier /api/state/commands/x: HTTP ${status} ${detail}`), { status });
   for (const [error, code] of [[failing(422, '"rate_limited: 6 per minute"'), 'rate_limited'], [failing(422, '"body_too_long"'), 'body_too_long'],
     [failing(409, '{"code":"idempotency_conflict"}'), 'idempotency_conflict'], [failing(403, '"steward_read_only: no"'), 'steward_read_only'],
@@ -660,6 +660,13 @@ test('chat channels: a 4xx is the refusal it names; a 5xx or a dropped connectio
   assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'y' }), { refused: 'code_expired' });
   thrown = failing(503, '"busy"');
   await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 503/);
+  // A 4xx that is not a channel refusal (a misconfigured token, say) is a failure to log, never hidden as one.
+  thrown = failing(403, '"steward_read_only: no"');
+  await assert.rejects(channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), /HTTP 403/);
+  thrown = failing(401, '"unauthorized: bad token"');
+  await assert.rejects(channels.recordDelivery({ messageId: 'm-1', channel: 'slack' }), /HTTP 401/);
+  thrown = failing(404, '"unknown_message: not yours"');
+  assert.deepEqual(await channels.recordDelivery({ messageId: 'm-1', channel: 'slack' }), { refused: 'unknown_message' });
   // A 200 that carries a code is a refusal too.
   assert.deepEqual(await channelOps(async () => ({ result: { code: 'invalid_code' } })).bind({ channel: 'slack', senderRef: 'U', code: '1', messageRef: 'z' }),
     { refused: 'invalid_code' });

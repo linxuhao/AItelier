@@ -489,6 +489,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
   // Step 16: the steward's reminder clock (created in events(), refreshed by the tools).
   let scheduleTimer;
+  // Step 19: the director's ownerMessageSent, kept from install() for attention.ask (the
+  // steward's questions are its messages to its owner too).
+  let mirrorOwnerMessage;
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
@@ -511,7 +514,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     /** The effective table: roles.json plus AItelier's State additions. */
     roles: table => aitelierRoles(table),
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
-    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch }) {
+    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent }) {
+      if (steward) mirrorOwnerMessage = ownerMessageSent;
       const require = createRequire(env.AITELIER_DSH_ENTRY);
       ({ installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent')));
       const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
@@ -730,11 +734,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
      *  missed by list and answers unknown_question to close. */
     attention: {
       async ask({ id, text, context }, signal) {
-        const result = await request('/api/state/commands/send_user_message', askOwnerRequest(project, { id, text, context }), signal)
+        const body = askOwnerRequest(project, { id, text, context });
+        const result = await request('/api/state/commands/send_user_message', body, signal)
           .catch(error => ({ error: String(error?.message ?? error) }));
         if (result.error) return /idempotency_conflict/.test(result.error)
           ? { refused: 'question_id_reused', reason: `question ${id} already asks something else; give this question its own id` }
           : { refused: 'state_refused', reason: String(result.error).slice(0, 500) };
+        // The steward's question is an unprompted message to its owner: it also goes to the
+        // owner's default channel, once (a retried ask is the same message, not sent again).
+        if (mirrorOwnerMessage) void mirrorOwnerMessage((result.result ?? result).message_id, textOf(body), undefined);
         return { asked: true, question_id: id, message_id: result.message_id };
       },
       async close({ id, reason }, signal) {

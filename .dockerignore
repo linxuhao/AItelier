@@ -24,3 +24,4 @@ project
 # Migration/review worktrees and evidence are not runtime application code.
 .claude/
 evidence/
+.wt/

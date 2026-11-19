@@ -48,7 +48,19 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "integrations" / "dsh-driver"
 DSH_PACKAGE = Path("/opt/aitelier-dsh/node_modules/@deepseek-ai/dsh/package.json")
 NODE_ARGS = ["--test", "--test-concurrency=1"]
-TIMEOUT_S = 900
+#: How long the suite may run before this row calls it UNMEASURED.
+#:
+#: This machine measured the suite ALONE in 314.22 s, and in 462 s in an earlier run
+#: of the same tree; the previous bound was 900 s, and one whole-suite arm (this host's
+#: load average was 11-43 on 16 shared cores) exceeded it and reddened the row with a
+#: timeout instead of the suite's own verdict. So 900 s was a bound the host's speed,
+#: not the suite, could decide. TIMEOUT_S is 2x that old 900 s bound and ~3.9x the
+#: largest alone wall (462 s) / ~5.7x the smaller one (314.22 s): a slow host can be
+#: several times slower than those walls without the timeout becoming the verdict,
+#: and a suite that never returns still fails, in minutes and never as a pass or a skip.
+#: Re-derive the number from those walls and this bound; another whole-suite arm would
+#: only measure the host again.
+TIMEOUT_S = 1800
 TAIL_LINES = 80
 # Variables a running DSH session sets; the suite must not inherit them.
 DROPPED_ENV = ("AITELIER_DSH_EXECUTION", "DSH_PERMISSION_MODE", "AITELIER_TODO_CWD")
@@ -120,9 +132,18 @@ def _run(argv: list[str], home: Path) -> tuple[int, str, float]:
             pass
         output, _ = proc.communicate()
         tail = "\n".join((output or "").splitlines()[-TAIL_LINES:])
+        waited = time.monotonic() - started
         pytest.fail(
-            f"driver node suite TIMED OUT after {TIMEOUT_S} s and was killed: argv={argv!r} "
-            f"cwd={DRIVER}. The suite is UNMEASURED.\n"
+            f"driver node suite TIMED OUT after {TIMEOUT_S} s (waited {waited:.1f} s) and "
+            f"was killed: argv={argv!r} cwd={DRIVER}. The suite is UNMEASURED -- this is "
+            f"a FAIL, never a skip and never a pass.\n"
+            f"The bound: {TIMEOUT_S} s = 2x the previous 900 s bound that a whole-suite "
+            f"arm exceeded on a host with load average 11-43 on 16 shared cores, and "
+            f"~3.9x / ~5.7x the walls the same tree measured ALONE (462 s and 314.22 s). "
+            f"A correct suite does not take this long; one that never returns does. "
+            f"Re-derive TIMEOUT_S from those walls, not from another whole-suite arm; "
+            f"if the host is simply slower than they were, the verdict is still 'the "
+            f"host ran out of the measured budget', not a driver defect.\n"
             f"--- last {TAIL_LINES} lines of output ---\n{tail}"
         )
     return proc.returncode, output or "", time.monotonic() - started

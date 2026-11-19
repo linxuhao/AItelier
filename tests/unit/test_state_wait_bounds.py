@@ -76,9 +76,11 @@ drift apart.
 (i) ``x.wait(...)`` on something that is not ``asyncio`` is a DIFFERENT API
 (``threading.Event.wait``, ``asyncio.Event.wait``) recorded ONLY when one of its
 arguments is a numeric literal of 1.0 or more; below that threshold it carries no
-record.  The ``handshake`` helper in the guarded module reads
-``observed = event.wait(HANDSHAKE_SECONDS)``, and neither that name-bound form nor
-``await event.wait()`` nor a sub-second ``event.wait(0.5)`` appears in the audit.
+record.  The synthetic spelling the probe below runs reads
+``observed = event.wait(HANDSHAKE_SECONDS)``; the guarded module's own
+``handshake`` helper reads ``observed = event.wait(seconds)``, a bound its caller
+passes, and neither that form nor ``await event.wait()`` nor a sub-second
+``event.wait(0.5)`` appears in the audit.
 So the exclusion is for the API above that one threshold: the same shape carrying
 ``event.wait(20.0)``, ``event.wait(timeout=5)`` or
 ``getattr(event, "wait")(20.0)`` is refused as

@@ -19,13 +19,14 @@ from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
 
 
-# One generous bound for every fixture handshake. These tests wait on real
-# database work -- a correction page reconciles up to ten attempts -- so a
-# correct page that is merely slow (a loaded host) must never decide a verdict.
-# A handshake that never completes still fails, well inside this bound and with
-# a message saying which wait it was. The same bound covers the must-complete
-# watchdogs below: they await the very same work, so a smaller number would let
-# a slow-but-correct page, not the claim under test, decide the verdict.
+# Two generous bounds, one per job (see the split at the bottom of this comment).
+# These tests wait on real database work -- a correction page reconciles up to ten
+# attempts -- so a correct page that is merely slow (a loaded host) must never
+# decide a verdict. A handshake that never completes still fails, well inside its
+# bound and with a message saying which wait it was. HANDSHAKE_SECONDS is the
+# must-complete watchdog bound: those sites await the very same work, so a smaller
+# number would let a slow-but-correct page, not the claim under test, decide the
+# verdict.
 #
 # Every must-complete site names itself and the bound it read when that bound
 # expires (a bare asyncio.TimeoutError names neither, so a reader could not tell
@@ -34,27 +35,48 @@ from core.workspace_manager import WorkspaceManager
 # further down put HANDSHAKE_SECONDS in force at each of SITE_WITNESS_BOUNDS and
 # check that the message reports the value in force. A message that hardcoded one
 # literal passes only the arm carrying that literal and fails the other arm.
+#
+# HANDSHAKE_SECONDS is the bound of the SITE UNDER TEST, and it is the only bound the
+# sites witness row varies: it shortens this constant to SITE_WITNESS_BOUNDS to make a
+# shipped site's own handler fire. So no piece of FIXTURE INFRASTRUCTURE may read it.
+# The fixture handshakes below block the recovery thread while the test schedules
+# (`release`, `entered`, `called`, `page_done`, `return_page`): their job is to let a
+# loaded host take as long as it needs to reach the next step, so they read the
+# separate FIXTURE_HANDSHAKE_SECONDS and keep it whatever the witness is varying.
+# Routing them through HANDSHAKE_SECONDS is the measured bug this split exists to
+# prevent: with the site's bound at 0.5 s under load, a fixture handshake expired,
+# the recovery thread's assertion was caught by state_changes' per-attempt
+# `except Exception` (honest degradation -- a page that fails yields "no events"
+# rather than failing the whole wait), and the row then reddened with IndexError at
+# `result["events"][-1]` instead of naming its measurement. The product's broad catch
+# is not the defect; the fixture putting its own scheduling timeout inside the
+# product's degradation path was.
+FIXTURE_HANDSHAKE_SECONDS = 20.0
 HANDSHAKE_SECONDS = 20.0
 
 
-def handshake(event, name, purpose):
+def handshake(event, name, purpose, seconds=FIXTURE_HANDSHAKE_SECONDS):
     """Block the calling thread until *event* is set, or fail naming the wait.
 
-    Blocks, so call it from a worker thread (or through awaited_handshake()
-    from async code, as the original waits did). Returns the seconds waited.
+    FIXTURE INFRASTRUCTURE: *seconds* is the fixture's own scheduling bound and must
+    not be the site bound the witness varies (see FIXTURE_HANDSHAKE_SECONDS above).
+    Blocks, so call it from a worker thread (or through awaited_handshake() from
+    async code, as the original waits did). Returns the seconds waited.
     """
     started = time.monotonic()
-    observed = event.wait(HANDSHAKE_SECONDS)
+    observed = event.wait(seconds)
     waited = time.monotonic() - started
     assert observed, (
         f"fixture handshake {name!r} never completed: waited {waited:.1f}s of a "
-        f"{HANDSHAKE_SECONDS:.1f}s bound while awaiting {purpose}")
+        f"{seconds:.1f}s fixture-scheduling bound while awaiting {purpose} (this is "
+        f"the fixture's own handshake, not the site under test, so the site's "
+        f"bound does not decide it)")
     return waited
 
 
-async def awaited_handshake(event, name, purpose):
+async def awaited_handshake(event, name, purpose, seconds=FIXTURE_HANDSHAKE_SECONDS):
     """handshake() for an async caller: block in a worker thread, as before."""
-    return await asyncio.to_thread(handshake, event, name, purpose)
+    return await asyncio.to_thread(handshake, event, name, purpose, seconds)
 
 
 def node(name):
@@ -120,16 +142,58 @@ def observe(service, attempt, status):
         status, str(report), hashlib.sha256(body).hexdigest(), quiescent=status == "failed")
 
 
+class EmptyHeldRecovery(Exception):
+    """The held recovery observed NO event: the fixture, not the paused tooth.
+
+    Deliberately neither an AssertionError nor a pytest.fail: the site witness row
+    wraps each shipped site in ``pytest.raises((AssertionError, pytest.fail.Exception))``,
+    because those are what a site's own rendered failure raises. An empty fixture is not
+    a rendered site failure, so it must escape that tuple and fail the row loudly
+    instead of being read as the tooth that fired.
+    """
+
+
+def _empty_fixture(owner, rid, note, result=None):
+    """The failure this fixture raises when the held recovery measured no event.
+
+    Built in one place so both routes to an empty page -- the wait returned no
+    events, and the site's bound expiring on a page this fixture had already
+    aborted -- name the same cause. Not an AssertionError and not a pytest.fail;
+    see EmptyHeldRecovery for why that matters to the witness row.
+    """
+    measured = "" if result is None else (
+        f" The wait returned {result!r} (reason={result.get('reason')!r}).")
+    return EmptyHeldRecovery(
+        "EMPTY FIXTURE: the held recovery produced no state events at all, so there is "
+        f"no paused status to read for attempt {owner['attempt_id']} (run {rid}) in "
+        f"project 'owner'. {note}{measured} This row measured nothing, so it is neither "
+        "a pass nor a product verdict. Causes: the recovery page raised (the engine "
+        f"logs `State wait recovery failed for attempt={owner['attempt_id']}`), the page "
+        "was held past the site's bound, or the fixture's own scheduling handshake "
+        "aborted the recovery thread before it could publish the paused event. Read that "
+        "log line before calling this a state-wait defect.")
+
+
 @asynccontextmanager
 async def held_recovery(system, monkeypatch):
     service, owner, rid = system
     entered, release = threading.Event(), threading.Event()
+    fixture_fault = []
     get_run = service.sf.get_run
 
     def held_get_run(run_id):
         if run_id == rid:
             entered.set()
-            handshake(release, "release", "fixture must release the actual observer thread")
+            try:
+                handshake(release, "release", "fixture must release the actual observer thread")
+            except AssertionError as aborted:
+                # The fixture's own scheduling handshake -- never the site's bound --
+                # aborted the recovery thread. state_changes catches that per attempt
+                # and degrades to an empty page, so record it: the row must name the
+                # empty fixture instead of reading the resulting empty page as the
+                # site's tooth (see the timeout branch below).
+                fixture_fault.append(str(aborted))
+                raise
         return get_run(run_id)
 
     monkeypatch.setattr(service.sf, "get_run", held_get_run)
@@ -146,11 +210,34 @@ async def held_recovery(system, monkeypatch):
         try:
             result = await asyncio.wait_for(owner_wait, HANDSHAKE_SECONDS)
         except asyncio.TimeoutError as expired:
+            if fixture_fault:
+                # The site's bound expired on a page this fixture had already aborted,
+                # so the site's rendered message would be this fixture's fault wearing
+                # the site's label. Name the empty fixture instead: an empty fixture is
+                # never green, and EmptyHeldRecovery is not caught by the witness row's
+                # `pytest.raises` tuple.
+                raise _empty_fixture(
+                    owner, rid,
+                    "The site's own bound (HANDSHAKE_SECONDS, the bound the witness "
+                    "varies) expired on a page this fixture had already aborted: "
+                    f"{fixture_fault[-1]}") from expired
             raise AssertionError(
                 f"must-complete wait 'held_recovery_owner_page' never completed within "
                 f"{HANDSHAKE_SECONDS}s: the owner wait under test did not reach its "
                 f"paused status after the fixture released the observer") from expired
-        assert result["events"][-1]["payload"]["status"] == "paused"
+        events = result.get("events") or []
+        if not events:
+            # The held recovery yielded nothing to read. That is this fixture failing,
+            # not the paused-status tooth: the row must name the empty fixture (and the
+            # recovery failure the engine logged, if any) instead of raising IndexError
+            # on events[-1].
+            raise _empty_fixture(
+                owner, rid,
+                "The owner wait returned an empty page after the fixture released the "
+                "observer.", result=result)
+        assert events[-1]["payload"]["status"] == "paused", (
+            f"the held recovery's last event is not the paused status the wait pages on: "
+            f"got {events[-1].get('payload', {}).get('status')!r} from {events[-1]!r}")
 
 
 @pytest.mark.asyncio

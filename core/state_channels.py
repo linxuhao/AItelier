@@ -480,10 +480,6 @@ class StateChannels:
         code, until the owner issues a new one). An attempt that names its channel
         message is answered once: a second delivery of it (under any request_key)
         answers {bound, duplicate: true} and counts nothing."""
-        # Only the keyed digest of the code enters the request ledger (driver_inbox_requests
-        # keeps it on a successful bind): no plain or unkeyed digest of it is stored anywhere.
-        digest = _code_hash(self._code_key(), channel, code)
-        request_hash = _hash([channel, sender_ref, digest])
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
@@ -497,6 +493,13 @@ class StateChannels:
             if first is not None:
                 return {"bound": first == "bound", "channel": channel, "sender_ref": sender_ref, "duplicate": True,
                         **({} if first == "bound" else {"refusal": first})}
+            # The pepper is read only now - after the steward check and the duplicate - and
+            # right before the request_key replay, which needs the keyed digest to tell a
+            # replay from a key reused with another code. Only the keyed digest of the code
+            # enters the request ledger (driver_inbox_requests keeps it on a successful
+            # bind): no plain or unkeyed digest of it is stored anywhere.
+            digest = _code_hash(self._code_key(), channel, code)
+            request_hash = _hash([channel, sender_ref, digest])
             replay = self.steward._replay(conn, "bind_owner_channel", request_key, request_hash)
             if replay is not None:
                 return replay

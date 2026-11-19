@@ -311,6 +311,23 @@ def test_without_the_pepper_no_code_is_issued_or_tried(world, monkeypatch, peppe
 
 
 
+def test_the_pepper_is_read_only_after_the_steward_check_and_the_duplicate_check(world, monkeypatch):
+    """K-order: the pepper used to be read first of all, so a caller that is not the
+    steward, and a binding message delivered again, read the secret file and could be
+    answered channel_secret_missing instead of what they are."""
+    code = world.owner.channels.issue_code("slack")["code"]
+    assert bind_message(world, code, "m-1")["bound"]
+    reads = []
+    monkeypatch.setattr(drivers, "read_pepper", lambda: reads.append(1))
+    refused(lambda: world.director.channels.bind_owner_channel(HOME, "b-x", "slack", "intruder", code, "m-x"),
+            "steward_role_required")
+    assert bind_message(world, code, "m-1", key="another") == {"bound": True, "channel": "slack",
+                                                               "sender_ref": SLACK_USER, "duplicate": True}
+    assert reads == [], "neither read the pepper"
+    refused(lambda: bind_message(world, code, "m-2"), "channel_secret_missing")
+    assert reads == [1]
+
+
 def test_a_code_stored_unkeyed_before_the_upgrade_matches_nothing(world):
     """Rows written by the old code (an unkeyed sha256) are not accepted: they bind
     nothing, expire with their 10 minutes, and the next issued code deletes them."""

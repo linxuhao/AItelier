@@ -46,6 +46,7 @@ run", not as "is the guard object somewhere in this route's tree".
 from __future__ import annotations
 
 import ast
+import builtins
 import functools
 import inspect
 import textwrap
@@ -53,6 +54,9 @@ from typing import NamedTuple
 
 from core.state_commands import is_public_read
 from core.state_commands import execute as _execute
+from starlette.responses import (FileResponse, HTMLResponse, JSONResponse,
+                                 PlainTextResponse, RedirectResponse, Response,
+                                 StreamingResponse)
 
 # The attribute a route's endpoint carries its declaration on.
 DECLARATION_ATTR = "_state_route"
@@ -62,6 +66,29 @@ STATE_PREFIX = "/api/state"
 # The callables a handler uses to run a State action, and the wrapper
 # `api/state_http.query` uses to hand the call to a worker thread.
 _ACTION_CALLABLES = ("execute", "_call")
+
+# Calls that BUILD A VALUE instead of delivering one. The reader walks their
+# ARGUMENTS exactly like any other expression, so an action handed to one is
+# still delivered: `return JSONResponse(execute(service, "get_driver_note", {}))`
+# is refused by the private-delivery branch, not excused here. What such a call
+# cannot do is run a State action in a body of its own - `str`/`len` are C code
+# and a framework response class only stores what it is given - so following it
+# found nothing, and refusing it made an ordinary `except ...: return
+# build_the_refusal(exc)` blind the whole action-dispatch family: one refusal
+# builder that wraps its body in `JSONResponse` turned
+# `POST /api/state/query/get_graph` into a 403 "state route declaration does not
+# match its handler" (iss-393c02b9ed844e04), while the same action over its own
+# GET route answered 200.
+#
+# Membership is by OBJECT IDENTITY, never by name: a handler that shadows `str`
+# with its own function, or subclasses a response class to run something in
+# `__init__`, resolves to a different object and stays fail-closed (opaque).
+_VALUE_CONSTRUCTORS = (str, repr, format, bytes, bool, int, float, len,
+                       list, tuple, dict, set, frozenset, sorted, min, max,
+                       abs, round)
+_RESPONSE_CONSTRUCTORS = (Response, HTMLResponse, PlainTextResponse, JSONResponse,
+                          RedirectResponse, StreamingResponse, FileResponse)
+_INERT_CALLABLES = _VALUE_CONSTRUCTORS + _RESPONSE_CONSTRUCTORS
 
 
 class Delivery(NamedTuple):
@@ -249,6 +276,9 @@ class _Analysis:
                     self._called.add(name)
                     self._walk_block(self._locals[name].body)
                 continue
+            if isinstance(node.func, ast.Name) and self._is_value_constructor(name):
+                # Builds a value; its arguments were walked above.
+                continue
             if isinstance(node.func, ast.Name) and self._follow_helper(name):
                 continue
             if not isinstance(node.func, ast.Name):
@@ -265,6 +295,27 @@ class _Analysis:
             # unresolvable delivery is a refusal, not an approval; `opaque` is
             # the observable, mutable state that records the derivation failure.
             self.opaque = True
+
+    def _is_value_constructor(self, name: str) -> bool:
+        """Whether a bare name resolves to a callable that only builds a value.
+
+        The name is resolved the same way a followed helper is - through the
+        handler's OWN globals - and only then compared by identity with the
+        constructors above. A handler that binds the name to something else (a
+        function of its own, a subclass of a response class) resolves to a
+        different object and is NOT inert.
+        """
+        target = None
+        if self._resolver is not None:
+            try:
+                target = self._resolver(name)
+            except Exception:
+                target = None
+        if target is None:
+            # `str`, `len`, ... are builtins: they are never in a module's
+            # globals, so the resolver cannot see them at all.
+            target = getattr(builtins, name, None)
+        return any(target is inert for inert in _INERT_CALLABLES)
 
     def _follow_helper(self, name: str) -> bool:
         """Follow a module-level helper the handler delivers through.
@@ -295,7 +346,16 @@ class _Analysis:
         # Record that this handler's action sites were reached THROUGH an
         # intermediate call: the judged parameter is not handed to the action
         # site directly, so the dispatch identity can no longer be trusted.
-        self.followed = True
+        #
+        # Only a helper that DELIVERS something can move that identity. A helper
+        # that hands over neither an action nor a parameter - a refusal builder
+        # called from an `except` clause - is followed for its own deliverable
+        # set, which is empty, so the dispatch stays where it was. Counting it
+        # was the second half of iss-393c02b9ed844e04: together with the refusal
+        # builder's own JSONResponse body it made every public action on
+        # `POST /api/state/query/{action}` an unverifiable declaration.
+        if sub.delivered or sub.params:
+            self.followed = True
         self.delivered |= sub.delivered
         self.params |= sub.params
         self.opaque = self.opaque or sub.opaque

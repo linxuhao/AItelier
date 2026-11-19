@@ -90,9 +90,14 @@ export interface DirectorApi {
    *  The director sends the same text on the owner's chat channel: a reply goes to the
    *  channel the answered message came from, an unprompted message to the default channel
    *  when one is set and bound, a reply to a dashboard message nowhere. Each message is
-   *  sent at most once (also across a restart, through channels.sourceOf) and recorded
-   *  with channels.recordDelivery, a failed send included, never retried. Never rejects;
-   *  without channels it resolves {mirrored: false}. */
+   *  sent once and recorded with channels.recordDelivery, a failed send included; a send
+   *  is never retried. The delivery row is what keeps a message from being sent again
+   *  after a restart (channels.sourceOf), so a record that fails is retried a bounded
+   *  number of times (CHANNEL_LIMITS: 6 tries over about 30 s) as the same request, which
+   *  the host must take once; a refusal is not retried. A record that fails every try is
+   *  logged (channel_record_failed): within the process the message is still not sent
+   *  again, but after a restart a replay of the same message id would send it a second
+   *  time. Never rejects; without channels it resolves {mirrored: false}. */
   ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
@@ -183,6 +188,10 @@ export interface DirectorHost {
    *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
    *    (channel, senderRef, messageRef): a redelivery answers the first result with
    *    duplicate: true; the same messageRef from another sender is another message.
+   *    A redelivery of an approval phrase whose decision was lost (the host stopped
+   *    after writing the message, before the decision was recorded) runs the decision
+   *    now and answers it with duplicate: true and decided_on_replay: true; the director
+   *    then sends the decision's line, which it sends once per channel message.
    *    The host refuses a sender that is not the channel's current binding
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
@@ -192,7 +201,11 @@ export interface DirectorHost {
    *    and its `result` is that proposal after the run: `status: 'failed'` when the run failed.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
    *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
-   *    more than two minutes ahead of the host's clock (approval_clock_skew).
+   *    more than two minutes ahead of the host's clock (approval_clock_skew), nor one
+   *    without `at` (approval_undated: the message is still written; a host may instead
+   *    answer {refused: 'approval_undated'}). A channel passes the time it was given and
+   *    never one of its own. The bound owner's message that is a live binding code is
+   *    refused code_sent_to_bound_account (the code is retired; the owner issues a new one).
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
    *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
    *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).
@@ -210,7 +223,7 @@ export interface DirectorHost {
  *    {refused: code} when the host will not take it. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
-      Promise<{ message_id: string | null; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
+      Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
         outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object } } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
       Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;

@@ -19,14 +19,10 @@ export const name = 'dsh-channel-wechat';
 export const inject = ['ownerChannels'];
 
 export const CHANNEL = 'wechat';
-// A message the owner wrote more than this long ago is not passed on. That covers
-// three cases: a restart of this plugin (the bridge still holds up to 500 old
-// messages; recent ones may not have been relayed yet and are, since the backend
-// drops a repeat of the same message ref), a bridge that logs in again (neo then
-// delivers what was written while it was down, `同意 proposal …` included, and an
-// approval must not be executed hours after it was written), and a host that stays
-// unavailable (the message is held and retried until it is this old).
-export const MAX_EVENT_AGE_MS = 10 * 60 * 1000;
+// No message is dropped for its age: after a restart of this plugin the bridge's
+// ring (up to 500 messages) is passed on again and the host takes each message
+// ref once; an approval phrase is dated by the host from `at` (refused when too old
+// or undated), and the message itself is written either way.
 // ownerChannels.inbound answers `unavailable` (or throws) when the host or the
 // backend cannot be reached: the message is kept, not dropped.
 const RETRY_REASONS = new Set(['unavailable']);
@@ -51,7 +47,7 @@ const sleep = (ms, signal) => new Promise(resolve => {
 /** Registers the channel and starts polling; returns `{ stop, polled }` (`polled`
  *  settles when the poll loop has ended). Timings are parameters for the tests. */
 export function startWechatChannel({ ownerChannels, logger = console, config = {}, fetch = globalThis.fetch,
-  now = () => Date.now(), waitSeconds = 25, retryMs = 5000, maxRetryMs = 60_000, pollGraceMs = 10_000,
+  waitSeconds = 25, retryMs = 5000, maxRetryMs = 60_000, pollGraceMs = 10_000,
   statusEveryMs = 30_000 }) {
   const url = String(config.url ?? defaultUrl()).replace(/\/+$/, '');
   const token = readToken(config.tokenFile ?? defaultTokenFile());
@@ -76,27 +72,14 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     }
   }
 
-  // When the owner wrote it; a message without a readable time counts from now.
-  const writtenAt = event => {
-    const at = Date.parse(event.at);
-    return Number.isFinite(at) ? at : now();
-  };
-  const tooOld = (event, born) => now() - born > MAX_EVENT_AGE_MS;
-
   /** Passes one message on. Returns once the host has answered it for good (accepted
-   *  or refused) or it is too old; while the host is unavailable the message is held
-   *  and retried with a growing pause, so the cursor stays on it and nothing after it
-   *  overtakes it. */
+   *  or refused); while the host is unavailable the message is held and retried with a
+   *  growing pause, however long that takes, so the cursor stays on it and nothing
+   *  after it overtakes it. */
   async function deliver(event) {
-    const born = writtenAt(event);
     const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, text: event.text, at: event.at };
     let pause = retryMs;
     for (let attempt = 1; !stopping.signal.aborted; attempt++) {
-      // Never the text in a log line: the message ref and the reason only.
-      if (tooOld(event, born)) {
-        logger.warn(`wechat: inbound ${event.message_ref} not passed on: written more than ${MAX_EVENT_AGE_MS / 60000} min ago`);
-        return;
-      }
       let reason;
       try {
         const result = await ownerChannels.inbound(message);
@@ -105,6 +88,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       } catch (error) {
         reason = String(error?.message ?? error).slice(0, 200);
       }
+      // Never the text in a log line: the message ref and the reason only.
       logger.warn(`wechat: inbound ${event.message_ref} not delivered (attempt ${attempt}): ${reason}; retrying`);
       await sleep(pause, stopping.signal);
       pause = Math.min(pause * 2, maxRetryMs);

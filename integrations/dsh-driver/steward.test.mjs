@@ -663,9 +663,15 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
   const channels = channelOps(async () => { throw thrown; });
   assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi' }), { refused: 'channel_sender_not_bound' });
   // A body that is not valid Unicode text (a lone surrogate) is refused, not an outage: as an
-  // error the WeChat plugin would retry it for 10 minutes and hold the lane behind it.
+  // error the WeChat plugin would retry it for as long as it is answered so, holding the lane behind it.
   thrown = failing(422, '"invalid_body: body is not valid Unicode text"');
   assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: 'hi \ud800' }), { refused: 'invalid_body' });
+  // An approval phrase without the channel's time, and a live binding code pasted by the
+  // bound owner, are the sender's own refusals: answered, never retried as an outage.
+  for (const code of ['approval_undated', 'code_sent_to_bound_account']) {
+    thrown = failing(422, `"${code}: refused"`);
+    assert.deepEqual(await channels.relay({ channel: 'slack', senderRef: 'U9', messageRef: 'x', text: '同意 proposal p-1' }), { refused: code });
+  }
   thrown = failing(422, '"code_expired"');
   assert.deepEqual(await channels.bind({ channel: 'slack', senderRef: 'U9', code: '111111', messageRef: 'y' }), { refused: 'code_expired' });
   thrown = failing(422, '"code_retired"');
@@ -673,7 +679,7 @@ test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped c
     'a retired code is a refusal the stranger is answered once for, not an outage (a WeChat message would be held and retried)');
   // A 4xx that names no code - a validation 422 whose detail is a list (a sender_ref over 200
   // characters) - is deterministic: refused invalid_request, never 'unavailable' (which the
-  // WeChat plugin retries for 10 minutes, holding the lane behind that one message).
+  // WeChat plugin retries for as long as it is answered so, holding the lane behind that one message).
   for (const detail of [`"[{'field': 'sender_ref', 'error': 'String should have at most 200 characters'}]"`,
     '[{"type":"string_too_long","loc":["body","channel_message_ref"],"msg":"too long"}]', '"Not A Code"', ''])
     for (const call of [() => channels.relay({ channel: 'slack', senderRef: 'U'.repeat(201), messageRef: 'x', text: 'hi' }),

@@ -492,7 +492,7 @@ export function refusalCode(error) {
  *  (401/403), is not something the sender did: it is thrown, logged as a failure, never hidden
  *  as a refusal (a 400 or 422 that names no code is invalid_request: channelOps). */
 export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'invalid_body', 'body_too_long', 'invalid_request', 'rate_limited',
-  'channel_sender_not_bound', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'code_retired', 'unknown_message', 'delivery_recorded',
+  'channel_sender_not_bound', 'approval_undated', 'code_sent_to_bound_account', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'code_retired', 'unknown_message', 'delivery_recorded',
   'detail_too_long', 'qr_svg_too_large', 'qr_svg_refused']);
 
 /** Design-steward 7.2: the host side of the owner's chat channels, over the State commands

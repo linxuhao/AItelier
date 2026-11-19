@@ -46,6 +46,8 @@ export const channelReplies = Object.freeze({
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   rate_limited: 'Not delivered: too many messages, try again later. 未送达：消息太频繁，请稍后再发。',
+  approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
+  code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
   approval({ proposal_id: id, action, outcome, refusal, kind, target, result }) {
     if (outcome === 'executed') {
@@ -56,6 +58,7 @@ export const channelReplies = Object.freeze({
         return en ? `proposal ${id}: approved, but it failed - ${en}. 已同意，但执行失败：${zh}。` : `proposal ${id}: approved, but it failed. 已同意，但执行失败。`;
       return en ? `proposal ${id}: approved and done - ${en}. 已同意并执行：${zh}。` : `proposal ${id}: approved and done. 已同意并执行。`;
     }
+    if (refusal === 'approval_undated') return `proposal ${id}: not done - the message carried no time, so it cannot decide; use the dashboard. 未执行：消息没有时间，不能用来决定，请在面板上操作。`;
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
     return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
   },
@@ -63,7 +66,7 @@ export const channelReplies = Object.freeze({
 
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
  *  generic `refused` line (a stranger is told none of them). */
-const TOLD = new Set(['body_too_long', 'rate_limited']);
+const TOLD = new Set(['body_too_long', 'rate_limited', 'approval_undated', 'code_sent_to_bound_account']);
 const CODE = /^[0-9]{6}$/;
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
@@ -75,9 +78,11 @@ const within = (promise, ms, what) => {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 };
 /** Bounds: a channel's send, the wait for the host, and binding attempts per channel and
- *  minute (each costs a binding read, a bind write and a line through the owner's bot). */
+ *  minute (each costs a binding read, a bind write and a line through the owner's bot).
+ *  A delivery record is tried recordAttempts times, recordRetryMs doubling between tries
+ *  (1+2+4+8+16 s: a backend restart). */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
-  statusDetail: 300 });
+  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -90,6 +95,9 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
  *    yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS }) {
   const registered = new Map(), told = new Map(), binds = new Map(), lanes = new Map(), answeredRefs = new Set();
+  // Channel messages this process handed to the host and got no answer for: whatever the
+  // host decided then, no line about it went out.
+  const unanswered = new Set();
   let ready;
   const started = new Promise(resolve => { ready = resolve; });
   const hostReady = () => within(started, limits.readyMs, 'host_not_ready');
@@ -221,12 +229,18 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         }
         return { accepted: false, reason };
       }
-      // A redelivered channel message was handled the first time, its answer included.
-      if (result?.approval && !result.duplicate)
+      // A decision is answered once per channel message (answer() keeps that within the
+      // process). A redelivery of a message whose line went out is not answered again; one
+      // whose line never went out is: this process got no answer the first time, or the
+      // host ran the decision only now (decided_on_replay: the first delivery's was lost).
+      const key = channel + '\n' + messageRef, lost = unanswered.delete(key);
+      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true))
         await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef });
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
       log('channel_inbound_failed', { ...seen, error: short(error) });
+      unanswered.add(channel + '\n' + messageRef);
+      if (unanswered.size > limits.answeredRefs) unanswered.delete(unanswered.values().next().value);
       return { accepted: false, reason: 'unavailable' };
     }
   };
@@ -235,6 +249,19 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // the order it receives them.
   let queue = Promise.resolve();
   const mirroring = new Set();
+  // The delivery row is what keeps a message from being sent again after a restart
+  // (sourceOf), so a record that fails is tried again, a bounded number of times, as the
+  // same request (the host takes it once). A refusal is the host's answer: not retried.
+  const record = async delivery => {
+    for (let attempt = 1; ; attempt++) {
+      try { return await host.recordDelivery(delivery); }
+      catch (failure) {
+        if (attempt >= limits.recordAttempts) throw failure;
+        log('channel_record_retry', { channel: delivery.channel, message_id: delivery.messageId, attempt, error: short(failure) });
+        await new Promise(resolve => setTimeout(resolve, limits.recordRetryMs * 2 ** (attempt - 1)));
+      }
+    }
+  };
   const mirror = async (messageId, body, replyTo) => {
     await hostReady();
     // Once per message, also across a restart: a delivery row means it was sent (or failed) before.
@@ -262,8 +289,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       try { ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref; }
       catch (failure) { error = short(failure); }
     }
-    // Recorded once, success or failure; a failed send is never retried.
-    const recorded = await host.recordDelivery({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) })
+    // Recorded once, success or failure (the record retried, a failed send never).
+    const recorded = await record({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) })
       .catch(failure => log('channel_record_failed', { channel, message_id: messageId, error: short(failure) }));
     if (recorded?.refused) log('channel_record_refused', { channel, message_id: messageId, reason: String(recorded.refused) });
     if (error) log('channel_send_failed', { channel, message_id: messageId, error });

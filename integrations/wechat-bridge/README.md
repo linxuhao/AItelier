@@ -48,9 +48,18 @@ What the build checks, and what it found (2026-11-18, log in
 
 ## Run
 
-Secret: `~/.aitelier-secrets/wechat-bridge-token` (one line, any random string, owned
-by uid 1000). The same file is read by the channel plugin. Without it the bridge does
-not start (exit 78) and the plugin stays disabled.
+Secret: `$HOME/.aitelier-secrets/wechat-bridge-token` (one line, any random string, owned
+by uid 1000, mode 0600). The same file is read by the channel plugin
+(`integrations/dsh-channel-wechat`). The directory is HOME-relative and fixed: no env var
+moves it (`AITELIER_SECRETS_DIR` does not). Without it the bridge does not start (exit
+78) and the plugin stays disabled.
+
+The steward's profile loads the channel plugin only when the token file exists, checked
+when the profile is written, at the steward's start: a token added to a running steward
+loads nothing until the steward is restarted. Until then the dashboard's Channels tab
+shows no status for WeChat at all (no QR to scan either; if it ran before, its last
+report); after the restart it shows the bridge's state (`scan needed` with the QR,
+`connected`, or why not).
 
 `run.sh` starts the container (nothing runs it for you):
 
@@ -114,7 +123,9 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   (capped at 25) for an event after `after`. Only 1:1 text messages from another
   contact: not the account's own, not rooms, not official accounts (`gh_` ids). Kept in
   memory, the last 500. Sequence numbers start at the boot time in milliseconds, so a
-  cursor kept from before a bridge restart never hides newer events.
+  cursor kept from before a bridge restart never hides newer events. `at` is when the
+  owner wrote it, as WeChat dates the message; a message WeChat does not date has no
+  `at` (the host then refuses it as an approval, `approval_undated`, and still writes it).
 - `POST /send {to, text}` → `{ref}`. Text longer than 1500 characters goes as
   consecutive messages; `ref` is the first part's message id, or `null` when the puppet
   returns none (puppet-neo does not). Refusals: `409 not_logged_in`, `409

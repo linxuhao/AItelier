@@ -175,6 +175,27 @@ test('refusals: any other refusal of the bound owner\'s message (the credential 
   }
 });
 
+test('an undated approval and a pasted binding code: the bound owner is told in their own line, a stranger nothing; no time is made up', async () => {
+  for (const refused of ['approval_undated', 'code_sent_to_bound_account']) {
+    const s = setup();
+    s.host.next = { refused };
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: '同意 proposal p-1' }),
+      { accepted: false, reason: refused });
+    assert.deepEqual(s.slack.sent, [{ text: channelReplies[refused], options: { replyToRef: 'o-1', to: 'U-OWNER' } }]);
+    s.host.next = { refused };
+    await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'x-1', text: '同意 proposal p-1' });
+    assert.equal(s.slack.sent.length, 1, 'a stranger is told nothing');
+    assert.ok(!('at' in only(s.calls, 'relay')[0]), 'a message without a time is relayed without one');
+  }
+  assert.match(channelReplies.code_sent_to_bound_account, /binding code; it is now retired.*重新生成/);
+  // The host may answer it as the approval's refusal instead (the message written either way).
+  const s = setup();
+  s.host.next = { message_id: 'm', duplicate: false, approval: { proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'approval_undated' } };
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-2', text: '同意 proposal p-1', at: '2026-11-19T02:00:00.000Z' });
+  assert.match(s.slack.sent[0].text, /^proposal p-1: not done - the message carried no time/);
+  assert.equal(only(s.calls, 'relay')[0].at, '2026-11-19T02:00:00.000Z', "the channel's time is passed on as given");
+});
+
 test('an approval the host executed is answered with one line of its outcome; a redelivered message is not answered again', async () => {
   const s = setup();
   const approval = (action, outcome, refusal) => ({ message_id: 'm', duplicate: false,
@@ -204,6 +225,34 @@ test('an approval the host executed is answered with one line of its outcome; a 
   w.host.next = approval('approve', 'executed');
   await w.inbound({ channel: 'wechat', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' });
   assert.equal(w.wechat.sent.length, 1);
+});
+
+test('a redelivery whose decision line never went out gets it, once: the first delivery had no answer, or the host decided only now', async () => {
+  const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
+  const s = setup();
+  // The host stopped between writing the message and recording the decision: no answer.
+  s.host.relay = async message => { s.calls.push(['relay', message]); throw new Error('HTTP 502'); };
+  const owner = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' };
+  assert.deepEqual(await s.inbound(owner), { accepted: false, reason: 'unavailable' });
+  assert.equal(s.slack.sent.length, 0);
+  // The channel redelivers; the host runs the lost decision and answers it as a duplicate.
+  s.host.relay = async message => { s.calls.push(['relay', message]); return { message_id: 'm', duplicate: true, approval: executed }; };
+  assert.deepEqual(await s.inbound(owner), { accepted: true, duplicate: true });
+  assert.equal(s.slack.sent.length, 1);
+  assert.match(s.slack.sent[0].text, /proposal p-1: approved and done - start director of wuxia/);
+  assert.deepEqual(s.slack.sent[0].options, { replyToRef: 'a-1', to: 'U-OWNER' });
+  await s.inbound(owner);
+  assert.equal(s.slack.sent.length, 1, 'its line went out: a further redelivery is not answered again');
+  // After a restart this process remembers nothing: a duplicate whose line went out before
+  // is not answered; one the host says it decided only now is.
+  const r = setup();
+  r.host.next = { message_id: 'm', duplicate: true, approval: executed };
+  await r.inbound({ ...owner, messageRef: 'a-2' });
+  assert.equal(r.slack.sent.length, 0, 'a genuine duplicate: its line went out the first time');
+  r.host.next = { message_id: 'm', duplicate: true, decided_on_replay: true, approval: executed };
+  await r.inbound({ ...owner, messageRef: 'a-3' });
+  await r.inbound({ ...owner, messageRef: 'a-3' });
+  assert.equal(r.slack.sent.length, 1, 'the decision the host ran on this redelivery is answered, once');
 });
 
 test("an executed decision's line names the host's kind and target in both languages; an unknown kind reads as itself; a long target is cut", () => {
@@ -367,18 +416,55 @@ test('once per message within a process: a delivery that could not be recorded i
   const fake = fakeHost(), logs = [];
   fake.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
   fake.host.recordDelivery = async delivery => { fake.calls.push(['recordDelivery', delivery]); throw new Error('backend down'); };
-  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]) });
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, recordRetryMs: 1 } });
   channels.ready();
   const slack = fakeChannel('slack');
   channels.service.register(slack.channel);
   assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: true, channel: 'slack' });
   assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: false, reason: 'already_mirrored' });
   assert.equal(slack.sent.length, 1);
+  assert.equal(only(fake.calls, 'recordDelivery').length, CHANNEL_LIMITS.recordAttempts, 'the record is tried a bounded number of times');
+  assert.equal(logs.filter(([event]) => event === 'channel_record_retry').length, CHANNEL_LIMITS.recordAttempts - 1);
   assert.deepEqual(logs.filter(([event]) => event === 'channel_record_failed').map(([, f]) => f.message_id), ['m-out']);
   // A delivery the host refuses to record is logged by its code.
   fake.host.recordDelivery = async () => ({ refused: 'delivery_recorded' });
   await channels.ownerMessageSent('m-out-2', 'answer', 'm-in');
   assert.deepEqual(logs.filter(([event]) => event === 'channel_record_refused').map(([, f]) => [f.message_id, f.reason]), [['m-out-2', 'delivery_recorded']]);
+});
+
+test('a record that fails after a successful send is tried again, so a restart replaying the same message sends nothing', async () => {
+  const fake = fakeHost({ defaultChannel: 'slack' }), logs = [];
+  const recordOnce = fake.host.recordDelivery;
+  let failures = 2;
+  // The backend is briefly down (a 502, a restart) when the delivery is recorded.
+  fake.host.recordDelivery = async delivery => {
+    if (failures-- > 0) { fake.calls.push(['recordDelivery', delivery]); throw new Error('HTTP 502'); }
+    return recordOnce(delivery);
+  };
+  const limits = { ...CHANNEL_LIMITS, recordRetryMs: 1 };
+  const first = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), limits });
+  first.ready();
+  const slack = fakeChannel('slack');
+  first.service.register(slack.channel);
+  assert.deepEqual(await first.ownerMessageSent('m-out', 'Your build finished'), { mirrored: true, channel: 'slack' });
+  assert.deepEqual(only(fake.calls, 'recordDelivery'), Array(3).fill({ messageId: 'm-out', channel: 'slack', channelMessageRef: 'slack-ref-1' }),
+    'the same delivery each time');
+  assert.equal(logs.filter(([event]) => event === 'channel_record_failed').length, 0);
+  first.stop();
+  // A restart: the in-memory guard is gone; the same message id is mirrored again (a
+  // replayed ask_owner answers the same id).
+  const second = createOwnerChannels({ host: fake.host, log: () => {}, limits });
+  second.ready();
+  const again = fakeChannel('slack');
+  second.service.register(again.channel);
+  assert.deepEqual(await second.ownerMessageSent('m-out', 'Your build finished'), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(slack.sent.length + again.sent.length, 1, 'the owner got it once');
+  // A refusal is the host's answer: not retried.
+  fake.host.recordDelivery = async delivery => { fake.calls.push(['recordDelivery', delivery]); return { refused: 'unknown_message' }; };
+  const before = only(fake.calls, 'recordDelivery').length;
+  await second.ownerMessageSent('m-out-2', 'next');
+  assert.equal(only(fake.calls, 'recordDelivery').length, before + 1);
 });
 
 test('a send that never answers is given up after the bound: recorded as failed, and the next message is mirrored', async () => {

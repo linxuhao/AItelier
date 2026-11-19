@@ -11,6 +11,14 @@ declares the `channels` capability). Design: step 19, §7.2.
   messageRef: <client_msg_id or ts>, text, at})`. Every Socket Mode envelope is
   acknowledged, whatever it is. Whether the sender is the bound owner is the service's
   decision, not this plugin's.
+- Slack never redelivers an acknowledged envelope, so the plugin keeps the message: while
+  the service answers `unavailable` (the host or the backend cannot be reached) or
+  throws, the message is held and handed in again under the same `messageRef` (which the
+  host takes once), 5 s doubling to at most 60 s between attempts, until it is accepted
+  or refused or the plugin stops. Each sender's messages stay in order (a held one is not
+  overtaken by the next); other senders are not held up. At most 100 messages per sender
+  are held; past that a message is logged by sender and length and not held. A held
+  message lives in memory only: a restart of the steward while the host is down loses it.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500
@@ -31,10 +39,17 @@ declares the `channels` capability). Design: step 19, §7.2.
 2. Bot token scopes: `im:history`, `chat:write`, `im:write`; subscribe to the bot event
    `message.im`; in App Home allow users to send messages to the app. Install it to the
    workspace (bot token starts `xoxb-`).
-3. Put the tokens, one per file, in `~/.aitelier-secrets/slack-app-token` and
-   `~/.aitelier-secrets/slack-bot-token` (mode 0600). They are read, never logged. With
-   either missing the channel registers as disconnected and does nothing.
-4. Run one instance per app: Slack spreads Socket Mode events over all of an app's open
+3. Put the tokens, one per file, in `$HOME/.aitelier-secrets/slack-app-token` and
+   `$HOME/.aitelier-secrets/slack-bot-token` (mode 0600). They are read, never logged.
+   The directory is HOME-relative and fixed: no env var moves it
+   (`AITELIER_SECRETS_DIR` does not), for this plugin or for the host that decides to
+   load it. With either missing the channel registers as disconnected and does nothing.
+4. Restart the steward. The steward's profile loads this plugin only when both files
+   exist, and that is checked when the profile is written, at the steward's start:
+   tokens added to a running steward load nothing. Until the restart the dashboard's
+   Channels tab shows no status for Slack at all (or, if it ran before, its last report);
+   after it, `connected` or why not.
+5. Run one instance per app: Slack spreads Socket Mode events over all of an app's open
    connections, so a second process would receive part of the owner's messages.
 
 The Slack SDK (`@slack/socket-mode` 3.1.1, `@slack/web-api` 8.3.0, pinned exactly) is a

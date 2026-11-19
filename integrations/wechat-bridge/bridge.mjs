@@ -87,10 +87,12 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
   bot.on('message', message => {
     try {
       if (!isOwnerCandidate(message, types)) return;
+      // When the owner wrote it, as WeChat says; a message WeChat does not date carries no
+      // time (never the bridge's own: the host refuses an undated approval phrase).
       const date = message.date?.();
-      const at = date instanceof Date && !Number.isNaN(date.getTime()) ? date.toISOString() : now().toISOString();
+      const at = date instanceof Date && !Number.isNaN(date.getTime()) ? date.toISOString() : undefined;
       ring.push({ seq: ++seq, type: 'message', sender_ref: message.talker().id, message_ref: String(message.id),
-        text: message.text(), at });
+        text: message.text(), ...(at ? { at } : {}) });
       if (ring.length > ringSize) ring.splice(0, ring.length - ringSize);
       const pending = waiters;
       waiters = new Set();

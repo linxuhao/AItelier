@@ -178,6 +178,16 @@ test('only 1:1 text messages from another contact become events', async () => {
   } finally { await bridge.close(); }
 });
 
+test('a message WeChat does not date carries no time, never the bridge\'s own', async () => {
+  const { bot, bridge, json } = await started();
+  try {
+    bot.emit('message', message({ id: 'undated', date: null, text: '同意 proposal p-1' }));
+    bot.emit('message', message({ id: 'bad-date', date: new Date(Number.NaN) }));
+    const [, body] = await json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, 'at' in e]), [['undated', false], ['bad-date', false]]);
+  } finally { await bridge.close(); }
+});
+
 test('a long poll returns as soon as a message arrives, and empty with the same cursor when none does', async () => {
   const { bot, bridge, json } = await started();
   try {

@@ -258,10 +258,14 @@ async def lifespan(app: FastAPI):
     # The first dashboard read should not be the request that pays for the
     # process's warm-up: on this tree it cost 14,249.4 ms, 4,527.5 ms of it the
     # engine's first boot and 8,205.1 ms the cache-stats trace pass (see
-    # warm_first_dashboard_read and the investigation it cites). Started here,
-    # while the rest of startup still runs, on a DAEMON thread that nothing
-    # awaits and nothing fails on — startup time is unchanged and a test app
-    # never reaches this branch.
+    # warm_first_dashboard_read and the investigation it cites), and the same
+    # shape applies to the two reads a visitor opens FIRST — 10.07 s for the
+    # first /api/projects and 5.88 s for the first /api/repos after a restart,
+    # both computed inline because neither key had ever been built. So the
+    # warm-up builds all three dashboard keys. Started here, while the rest of
+    # startup still runs, on a DAEMON thread that nothing awaits and nothing
+    # fails on — startup time is unchanged and a test app never reaches this
+    # branch.
     _threading.Thread(target=warm_first_dashboard_read,
                       name="first-dashboard-read", daemon=True).start()
 
@@ -330,7 +334,7 @@ _mcp_endpoint = MCPEndpoint()
 
 
 def warm_first_dashboard_read():
-    """Build the engine and the default `GET /api/runs` answer, OFF the request path.
+    """Build the engine and the three dashboard answers, OFF the request path.
 
     Measured on this tree (docs/investigations/run-cold-read-20261118): the first
     `GET /api/runs` of a process cost **14,249.4 ms**, of which **4,527.5 ms** was
@@ -340,26 +344,44 @@ def warm_first_dashboard_read():
     have been the first to ask for: a cold process makes every dashboard visitor
     after a restart pay them, in the one process that also drives live runs.
 
+    `/api/runs` was never the only read in that position, and warming only it
+    left the two reads the dashboard actually opens first computing inline.
+    Measured by the director on the live backend (container recreated
+    19:00:05Z, probed 19:32Z at load 6.4-7.0 with no browser attached, so no
+    key had ever been built): the first `GET /api/projects` cost **10.072298 s /
+    845,769 B** and the first `GET /api/repos` **5.882613 s / 535,213 B**,
+    against 0.154613 s and 0.138388 s for the identical call right behind them.
+    That is the same one-CPU pass this function already moves off the request
+    path — so the win here is LATENCY, not throughput: the CPU moves into the
+    startup thread at boot and the first visitor stops paying it.
+
     So the lifespan starts this on a DAEMON thread and does not wait for it.
     Three rules, all of them the difference between "warm the cache" and "turn
     startup into a request":
 
     * **It never raises.** Everything is caught and logged at WARNING: an
       unreachable database, a failing engine boot or a broken run must leave the
-      backend starting normally, with the first `/api/runs` merely as expensive
-      as it was before this existed.
+      backend starting normally, with the first read merely as expensive as it
+      was before this existed. Each of the three keys is built on its own, so one
+      failing builder costs ITS key and never the two behind it in the loop.
     * **It never blocks startup.** The thread is started before the lifespan
       yields, and nothing joins it — `TestClient`-style startups return at once,
       and a test app (`_test_mode`) never reaches this code at all, because it is
       in the served backend's branch only.
-    * **It warms the SAME key the request path reads** (`api/run_routers`'s
-      `("runs", owner, include_all)` for an anonymous caller with the default
-      window), through `api/_read_cache.cached`, so a request that arrives while
-      this is still running WAITS for this one pass instead of starting a second
+    * **It warms the SAME keys the request path reads**, through
+      `api/_read_cache.cached` and the routes' own builders: `api/run_routers`'s
+      `("runs", None, False)`, `api/project_routers`'s `("projects", None)` and
+      `api/repo_routers`'s `("repos", None)` — an anonymous caller with the
+      default window, which is what `owner_filter(None, request)` yields and what
+      the dashboard's first load asks for. A request that arrives while this is
+      still running WAITS for this one pass instead of starting a second
       (`_read_cache`'s per-key lock is what makes a miss cost one computation).
+      Owner-filtered and `include_all` variants are deliberately NOT warmed: each
+      is a different key, none is what a first visitor reads, and on a deployment
+      with many owners they are a key per owner.
 
-    Returns a small dict of the two spans on success, None on failure — for a
-    probe to read, never for a caller to depend on.
+    Returns a small dict of the spans on success, None when the engine could not
+    boot — for a probe to read, never for a caller to depend on.
     """
     import logging as _logging
     _log = _logging.getLogger(__name__)
@@ -367,7 +389,11 @@ def warm_first_dashboard_read():
         # A composed app (tests swap the DB/registry underneath these routes) is
         # not the production composition, and this function builds its value
         # from the SINGLETONS — warming a key that the overridden routes would
-        # answer differently is worse than not warming at all.
+        # answer differently is worse than not warming at all. A test that wants
+        # to exercise the warming can lift this table and point the getters below
+        # at the database/registry its routes resolve, or hand
+        # `_warm_dashboard_reads` those two objects directly; either way the keys
+        # are built from the composition the routes answer from.
         _log.info("first-dashboard-read prefetch skipped: this app carries "
                   "dependency overrides")
         return None
@@ -378,23 +404,79 @@ def warm_first_dashboard_read():
         engine_started = _time.monotonic()
         get_skillflow()
         engine_ms = round((_time.monotonic() - engine_started) * 1000.0, 1)
-        from api import run_routers
-        cutoff = run_routers._window_cutoff()
-        _read_cache.cached(
-            ("runs", None, False),
-            lambda: run_routers._list_all_runs_uncached(
-                None, get_db_manager(), get_config_registry(), cutoff=cutoff),
-        )
+        # Resolved AFTER the engine boots, through the same getters the
+        # dependency wiring uses: the keys have to be built from the objects a
+        # request would see, not from a second composition of them.
+        db = get_db_manager()
+        registry = get_config_registry()
     except Exception:  # noqa: BLE001 - startup must never fail because of this
         _log.warning(
-            "first-dashboard-read prefetch failed; the first GET /api/runs will "
-            "compute inline exactly as it did before this existed",
+            "first-dashboard-read prefetch failed; the first GET /api/runs, "
+            "/api/repos and /api/projects will compute inline exactly as they "
+            "did before this existed",
             exc_info=True)
         return None
-    spans = {"engine_ms": engine_ms,
-             "warm_ms": round((_time.monotonic() - started) * 1000.0, 1)}
+    return _warm_dashboard_reads(db, registry, engine_ms=engine_ms, started=started)
+
+
+def _warm_dashboard_reads(db, registry, *, engine_ms, started):
+    """Build the three dashboard keys through `_read_cache`, one span each.
+
+    Split out of `warm_first_dashboard_read` so the entry point resolves the
+    composition (and refuses a composed app) in one place and the warming itself
+    needs nothing but the two objects a request would resolve: under `TestClient`
+    the entry point returns None by design, because warming from the singletons
+    while the routes answer from dependency overrides would warm a value nobody
+    reads, so a test either hands this function its fixture's database and
+    registry or lifts the override table and calls the entry point (what
+    `tests/unit/test_read_cache_prefetch_20261119.py` does — the stronger form,
+    since it drives the real function). Same keys, same builders, same order of
+    magnitude — this IS the warming the entry point does.
+
+    Keys and builders are taken from the routes themselves — the tuple literal a
+    route passes to `cached` and the module-level function its builder calls — so
+    the two cannot drift apart silently; `tests/unit/test_read_cache_prefetch_
+    20261119.py` pins the equality by asking each route which key it uses.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    from api import project_routers, repo_routers, run_routers
+    # ONE clock read, the way the route does it (`_window_cutoff` above the
+    # cache call), so the warmed window is the one a request arriving now asks
+    # for. A request after the window edge builds its own key — a cache miss, not
+    # a wrong answer.
+    cutoff = run_routers._window_cutoff()
+    owner = None  # `owner_filter(None, request)`: no user, no filter.
+    jobs = (
+        ("runs_ms", ("runs", owner, False),
+         lambda: run_routers._list_all_runs_uncached(
+             owner, db, registry, cutoff=cutoff)),
+        ("repos_ms", ("repos", None),
+         lambda: repo_routers._list_repos_uncached(db)),
+        ("projects_ms", ("projects", owner),
+         lambda: project_routers._list_projects_uncached(db, owner)),
+    )
+    spans = {"engine_ms": engine_ms}
+    for span_name, key, build in jobs:
+        key_started = _time.monotonic()
+        try:
+            _read_cache.cached(key, build)
+        except Exception:  # noqa: BLE001 - one key must not cost the others
+            _log.warning(
+                "first-dashboard-read prefetch: warming %r failed; the first "
+                "read of that key will compute inline exactly as it did before "
+                "this existed", key, exc_info=True)
+            continue
+        spans[span_name] = round((_time.monotonic() - key_started) * 1000.0, 1)
+    spans["warm_ms"] = round((_time.monotonic() - started) * 1000.0, 1)
+    # The line keeps its `first-dashboard-read prefetch done: engine N ms, `
+    # prefix so whatever parses it keeps parsing it; the per-key spans are the
+    # new part and a key that failed reads None.
     _log.info("first-dashboard-read prefetch done: engine %.1f ms, "
-              "/api/runs %.1f ms total", spans["engine_ms"], spans["warm_ms"])
+              "/api/runs %s ms, /api/repos %s ms, /api/projects %s ms, "
+              "%.1f ms total",
+              spans["engine_ms"], spans.get("runs_ms"), spans.get("repos_ms"),
+              spans.get("projects_ms"), spans["warm_ms"])
     return spans
 
 

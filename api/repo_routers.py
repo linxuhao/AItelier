@@ -133,6 +133,17 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
     return groups
 
 
+def _list_repos_uncached(db: DBManager) -> list[dict]:
+    """The uncached read behind `GET /api/repos` — every group, enriched.
+
+    A named wrapper (not a second implementation) so `api/main.py`'s startup
+    warm-up builds the value with the same function the route builds it with;
+    see `api/project_routers.py:_list_projects_uncached` for why the sharing has
+    to be the code and not a copy of it.
+    """
+    return _build_repo_groups(db)
+
+
 @router.get("")
 def list_repos(request: Request, db: DBManager = Depends(get_db_manager)):
     """List all repository groups (distinct repo_path values).
@@ -152,7 +163,8 @@ def list_repos(request: Request, db: DBManager = Depends(get_db_manager)):
     for this every 10s and the answer is identical for all of them, so it was
     being recomputed once per tab per tick on a single-core process.
     """
-    groups = _read_cache.cached(("repos", None), lambda: _build_repo_groups(db))
+    groups = _read_cache.cached(
+        ("repos", None), lambda: _list_repos_uncached(db))
     if may_read_private(request):
         return groups
     return [{"project_count": group["project_count"], "last_activity": group["last_activity"],

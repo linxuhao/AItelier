@@ -48,6 +48,12 @@ const month = at => String(at).slice(0, 7);
 /** The purge phases before the directory swap: a journal that ends in one of them describes
  *  a repository nothing was swapped into yet, whatever the layout says afterwards. */
 const PRE_SWAP_PHASES = new Set(['forgetting', 'forget_done', 'building', 'verified', 'rolling_back']);
+/** The owner's notice for derived vector rows a failed filter could not remove (design 3.8.2):
+ *  the words a recovery at boot raises, with a kind, so a later filter that does remove them can
+ *  take the notice back instead of leaving a second name for the same state on file. */
+const VECTOR_PENDING = 'vector-pending-forget';
+const vectorPendingText = (ids, reason) =>
+  `向量文件里仍有已彻底删除的编号 ${ids.join(', ')}，原因 ${reason}；下次载入会再去掉`;
 
 export class MemoryUnavailable extends Error {
   constructor(message) { super(message); this.name = 'MemoryUnavailable'; }
@@ -265,6 +271,10 @@ export class MemoryStore {
     if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
       appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
     this.#readNotices();
+    // design 3.8.2: a filter that failed during a run left its rows in the vector file and its
+    // notice for the owner (the same words a recovery here raises), so this boot is where it is
+    // made good - before the load, so the load's own reconciliation finds nothing left to do.
+    if (this.#vectorPending().size) await this.#filterVectorsBestEffort([]);
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
       if (leftovers.length) throw new MemoryUnavailable(`memory: ${this.dir} is missing while ${leftovers.join(', ')} exists; refusing to start an empty repository over it`);
@@ -761,9 +771,10 @@ export class MemoryStore {
    *
    *  Their vectors leave memory at once; the vector file on disk is filtered once per call,
    *  best effort (design 3.8.2): the records are written and the log lines gone, there is no
-   *  way back, so a failure (ENOSPC, EACCES) is only logged and the next load's
-   *  reconciliation removes those rows. A purge filters the file itself, with its checks, and
-   *  passes filterVectors: false. */
+   *  way back, so a failure (ENOSPC, EACCES) never fails the forget - it is logged and put on
+   *  the owner's notices (the words a recovery at boot raises) as a row still awaiting removal,
+   *  until a filter that does reach the file removes it, here or at the next boot. A purge
+   *  filters the file itself, with its checks, and passes filterVectors: false. */
   async #dropFromWorkTree(ids, { reason, by }, { filterVectors = true } = {}) {
     const at = this.now();
     const rows = [];
@@ -789,14 +800,54 @@ export class MemoryStore {
     return dropped;
   }
 
-  /** Filter the vector file, never failing the caller; the reason, or undefined. */
+  /** The derived rows a failed filter left in the vector file, id -> reason, taken from the
+   *  owner's notice: in memory once read, and the same row the next process reads. */
+  #vectorPending() {
+    const rows = this.noticeRows ?? this.#readNotices();
+    const pending = new Map();
+    for (const row of rows) {
+      if (row.kind !== VECTOR_PENDING || !Array.isArray(row.ids)) continue;
+      for (const id of row.ids) pending.set(id, row.reason ?? 'unknown');
+    }
+    return pending;
+  }
+
+  /** Put the pending rows on the owner's notices (one row, the recovery's own words), or take
+   *  it back when none is left. Text that has not changed is left alone, so a boot that retries
+   *  and fails again adds no second row. */
+  #vectorPendingNotice(pending) {
+    const rows = this.noticeRows ?? this.#readNotices();
+    const before = rows.find(r => r.kind === VECTOR_PENDING);
+    if (!pending.size) { if (before) this.#notice(VECTOR_PENDING); return; }
+    const ids = [...pending.keys()].sort();
+    const reason = [...new Set(pending.values())].join('; ');
+    const text = vectorPendingText(ids, reason);
+    if (before?.text === text) return;
+    this.#notice(VECTOR_PENDING); // the ids are the notice's text: it moves on with them
+    this.#notice(VECTOR_PENDING, text, { ids, reason });
+  }
+
+  /** Filter the vector file, never failing the caller; the reason, or undefined. A failure is
+   *  the notice a recovery at boot raises, not only a log line: the row is still in the file, so
+   *  a forgotten text is still derived and stored, and the surface that says so after a restart
+   *  says so during the run too. A success takes the notice back for the rows it dropped; the
+   *  rows an earlier failure left are dropped with them, so a later filter finishes what the
+   *  failed one could not. */
   async #filterVectorsBestEffort(ids) {
-    try { await filterVectorFile(this.vectorFile, new Set(ids)); return undefined; }
+    const pending = this.#vectorPending();
+    const drop = new Set([...ids, ...pending.keys()]);
+    let reason;
+    try { await filterVectorFile(this.vectorFile, drop); }
     catch (error) {
-      const reason = String(error?.message ?? error).slice(0, 200);
+      reason = String(error?.message ?? error).slice(0, 200);
       this.log('memory/vector-filter-failed', { ids, reason });
+      for (const id of ids) pending.set(id, reason);
+      this.#vectorPendingNotice(pending);
       return reason;
     }
+    for (const id of drop) pending.delete(id); // gone from the file: nothing left to tell
+    this.#vectorPendingNotice(pending);
+    return undefined;
   }
 
   /** Forget (design 3.6 level 1): out of the working tree, grep and BM25; recoverable
@@ -1435,8 +1486,7 @@ export class MemoryStore {
     // forgotten either way); keyed by plan.ids, since a finished forget left `entries`
     // already. Idempotent; a failure never stops the boot - the owner is told, and this
     // boot's load reconciles again.
-    const vectorProblem = await this.#filterVectorsBestEffort(plan.ids ?? []);
-    if (vectorProblem) this.#notice(undefined, `向量文件里仍有已彻底删除的编号 ${(plan.ids ?? []).join(', ')}，原因 ${vectorProblem}；下次载入会再去掉`);
+    await this.#filterVectorsBestEffort(plan.ids ?? []);
     const finished = this.#finishForget(plan.ids ?? []);
     this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,
       ...(finished ? { forget_finished: finished } : {}) });

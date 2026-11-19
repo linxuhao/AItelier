@@ -40,7 +40,6 @@ All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLE
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -49,6 +48,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
 
+from core import drivers
 from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
@@ -145,8 +145,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _code_hash(code: str) -> str:
-    return hashlib.sha256(("owner-channel-code:" + code).encode("utf-8")).hexdigest()
+def _code_hash(pepper: str, channel: str, code: str) -> str:
+    """A binding code as it is stored and looked up: HMAC-SHA256 keyed with the driver
+    pepper (core.drivers.token_hash, the driver tokens' own scheme), over the code and
+    the channel it was issued for. A copy of the State file (it is world-readable) must
+    not give the code away: an unkeyed digest of a 6-digit code is undone offline in
+    under a second, after which the copy's holder binds their own account and approves
+    proposals over chat. Keyed, the 10^6 candidates cannot be tried without the pepper,
+    and online guessing stays bounded at BIND_FAILURES_MAX per code.
+
+    Rows written before this (an unkeyed sha256) match no code: they expire with their
+    CODE_TTL, and the owner's next issue_code deletes an unused one anyway."""
+    return drivers.token_hash(pepper, f"owner-channel-code:{channel}:{code}")
 
 
 def require_bound(conn, channel, sender_ref):
@@ -260,9 +270,12 @@ def _refusal(exc) -> str:
 
 
 class StateChannels:
-    def __init__(self, store, actor, driver_id=None, steward=None, inbox=None):
+    def __init__(self, store, actor, driver_id=None, steward=None, inbox=None, pepper=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
         self.steward, self.inbox = steward, inbox
+        # The binding codes' key (_code_hash); None = the driver pepper secret file,
+        # read when a code is issued or tried (core.drivers.read_pepper).
+        self._pepper = pepper
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
@@ -356,6 +369,15 @@ class StateChannels:
                              (json.dumps(result), self.actor, request_key, ref_key))
         return result
 
+    def _code_key(self):
+        """The pepper that keys the binding codes, or channel_secret_missing: without
+        it no code is issued or tried - never an unkeyed digest in its place."""
+        pepper = self._pepper if self._pepper is not None else drivers.read_pepper()
+        if not isinstance(pepper, str) or len(pepper) < 32:
+            raise StateGraphError(f"channel_secret_missing: binding codes need the {drivers.PEPPER_SECRET_NAME} "
+                                  "secret file (at least 32 characters)")
+        return pepper
+
     @staticmethod
     def _log_refusal(code, channel, sender_ref, size):
         # B3: who, where, when and how long - never the body.
@@ -370,7 +392,10 @@ class StateChannels:
         code, until the owner issues a new one). An attempt that names its channel
         message is answered once: a second delivery of it (under any request_key)
         answers {bound, duplicate: true} and counts nothing."""
-        request_hash = _hash([channel, sender_ref, code])
+        # Only the keyed digest of the code enters the request ledger (driver_inbox_requests
+        # keeps it on a successful bind): no plain or unkeyed digest of it is stored anywhere.
+        digest = _code_hash(self._code_key(), channel, code)
+        request_hash = _hash([channel, sender_ref, digest])
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
@@ -395,7 +420,7 @@ class StateChannels:
                 live = None
             well_formed = len(code) == 6 and code.isascii() and code.isdigit()
             row = conn.execute("SELECT * FROM state_owner_channel_codes WHERE code_hash=?",
-                               (_code_hash(code),)).fetchone() if well_formed else None
+                               (digest,)).fetchone() if well_formed else None
             if live is not None and live["retired_at"] is not None:
                 refusal = "code_retired"
             elif row is None or row["channel"] != channel:
@@ -536,19 +561,22 @@ class StateChannels:
     # ---------------------------------------------------------------- the owner (dashboard)
     def issue_code(self, channel):
         """A fresh 6-digit code for binding `channel`; the plaintext exists only in
-        this answer. Any earlier unused code of the channel stops working."""
+        this answer, the backend keeps its keyed digest (_code_hash). Any earlier unused
+        code of the channel stops working."""
         self.steward._owner()
+        pepper = self._code_key()
         moment = _now()
         with self.store.transaction(write=True) as conn:
             conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND used_at IS NULL", (channel,))
             while True:
                 code = f"{secrets.randbelow(10 ** 6):06d}"
+                digest = _code_hash(pepper, channel, code)
                 if conn.execute("SELECT 1 FROM state_owner_channel_codes WHERE code_hash=?",
-                                (_code_hash(code),)).fetchone() is None:
+                                (digest,)).fetchone() is None:
                     break
             conn.execute("INSERT INTO state_owner_channel_codes(code_hash,channel,issued_at,expires_at) "
                          "VALUES(?,?,?,?)",
-                         (_code_hash(code), channel, moment.isoformat(), (moment + CODE_TTL).isoformat()))
+                         (digest, channel, moment.isoformat(), (moment + CODE_TTL).isoformat()))
         return {"code": code, "expires_at": (moment + CODE_TTL).isoformat()}
 
     def unbind(self, channel):

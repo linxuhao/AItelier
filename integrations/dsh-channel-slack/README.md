@@ -54,8 +54,11 @@ These hold for every owner channel (Slack and WeChat):
   `aitelier.db`. A later hardening is a separate, host-only credential for the channel
   commands.
 - A stranger who can DM the bot can retire a live binding code with 5 wrong guesses. It
-  cannot take the binding over (5 guesses in 10^6), the refusals are in the log with the
-  sender, and the owner just issues a new code.
+  cannot take the binding over: the code is stored only as an HMAC keyed with the driver
+  pepper secret file (like the driver tokens), so a copy of the State database does not
+  reveal it - without the pepper no code is issued or checked (`channel_secret_missing`) -
+  and online guessing stays bounded at 5 guesses in 10^6. The refusals are in the log
+  with the sender, and the owner just issues a new code.
 - Token files (`slack-app-token`, `slack-bot-token`, `wechat-bridge-token`) should be
   mode 0600; nothing enforces it.
 

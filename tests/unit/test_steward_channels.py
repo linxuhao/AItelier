@@ -8,8 +8,11 @@ path. The HTTP tests run the real app with the write gate ON, like
 tests/unit/test_steward_proposals.py."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+import sqlite3
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -20,12 +23,12 @@ from fastapi.testclient import TestClient
 from api import authz
 from api.dependencies import get_db_manager
 from api.main import app
-from core import cf_access, state_channels
+from core import cf_access, drivers, state_channels
 from core.drivers import DriverRegistry
 from core.dsh_driver import DshDrivers
 from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_database import StateDatabase
-from core.state_graph import StateGraphError
+from core.state_graph import StateGraphError, canonical
 from core.state_service import StateService
 
 HOME = "aitelier-home"
@@ -36,7 +39,10 @@ CREATE = {"project_id": "gamma", "title": "Gamma", "goal": "a new project", "see
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, monkeypatch):
+    # The binding codes are keyed with the driver pepper secret file; here it is the
+    # registry's pepper, whatever the ambient container mounts.
+    monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
     db = StateDatabase(str(tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, PEPPER)
     registry.seed("steward-channel-owner-cli-token")
@@ -184,6 +190,130 @@ def test_four_refused_attempts_leave_the_code_live_and_none_count_without_one(wo
                                 allow_write=True), "invalid_code")
     assert execute(world.steward, "bind_owner_channel", {"request_key": "ok", "channel": "slack",
                                                          "sender_ref": SLACK_USER, "code": code},
+                   allow_write=True)["bound"]
+
+
+# --- the stored code is keyed (a copy of the State file does not give it away) -------------
+
+def _unkeyed(code, channel="slack", sender=SLACK_USER):
+    """Every unkeyed digest of `code` the backend ever stored or could store: the old
+    code_hash, plain variants, and the old bind request hash (driver_inbox_requests)."""
+    sha = lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest()  # noqa: E731
+    return {sha("owner-channel-code:" + code), sha(code), sha(f"owner-channel-code:{channel}:{code}"),
+            sha(canonical([channel, sender, code])), sha(canonical(code))}
+
+
+def _copy(world, tmp_path):
+    """A read-only copy of the State file, as someone who can only read it would take it."""
+    copy = tmp_path / "copy.sqlite"
+    with sqlite3.connect(world.db.db_path) as src, sqlite3.connect(copy) as dst:
+        src.backup(dst)
+    return sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
+
+
+def test_the_stored_code_is_hmac_keyed_with_the_driver_pepper_not_an_unkeyed_digest(world):
+    code = world.owner.channels.issue_code("slack")["code"]
+    with world.db.get_connection() as conn:
+        (stored,), = conn.execute("SELECT code_hash FROM state_owner_channel_codes").fetchall()
+    keyed = lambda pepper: hmac.new(pepper.encode(), f"owner-channel-code:slack:{code}".encode(),  # noqa: E731
+                                    hashlib.sha256).hexdigest()
+    assert stored == keyed(PEPPER)
+    assert stored not in _unkeyed(code), "an unkeyed digest of a 6-digit code is undone offline"
+    assert keyed("another-pepper-of-at-least-32-chars!") != stored, "the digest changes with the pepper"
+
+
+def test_a_db_copy_cannot_be_brute_forced_offline_for_the_live_code(world, tmp_path):
+    """The verifier's repro (approval-semantics-and-secrets_f1): from a copy of the State
+    file, try all 10^6 codes under the old formula against the live row. Before the fix
+    this found the code in under a second, bound the copy holder's account and let it
+    approve proposals over chat."""
+    truth = world.owner.channels.issue_code("slack")["code"]
+    conn = _copy(world, tmp_path)
+    stored = {r[0] for r in conn.execute("SELECT code_hash FROM state_owner_channel_codes WHERE used_at IS NULL")}
+    conn.close()
+    assert len(stored) == 1
+    prefix = hashlib.sha256(b"owner-channel-code:")
+    recovered = None
+    for i in range(10 ** 6):
+        candidate = prefix.copy()
+        candidate.update(b"%06d" % i)
+        if candidate.hexdigest() in stored:
+            recovered = f"{i:06d}"
+            break
+    assert recovered is None
+    assert not stored & _unkeyed(truth)
+    # Without the pepper the copy holder has nothing; the owner's code still binds.
+    assert bind_message(world, truth, "m-own")["bound"]
+
+
+def test_after_a_bind_no_table_holds_an_unkeyed_digest_of_the_code(world, tmp_path):
+    code = world.owner.channels.issue_code("slack")["code"]
+    assert bind_message(world, code, "m-1")["bound"]
+    conn = _copy(world, tmp_path)
+    forbidden, cells = _unkeyed(code), 0
+    with world.db.get_connection() as live:
+        assert live.execute("SELECT COUNT(*) FROM driver_inbox_requests WHERE operation='bind_owner_channel'"
+                            ).fetchone()[0] == 1, "the bind's request ledger row is in the scan"
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    cells += 1
+                    assert cell != code, table
+                    assert not any(digest in cell for digest in forbidden), table
+    conn.close()
+    assert cells
+
+
+def test_another_pepper_cannot_verify_the_code(world, monkeypatch):
+    code = world.owner.channels.issue_code("slack")["code"]
+    monkeypatch.setattr(drivers, "read_pepper", lambda: "a-different-pepper-of-32-characters-or-more")
+    refused(lambda: execute(world.steward, "bind_owner_channel",
+                            {"request_key": "b1", "channel": "slack", "sender_ref": SLACK_USER, "code": code},
+                            allow_write=True), "invalid_code")
+    monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
+    assert execute(world.steward, "bind_owner_channel",
+                   {"request_key": "b2", "channel": "slack", "sender_ref": SLACK_USER, "code": code},
+                   allow_write=True)["bound"]
+
+
+@pytest.mark.parametrize("pepper", [None, "too-short"])
+def test_without_the_pepper_no_code_is_issued_or_tried(world, monkeypatch, pepper):
+    code = world.owner.channels.issue_code("slack")["code"]
+    monkeypatch.setattr(drivers, "read_pepper", lambda: pepper)
+    refused(lambda: world.owner.channels.issue_code("slack"), "channel_secret_missing")
+    for i in range(state_channels.BIND_FAILURES_MAX + 1):
+        refused(lambda: execute(world.steward, "bind_owner_channel",
+                                {"request_key": f"n{i}", "channel": "slack", "sender_ref": SLACK_USER,
+                                 "code": code, "channel_message_ref": f"m{i}"}, allow_write=True),
+                "channel_secret_missing")
+    with world.db.get_connection() as conn:
+        assert tuple(conn.execute("SELECT COUNT(*), MAX(failed_attempts) FROM state_owner_channel_codes")
+                     .fetchone()) == (1, 0), "a missing secret issues nothing, keeps the live code and counts no guess"
+        assert conn.execute("SELECT COUNT(*) FROM state_owner_channel_bind_attempts").fetchone()[0] == 0
+    monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
+    assert bind_message(world, code, "m0")["bound"], "the refused message binds once the secret is back"
+
+
+
+def test_a_code_stored_unkeyed_before_the_upgrade_matches_nothing(world):
+    """Rows written by the old code (an unkeyed sha256) are not accepted: they bind
+    nothing, expire with their 10 minutes, and the next issued code deletes them."""
+    old = "424242"
+    moment = state_channels._now()
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_owner_channel_codes(code_hash,channel,issued_at,expires_at) VALUES(?,?,?,?)",
+                     (hashlib.sha256(("owner-channel-code:" + old).encode()).hexdigest(), "slack",
+                      moment.isoformat(), (moment + state_channels.CODE_TTL).isoformat()))
+        conn.commit()
+    refused(lambda: execute(world.steward, "bind_owner_channel",
+                            {"request_key": "old", "channel": "slack", "sender_ref": SLACK_USER, "code": old},
+                            allow_write=True), "invalid_code")
+    code = world.owner.channels.issue_code("slack")["code"]
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_owner_channel_codes").fetchone()[0] == 1
+    assert execute(world.steward, "bind_owner_channel",
+                   {"request_key": "new", "channel": "slack", "sender_ref": SLACK_USER, "code": code},
                    allow_write=True)["bound"]
 
 
@@ -864,6 +994,12 @@ def test_the_channel_routes_are_the_owner_sessions_alone(world, client):
     assert client.get("/api/steward/message-sources?ids=a,b", headers=OWNER_HEADERS).json() == {"sources": {}}
     too_many = ",".join(f"m{i}" for i in range(201))
     assert client.get(f"/api/steward/message-sources?ids={too_many}", headers=OWNER_HEADERS).status_code == 422
+
+
+def test_without_the_pepper_the_code_route_answers_503_channel_secret_missing(world, client, monkeypatch):
+    monkeypatch.setattr(drivers, "read_pepper", lambda: None)
+    r = client.post("/api/steward/channels/slack/code", headers=OWNER_HEADERS)
+    assert r.status_code == 503 and r.json()["detail"].startswith("channel_secret_missing"), r.text
 
 
 def test_the_owner_sees_the_reported_status_and_qr_over_http_and_no_one_else_does(world, client):

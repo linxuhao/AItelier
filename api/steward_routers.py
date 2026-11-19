@@ -250,9 +250,13 @@ def set_default_channel(body: DefaultChannel, service=Depends(get_service)):
 @router.post("/channels/{channel}/code", dependencies=[Depends(authz.require_writer)])
 def issue_code(channel: Channel, service=Depends(get_service)):
     """A 6-digit code, valid 10 minutes, once: the owner sends it to the bot from the
-    account to bind. The plaintext is in this answer only (the backend keeps a hash)."""
+    account to bind. The plaintext is in this answer only (the backend keeps a digest
+    keyed with the driver pepper; without that secret no code is issued: 503)."""
     _owner(service)
-    return service.channels.issue_code(channel)
+    try:
+        return service.channels.issue_code(channel)
+    except StateGraphError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @router.delete("/channels/{channel}", dependencies=[Depends(authz.require_writer)])

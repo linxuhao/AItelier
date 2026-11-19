@@ -781,6 +781,108 @@ def test_an_approval_replayed_under_its_request_key_says_duplicate_and_decides_n
     assert len(conversation(world)) == 1 and proposal(world)["status"] == "done"
 
 
+def ledger(world):
+    """The relay's two request-ledger records, as stored."""
+    with world.db.get_connection() as conn:
+        return {op: json.loads(result) for op, result in conn.execute(
+            "SELECT operation,result_json FROM driver_inbox_requests WHERE operation LIKE 'relay_owner_message%'")}
+
+
+class Stopped(BaseException):
+    """The process stopping (a restart, a container recreate) at that point."""
+
+
+@pytest.mark.parametrize("key", ["relay-ts-approve", "another-key"])
+def test_a_stop_between_the_message_and_the_decision_is_decided_by_the_redelivery(world, monkeypatch, key):
+    """races-and-failure-paths_f1 / approval-semantics_f3: the message and its ledger
+    records committed with approval: null, then the process stopped before the decision.
+    The redelivery (same key, or the same channel message under another) answered
+    {duplicate: true, approval: null} - no line, the proposal open for good."""
+    bind(world)
+    plant_proposal(world)
+
+    def stop(*args, **kwargs):
+        raise Stopped()
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.channels, "_decide", stop)
+        with pytest.raises(Stopped):
+            relay(world, "同意 proposal p-1", "ts-approve")
+    assert proposal(world)["status"] == "open"
+    assert all(r["approval"] is None for r in ledger(world).values()), "committed before the decision"
+    assert world.steward.steward.recover() == {"settled": 0}, "recover() does not revisit an open proposal"
+    again = relay(world, "同意 proposal p-1", "ts-approve", key=key)
+    assert again["duplicate"] is False and again["approval"]["outcome"] == "executed", again
+    assert again["message_id"] == conversation(world)[0]["message_id"] and len(conversation(world)) == 1
+    row = proposal(world)
+    assert row["status"] == "done" and row["decided_by"] == f"owner:slack:{SLACK_USER}"
+    assert all(r == {k: v for k, v in again.items()} for r in ledger(world).values()), "the ledger is repaired"
+    assert relay(world, "同意 proposal p-1", "ts-approve", key="third") == {**again, "duplicate": True}
+    assert proposal(world)["version"] == row["version"], "decided once"
+
+
+def test_a_failed_ledger_write_after_the_decision_keeps_the_answer_for_the_redelivery(world, monkeypatch):
+    """The other half of the window: the decision ran, then the ledger write failed
+    (StateWriteBusy). The proposal was done but the ledger said approval: null forever."""
+    from contextlib import contextmanager
+
+    from core.state_graph import StateWriteBusy
+    bind(world)
+    plant_proposal(world)
+    store, armed = world.steward.store, {"on": False}
+    real_transaction, real_decide = store.transaction, world.steward.channels._decide
+
+    def decide_then_arm(*args, **kwargs):
+        out = real_decide(*args, **kwargs)
+        armed["on"] = True  # the next write transaction is the ledger's
+        return out
+
+    @contextmanager
+    def busy(*, write=False, notebook=None):
+        if write and armed["on"]:
+            armed["on"] = False
+            raise StateWriteBusy("state_write_busy: another writer held the State write lock")
+        with real_transaction(write=write, notebook=notebook) as conn:
+            yield conn
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.channels, "_decide", decide_then_arm)
+        patched.setattr(store, "transaction", busy)
+        first = relay(world, "同意 proposal p-1", "ts-approve")
+    assert first["duplicate"] is False and first["approval"]["outcome"] == "executed", \
+        "the decision in hand is answered, not lost to the ledger write"
+    decided = proposal(world)
+    assert decided["status"] == "done"
+    assert all("pending" in r for r in ledger(world).values()), "the ledger write failed"
+    again = relay(world, "同意 proposal p-1", "ts-approve")
+    assert again == first, "the redelivery answers the decision this message made, not proposal_not_open"
+    assert proposal(world)["version"] == decided["version"] and proposal(world)["decided_at"] == decided["decided_at"]
+    assert all(r == first for r in ledger(world).values())
+    assert relay(world, "同意 proposal p-1", "ts-approve", key="k2") == {**first, "duplicate": True}
+
+
+def test_a_stop_while_the_approval_executes_is_answered_once_recover_settles_it(world, monkeypatch):
+    """Stopped after the decision began (proposal executing): a redelivery while it runs
+    answers no approval and decides nothing; after recover() settles the proposal the
+    redelivery answers it as this message's executed decision."""
+    bind(world)
+    plant_proposal(world)
+
+    def stop(*args, **kwargs):
+        raise Stopped()
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.steward, "execute_create_project", stop)
+        with pytest.raises(Stopped):
+            relay(world, "同意 proposal p-1", "ts-approve")
+    assert proposal(world)["status"] == "executing"
+    running = relay(world, "同意 proposal p-1", "ts-approve")
+    assert running == {"message_id": running["message_id"], "duplicate": True, "approval": None}
+    assert world.steward.steward.recover() == {"settled": 1}
+    assert proposal(world)["status"] == "done"
+    settled = relay(world, "同意 proposal p-1", "ts-approve")
+    assert settled["duplicate"] is False and settled["approval"]["outcome"] == "executed"
+    assert settled["approval"]["result"]["status"] == "done" and settled["approval"]["target"] == "gamma"
+    assert relay(world, "同意 proposal p-1", "ts-approve") == {**settled, "duplicate": True}
+
+
 @pytest.mark.parametrize("age,outcome", [(timedelta(minutes=9, seconds=59), "executed"),
                                          (timedelta(minutes=10, seconds=1), "refused"),
                                          (timedelta(hours=3), "refused")])

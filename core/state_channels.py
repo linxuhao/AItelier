@@ -53,8 +53,8 @@ from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
-from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, impact_is_empty, steward_project,
-                                stop_impact)
+from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, _proposal, impact_is_empty,
+                                steward_project, stop_impact)
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +135,8 @@ _QR_SHAPES = frozenset({"g", "path", "rect"})
 _QR_ATTRIBUTES = frozenset({"viewBox", "width", "height", "d", "fill", "stroke", "stroke-width",
                             "shape-rendering", "x", "y"})
 _QR_VALUE = re.compile(r"[A-Za-z0-9#., -]*")
+# _own_decision: the proposal is executing under this very message's decision.
+_RUNNING = object()
 
 
 def rate_limits() -> tuple[int, int]:
@@ -290,7 +292,11 @@ class StateChannels:
                             channel_at=None):
         """One owner message from a channel into the steward's conversation, then the
         chat approval check. Idempotent per request_key and per channel message: either
-        replay answers the first result with duplicate: true. A channel message is the
+        replay answers the first result with duplicate: true - except an approval whose
+        answer the ledger does not hold yet (the process stopped, or the ledger write
+        failed, between the message and the decision): the redelivery decides it, or
+        finds it decided by this message, and answers {duplicate: false, approval} so the
+        channel sends its line. A channel message is the
         sender's: the same ref from another sender is another message, which goes
         through every check (an unbound sender is refused, never handed the owner's
         first result). `channel_at` is when the
@@ -318,64 +324,130 @@ class StateChannels:
         home = steward_project()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
-            replay = self.steward._replay(conn, "relay_owner_message", request_key, request_hash)
-            if replay is not None:
-                return {**replay, "duplicate": True}
-            seen = conn.execute("SELECT message_id FROM state_message_sources WHERE direction='in' AND channel=? "
-                                "AND sender_ref=? AND channel_message_ref=?",
-                                (channel, sender_ref, channel_message_ref)).fetchone()
-            if seen is not None:
-                first = conn.execute("SELECT result_json FROM driver_inbox_requests WHERE actor=? AND operation=? "
-                                     "AND request_key=?", (self.actor, "relay_owner_message:ref", ref_key)).fetchone()
-                return {**(json.loads(first[0]) if first else {"message_id": seen[0], "approval": None}),
-                        "duplicate": True}
-            # A binding message delivered again after it bound its sender: the sender is
-            # bound now, so the host relays it - it was never an owner message, and it
-            # neither lands in the conversation nor wakes the steward.
-            if _bind_attempt(conn, channel, sender_ref, channel_message_ref) is not None:
-                return {"message_id": None, "duplicate": True, "approval": None}
-            moment = _now()
-            per_minute, per_hour = rate_limits()
-            for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
-                accepted = conn.execute("SELECT COUNT(*) FROM state_message_sources WHERE channel=? "
-                                        "AND direction='in' AND at>?",
-                                        (channel, (moment - window).isoformat())).fetchone()[0]
-                if accepted >= limit:
-                    self._log_refusal("rate_limited", channel, sender_ref, size)
-                    raise StateGraphError(f"rate_limited: {channel} took {accepted} messages in the last "
-                                          f"{int(window.total_seconds())} s; at most {limit}")
-            try:
-                require_bound(conn, channel, sender_ref)
-            except StateGraphError:
-                self._log_refusal("channel_sender_not_bound", channel, sender_ref, size)
-                raise
-            self.store._project(conn, home)
-            message_id, _, _ = self.inbox.write_user_half(conn, home, USER_SUBJECT, body)
-            conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
-                         "channel_message_ref,at) VALUES(?,'in',?,?,?,?)",
-                         (message_id, channel, sender_ref, channel_message_ref, moment.isoformat()))
-            matched = match_phrase(conn, body)
-            result = {"message_id": message_id, "duplicate": False, "approval": None}
-            if matched is not None and written_at is None:
-                result["approval"] = {"proposal_id": matched["proposal_id"], "action": matched["action"],
-                                      "outcome": "refused", "refusal": "approval_undated"}
-                matched = None
-            self.steward._record(conn, "relay_owner_message", request_key, request_hash, result)
-            # The per-message record: a second relay of this channel message (under any
-            # request_key) answers the first result.
-            self.steward._record(conn, "relay_owner_message:ref", ref_key, request_hash, result)
-        self.steward._notify()
-        if matched is not None:
-            carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
-                       "phrase": matched["phrase"]}
-            result = {**result, "approval": self._decide(matched, f"owner:{channel}:{sender_ref}", carrier,
-                                                         written_at)}
-            with self.store.transaction(write=True) as conn:
-                conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND "
-                             "((operation='relay_owner_message' AND request_key=?) OR "
-                             "(operation='relay_owner_message:ref' AND request_key=?))",
-                             (json.dumps(result), self.actor, request_key, ref_key))
+            first = self._relayed(conn, request_key, request_hash, channel, sender_ref, channel_message_ref,
+                                  ref_key)
+            if first is None:
+                first = self._write_relay(conn, home, request_key, request_hash, channel, sender_ref,
+                                          channel_message_ref, ref_key, body, size, written_at)
+                fresh = True
+            else:
+                fresh = False
+        if fresh:
+            self.steward._notify()
+        if "pending" not in first:
+            return first if fresh else {**first, "duplicate": True}
+        # The approval this message carries is not settled in the ledger: decided now, or
+        # - a redelivery after a stop or a failed ledger write - decided (or found
+        # decided) again, so the channel gets its one line either way.
+        settled = self._settle(first, channel, sender_ref, channel_message_ref)
+        if settled is None:  # being decided by the first delivery right now
+            return {"message_id": first["message_id"], "duplicate": True, "approval": None}
+        return settled
+
+    def _relayed(self, conn, request_key, request_hash, channel, sender_ref, channel_message_ref, ref_key):
+        """The ledger's record of this relay when it was relayed before (by request_key,
+        or by its channel message under any key), else None."""
+        replay = self.steward._replay(conn, "relay_owner_message", request_key, request_hash)
+        if replay is not None:
+            return replay
+        seen = conn.execute("SELECT message_id FROM state_message_sources WHERE direction='in' AND channel=? "
+                            "AND sender_ref=? AND channel_message_ref=?",
+                            (channel, sender_ref, channel_message_ref)).fetchone()
+        if seen is not None:
+            first = conn.execute("SELECT result_json FROM driver_inbox_requests WHERE actor=? AND operation=? "
+                                 "AND request_key=?", (self.actor, "relay_owner_message:ref", ref_key)).fetchone()
+            return json.loads(first[0]) if first else {"message_id": seen[0], "approval": None}
+        # A binding message delivered again after it bound its sender: the sender is
+        # bound now, so the host relays it - it was never an owner message, and it
+        # neither lands in the conversation nor wakes the steward.
+        if _bind_attempt(conn, channel, sender_ref, channel_message_ref) is not None:
+            return {"message_id": None, "approval": None}
+        return None
+
+    def _write_relay(self, conn, home, request_key, request_hash, channel, sender_ref, channel_message_ref,
+                     ref_key, body, size, written_at):
+        """The owner message, its source row and its two ledger records, in the caller's
+        transaction. An approval phrase to decide is recorded `pending` (the phrase, the
+        version it names and when it was written): the decision runs after this commits,
+        and until the ledger holds its answer a redelivery decides it (_settle)."""
+        moment = _now()
+        per_minute, per_hour = rate_limits()
+        for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
+            accepted = conn.execute("SELECT COUNT(*) FROM state_message_sources WHERE channel=? "
+                                    "AND direction='in' AND at>?",
+                                    (channel, (moment - window).isoformat())).fetchone()[0]
+            if accepted >= limit:
+                self._log_refusal("rate_limited", channel, sender_ref, size)
+                raise StateGraphError(f"rate_limited: {channel} took {accepted} messages in the last "
+                                      f"{int(window.total_seconds())} s; at most {limit}")
+        try:
+            require_bound(conn, channel, sender_ref)
+        except StateGraphError:
+            self._log_refusal("channel_sender_not_bound", channel, sender_ref, size)
+            raise
+        self.store._project(conn, home)
+        message_id, _, _ = self.inbox.write_user_half(conn, home, USER_SUBJECT, body)
+        conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
+                     "channel_message_ref,at) VALUES(?,'in',?,?,?,?)",
+                     (message_id, channel, sender_ref, channel_message_ref, moment.isoformat()))
+        matched = match_phrase(conn, body)
+        result = {"message_id": message_id, "duplicate": False, "approval": None}
+        if matched is not None and written_at is None:
+            result["approval"] = {"proposal_id": matched["proposal_id"], "action": matched["action"],
+                                  "outcome": "refused", "refusal": "approval_undated"}
+        elif matched is not None:
+            result["pending"] = {**matched, "written_at": written_at.isoformat()}
+        self.steward._record(conn, "relay_owner_message", request_key, request_hash, result)
+        # The per-message record: a second relay of this channel message (under any
+        # request_key) answers the first result.
+        self.steward._record(conn, "relay_owner_message:ref", ref_key, request_hash, result)
         return result
+
+    def _settle(self, first, channel, sender_ref, channel_message_ref):
+        """Decide the approval a relayed message carries and put the answer in its two
+        ledger records: {message_id, duplicate: false, approval}. Re-entry is safe - the
+        decision checks the proposal's status and version in its own write transaction -
+        and a proposal this very message already decided (the stop came after the
+        decision, or the ledger write failed) is answered as that decision, not as
+        proposal_not_open. None while the first delivery is still running it."""
+        pending = first["pending"]
+        carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
+                   "phrase": pending["phrase"]}
+        approval = self._own_decision(pending, carrier)
+        if approval is None:
+            approval = self._decide(pending, f"owner:{channel}:{sender_ref}", carrier,
+                                    datetime.fromisoformat(pending["written_at"]))
+            if approval.get("refusal") == "proposal_not_open":  # decided meanwhile, maybe by this message
+                approval = self._own_decision(pending, carrier) or approval
+        if approval is _RUNNING:
+            return None
+        result = {"message_id": first["message_id"], "duplicate": False, "approval": approval}
+        try:
+            with self.store.transaction(write=True) as conn:
+                # Only records still pending: a concurrent settle that got there first stands.
+                conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND operation IN "
+                             "('relay_owner_message','relay_owner_message:ref') AND result_json=?",
+                             (json.dumps(result), self.actor, json.dumps(first)))
+        except Exception:  # noqa: BLE001 - the decision stands; a redelivery writes its answer
+            log.warning("owner channel approval answer not recorded: channel=%s sender_ref=%s message_id=%s; "
+                        "a redelivery records it", channel, sender_ref, first["message_id"], exc_info=True)
+        return result
+
+    def _own_decision(self, pending, carrier):
+        """The proposal as decided by THIS message (its stored record names this channel
+        message and phrase): the executed answer, _RUNNING while it is executing, None
+        when this message did not decide it."""
+        with self.store.transaction() as conn:
+            row = self.steward._get(conn, pending["proposal_id"])
+        record = json.loads(row["result_json"]) if row["result_json"] else {}
+        if row["status"] == "open" or not isinstance(record, dict) \
+                or any(record.get(field) != value for field, value in carrier.items()):
+            return None
+        if row["status"] == "executing":
+            return _RUNNING
+        decided = _proposal(row)
+        return {"proposal_id": pending["proposal_id"], "action": pending["action"], "outcome": "executed",
+                **_subject(decided), "result": decided}
 
     def _code_key(self):
         """The pepper that keys the binding codes, or channel_secret_missing: without

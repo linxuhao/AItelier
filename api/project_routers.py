@@ -181,6 +181,22 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
     return target
 
 
+def _list_projects_uncached(db: DBManager, owner: str | None) -> list[dict]:
+    """The uncached read behind `GET /api/projects` — one enrichment pass.
+
+    Named, and called by the route through `_read_cache.cached`, so the startup
+    warm-up in `api/main.py:warm_first_dashboard_read` can build the exact value
+    the route would have built. Inlining this in the route's lambda would leave
+    the warm-up with a copy, and a copy is what drifts: the key tuple and the
+    builder have to be the same two things on both sides of the cache, or the
+    first visitor waits on a lock nobody is holding while this process pays the
+    pass twice.
+    """
+    return _add_task_summaries(
+        [enrich_project_status(p) or p
+         for p in db.list_projects_with_stats(owner_email=owner)])
+
+
 @router.get("", response_model=list[ProjectWithStats])
 def list_projects(
     request: Request,
@@ -203,9 +219,8 @@ def list_projects(
     onto one wait instead of N.
     """
     owner = owner_filter(user, request)
-    rows = _read_cache.cached(("projects", owner), lambda: _add_task_summaries(
-        [enrich_project_status(p) or p
-         for p in db.list_projects_with_stats(owner_email=owner)]))
+    rows = _read_cache.cached(
+        ("projects", owner), lambda: _list_projects_uncached(db, owner))
     return [execution_progress(request, row) for row in rows]
 
 

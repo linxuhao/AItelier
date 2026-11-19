@@ -47,6 +47,7 @@ const decided = ({ kind, target }) => {
 export const channelReplies = Object.freeze({
   bound: 'Bound: this account now talks to the steward. 已绑定：这个账号现在可以和管家对话。',
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
+  unknowable: 'Not delivered, and it cannot be retried: please send it again. 未送达，且无法重试：请再发一次。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
   code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
@@ -76,11 +77,6 @@ const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_a
  *  is still running. The message is held and asked again; it is never dropped. */
 const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
-/** Six digits in a row in ANY decimal script (Nd: ASCII, full-width, Arabic-Indic,
- *  Devanagari, ...). The host mints the binding code as six digits and folds every Nd block
- *  to them, so text carrying a run like this can be a live code wherever it sits in the
- *  sentence - not only when the message IS one. */
-const DIGITS6 = /\p{Nd}{6}/u;
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
 /** A message is owed while its delivery or the line its decision owes has not been
@@ -88,15 +84,17 @@ const short = error => String(error?.message ?? error).slice(0, 300);
 const owedKey = ({ channel, senderRef, messageRef }) => `${channel}\n${senderRef}\n${messageRef}`;
 /** Where the owed messages are kept across a restart when the caller names no file: the
  *  path $DSH_CHANNEL_OWED_FILE gives, else none - memory only, i.e. a restart loses what was
- *  owed (the director plugin passes the host's own state dir instead). The file holds the
- *  owner's own text verbatim, in mode 0600, and it holds it in exactly the case the backend
- *  has NOT judged it yet (the host was unreachable, threw, or the text was never handed in) -
- *  so a body carrying a live binding code can be here until the host answers. Its bounds:
- *  0600 in the director's own directory, never the backend's world-readable database;
- *  cleared as soon as the host answers; and a binding code expires within minutes, so a
- *  stored one is dead by the time the retry lands. The backend also answers a code-carrying
- *  body BEFORE any transient refusal (its own `_write_relay`), so no transient refusal can
- *  put a live code here at all. */
+ *  owed (the director plugin passes the host's own state dir instead). The file is mode 0600
+ *  and it holds a body ONLY once the host has said it may: channels.codeCheck answers with
+ *  the rule the relay itself applies (a bound sender, and no live binding code anywhere in
+ *  the text, in every rendering the backend folds), so the client never carries a digit rule
+ *  of its own. A digit rule cannot do this job - measured both ways against this tree: six
+ *  digits in a row refuse an approval whose proposal id carries one (about 38% of them do,
+ *  and those lines were lost outright), and \\p{Nd}{6} misses every folded rendering
+ *  (superscripts, circled, dingbat: 99 code points) so a live code was written down verbatim.
+ *  The fact that a message is owed is written BEFORE any host call, so nothing is lost either
+ *  way; the text joins it at the first answer, and a stop before that answer costs the sender
+ *  one "send it again" line instead of a live code on disk. */
 export function defaultOwedFile(env = process.env) {
   return text(env.DSH_CHANNEL_OWED_FILE) ? env.DSH_CHANNEL_OWED_FILE : undefined;
 }
@@ -153,26 +151,51 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     try {
       const stored = JSON.parse(readFileSync(owedFile, 'utf8'));
       for (const [key, message] of Object.entries(stored ?? {})) {
-        if (message && text(message.channel) && text(message.senderRef) && text(message.messageRef) && typeof message.text === 'string')
+        // A record without a text is a real one: it says a message is owed whose body was
+        // never written down because the host had not judged it (see remember()).
+        if (message && text(message.channel) && text(message.senderRef) && text(message.messageRef)
+          && (message.text === undefined || typeof message.text === 'string'))
           owed.set(key, message);
       }
     } catch (error) {
       if (error?.code !== 'ENOENT') log('channel_owed_unreadable', { error: short(error) });
     }
   }
-  const remember = message => {
+  // `judged` says the HOST has allowed this text to be kept: channels.codeCheck said so, or
+  // the host answered the relay itself without refusing it for its text (its code check runs
+  // before every decision and before the rate limit). Only then is the body written down. No
+  // digit rule of this side's own may stand in for that answer: six digits in a row refuse an
+  // approval whose proposal id carries one (about 38% of real ids, and their line was lost),
+  // and the folded renderings a \\p{Nd} rule misses were written down and then refused by the
+  // backend as the live code. Until the host allows it the record keeps the fact of the debt
+  // only: a stop in that window costs the sender one "send it again" line.
+  // The host's own answer to "may this text be kept" (channels.codeCheck, host.d.ts): the
+  // plugin writes the owner's words down before the relay so a timed-out answer is replayed,
+  // and must never write a live binding code - and only the host knows which code is live.
+  // An answer we do not get is no permission: no codeCheck (an older host), a transport
+  // failure, a refusal - the message stays owed without its text.
+  let codeCheckMissing = false;
+  const mayKeepText = async message => {
+    if (typeof host.codeCheck !== 'function') {
+      if (!codeCheckMissing) { codeCheckMissing = true; log('channel_code_check_absent', {}); }
+      return false;
+    }
+    try {
+      const verdict = await host.codeCheck({ channel: message.channel, senderRef: message.senderRef,
+        messageRef: message.messageRef, text: message.text });
+      return verdict?.store_text === true;
+    } catch (error) {
+      log('channel_code_check_failed', { channel: message.channel, error: short(error) });
+      return false;
+    }
+  };
+  const remember = (message, { judged = false } = {}) => {
     const key = owedKey(message);
-    // The one text that is never written down: anything carrying six digits in a row is
-    // possibly the owner's live binding code - the one secret the owner sends, and no
-    // approval can hang on a run of digits. The host's own code check retires and refuses
-    // such a body, so nothing durable is owed for it; what a stop can cost is the sender
-    // retyping it, while a stored copy would put a live code on disk for its ten minutes -
-    // exactly what no writer-side check could ever cover here (on this path the code has to
-    // be live). The test lives here, not at the callers, so every path that makes a message
-    // durable is covered by it once.
-    if (DIGITS6.test(String(message.text ?? ''))) return null;
+    const previous = owed.get(key);
+    const body = typeof message.text === 'string' ? message.text : undefined;
+    const kept = judged ? body : (typeof previous?.text === 'string' ? previous.text : undefined);
     owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
-      text: message.text, ...(text(message.at) ? { at: message.at } : {}) });
+      ...(kept === undefined ? {} : { text: kept }), ...(text(message.at) ? { at: message.at } : {}) });
     if (owed.size > limits.owedMax) owed.delete(owed.keys().next().value);
     owedSave();
     return key;
@@ -299,13 +322,14 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     // Write-ahead: the owe is on disk BEFORE the host is asked. A stop while a relay is in
     // flight (a start/stop_driver decision runs inside it, up to the host's own 30 s) then
     // still leaves the message for the restart to ask again - the whole point of the store.
-    // Every path that finishes this message forgets it; nothing else does. remember() itself
-    // refuses a text carrying six digits in a row (see there), which is the one message that
-    // can be the owner's live binding code.
+    // The body itself joins the record only once the host has answered it (remember's
+    // `judged`); every path that finishes this message forgets it, and nothing else does.
     handling.add(owed1);
+    // The debt is written before ANY host call, and the text follows the host's own verdict.
     remember(message);
     try {
       await hostReady();
+      if (await mayKeepText(message)) remember(message, { judged: true });
       // Six digits from someone who is not the bound owner is a binding attempt; the bound
       // owner's six digits are an ordinary message. Past the channel's binding attempts for
       // the minute, six digits are relayed like any message: the host takes the owner's and
@@ -333,6 +357,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         if (RETRYABLE.has(reason)) {
           // Transient (too many messages this minute): still owed from the write-ahead, so
           // the same message is asked again - by this channel's hold, and by a restart.
+          // A rate_limited answer means the host DID read this body - its code check runs
+          // before the rate limit - so the body may join the record. `unavailable` is this
+          // side's own name for an answer that never came, and it joins nothing.
+          if (reason === 'rate_limited') remember(message, { judged: true });
           log('channel_relay_retrying', { ...seen, reason });
           return { accepted: false, reason };
         }
@@ -352,7 +380,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         // The decision this message carries is still running: this is no answer yet, so the
         // line is owed. Retryable, never terminal - the channel asks again, and a restart
         // re-asks from the owed store.
-        remember(message);
+        remember(message, { judged: true });
         unanswered.add(channel + '\n' + messageRef);
         trimUnanswered();
         log('channel_relay_pending', { ...seen, message_id: result.message_id });
@@ -367,15 +395,15 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (result?.approval || !result?.duplicate) unanswered.delete(key);
       if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || carried)) {
         if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
-        else remember(message);
+        else remember(message, { judged: true });
       } else {
         forget(owed1);
       }
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
       // No answer: the delivery is owed durably, so a restart asks again instead of the
-      // message existing only in this process's memory (a text carrying six digits in a row
-      // excepted, in remember()).
+      // message existing only in this process's memory. No answer is no judgement, so the
+      // body is not added here (remember keeps one an earlier answer allowed).
       remember(message);
       log('channel_inbound_failed', { ...seen, error: short(error) });
       unanswered.add(channel + '\n' + messageRef);
@@ -398,6 +426,18 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (!owed.size) return;
       for (const message of [...owed.values()]) {
         if (!owed.has(owedKey(message)) || handling.has(owedKey(message))) continue;
+        if (typeof message.text !== 'string') {
+          // The host never judged this body, so there is nothing to ask again: the bound
+          // owner is told once that it has to be sent again, a stranger is told nothing, and
+          // either way the record is done - retrying it could only repeat a line or answer a
+          // stranger, and the body itself was never written down to replay.
+          try {
+            if ((await binding(message.channel))?.sender_ref === message.senderRef)
+              await answer(message.channel, replies.unknowable, { replyToRef: message.messageRef, to: message.senderRef });
+          } catch (error) { log('channel_owed_failed', { channel: message.channel, error: short(error) }); }
+          forget(owedKey(message));
+          continue;
+        }
         try { await handle(message); }
         catch (error) { log('channel_owed_failed', { channel: message.channel, error: short(error) }); }
       }

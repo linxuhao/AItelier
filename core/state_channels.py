@@ -478,7 +478,7 @@ class StateChannels:
 
     # ---------------------------------------------------------------- the steward's host
     def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body,
-                            channel_at=None):
+                            channel_at=None, precheck=False):
         """One owner message from a channel into the steward's conversation, then the
         chat approval check. Idempotent per request_key and per channel message: either
         replay answers the first result with duplicate: true - except an approval whose
@@ -512,6 +512,11 @@ class StateChannels:
             raise StateGraphError(f"body_too_long: {size} bytes; at most {BODY_MAX_BYTES} bytes")
         refuse_credential_body(body)
         written_at = _written_at(channel_at)
+        if precheck:
+            # The channel client's one question before it writes the owner's own words into
+            # its durable owed store (lib/channels.mjs): may this text be kept? Nothing is
+            # relayed, recorded or decided - see _store_text_verdict.
+            return self._store_text_verdict(channel, sender_ref, body)
         request_hash = _hash([channel, sender_ref, channel_message_ref, body])
         # The per-message record's key: the channel message of this sender.
         ref_key = f"{channel}:{_hash([sender_ref, channel_message_ref])}"
@@ -691,6 +696,37 @@ class StateChannels:
             raise StateGraphError(f"channel_secret_missing: binding codes need the {drivers.PEPPER_SECRET_NAME} "
                                   "secret file (at least 32 characters)")
         return pepper
+
+    def _store_text_verdict(self, channel, sender_ref, body):
+        """{store_text}: may a channel client keep `body` in its durable owed store?
+
+        The client writes the owner's own words down BEFORE it relays them, so a message
+        whose answer times out (a start/stop decision runs longer than the client's bound)
+        is asked again after a restart instead of its line vanishing. It must never write a
+        live binding code down: the code is the one secret the owner sends.
+
+        Only the host can answer both at once - it is the only side that knows which code is
+        live. A local rule is either too wide or too narrow, measured both ways against this
+        tree: a run of six digits refuses an approval whose proposal id carries one
+        (core/state_steward.py:538 mints 20 hex chars; ~38% of ids carry such a run, and their
+        line was then lost entirely), while `\\p{Nd}{6}` misses the 99 code points that
+        unicodedata folds to a digit (superscripts, circled, dingbat, Ethiopic...), so those
+        renderings were written down verbatim and then refused as the live code by
+        _write_relay. So the client asks, and this is the same rule the relay applies.
+
+        The binding check runs FIRST, exactly as in _write_relay: a stranger is answered
+        store_text false without learning whether their digits were a live code.
+
+        Reads only. The client asks before it has decided to keep anything, so a refusal here
+        costs nothing and writes nothing.
+        """
+        with self.store.transaction() as conn:
+            self._reader(conn)
+            try:
+                require_bound(conn, channel, sender_ref)
+            except StateGraphError:
+                return {"store_text": False}
+            return {"store_text": self.code_in_text(conn, body, _now()) is None}
 
     def code_in_text(self, conn, body, moment):
         """The live binding code `body` carries ANYWHERE in it (its stored row, as

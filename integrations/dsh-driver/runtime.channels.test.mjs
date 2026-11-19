@@ -103,7 +103,9 @@ async function run(t, { steward, mode = 'tool' }) {
     if (url.startsWith('/api/state/commands/')) {
       const name = url.slice('/api/state/commands/'.length);
       seen.commands.push([name, body]);
-      if (name === 'relay_owner_message') return send({ message_id: 'm-in-1', duplicate: false, approval: null });
+      // The plugin's store-text question rides the same command in its precheck mode.
+      if (name === 'relay_owner_message') return send(body.precheck ? { store_text: true }
+        : { message_id: 'm-in-1', duplicate: false, approval: null });
       if (name === 'bind_owner_channel') return send({ detail: 'invalid_code: no such code for slack' }, 422);
       if (name === 'send_user_message') return send({ message_id: 'm-out-1', project_id: project });
       if (name === 'complete_steward_memory_request') return send({});
@@ -178,7 +180,12 @@ test('real pinned DSH, the steward: a channel plugin loads, its messages reach r
     await r.until('both inbound messages were not answered', () => seen.inbound.length === 2);
     assert.deepEqual(seen.inbound, [{ accepted: true }, { accepted: false, reason: 'invalid_code' }]);
     const command = name => seen.commands.filter(([n]) => n === name).map(([, body]) => body);
-    const [relay] = command('relay_owner_message');
+    // Two requests, in this order: the store-text question the plugin asks before it writes
+    // the owner's words down, then the relay of the message itself.
+    const [check, relay] = command('relay_owner_message');
+    assert.deepEqual({ ...check, request_key: undefined }, { request_key: undefined, precheck: true, channel: 'slack',
+      sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', body: 'hello from slack' });
+    assert.match(check.request_key, /^relay-check:slack:[0-9a-f]{16}$/);
     assert.deepEqual({ ...relay, request_key: undefined }, { request_key: undefined, channel: 'slack', sender_ref: 'U-OWNER',
       channel_message_ref: 'ts-1', body: 'hello from slack' });
     assert.match(relay.request_key, /^relay:slack:[0-9a-f]{16}$/);

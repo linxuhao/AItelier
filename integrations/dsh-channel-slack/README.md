@@ -25,11 +25,15 @@ declares the `channels` capability). Design: step 19, §7.2.
   (`$AITELIER_DSH_STATE_DIR/channel-owed.json`, mode 0600; the owner's own text, like the
   State database that takes it) and asked again after a restart, in the order it arrived;
   the entry is cleared only once it has been answered for good - a line that could not be
-  sent is owed, not lost. One text is never written there: anything carrying six digits in a
-  row, in any decimal script, may be the live binding code (the host folds every Nd block to
-  the same digits and refuses such a body), so a stop costs the sender retyping that message
-  rather than putting a live code on disk. Without a State dir the owe lives in memory only,
-  so a restart loses it.
+  sent is owed, not lost. The fact of the debt is written before any host call; the text
+  joins it only once the host has said that text may be kept (`channels.codeCheck`, which
+  answers with the relay's own rule: a bound sender, and no live binding code anywhere in
+  the text in any rendering the backend folds). A client-side digit rule cannot replace
+  that answer - six digits in a row would silence an approval whose proposal id carries
+  one, and the folded renderings it misses leave the live code on disk - so the plugin asks
+  and, until the answer, keeps the message without its text: a stop in that window costs
+  the sender one "send it again" line, never a live code on disk. Without a State dir the
+  owe lives in memory only, so a restart loses it.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500
@@ -107,16 +111,21 @@ These hold for every owner channel (Slack and WeChat):
   sender, and the owner just issues a new code.
 - One place beside the State database holds owner text: the director's owed store
   (`channel-owed.json` in the director's own state dir, mode 0600, `createOwnerChannels` in
-  `integrations/dsh-director/lib/channels.mjs`) keeps a message until the backend has
-  judged it - it is written BEFORE the host is asked, so a stop during the call loses
-  nothing. A body of exactly six digits - the binding code's shape, which can never carry
-  an approval - is never written there. Any other text is, so if such a message carries a
-  live binding code, the code sits there until the host answers. It is 0600 in the
-  director's own directory (not the world-readable State database), it is cleared as soon
-  as the host answers, and the code expires within minutes, so a stored one is dead by the
-  retry. A transient refusal cannot put a code there: the backend answers a code-carrying
-  body before it answers `rate_limited`. Revisit if a channel client ever holds text for
-  longer than a code's life, or if the owed file moves out of the director's own directory.
+  `integrations/dsh-director/lib/channels.mjs`). It records that a message is owed BEFORE
+  any host call, so a stop during the call loses nothing, and it holds the message's text
+  only after the host has allowed it: `channels.codeCheck` answers with the rule the relay
+  itself applies (`core/state_channels.py:_store_text_verdict` - a bound sender, and no
+  live binding code anywhere in the text in any rendering the backend folds), so the text
+  that reaches the file cannot be the live code, and a text that could be is never written
+  there at all. The plugin keeps no digit rule of its own: measured on this tree, six
+  digits in a row silenced an approval whose proposal id carried one (about 38% of real
+  ids), and `\p{Nd}{6}` missed the 99 code points that fold to a digit (superscripts,
+  circled, dingbat), leaving the live code in the file. It is 0600 in the director's own
+  directory (not the world-readable State database) and is cleared as soon as the host
+  answers. A transient refusal cannot put a code there either: the backend answers a
+  code-carrying body before it answers `rate_limited`. Revisit if a channel client ever
+  holds text for longer than a code's life, or if the owed file moves out of the director's
+  own directory.
 - Token files (`slack-app-token`, `slack-bot-token`, `wechat-bridge-token`) should be
   mode 0600; nothing enforces it.
 

@@ -30,6 +30,12 @@ function fakeHost({ bindings = { slack: 'U-OWNER' }, defaultChannel = null } = {
         sender_ref: bindings[channel] ?? null, bound_at: null, revoked_at: null, is_default: channel === defaultChannel })) };
     },
     async relay(message) { calls.push(['relay', message]); return host.next ?? { message_id: 'm-in', duplicate: false, approval: null }; },
+    // The host's own answer to "may this text be kept" (channels.codeCheck). `storeText: false`
+    // is the answer for a text carrying a live binding code; `codeCheckFails` is a host that
+    // cannot answer at all, which is no permission either.
+    storeText: true,
+    async codeCheck(message) { calls.push(['codeCheck', message]); if (host.codeCheckFails) throw new Error('HTTP 502');
+      return { store_text: host.storeText !== false }; },
     async bind(request) { calls.push(['bind', request]); if (host.bindResult.bound) bindings[request.channel] = request.senderRef; return host.bindResult; },
     async sourceOf(id) { calls.push(['sourceOf', id]); return sources.get(id) ?? null; },
     async recordDelivery(delivery) {
@@ -360,15 +366,20 @@ test('a line whose send failed stays owed and goes out on the next delivery, nev
 });
 
 test('a message is owed on disk BEFORE the host is asked, so a stop while the relay is in flight still sends its line', async () => {
-  const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
+  // The id carries six digits in a row - real ids are 20 hex characters and about 38% of them
+  // do, so this is the ordinary shape of an approval, not a corner.
+  const executed = { proposal_id: 'prop-234567abcdef01234567', action: 'approve', outcome: 'executed',
+    kind: 'start_driver', target: 'wuxia' };
   const first = setup(undefined, { answerRetryMs: 1 });
   // The relay never answers: this process is stopped while the decision runs inside it.
   first.host.relay = () => new Promise(() => {});
-  const inFlight = first.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-9', text: '同意 proposal p-1',
-    at: '2026-11-19T02:00:00.000Z' });
+  const inFlight = first.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-9',
+    text: '\u540c\u610f proposal prop-234567abcdef01234567', at: '2026-11-19T02:00:00.000Z' });
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(owed(first.owedFile).map(message => message.messageRef), ['a-9'],
     'written ahead of the host answer, not after it');
+  assert.equal(owed(first.owedFile)[0].text, '\u540c\u610f proposal prop-234567abcdef01234567',
+    'and the host allowed this text to be kept, digits in a row or not');
   first.channels.stop();
   void inFlight;
   // The restart: the decision executed before the stop, the host answers it as a duplicate,
@@ -378,39 +389,62 @@ test('a message is owed on disk BEFORE the host is asked, so a stop while the re
   second.start();
   await second.channels.pollOwed();
   assert.equal(second.slack.sent.length, 1, 'the line the stop left owed is sent');
-  assert.match(second.slack.sent[0].text, /proposal p-1: approved and done - start director of wuxia/);
+  assert.match(second.slack.sent[0].text, /proposal prop-234567abcdef01234567: approved and done - start director of wuxia/);
   assert.deepEqual(second.slack.sent[0].options, { replyToRef: 'a-9', to: 'U-OWNER' });
   assert.deepEqual(owed(first.owedFile), [], 'and the store is empty once the line went out');
   second.channels.stop();
 });
 
-test('a text carrying six digits in a row is never written to the owed store: it may be the binding code', async () => {
+test('a text the host will not keep is owed without it, and its sender is told to send it again', async () => {
+  const first = setup(undefined, { answerRetryMs: 1 });
+  // The host's answer for a text carrying a live binding code: the message is relayed (the
+  // host refuses and retires the code), but the plugin keeps no copy of the words.
+  first.host.storeText = false;
+  first.host.next = { message_id: null, duplicate: false, refused: 'code_sent_to_bound_account' };
+  assert.deepEqual(await first.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-1',
+    text: 'binding code: \u2077\u00b9\u00b9\u2078\u00b3\u00b3 please bind' }), { accepted: false, reason: 'code_sent_to_bound_account' });
+  assert.deepEqual(owed(first.owedFile), [], 'a refused body is neither durable nor replayed');
+  // And the case the store exists for: the relay never answers, the host never allowed the
+  // text, so the message is owed without it and a restart cannot replay a body it never had.
+  first.host.storeText = false;
+  first.host.relay = () => new Promise(() => {});
+  const inFlight = first.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-2', text: 'hello' });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(owed(first.owedFile).map(message => message.messageRef), ['b-2'], 'still owed');
+  assert.equal(owed(first.owedFile)[0].text, undefined, 'but not its text');
+  first.channels.stop();
+  void inFlight;
+  const second = setup(undefined, undefined, { owedFile: first.owedFile, ready: false });
+  second.start();
+  await second.channels.pollOwed();
+  assert.equal(second.slack.sent.length, 1, 'the owner learns it was not delivered');
+  assert.match(second.slack.sent[0].text, /it cannot be retried: please send it again/);
+  assert.deepEqual(second.slack.sent[0].options, { replyToRef: 'b-2', to: 'U-OWNER' });
+  assert.deepEqual(owed(first.owedFile), [], 'and nothing is owed once it was told');
+  second.channels.stop();
+});
+
+test('nothing is written down before the host has allowed it, whatever digits the text carries', async () => {
   const s = setup();
-  // The host is down: the binding attempt AND a message carrying a code both fail.
+  // The host cannot answer at all: no permission, and no relay either.
+  s.host.codeCheckFails = true;
   s.host.bind = async () => { throw new Error('HTTP 502'); };
   s.host.relay = async () => { throw new Error('HTTP 502'); };
-  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-NEWDEVICE', messageRef: 'b-1', text: '711833' }),
-    { accepted: false, reason: 'unavailable' });
-  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-2', text: ' 711833 ' }),
-    { accepted: false, reason: 'unavailable' });
-  // The code does not have to BE the message: the host reads six digits of a live code
-  // anywhere in the text, so one inside a sentence is the same secret on disk.
-  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-3',
-    text: 'binding code: 711833 - please bind my new laptop' }), { accepted: false, reason: 'unavailable' });
-  // Nor does it have to be written in ASCII digits: the host folds every Nd block, so
-  // Arabic-Indic (U+0660) or full-width (U+FF10) six digits are the same code.
-  for (const [ref, code] of [['b-4', '٧١١٨٣٣'], ['b-5', '７１１８３３']]) {
-    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: code }),
-      { accepted: false, reason: 'unavailable' });
-  }
-  assert.deepEqual(owed(s.owedFile), [], 'a live code is never put on disk');
-  // Any other message IS written ahead: its answer may be a decision, and a stop must not
-  // lose it. Five digits, or six broken up, cannot be the code.
-  for (const [ref, body] of [['a-1', '同意 proposal p-1'], ['a-2', 'order 12345 shipped'], ['a-3', 'code 123 456']]) {
+  // Which of these carries the live binding code is the HOST's question, and it folds every
+  // rendering (core/state_channels.py ascii_digits: NFKC, arabic-indic, superscript, circled).
+  // No body is stored before that answer, so a wrong guess - in either direction - costs
+  // nothing: it cannot lose a line, and it cannot put a code on disk.
+  const bodies = [['b-1', '711833'], ['b-2', ' 711833 '], ['b-3', 'binding code: 711833 - please bind my new laptop'],
+    ['b-4', '\u0667\u0661\u0661\u0668\u0663\u0663'], ['b-5', '\uff17\uff11\uff11\uff18\uff13\uff13'],
+    ['b-6', '\u2077\u00b9\u00b9\u2078\u00b3\u00b3'], ['b-7', '\u2790\u2791\u2792\u278a\u278b\u278c'],
+    ['a-1', '\u540c\u610f proposal p-1']];
+  for (const [ref, body] of bodies) {
     assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: body }),
-      { accepted: false, reason: 'unavailable' });
+      { accepted: false, reason: 'unavailable' }, `${ref} fails without an answer`);
   }
-  assert.deepEqual(owed(s.owedFile).map(message => message.messageRef), ['a-1', 'a-2', 'a-3']);
+  const records = owed(s.owedFile);
+  assert.deepEqual(records.map(message => message.messageRef), bodies.map(([ref]) => ref), 'every one of them is owed');
+  assert.deepEqual(records.filter(message => message.text !== undefined), [], 'and none of their texts is on disk');
 });
 
 test('the plugin-facing service is exactly {register, inbound}; the director-side handle carries the polls', () => {

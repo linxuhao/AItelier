@@ -1237,6 +1237,9 @@ class RelayOwnerMessage(Project):
     body: str
     # When the channel says the message was written (ISO 8601); dates an approval phrase.
     channel_at: str | None = Field(default=None, min_length=1, max_length=64)
+    # The channel client's question, not a relay: may this text be kept in its durable owed
+    # store? Answered {store_text} and nothing is relayed, recorded or decided.
+    precheck: bool = False
 
 
 class BindOwnerChannel(Project):

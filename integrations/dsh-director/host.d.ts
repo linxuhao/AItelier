@@ -220,7 +220,12 @@ export interface DirectorHost {
    *    Idempotent by (channel, senderRef, messageRef): the same binding message delivered
    *    again answers {bound, duplicate: true, refusal?} and counts nothing; relayed (its
    *    sender is bound now) it answers {message_id: null, duplicate: true} and writes nothing.
-   *  - sourceOf: where a message came from or went to: null for the dashboard, else
+   *  - codeCheck (optional): may this text be kept in the plugin's durable owed store?
+    {store_text: boolean}. The host answers with its own rule for a live binding code - a
+    bound sender, and no code in the text in any rendering it folds - because the plugin
+    writes the owner's own words down before it relays them and must never write a code.
+    Absent (an older host), the plugin keeps no text: durability degrades, never a secret.
+  - sourceOf: where a message came from or went to: null for the dashboard, else
    *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
    *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
    *    channel's own ref) or failed (`error`).
@@ -241,6 +246,8 @@ export interface DirectorHost {
       signal?: AbortSignal): Promise<object>;
     list(signal?: AbortSignal): Promise<{ channels: Array<{ channel: 'slack' | 'wechat'; bound: boolean; sender_ref: string | null;
       bound_at: string | null; revoked_at: string | null; is_default: boolean }>; default_channel: 'slack' | 'wechat' | null }>;
+    codeCheck?(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string },
+      signal?: AbortSignal): Promise<{ store_text: boolean }>;
     reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
       Promise<object>;
   };
@@ -272,23 +279,26 @@ export interface DirectorHost {
  *
  *  What a message still OWES survives the process: an `inbound` is written to a durable
  *  owed store BEFORE the host is asked (`owedFile` in createOwnerChannels, mode 0600:
- *  channel, sender, the message ref and the owner's own text verbatim), so a stop while
- *  the host call is still in flight loses nothing; a transient answer and a decision whose
- *  line has not been sent yet leave it there too. A text that carries six digits in a row,
- *  in any decimal script (ASCII, full-width, Arabic-Indic, Devanagari: the host folds every
- *  Nd block to the same digits), is never written there - that is the binding code's shape,
- *  the one secret the owner sends, and no approval can hang on a run of digits - so a stop
- *  can cost the sender retyping such a message, where a stored copy would put a live code on
- *  disk for its minutes. It is re-asked at `ready()` and every
- *  30 s and cleared only once the line is actually sent or the host has answered for good.
- *  A plugin must not answer a message it could not send and forget it - the store is what a
- *  restart inherits. The store is the one place beside the backend's own records that holds
- *  owner text, and it holds it while the host has NOT judged it: it is 0600 in the director's
- *  own directory (never the backend's world-readable database) and cleared as soon as the
- *  host answers. It cannot hold a live binding code - a text carrying six digits in a row is
- *  never remembered at all, and the backend answers a code-carrying body before every
- *  transient refusal (`rate_limited` included), so neither writer nor answer can leave one
- *  there. An answer of `{duplicate: true, approval: null}` with no
+ *  channel, sender, the message ref and the owner's own text), so a stop while the host call
+ *  is still in flight loses nothing - a decision runs longer than the client's own bound, so
+ *  a timeout there is ordinary, and the line it owes must still go out; a transient answer
+ *  and a decision whose line has not been sent yet leave it there too. It is re-asked at
+ *  `ready()` and every 30 s and cleared only once the line is actually sent or the host has
+ *  answered for good. A plugin must not answer a message it could not send and forget it -
+ *  the store is what a restart inherits.
+ *
+ *  The store must never hold a live binding code, the one secret the owner sends, and the
+ *  text is written down only when the host says it may be: `channels.codeCheck` answers
+ *  {store_text} with the same rule the relay applies (a bound sender, and no live code
+ *  anywhere in the text in any rendering the backend folds - NFKC, every Nd block, and the
+ *  code points unicodedata calls a digit). A digit rule of the client's own cannot do this:
+ *  a run of six digits refuses an approval whose proposal id carries one (ids are 20 hex
+ *  characters, about 38% of them carry such a run, and their line was lost outright), while
+ *  `\p{Nd}{6}` misses every folded rendering (superscripts, circled, dingbat: measured 99
+ *  code points) and wrote the live code down. Until the host says store_text the record is
+ *  kept WITHOUT the text: a stop in that window costs the sender one "send it again" line,
+ *  never a live code on disk. The store is 0600 in the director's own directory, never the
+ *  backend's world-readable database. An answer of `{duplicate: true, approval: null}` with no
  *  `approval_pending` is read as finished (a backend that predates that marker cannot say
  *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before
  *  running a director plugin against an older backend. */

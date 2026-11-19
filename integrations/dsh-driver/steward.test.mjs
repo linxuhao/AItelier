@@ -213,7 +213,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
-  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'list', 'recordDelivery', 'relay', 'reportStatus', 'sourceOf']);
+  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'codeCheck', 'list', 'recordDelivery', 'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
@@ -651,6 +651,30 @@ test('chat channels (step 19): each plugin call is one State request; the reques
   answer = { result: { channels: [], default_channel: null } };
   assert.deepEqual(await channels.list(), { channels: [], default_channel: null });
   assert.deepEqual(calls.at(-1), ['/api/state/query/list_owner_channels', {}]);
+});
+
+test('chat channels: the store-text question is the relay command in its precheck mode, and the request key is never the relay\'s', async () => {
+  const calls = [];
+  let answer = { result: { store_text: true } };
+  const request = async (path, body) => { calls.push([path, body]); if (answer instanceof Error) throw answer; return answer; };
+  const channels = channelOps(request);
+  assert.deepEqual(await channels.codeCheck({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-1', text: '\u540c\u610f proposal p-1' }),
+    { store_text: true });
+  assert.equal(calls[0][0], '/api/state/commands/relay_owner_message');
+  assert.deepEqual({ ...calls[0][1], request_key: undefined }, { request_key: undefined, precheck: true, channel: 'slack',
+    sender_ref: 'U1', channel_message_ref: 'ts-1', body: '\u540c\u610f proposal p-1' });
+  assert.ok(calls[0][1].request_key.startsWith('relay-check:'), 'its own key: a check is never the relay\'s replay');
+  // The host's verdict is passed through as it came: the plugin decides what to keep.
+  answer = { result: { store_text: false } };
+  assert.deepEqual(await channels.codeCheck({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-2', text: '\u2077\u00b9\u00b9\u2078\u00b3\u00b3' }),
+    { store_text: false });
+  // A refusal is the host's answer, not an outage; an outage is thrown for the plugin to read
+  // as no permission.
+  answer = Object.assign(new Error('AItelier /api/state/commands/relay_owner_message: HTTP 422 "channel_sender_not_bound: U1"'), { status: 422 });
+  assert.deepEqual(await channels.codeCheck({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-3', text: 'hi' }),
+    { refused: 'channel_sender_not_bound' });
+  answer = Object.assign(new Error('AItelier /api/state/commands/relay_owner_message: HTTP 503 "down"'), { status: 503 });
+  await assert.rejects(channels.codeCheck({ channel: 'slack', senderRef: 'U1', messageRef: 'ts-4', text: 'hi' }), /HTTP 503/);
 });
 
 test('chat channels: a 4xx is the channel refusal it names; a 5xx or a dropped connection is an error, not a refusal', async () => {

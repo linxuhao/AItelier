@@ -527,6 +527,14 @@ export function channelOps(request) {
     relay: ({ channel, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_owner_message', {
       request_key: `relay:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
       body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
+    // The channel client's one question before it writes the owner's own words down: may
+    // this text be kept? The host's own rule answers it (a bound sender, and no live binding
+    // code in the text in ANY rendering - core/state_channels.py:_store_text_verdict), so the
+    // client never has to guess with a digit rule of its own. Nothing is relayed or recorded.
+    codeCheck: ({ channel, senderRef, messageRef, text }, signal) => request('/api/state/commands/relay_owner_message', {
+      request_key: `relay-check:${channel}:${digest(senderRef + '\n' + messageRef)}`, precheck: true, channel,
+      sender_ref: senderRef, channel_message_ref: messageRef, body: text }, signal)
+      .then(answered, refused),
     bind: ({ channel, senderRef, code, messageRef }, signal) => request('/api/state/commands/bind_owner_channel', {
       request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code,
       channel_message_ref: messageRef }, signal)

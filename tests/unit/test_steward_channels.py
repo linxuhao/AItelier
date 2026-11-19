@@ -123,6 +123,65 @@ def _render(digits, base):
 RENDERINGS = [("full_width", 0xFF10), ("arabic_indic", 0x0660), ("devanagari", 0x0966)]
 
 
+# The renderings the backend folds but a \p{Nd} rule does not: superscripts are category No,
+# and unicodedata.digit reads them as 0-9 (core/state_channels.py:ascii_digits).
+SUPERSCRIPT = dict(zip("0123456789", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079"))
+
+
+def folded(text, table=SUPERSCRIPT):
+    """The same digits, written the way NFKC does not call a digit run: one char per digit."""
+    return "".join(table.get(char, char) for char in text)
+
+
+def precheck(world, body, ref, sender=SLACK_USER, channel="slack"):
+    """The channel client's question before it writes the owner's words into its owed store
+    (integrations/dsh-director/lib/channels.mjs -> channels.codeCheck -> this command's
+    precheck mode)."""
+    return execute(world.steward, "relay_owner_message",
+                   {"request_key": f"relay-check-{ref}", "channel": channel, "sender_ref": sender,
+                    "channel_message_ref": ref, "body": body, "precheck": True}, allow_write=True)
+
+
+def test_the_store_text_precheck_answers_with_the_relays_own_rule_and_writes_nothing(world):
+    """The channel client keeps the owner's own words in a durable owed store BEFORE it relays
+    them, so a message whose answer times out (a start/stop decision runs longer than the
+    client's own bound) is asked again after a restart instead of its line vanishing. That
+    store must never hold a live binding code. The client cannot decide either question: a
+    digit rule of its own is too wide (a proposal id carrying six digits in a row lost its
+    line) or too narrow (a superscript code was written verbatim and then refused as the live
+    code). So it asks, and the answer is this command's rule."""
+    bind(world)
+    before = len(conversation(world))
+    # Ordinary text may be kept - including an approval phrase whose proposal id carries six
+    # digits in a row: ids are 20 hex characters (core/state_steward.py:538), about 38% of them
+    # carry such a run, and those are exactly the approvals the client-side rule silenced.
+    for ref, body in (("p-1", "请帮我看看"), ("p-2", "同意 proposal prop-234567abcdef01234567")):
+        assert precheck(world, body, ref) == {"store_text": True}, body
+    # A live code may not be kept, in ANY rendering the backend folds - not only the Nd blocks
+    # the client's guard used to know about.
+    code = world.owner.channels.issue_code("slack")["code"]
+    superscript = folded(code)
+    assert superscript != code and superscript.isascii() is False
+    for ref, body in (("c-1", code), ("c-2", f"binding code: {code} please bind"), ("c-3", superscript),
+                      ("c-4", f"binding code: {superscript} please bind"), ("c-5", _render(code, 0xFF10))):
+        assert precheck(world, body, ref) == {"store_text": False}, body
+    # A stranger is answered false and learns nothing: the binding check runs FIRST, exactly as
+    # in the relay, so a code-shaped answer cannot tell them their digits were a live code.
+    for ref, body in (("s-1", code), ("s-2", "hello")):
+        assert precheck(world, body, ref, sender="U-STRANGER") == {"store_text": False}
+    # It reads: nothing reached the conversation, no source row was written, no ledger row was
+    # recorded, and the code the owner issued is still live - a check never retires one.
+    assert len(conversation(world)) == before
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_message_sources").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM driver_inbox_requests WHERE operation LIKE 'relay%'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM state_owner_channel_bind_attempts").fetchone()[0] == 0
+        live = conn.execute("SELECT COUNT(*) FROM state_owner_channel_codes WHERE retired_at IS NULL AND used_at IS NULL").fetchone()[0]
+    assert live == 1, "the precheck retired nothing"
+    # And the relay itself still refuses that body as the live code, retiring it then.
+    refused(lambda: relay(world, f"binding code: {superscript} please bind", "c-6"), "code_sent_to_bound_account")
+
+
 # --- binding -------------------------------------------------------------------------------
 
 def test_a_code_the_owner_issued_binds_the_sender_once(world):

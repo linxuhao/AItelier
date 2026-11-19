@@ -47,10 +47,13 @@ export const channelReplies = Object.freeze({
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   rate_limited: 'Not delivered: too many messages, try again later. 未送达：消息太频繁，请稍后再发。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
-  approval({ proposal_id: id, action, outcome, refusal, kind, target }) {
+  approval({ proposal_id: id, action, outcome, refusal, kind, target, result }) {
     if (outcome === 'executed') {
       const [en, zh] = decided({ kind, target }) ?? [];
       if (action === 'decline') return en ? `proposal ${id}: declined - ${en}. 已拒绝：${zh}。` : `proposal ${id}: declined. 已拒绝。`;
+      // An approval whose run failed (the proposal ends 'failed') is not reported as done.
+      if (result?.status === 'failed')
+        return en ? `proposal ${id}: approved, but it failed - ${en}. 已同意，但执行失败：${zh}。` : `proposal ${id}: approved, but it failed. 已同意，但执行失败。`;
       return en ? `proposal ${id}: approved and done - ${en}. 已同意并执行：${zh}。` : `proposal ${id}: approved and done. 已同意并执行。`;
     }
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;

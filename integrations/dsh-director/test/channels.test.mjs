@@ -237,6 +237,16 @@ test('the decided line reaches the bound sender with the kind and target the rel
   assert.equal(s.slack.sent.at(-1).text, 'proposal p-1: approved and done - start director of alpha. 已同意并执行：启动 alpha 项目的导演。');
 });
 
+test('an approval whose run failed is answered as failed, never as done', () => {
+  const line = (kind, target, result) => channelReplies.approval({ proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind, target, result });
+  assert.equal(line('start_driver', 'alpha', { status: 'failed', result: { error: 'RuntimeError: boom' } }),
+    'proposal p-1: approved, but it failed - start director of alpha. 已同意，但执行失败：启动 alpha 项目的导演。');
+  assert.equal(line('create_project', 'alpha', { status: 'failed', result: { error: 'project_id alpha 已被占用' } }),
+    'proposal p-1: approved, but it failed - create project alpha. 已同意，但执行失败：创建 alpha 项目。');
+  assert.equal(line(undefined, undefined, { status: 'failed' }), 'proposal p-1: approved, but it failed. 已同意，但执行失败。');
+  assert.equal(line('start_driver', 'alpha', { status: 'done' }), 'proposal p-1: approved and done - start director of alpha. 已同意并执行：启动 alpha 项目的导演。');
+});
+
 test('binding attempts are bounded per channel and minute: past the bound, six digits are relayed like any message, and nobody is answered', async () => {
   const s = setup({ bindings: {} });
   s.host.bindResult = { refused: 'invalid_code' };

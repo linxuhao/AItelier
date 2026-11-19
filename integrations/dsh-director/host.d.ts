@@ -188,7 +188,8 @@ export interface DirectorHost {
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
    *    {refused: code}. When the text is exactly an approval phrase the host executes it
    *    in code and says so in `approval`; the model never does. An executed decision
-   *    names the decided proposal's `kind` and `target` from the host's own record of it.
+   *    names the decided proposal's `kind` and `target` from the host's own record of it,
+   *    and its `result` is that proposal after the run: `status: 'failed'` when the run failed.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
    *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
    *    more than two minutes ahead of the host's clock (approval_clock_skew).

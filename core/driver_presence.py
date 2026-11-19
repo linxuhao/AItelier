@@ -53,7 +53,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from core import drivers
-from core.off_loop_sqlite import retry_while_locked
+from core.off_loop_sqlite import locked_database, retry_while_locked
 
 WAIT_GRACE_ENV = "AITELIER_PRESENCE_WAIT_GRACE_SECONDS"
 WAIT_GRACE_DEFAULT = 120
@@ -85,7 +85,17 @@ _log = logging.getLogger(__name__)
 
 
 class WaitNotRegistered(Exception):
-    """Raised by ``driver_waiting`` when the wait row cannot be written."""
+    """Raised by ``driver_waiting`` when the wait row cannot be written.
+
+    It carries the SQLite error it gave up on (``cause``), because the ANSWER
+    differs by cause: a held write lock is retryable and is answered as the busy
+    refusal it is, while a permanent failure (a database without the table) is
+    not something a caller should be told to repeat.
+    """
+
+    def __init__(self, message: str, cause: BaseException | None = None):
+        super().__init__(message)
+        self.cause = cause
 
 
 def shared_identity(driver_id) -> bool:
@@ -312,7 +322,7 @@ def _wait_begin(db, driver_id, timeout_seconds) -> str:
             last = exc
         if time.monotonic() + delay >= deadline:
             _log.warning("could not register the wait of %s: %s", driver_id, last)
-            raise WaitNotRegistered(str(last))
+            raise WaitNotRegistered(str(last), last) from last
         time.sleep(delay)
         delay = min(delay * 2, 1.0)
 
@@ -347,8 +357,11 @@ def _wait_end(db, wait_id) -> None:
 @asynccontextmanager
 async def driver_waiting(db, driver_id, timeout_seconds):
     """Mark ``driver_id`` as waiting for the duration of the block (off the event
-    loop). Raises the retryable ``ClaimError('wait_not_registered')`` - before
-    waiting - when the row cannot be written."""
+    loop). Raises the retryable ``wait_not_registered`` refusal - before waiting -
+    when the row cannot be written: ``WaitRegistrationBusy`` when the cause is a
+    held write lock (a ``ClaimError`` that is also the repository's busy refusal,
+    so a transport answers it 503 + ``Retry-After``), a plain ``ClaimError`` for
+    a failure that a second look would not fix."""
     from core.state_privacy import UntrustedDatabase
     if not driver_id or db is None or isinstance(db, UntrustedDatabase) or not hasattr(db, "get_connection"):
         yield
@@ -361,9 +374,17 @@ async def driver_waiting(db, driver_id, timeout_seconds):
     try:
         wait_id = await asyncio.to_thread(_wait_begin, db, driver_id, seconds)
     except WaitNotRegistered as exc:
-        from core.state_claims import ClaimError
-        raise ClaimError("wait_not_registered", "the database is busy and this wait could not be recorded, so "
-                         "you would not count as present; retry the wait") from exc
+        from core.state_claims import ClaimError, WaitRegistrationBusy
+        detail = ("the database is busy and this wait could not be recorded, so "
+                  "you would not count as present; retry the wait")
+        if locked_database(exc.cause):
+            # The cause is a HELD WRITE LOCK, i.e. the same condition the State
+            # command routes answer 503 + `Retry-After` for. Raising it as a
+            # plain `ClaimError` made the HTTP path answer 409 Conflict - "your
+            # view is stale, somebody else has it" - about a request that changed
+            # nothing and is simply worth repeating (`iss-89b4c2a1e8c048b3`).
+            raise WaitRegistrationBusy(detail) from exc
+        raise ClaimError("wait_not_registered", detail) from exc
     try:
         yield
     finally:

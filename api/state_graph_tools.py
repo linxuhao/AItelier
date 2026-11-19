@@ -189,6 +189,16 @@ def register_state_tools(tool, mcp, service_factory=None):
             if inspect.isawaitable(result):
                 result = await result
             return {"result": result}
+        except StateWriteBusyRefusal as refusal:
+            # A READ can be refused for a busy write lock: `wait_for_state_change`
+            # records the driver's presence row before it waits. `invoke` raises
+            # the typed refusal for it, and this surface answers it the same way
+            # `state_graph_write` does - `isError` with the code and the wait in
+            # `structuredContent` - instead of letting an exception that is
+            # deliberately NOT a StateGraphError escape the tool as a transport
+            # error. The caller retries either way; only one of the two shapes
+            # tells it when.
+            return _busy_result(refusal)
         except StateGraphError as exc:
             raise MCPToolError(str(exc)) from exc
 

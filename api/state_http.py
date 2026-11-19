@@ -29,13 +29,20 @@ SCHEMA_DECLARED_ACTION = "get_state_schema"
 
 
 def state_write_busy_response(exc):
-    """The ONE answer for a State write that could not take SQLite's write lock.
+    """The ONE answer for a write that could not take SQLite's write lock.
 
     Retryable and it wrote nothing, so it is neither a 500 (nothing failed) nor a
     422 (nothing was malformed): the body carries the machine-readable code and
     `Retry-After` says when the same request is worth repeating. Both the
     in-router `_call` clause and the app-wide default below return THIS object,
     so the two routes cannot drift into disagreeing shapes.
+
+    The refusal names itself, because not every busy write is a State command: a
+    driver's presence row that a wait could not register is
+    `core.state_claims.WaitRegistrationBusy`, which reports `wait_not_registered`
+    (the code every driver already retries on) rather than a conflict, and a
+    driver stamp that exhausted its budget is `core.dsh_driver.DriverStampBusy`.
+    Both are `StateWriteBusy`, so both land here and both carry `retry_after`.
     """
     return JSONResponse(
         {"detail": str(exc), "code": exc.code, "retry_after": exc.retry_after},
@@ -177,12 +184,16 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
             # a route author cannot bypass it by forging a declaration.
             raise HTTPException(403, str(exc)) from exc
         except StateWriteBusy as exc:
-            # A State write that could not take SQLite's write lock within its
-            # budget. It is RETRYABLE and it wrote nothing, so it is neither a
-            # 500 (nothing failed) nor a 422 (nothing was malformed). This clause
-            # sits BEFORE the StateGraphError one because StateWriteBusy IS a
-            # StateGraphError; it returns the same object `apply_state_write_busy`
-            # installs as the app-wide default, so the two cannot disagree.
+            # A write that could not take SQLite's write lock within its budget.
+            # It is RETRYABLE and it wrote nothing, so it is neither a 500
+            # (nothing failed) nor a 422 (nothing was malformed). This clause sits
+            # BEFORE the StateConflict one because a refusal may be BOTH kinds at
+            # once - `core.state_claims.WaitRegistrationBusy` is a `ClaimError`
+            # (the stable `wait_not_registered` code) AND a `StateWriteBusy` -
+            # and 409 Conflict, which says "somebody else has it", is the wrong
+            # answer for "the lock was busy, ask again" (`iss-89b4c2a1e8c048b3`).
+            # It returns the same object `apply_state_write_busy` installs as the
+            # app-wide default, so the two cannot disagree.
             return state_write_busy_response(exc)
         except StateNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -456,6 +467,16 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         try:
             result = await to_thread.run_sync(partial(_call, service, action, arguments))
             return await result if inspect.isawaitable(result) else result
+        except StateWriteBusy as exc:
+            # A READ that must WRITE - `wait_for_state_change` records the
+            # driver's presence row before it waits - can be refused exactly like
+            # a command: the lock is busy, nothing was written and the same
+            # request is worth repeating. The clause is here as well as in `_call`
+            # because this handler is what the long-poll route
+            # (`POST /api/state/query/wait_for_state_change`) runs, and a refusal
+            # that reached it another way must not fall through to the conflict
+            # clauses below, which would report it 409.
+            return state_write_busy_response(exc)
         except StateNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except StateConflict as exc:

@@ -35,9 +35,11 @@ from datetime import UTC, datetime, timedelta
 
 from core import driver_presence
 from core.state_graph import (
+    STATE_WRITE_BUSY_RETRY_AFTER,
     StateConflict,
     StateGraphError,
     StateNotFound,
+    StateWriteBusy,
     digest,
     key,
     text,
@@ -232,6 +234,35 @@ class ClaimError(StateConflict):
     def __init__(self, code: str, detail: str, **facts):
         self.code, self.facts = code, facts
         super().__init__(f"{code}: {detail}")
+
+
+class WaitRegistrationBusy(ClaimError, StateWriteBusy):
+    """A driver wait whose presence row could not be written: the write lock was held.
+
+    RETRYABLE, and it wrote nothing: the wait never started, so nothing pretended
+    the driver was present and the caller still holds its cursor.
+
+    It is BOTH kinds of refusal ON PURPOSE, and the two halves say why the
+    reported status had to change:
+
+    * a `ClaimError`, so the stable `wait_not_registered` code, the documented
+      "retry it" instruction (`core/state_driver_guide.py`) and every existing
+      `except ClaimError` branch keep working unchanged;
+    * a `StateWriteBusy`, so a transport answers it like every other write that
+      could not take SQLite's lock: 503 with `Retry-After`. Previously the only
+      thing the HTTP command path could see was `StateConflict` -> 409 Conflict,
+      which says "somebody else has it, your view is stale" about a condition
+      that is only "the lock was busy, ask again" - and the SAME busy database
+      answered 503 on the State command routes at the same moment
+      (`iss-89b4c2a1e8c048b3`).
+    """
+
+    def __init__(self, detail: str, retry_after: int = STATE_WRITE_BUSY_RETRY_AFTER):
+        ClaimError.__init__(self, "wait_not_registered", detail)
+        # `ClaimError` sets `code` as an INSTANCE attribute, so the driver-facing
+        # code stays `wait_not_registered` while the transport still reads the
+        # retry wait off this object like any other busy refusal.
+        self.retry_after = max(1, int(retry_after))
 
 
 def _claim_view(row, current: str) -> dict:

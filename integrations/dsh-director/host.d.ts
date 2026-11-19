@@ -202,7 +202,9 @@ export interface DirectorHost {
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
    *    {refused: code}. `rate_limited` and `unavailable` are TRANSIENT: the message was
    *    not taken, so a channel holds it and asks again with backoff (dropping it loses
-   *    the owner's message); every other refusal is final for that message.
+   *    the owner's message); every other refusal is final for that message. The bound
+   *    owner is told once a minute that a rate_limited burst is held ("no need to send
+   *    them again"); that line never uses up the message's own answer.
    *    When the text is exactly an approval phrase the host executes it
    *    in code and says so in `approval`; the model never does. An executed decision
    *    names the decided proposal's `kind` and `target` from the host's own record of it,
@@ -225,6 +227,9 @@ export interface DirectorHost {
     bound sender, and no code in the text in any rendering it folds - because the plugin
     writes the owner's own words down before it relays them and must never write a code.
     Absent (an older host), the plugin keeps no text: durability degrades, never a secret.
+    Present but not answered (a transport failure, a 5xx, a timeout), the message is not
+    relayed either: it is answered `unavailable` and the plugin hands it in again, so no
+    relay ever commits while the owed record has no text.
   - sourceOf: where a message came from or went to: null for the dashboard, else
    *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
    *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
@@ -297,7 +302,13 @@ export interface DirectorHost {
  *  `\p{Nd}{6}` misses every folded rendering (superscripts, circled, dingbat: measured 99
  *  code points) and wrote the live code down. Until the host says store_text the record is
  *  kept WITHOUT the text: a stop in that window costs the sender one "send it again" line,
- *  never a live code on disk. The store is 0600 in the director's own directory, never the
+ *  never a live code on disk. That line is only for a record a restart inherited: one whose
+ *  last answer here was transient is still held by its plugin, which hands it in again, so
+ *  it is left to that retry. A decision line goes only to the account bound NOW and never
+ *  more than an hour after the owner wrote (CHANNEL_LIMITS.lineMaxAgeMs: the earlier of the
+ *  channel's time and when it was first owed here); a redelivery past either is answered
+ *  with no line and leaves the store. A store over owedMax drops a record without a text
+ *  first, so a flood of strangers' messages never pushes out the owner's owed line. The store is 0600 in the director's own directory, never the
  *  backend's world-readable database. An answer of `{duplicate: true, approval: null}` with no
  *  `approval_pending` is read as finished (a backend that predates that marker cannot say
  *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before

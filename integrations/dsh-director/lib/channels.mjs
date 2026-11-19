@@ -51,6 +51,7 @@ export const channelReplies = Object.freeze({
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
   code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
+  rate_limited: 'Held: too many messages at once; they reach the steward in order, a little later - no need to send them again. 消息太频繁：已留住，稍后按顺序送达管家，不必重发。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
   approval({ proposal_id: id, action, outcome, refusal, kind, target, result }) {
     if (outcome === 'executed') {
@@ -69,8 +70,10 @@ export const channelReplies = Object.freeze({
 
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
  *  generic `refused` line (a stranger is told none of them). A TRANSIENT refusal is not in
- *  here on purpose: the message is held and asked again (RETRYABLE), so "too many messages,
- *  try later" would be a line about a message that is still on its way. */
+ *  here: the message is held and asked again (RETRYABLE). For rate_limited the owner is told
+ *  exactly that, once a minute (replies.rate_limited: "Held ... no need to send them again"),
+ *  so a burst still on its way is not sent again; that line has its own key, so the
+ *  message's real answer (an approval's line) is still owed. */
 const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_account']);
 /** The answers that are transient, not terminal: the host or the backend could not be
  *  reached, the channel's minute's share is spent, or the decision this message carries
@@ -109,9 +112,12 @@ const within = (promise, ms, what) => {
  *  minute (each costs a binding read, a bind write and a line through the owner's bot).
  *  A delivery record is tried recordAttempts times, recordRetryMs doubling between tries
  *  (1+2+4+8+16 s: a backend restart); an answer line answerAttempts times, answerRetryMs
- *  between tries; the owed store is re-asked every owedMs, at most owedMax messages. */
+ *  between tries; the owed store is re-asked every owedMs, at most owedMax messages; a decision
+ *  line is never sent more than lineMaxAgeMs after the owner wrote it (the earlier of the
+ *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
-  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200 });
+  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
+  lineMaxAgeMs: 3600000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -138,6 +144,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // The messages this process is handling right now: the owed poll must not ask one of them
   // again while its relay is still in flight (the write-ahead put it in the store first).
   const handling = new Set();
+  // The messages whose last answer here was TRANSIENT (unavailable, rate_limited,
+  // approval_pending): the channel plugin holds each and hands it in again. A record of one
+  // without a text is not a body lost to a restart - the plugin still has it - so the owed
+  // poll leaves it to that retry instead of telling the owner to send it again.
+  const held = new Set();
   const owedSave = () => {
     if (!owedFile) return;
     try {
@@ -172,8 +183,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // The host's own answer to "may this text be kept" (channels.codeCheck, host.d.ts): the
   // plugin writes the owner's words down before the relay so a timed-out answer is replayed,
   // and must never write a live binding code - and only the host knows which code is live.
-  // An answer we do not get is no permission: no codeCheck (an older host), a transport
-  // failure, a refusal - the message stays owed without its text.
+  // An answer we do not get is no permission: no codeCheck (an older host) or a refusal -
+  // the message stays owed without its text. A codeCheck that is not ANSWERED (a transport
+  // failure, a 5xx, a timeout) throws: the message is then not relayed either, and is answered
+  // `unavailable` for the plugin to hold and hand in again. A relay without a verdict could
+  // commit (and execute an approval) while the record had no text, and a restart could then
+  // only tell the owner "send it again" about a message that was taken - and lose its line.
   let codeCheckMissing = false;
   const mayKeepText = async message => {
     if (typeof host.codeCheck !== 'function') {
@@ -186,7 +201,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       return verdict?.store_text === true;
     } catch (error) {
       log('channel_code_check_failed', { channel: message.channel, error: short(error) });
-      return false;
+      throw error;
     }
   };
   const remember = (message, { judged = false } = {}) => {
@@ -194,11 +209,31 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     const previous = owed.get(key);
     const body = typeof message.text === 'string' ? message.text : undefined;
     const kept = judged ? body : (typeof previous?.text === 'string' ? previous.text : undefined);
+    // `owedAt`: when this message was first owed here (kept across a restart) - with the
+    // channel's `at`, what dates the line it may owe (lineExpired).
     owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
-      ...(kept === undefined ? {} : { text: kept }), ...(text(message.at) ? { at: message.at } : {}) });
-    if (owed.size > limits.owedMax) owed.delete(owed.keys().next().value);
+      ...(kept === undefined ? {} : { text: kept }), ...(text(message.at) ? { at: message.at } : {}),
+      owedAt: text(previous?.owedAt) ? previous.owedAt : new Date().toISOString() });
+    // Past the bound, a record WITHOUT a text goes first (it can owe no replayable line, only
+    // a "send it again" notice; a stranger's message is always one), so a flood never pushes
+    // out the owner's owed line. Only a store of owner texts alone loses its oldest.
+    if (owed.size > limits.owedMax) {
+      let victim = owed.keys().next().value;
+      for (const [candidate, record] of owed) if (typeof record.text !== 'string') { victim = candidate; break; }
+      owed.delete(victim);
+    }
     owedSave();
     return key;
+  };
+  // A decision line is never sent more than lineMaxAgeMs after the owner wrote: the earlier
+  // of the channel's own time and when it was first owed here (so a skewed channel time
+  // cannot keep it). A ring replay of a decision made yesterday, or a line owed through a long
+  // outage, is not announced as news - and its record is done (handle), so it is not re-asked
+  // every owedMs for good. A message still owed its DELIVERY has no such bound: it is relayed
+  // whenever the host takes it (the host dates an approval phrase itself).
+  const lineExpired = record => {
+    const born = Math.min(...[record?.at, record?.owedAt].filter(text).map(Date.parse).filter(Number.isFinite));
+    return Number.isFinite(born) && Date.now() - born > limits.lineMaxAgeMs;
   };
   const forget = key => { if (owed.delete(key)) owedSave(); };
   let ready;
@@ -209,10 +244,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // a failure to answer is logged and tried a bounded number of times, and then REPORTED -
   // what owes the line keeps it owed instead of counting it sent. Never throws into the
   // caller (the message itself was handled).
-  const answer = async (channel, line, options) => {
+  // `key` is what makes it once: the channel message, unless the caller names another (the
+  // Held line of a message that will still be delivered must not use up its answer).
+  const answer = async (channel, line, options, key = channel + '\n' + options.replyToRef) => {
     const entry = registered.get(channel);
     if (!entry) { log('channel_answer_skipped', { channel, reason: 'not_registered' }); return false; }
-    const key = channel + '\n' + options.replyToRef;
     if (answeredRefs.has(key)) { log('channel_answer_skipped', { channel, reason: 'already_answered' }); return true; }
     if (answering.has(key)) { log('channel_answer_skipped', { channel, reason: 'already_answering' }); return false; }
     answering.add(key);
@@ -308,8 +344,17 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     },
   };
 
-  // Never rejects: every failure is an answer.
-  const handle = async ({ channel, senderRef, messageRef, text: body, at }) => {
+  // Never rejects: every failure is an answer. A transient answer marks the message `held`
+  // (the plugin hands it in again); any other answer ends that.
+  const handle = async message => {
+    const result = await handleOnce(message), key = owedKey(message);
+    if (result?.accepted === false && RETRYABLE.has(result.reason)) {
+      held.add(key);
+      while (held.size > limits.answeredRefs) held.delete(held.values().next().value);
+    } else held.delete(key);
+    return result;
+  };
+  const handleOnce = async ({ channel, senderRef, messageRef, text: body, at }) => {
     const seen = { channel, sender_ref: senderRef, at: at ?? new Date().toISOString(), length: body.length };
     const trimmed = body.trim();
     const message = { channel, senderRef, messageRef, text: body, at };
@@ -329,7 +374,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     remember(message);
     try {
       await hostReady();
-      if (await mayKeepText(message)) remember(message, { judged: true });
+      let keep;
+      try { keep = await mayKeepText(message); }
+      catch { return { accepted: false, reason: 'unavailable' }; }  // no verdict: not relayed (mayKeepText)
+      if (keep) remember(message, { judged: true });
       // Six digits from someone who is not the bound owner is a binding attempt; the bound
       // owner's six digits are an ordinary message. Past the channel's binding attempts for
       // the minute, six digits are relayed like any message: the host takes the owner's and
@@ -362,6 +410,14 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
           // side's own name for an answer that never came, and it joins nothing.
           if (reason === 'rate_limited') remember(message, { judged: true });
           log('channel_relay_retrying', { ...seen, reason });
+          // rate_limited only ever answers the bound owner (the backend checks the binding
+          // first): told once a minute that the burst is held, so it is not sent again. The
+          // line has its own key: the message's own answer is still to come.
+          if (reason === 'rate_limited' && Date.now() - (told.get(channel) ?? 0) >= 60000
+            && (await binding(channel))?.sender_ref === senderRef) {
+            told.set(channel, Date.now());
+            await answer(channel, replies.rate_limited, { replyToRef: messageRef, to: senderRef }, channel + '\nheld\n' + messageRef);
+          }
           return { accepted: false, reason };
         }
         // The host's answer for good: nothing is owed for this message any more.
@@ -369,9 +425,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         log('channel_relay_refused', { ...seen, reason });
         // Only the bound owner learns why: the binding is read again, not inferred from the code.
         // At most one such line per channel and minute, so a flood is not answered line for line.
-        if (reason !== 'channel_sender_not_bound' && Date.now() - (told.get(channel) ?? 0) >= 60000
+        // The binding-code line has a minute of its own: no other line ever holds back the
+        // news that a code was retired.
+        const throttle = reason === 'code_sent_to_bound_account' ? channel + '\ncode' : channel;
+        if (reason !== 'channel_sender_not_bound' && Date.now() - (told.get(throttle) ?? 0) >= 60000
           && (await binding(channel))?.sender_ref === senderRef) {
-          told.set(channel, Date.now());
+          told.set(throttle, Date.now());
           await answer(channel, TOLD.has(reason) ? replies[reason] : replies.refused(reason), { replyToRef: messageRef, to: senderRef });
         }
         return { accepted: false, reason };
@@ -394,7 +453,15 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       const key = channel + '\n' + messageRef, lost = unanswered.has(key);
       if (result?.approval || !result?.duplicate) unanswered.delete(key);
       if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || carried)) {
-        if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
+        // A redelivery's line goes only to the account bound NOW (the backend replays a
+        // channel message's answer before it checks the binding), and never long after the
+        // owner wrote: an unbound account never learns the decision, and a decision made
+        // yesterday is not announced again by a ring replay that met one transient failure.
+        const expired = result.duplicate && lineExpired({ at, owedAt: owed.get(owed1)?.owedAt });
+        if (expired || (result.duplicate && (await binding(channel))?.sender_ref !== senderRef)) {
+          log('channel_line_dropped', { ...seen, reason: expired ? 'expired' : 'not_bound' });
+          forget(owed1);
+        } else if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
         else remember(message, { judged: true });
       } else {
         forget(owed1);
@@ -426,6 +493,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (!owed.size) return;
       for (const message of [...owed.values()]) {
         if (!owed.has(owedKey(message)) || handling.has(owedKey(message))) continue;
+        // A plugin still holds it and hands it in again: not a body lost to a restart.
+        if (typeof message.text !== 'string' && held.has(owedKey(message))) continue;
         if (typeof message.text !== 'string') {
           // The host never judged this body, so there is nothing to ask again: the bound
           // owner is told once that it has to be sent again, a stranger is told nothing, and
@@ -448,7 +517,19 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // One mirror at a time, in the order the messages were written: a channel shows them in
   // the order it receives them.
   let queue = Promise.resolve();
+  // Messages sent whose delivery row is not recorded: the only thing that keeps them from
+  // being sent again in this process. A recorded one leaves it (sourceOf answers for it).
   const mirroring = new Set();
+  // stop() ends a record's wait between tries (the try fails as channels_stopped); the wait
+  // never keeps the process alive.
+  const stopping = new AbortController();
+  const pause = ms => new Promise((resolve, reject) => {
+    const stopped = () => { clearTimeout(timer); reject(new Error('channels_stopped')); };
+    const timer = setTimeout(() => { stopping.signal.removeEventListener('abort', stopped); resolve(); }, ms);
+    timer.unref?.();
+    if (stopping.signal.aborted) return stopped();
+    stopping.signal.addEventListener('abort', stopped, { once: true });
+  });
   // The delivery row is what keeps a message from being sent again after a restart
   // (sourceOf), so a record that fails is tried again, a bounded number of times, as the
   // same request (the host takes it once). A refusal is the host's answer: not retried.
@@ -458,7 +539,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       catch (failure) {
         if (attempt >= limits.recordAttempts) throw failure;
         log('channel_record_retry', { channel: delivery.channel, message_id: delivery.messageId, attempt, error: short(failure) });
-        await new Promise(resolve => setTimeout(resolve, limits.recordRetryMs * 2 ** (attempt - 1)));
+        await pause(limits.recordRetryMs * 2 ** (attempt - 1));
       }
     }
   };
@@ -490,9 +571,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       catch (failure) { error = short(failure); }
     }
     // Recorded once, success or failure (the record retried, a failed send never).
-    const recorded = await record({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) })
-      .catch(failure => log('channel_record_failed', { channel, message_id: messageId, error: short(failure) }));
+    let recorded, failed = false;
+    try { recorded = await record({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) }); }
+    catch (failure) { failed = true; log('channel_record_failed', { channel, message_id: messageId, error: short(failure) }); }
     if (recorded?.refused) log('channel_record_refused', { channel, message_id: messageId, reason: String(recorded.refused) });
+    else if (!failed) mirroring.delete(messageId);
     if (error) log('channel_send_failed', { channel, message_id: messageId, error });
     return error ? { mirrored: false, reason: 'send_failed', channel } : { mirrored: true, channel };
   };
@@ -530,6 +613,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     stop: () => {
       clearInterval(statusTimer); statusTimer = undefined;
       clearInterval(owedTimer); owedTimer = undefined;
+      stopping.abort();
     },
   };
 }

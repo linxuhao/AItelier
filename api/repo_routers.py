@@ -30,7 +30,13 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
         List of repo-group dicts, each containing:
         - repo_path, repo_name, repo_type, repo_url
         - project_count, representative_project_id, last_activity
-        - projects: list of {project_id, name, status, updated_at}
+        - projects: list of {project_id, name, status, updated_at}, each
+          enriched in place (so also config_name/current_project_step/
+          completed_project_steps/… once a run exists — see
+          `api.dependencies.enrich_project_status`)
+
+    The projects rows are selected with the fields the enrichment memo keys on,
+    not just the ones the response documents; the comment at the SELECT says why.
     """
     groups: list[dict] = []
 
@@ -62,9 +68,28 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
             from core.git_ops import redact_url_credentials
             ru = redact_url_credentials(ru)
 
-            # Fetch all projects sharing this repo_path
+            # Fetch all projects sharing this repo_path.
+            #
+            # `current_project_step` and `config_name` are here for ENRICHMENT,
+            # not for the response. `enrich_project_status` memoises on
+            # `api.dependencies._enrichment_memo_key(row)` = (project_id, status,
+            # updated_at, current_project_step, config_name), and
+            # `_derive_project_enrichment` reads `config_name` off the row when
+            # the run has no `graph_name`. A row built from a narrower SELECT
+            # hashes to a DIFFERENT key than the same project's row from
+            # `db.list_projects_with_stats` (what `/api/projects` enriches), so
+            # the startup warm-up, which builds both reads, derived every
+            # project twice: measured 2893 enrich calls, 2699 derivations, 194
+            # memo hits for 1545 projects, and 4731 of the 8829 ms cold
+            # `/api/repos` build. The absent `config_name` also let the two
+            # views disagree on a run row without a `graph_name` — this view
+            # fell through to "dpe_default_v2" while the projects view used the
+            # row's real config. Keep this select in step with
+            # `_enrichment_memo_key`; tests/unit/
+            # test_repos_enrichment_memo_20261119.py fails if it drifts.
             project_rows = conn.execute(
-                """SELECT project_id, name, status, updated_at
+                """SELECT project_id, name, status, updated_at,
+                          current_project_step, config_name
                    FROM runs
                    WHERE repo_path = ?
                    ORDER BY updated_at DESC""",

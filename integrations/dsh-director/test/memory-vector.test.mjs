@@ -23,8 +23,15 @@ const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memvec-'));
 const repo = root => join(root, USER);
 const vfile = root => join(root, USER + '.vectors.jsonl');
 const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir, ...args], { cwd: dir, env: gitEnv(dir), maxBuffer: 1 << 28 });
-/** Root ignores file modes: the tests that make a file unwritable with chmod cannot run as root. */
-const AS_ROOT = { skip: process.getuid?.() === 0 && 'running as root: chmod 0400 does not stop root from writing' };
+/** Make filtering the vector file fail: chmod 0400 (refused by the filter's W_OK check) - or,
+ *  as root (the shipped image's test run), which writes through any mode, a directory among
+ *  the filter's temporary-file names, which the filter cannot remove. Returns the undo. */
+const BLOCKER = '.filter-blocked';
+function blockFilter(root) {
+  if (process.getuid?.() === 0) { mkdirSync(vfile(root) + BLOCKER); return () => rmSync(vfile(root) + BLOCKER, { recursive: true }); }
+  chmodSync(vfile(root), 0o400);
+  return () => chmodSync(vfile(root), 0o600);
+}
 const TUNING = { backoffMinMs: 20, backoffMaxMs: 100, workerTimeoutMs: 3000 };
 const servers = [];
 after(async () => { for (const s of servers) await s.close(); });
@@ -312,7 +319,7 @@ test('8: after a restart the backfill completes and vector is ok', async () => {
   await store.close();
 });
 
-test('8: an unwritable vector file - forget succeeds and logs; the store still opens; once writable, the next load removes the row', AS_ROOT, async () => {
+test('8: an unwritable vector file - forget succeeds and logs; the store still opens; once writable, the next load removes the row', async () => {
   const fake = await server();
   const root = newRoot();
   const events = [];
@@ -320,7 +327,7 @@ test('8: an unwritable vector file - forget succeeds and logs; the store still o
   let store = await open(root, fake.url, { logger });
   await store.recordTurn('a', [{ role: 'owner', text: 'secret garden' }, { role: 'steward', text: 'the garden reply' }]);
   await ready(store);
-  chmodSync(vfile(root), 0o400);
+  const unblock = blockFilter(root);
   const f = await store.forget(['t-a-0'], { reason: 'asked', by: 'owner' });
   assert.deepEqual(f.forgotten, ['t-a-0']);
   const failed = events.find(([e]) => e === 'memory/vector-filter-failed');
@@ -336,7 +343,7 @@ test('8: an unwritable vector file - forget succeeds and logs; the store still o
   assert.ok(!store.vector.mem.has('t-a-0'));
   assert.ok(fileIds(root).includes('t-a-0'), 'still unwritable: still there');
   await store.close();
-  chmodSync(vfile(root), 0o600);
+  unblock();
   store = await open(root, fake.url, { logger });
   await store.vector.whenLoaded();
   assert.deepEqual(fileIds(root), ['t-a-1']);
@@ -482,7 +489,7 @@ test('10: purged ids all forgotten before (no forget, no commit) - the step 1 fi
   await store.close();
 });
 
-test('10: step 1 cannot filter (unwritable file) - aborted before the build, repository bytes unchanged, done{rolled_back}; no "interrupted" next boot', AS_ROOT, async () => {
+test('10: step 1 cannot filter (unwritable file) - aborted before the build, repository bytes unchanged, done{rolled_back}; no "interrupted" next boot', async () => {
   for (const alreadyForgotten of [true, false]) {
     const fake = await server();
     const { root, store } = await purgeSeed(fake.url);
@@ -494,7 +501,7 @@ test('10: step 1 cannot filter (unwritable file) - aborted before the build, rep
     await store.flush();
     const before = treeHash(repo(root));
     const vectorsBefore = readFileSync(vfile(root));
-    chmodSync(vfile(root), 0o400);
+    const unblock = blockFilter(root);
     let built = false;
     store.faults = { beforeBuild: () => { built = true; } };
     const r = await store.purge(['t-gone-0']);
@@ -506,9 +513,9 @@ test('10: step 1 cannot filter (unwritable file) - aborted before the build, rep
     assert.deepEqual(readFileSync(vfile(root)), vectorsBefore);
     const last = journalOf(root).at(-1);
     assert.equal(last.phase, 'done'); assert.equal(last.outcome, 'rolled_back'); assert.match(last.reason, /^vector filter failed: /);
-    assert.deepEqual(readdirSync(root).filter(n => n.includes('.purge-new-') || n.includes('.pre-purge-') || n.includes('.filter-')), []);
+    assert.deepEqual(readdirSync(root).filter(n => n.includes('.purge-new-') || n.includes('.pre-purge-') || (n.includes('.filter-') && !n.endsWith(BLOCKER))), []);
     await store.close();
-    chmodSync(vfile(root), 0o600);
+    unblock();
     const rows = journalOf(root).length;
     const next = await open(root, fake.url);
     assert.equal(next.statusLine().notices, undefined, 'a refused purge is not reported as interrupted');
@@ -612,21 +619,21 @@ test('10: a purged row written back between step 1 and step 5 - the old reposito
   await store.close();
 });
 
-test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory still opens and the owner is told', AS_ROOT, async () => {
+test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory still opens and the owner is told', async () => {
   const root = newRoot();
   const fixture = new URL('./fixtures/memory-crash.mjs', import.meta.url).pathname;
   // Killed inside step 1, before its vector filter: the purged id is still in the file.
   const child = spawnSync(process.execPath, [fixture, root, USER, 'beforeForgetStrip', '0'], { encoding: 'utf8' });
   assert.equal(child.signal, 'SIGKILL', child.stderr + child.stdout);
   assert.ok(fileIds(root).includes('t-gone-0'));
-  chmodSync(vfile(root), 0o400);
+  const unblock = blockFilter(root);
   const store = await open(root);
   assert.equal(journalOf(root).at(-1).phase, 'done');
   const notices = store.statusLine().notices ?? [];
   assert.ok(notices.some(n => /^向量文件里仍有已彻底删除的编号 t-gone-0，原因 .*；下次载入会再去掉$/.test(n)), JSON.stringify(notices));
   assert.ok(notices.some(n => /^上次彻底删除/.test(n)), 'the interruption notice as before');
   await store.close();
-  chmodSync(vfile(root), 0o600);
+  unblock();
   const fake = await server();
   const next = await open(root, fake.url);
   await next.vector.whenLoaded();

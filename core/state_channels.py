@@ -327,12 +327,6 @@ class StateChannels:
         refuse_credential_body(body)
         written_at = _written_at(channel_at)
         request_hash = _hash([channel, sender_ref, channel_message_ref, body])
-        # Six digits may be a live binding code (either channel's): its keyed digests, to
-        # look it up. Without the pepper no code can be checked or bound: a plain message.
-        digits, pepper = body.strip(), None
-        if len(digits) == 6 and digits.isascii() and digits.isdigit():
-            pepper = self._pepper_value()
-        codes = [_code_hash(pepper, name, digits) for name in CHANNELS] if pepper else []
         # The per-message record's key: the channel message of this sender.
         ref_key = f"{channel}:{_hash([sender_ref, channel_message_ref])}"
         home = steward_project()
@@ -342,7 +336,7 @@ class StateChannels:
                                   ref_key)
             if first is None:
                 first = self._write_relay(conn, home, request_key, request_hash, channel, sender_ref,
-                                          channel_message_ref, ref_key, body, size, written_at, codes)
+                                          channel_message_ref, ref_key, body, size, written_at)
                 fresh = True
             else:
                 fresh = False
@@ -382,7 +376,7 @@ class StateChannels:
         return None
 
     def _write_relay(self, conn, home, request_key, request_hash, channel, sender_ref, channel_message_ref,
-                     ref_key, body, size, written_at, codes):
+                     ref_key, body, size, written_at):
         """The owner message, its source row and its two ledger records, in the caller's
         transaction. An approval phrase to decide is recorded `pending` (the phrase, the
         version it names and when it was written): the decision runs after this commits,
@@ -406,7 +400,13 @@ class StateChannels:
         # A LIVE binding code the bound owner sent as a message is never written: the code
         # is retired and the relay refused code_sent_to_bound_account. The attempt is kept by
         # its channel message like a binding attempt, so a redelivery is a duplicate that
-        # writes nothing (the digits, retired now, would otherwise land as a message).
+        # writes nothing (the digits, retired now, would otherwise land as a message). The
+        # pepper is read only here, past the steward and binding checks; without it no code
+        # can be checked or bound, and six digits are a plain message.
+        digits, pepper = body.strip(), None
+        if len(digits) == 6 and digits.isascii() and digits.isdigit():
+            pepper = self._pepper_value()
+        codes = [_code_hash(pepper, name, digits) for name in CHANNELS] if pepper else []
         live = [row for row in conn.execute(
             f"SELECT code_hash,channel,expires_at FROM state_owner_channel_codes WHERE code_hash IN "
             f"({','.join('?' * len(codes))}) AND used_at IS NULL AND retired_at IS NULL", codes).fetchall()

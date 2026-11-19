@@ -527,6 +527,20 @@ def test_a_live_code_sent_from_the_bound_account_is_refused_retired_and_never_wr
     refused(lambda: bind_message(world, code, "m-bind", channel=code_channel, sender="someone-else"), "code_retired")
 
 
+def test_a_relay_reads_the_pepper_only_for_the_bound_owners_six_digits(world, monkeypatch):
+    """As for a bind (K-order): the code lookup's pepper read comes after the steward
+    check and the binding check, never for a stranger's or a non-steward's relay."""
+    bind(world)
+    reads = []
+    monkeypatch.setattr(drivers, "read_pepper", lambda: reads.append(1) or PEPPER)
+    refused(lambda: relay(world, "123456", "ts-1", sender="U-STRANGER"), "channel_sender_not_bound")
+    refused(lambda: world.director.channels.relay_owner_message(HOME, "k", "slack", SLACK_USER, "ts-2", "123456"),
+            "steward_role_required")
+    assert reads == []
+    relay(world, "123456", "ts-3")
+    assert reads == [1] and [m["body"] for m in conversation(world)] == ["123456"]
+
+
 def test_six_digits_that_are_no_live_code_are_an_ordinary_message(world):
     bind(world)
     code = world.owner.channels.issue_code("wechat")["code"]

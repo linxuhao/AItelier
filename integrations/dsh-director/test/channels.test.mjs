@@ -452,8 +452,8 @@ test('a record that fails after a successful send is tried again, so a restart r
     'the same delivery each time');
   assert.equal(logs.filter(([event]) => event === 'channel_record_failed').length, 0);
   first.stop();
-  // A restart: the in-memory guard is gone; the same State message id is mirrored again
-  // (a replayed ask_owner / send_user_message answers the same id).
+  // A restart: the in-memory guard is gone; the same message id is mirrored again (a
+  // replayed ask_owner answers the same id).
   const second = createOwnerChannels({ host: fake.host, log: () => {}, limits });
   second.ready();
   const again = fakeChannel('slack');

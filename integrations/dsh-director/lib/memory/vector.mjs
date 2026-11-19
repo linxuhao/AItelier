@@ -20,6 +20,7 @@ import { access, open as openFile, readdir, rename, unlink } from 'node:fs/promi
 import { createInterface } from 'node:readline';
 import { basename, dirname, join } from 'node:path';
 import { VECTOR_MODELS } from '../host.mjs';
+import { due, turn } from './slices.mjs';
 
 /** Only the first code points of an entry (and of a query) are embedded: bge-m3 is a
  *  bidirectional encoder whose whole input must fit one ubatch (1024 tokens). */
@@ -54,11 +55,19 @@ export function parseHeader(line) {
   return h;
 }
 
-/** A data line as {id, v: Buffer of `dims` bytes}, or undefined (a torn or foreign line). */
-export function parseRow(line, dims) {
+/** A data line as {id, v: Buffer of `dims` bytes}, or undefined (a torn or foreign line).
+ *  With `scratch` (a Buffer the caller reuses) the bytes are decoded into it and `v` is a
+ *  view of it, valid until the next call: no Buffer per row (a load made 100k of them). A
+ *  string that could decode to more than `scratch` holds takes the allocating path, so the
+ *  answer is the same either way. */
+export function parseRow(line, dims, scratch) {
   let row;
   try { row = JSON.parse(line); } catch { return undefined; }
   if (!row || typeof row.id !== 'string' || !row.id || typeof row.v !== 'string') return undefined;
+  if (scratch && Math.floor(row.v.length * 3 / 4) <= scratch.length) {
+    const n = scratch.write(row.v, 'base64');
+    return n === dims ? { id: row.id, v: scratch.subarray(0, dims) } : undefined;
+  }
   const v = Buffer.from(row.v, 'base64');
   return v.length === dims ? { id: row.id, v } : undefined;
 }
@@ -79,6 +88,42 @@ async function fsyncDirOf(file) {
 
 function lines(file) {
   return createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+}
+
+/** The lines of a file as `lines` gives them (ends: \n, \r\n, \r; a last line without
+ *  one; each line decoded whole), read through one reused buffer: the load's 139 MB file at
+ *  100k was 2,000 transient 64 KB chunks and 100k row Buffers between the vector blocks in
+ *  the allocator, and the RSS kept 20-50 MB of them (plugin step 21 perf follow-up). */
+export async function* fileLines(file, size = 1 << 18) {
+  const fh = await openFile(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(size);
+    let carry = null, skipLf = false;
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, 0, size, null);
+      if (!bytesRead) break;
+      let start = 0, i = 0;
+      if (skipLf && buf[0] === 0x0a) start = i = 1;
+      skipLf = false;
+      let cr = buf.indexOf(0x0d, i), lf = buf.indexOf(0x0a, i);
+      for (;;) {
+        if (cr !== -1 && cr >= bytesRead) cr = -1;
+        if (lf !== -1 && lf >= bytesRead) lf = -1;
+        const end = cr === -1 ? lf : lf === -1 ? cr : Math.min(cr, lf);
+        if (end === -1) break;
+        const line = carry ? Buffer.concat([carry, buf.subarray(start, end)]).toString('utf8') : buf.toString('utf8', start, end);
+        carry = null;
+        let next = end + 1;
+        if (buf[end] === 0x0d) { if (next < bytesRead) { if (buf[next] === 0x0a) next++; } else skipLf = true; }
+        start = next;
+        if (cr !== -1 && cr < start) cr = buf.indexOf(0x0d, start);
+        if (lf !== -1 && lf < start) lf = buf.indexOf(0x0a, start);
+        yield line;
+      }
+      if (start < bytesRead) carry = carry ? Buffer.concat([carry, buf.subarray(start, bytesRead)]) : Buffer.from(buf.subarray(start, bytesRead));
+    }
+    if (carry && carry.length) yield carry.toString('utf8');
+  } finally { await fh.close(); }
 }
 
 /** Stream a vector file: its header line, its valid data rows, its bad lines, and how many
@@ -272,25 +317,28 @@ export class VectorChannel {
     const mem = this.mem;
     const entries = this.store.entries();
     const extras = new Set();
+    const scratch = Buffer.alloc(2 * this.dims);
     let rebuild;
     if (existsSync(this.file)) {
       let first = true, n = 0;
-      const rl = lines(this.file);
+      const rl = fileLines(this.file);
       for await (const line of rl) {
-        if (gen !== this.gen) { rl.close(); return; }
+        if (gen !== this.gen) return;
         if (first) {
           first = false;
           const h = parseHeader(line);
           if (!h) rebuild = 'no header';
           else if (h.model !== this.modelName || h.dims !== this.dims || h.input_chars !== INPUT_CHARS)
             rebuild = `header ${h.model}/${h.dims}/${h.input_chars}, config ${this.modelName}/${this.dims}/${INPUT_CHARS}`;
-          if (rebuild) { rl.close(); break; }
+          if (rebuild) break;
           continue;
         }
         if (!line) continue;
-        const row = parseRow(line, this.dims);
+        const row = parseRow(line, this.dims, scratch);
         if (!row) continue; // a torn last line: never acknowledged, the reconciliation queues it again
-        if (entries.has(row.id)) mem.set(row.id, row.v); else extras.add(row.id);
+        // The entry's own id string is kept, not the one parsed from the file (100k strings).
+        const entry = entries.get(row.id);
+        if (entry) mem.set(entry.id, row.v); else extras.add(row.id);
         if (++n % YIELD_ROWS === 0) await yieldLoop();
       }
       if (first && !rebuild) rebuild = 'empty file';
@@ -496,15 +544,21 @@ export class VectorChannel {
     // better(a, b): a ranks before b - higher score, then newer, then id.
     const better = (a, b) => a.score > b.score || (a.score === b.score && (at(a.id) > at(b.id) || (at(a.id) === at(b.id) && a.id < b.id)));
     const top = [];
-    let slice = performance.now();
+    // The scan runs in turns (slices.mjs), starting with one of its own. This continuation
+    // runs in the poll phase (the answer's socket), and a setImmediate from there runs in
+    // the check phase of the same loop iteration, with no timer or I/O between: the first
+    // two slices were one block (10-12 ms at 100k, plugin step 21 perf follow-up).
+    await turn();
     for (let row = 0; row < mem.ids.length; row++) {
       const id = mem.ids[row];
       if (id !== undefined && entries.has(id)) {
         const data = mem.blocks[(row / BLOCK_ROWS) | 0], base = (row % BLOCK_ROWS) * dims;
         let score = 0;
         for (let i = 0; i < dims; i++) score += data[base + i] * q[i];
-        const item = { id, score };
-        if (top.length < count || better(item, top[top.length - 1])) {
+        // An object only for a row that may rank: one per row was 100k per search, and the
+        // scavenges they caused landed inside the slices.
+        const item = top.length < count || score >= top[top.length - 1].score ? { id, score } : undefined;
+        if (item && (top.length < count || better(item, top[top.length - 1]))) {
           let i = top.length < count ? top.length : top.length - 1;
           if (top.length >= count) top.pop();
           while (i > 0 && better(item, top[i - 1])) i--;
@@ -512,8 +566,13 @@ export class VectorChannel {
         }
       }
       // Every 10,000 rows, and sooner on a slow (cold or busy) pass: no block past a few ms.
-      if ((row + 1) % YIELD_ROWS === 0 || ((row + 1) % 100 === 0 && performance.now() - slice > 5)) { await yieldLoop(); slice = performance.now(); }
+      // The clock is read every 16 rows: the first scan of a process runs unoptimized, where
+      // 100 rows took 25 ms.
+      if ((row + 1) % YIELD_ROWS === 0 || ((row + 1) % 16 === 0 && due())) await turn();
     }
+    // What the caller does next (BM25, the fusion, the rendering) runs in a turn of its own,
+    // not after the last slice.
+    await turn();
     // Forgotten while the scan yielded: never a hit.
     return top.filter(t => entries.has(t.id)).map(t => t.id);
   }

@@ -28,6 +28,7 @@ import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, pa
 import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
 import { RRF_K, VectorChannel, candidates, filterVectorFile, scanVectorFile } from './vector.mjs';
 import { git, gitOk } from './git.mjs';
+import { due, turn } from './slices.mjs';
 import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
 export const PROFILE_LIMIT = 4000;
@@ -110,6 +111,79 @@ function withoutLinesNaming(text, ids) {
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+
+/** A byte stream's '\n'-terminated records, each decoded whole and handed to `take` in
+ *  order, in turns (slices.mjs; plugin step 21 perf follow-up): a common word's
+ *  `git grep` output at 100k entries is thousands of lines (23 MB for one query), and
+ *  concatenating, decoding, splitting and parsing it at once blocked the loop for 20-77 ms
+ *  (design 3.8.2: 20 ms). push(chunk) as the bytes come; end() after the last chunk takes
+ *  what is left (a last record without '\n' too), and rejects with what `take` threw. */
+export function recordReader(take) {
+  const queue = [];
+  let pending = [], offset = 0, draining, failed;
+  async function drain() {
+    await turn();
+    while (queue.length && !failed) {
+      if (due()) { await turn(); continue; }
+      const chunk = queue[0];
+      const nl = chunk.indexOf(0x0a, offset);
+      if (nl === -1) { pending.push(chunk.subarray(offset)); queue.shift(); offset = 0; continue; }
+      const piece = chunk.subarray(offset, nl);
+      const record = (pending.length ? Buffer.concat([...pending, piece]) : piece).toString('utf8');
+      pending = []; offset = nl + 1;
+      if (offset === chunk.length) { queue.shift(); offset = 0; }
+      try { take(record); } catch (error) { failed = { error }; }
+    }
+  }
+  return {
+    push: chunk => { queue.push(chunk); draining ??= drain().finally(() => { draining = undefined; }); },
+    async end() {
+      while (draining) await draining;
+      if (!failed && pending.length) {
+        const record = Buffer.concat(pending).toString('utf8');
+        pending = [];
+        try { take(record); } catch (error) { failed = { error }; }
+      }
+      if (failed) throw failed.error;
+    },
+  };
+}
+
+/** grep's items from `git grep -z -n` records, newest first, at most k: `{hit, entry}` for
+ *  a log line (the entry as the log holds it) and `{hit, entry: {text}, profileLine}` for a
+ *  line of the profile. Kept as they come: equal times in output order, which is what a
+ *  stable sort of all of them newest first gave, without holding or sorting thousands. A
+ *  line whose `at` is not a string has no such order, so then all of them are sorted as
+ *  before. */
+export function grepMatches(query, k) {
+  const lower = query.toLowerCase();
+  const top = [], all = [];
+  let odd = false;
+  return {
+    take(record) {
+      const [file, line, ...rest] = record.split('\0');
+      if (!file || rest.length === 0) return;
+      const content = rest.join('\0');
+      let item;
+      if (file === 'profile.md') item = { at: '', profileLine: Number(line), entry: { text: content }, hit: { id: 'profile', line: Number(line) } };
+      else {
+        let e;
+        try { e = JSON.parse(content); } catch { return; }
+        if (!e?.text || !e.text.toLowerCase().includes(lower)) return;
+        item = { at: e.at, entry: e, hit: { id: e.id, at: e.at, role: e.role } };
+      }
+      all.push(item);
+      if (typeof item.at !== 'string') odd = true;
+      if (odd) return;
+      let i = top.length;
+      while (i > 0 && item.at > top[i - 1].at) i--;
+      if (i >= k) return;
+      top.splice(i, 0, item);
+      if (top.length > k) top.pop();
+    },
+    items: () => (odd ? all.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0)).slice(0, k) : top),
+  };
 }
 
 /** Entry ids in number order (`t-9-…` before `t-10-…`), as memory_read orders a turn. */
@@ -804,7 +878,10 @@ export class MemoryStore {
     const q = String(query ?? '');
     if (!q.trim()) return { refused: 'empty_query' };
     const k = Math.max(1, Math.min(TOP_K_MAX, Number.isInteger(topK) ? topK : 10));
-    const [grep, ranked] = await Promise.all([this.#grep(q, k), this.#ranked(q, k)]);
+    // grep's spawn is a fork of this process, a synchronous 12-15 ms at 100k entries (it
+    // grows with the RSS): it waits for a turn of its own (slices.mjs), not after the ranked
+    // answer's start (BM25, or the query's embedding request) nor beside a scan's slice.
+    const [grep, ranked] = await Promise.all([turn().then(() => this.#grep(q, k)), this.#ranked(q, k)]);
     const answers = [{ name: 'grep', items: grep.items, omitted: [] }];
     if (ranked.items) answers.push({ name: 'ranked', items: ranked.items, omitted: [] });
     const used = this.#place(answers);
@@ -936,27 +1013,14 @@ export class MemoryStore {
   async #grep(query, k) {
     const source = 'grep · 字面匹配 · 本地记忆日志';
     const needle = JSON.stringify(query).slice(1, -1);
+    const matches = grepMatches(query, k);
+    const reader = recordReader(matches.take);
     const r = await git(this.dir, ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'],
-      { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; } });
-    const items = [];
-    const lower = query.toLowerCase();
-    for (const record of r.stdout.toString('utf8').split('\n')) {
-      const [file, line, ...rest] = record.split('\0');
-      if (!file || rest.length === 0) continue;
-      const content = rest.join('\0');
-      if (file === 'profile.md') {
-        items.push({ at: '', profileLine: Number(line), entry: { text: content }, hit: { id: 'profile', line: Number(line) } });
-        continue;
-      }
-      let e;
-      try { e = JSON.parse(content); } catch { continue; }
-      if (!e?.text || !e.text.toLowerCase().includes(lower)) continue;
-      items.push({ at: e.at, entry: e, hit: { id: e.id, at: e.at, role: e.role } });
-    }
-    items.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
+      { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; }, onStdout: reader.push });
+    await reader.end();
     return { source, complete: !r.killed && (r.code === 0 || r.code === 1),
       ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}),
-      items: items.slice(0, k) };
+      items: matches.items() };
   }
 
   /** Design 3.8.1: a local ranked hit that shares no word with the query and only meets it

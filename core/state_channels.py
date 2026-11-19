@@ -301,8 +301,8 @@ class StateChannels:
         replay answers the first result with duplicate: true - except an approval whose
         answer the ledger does not hold yet (the process stopped, or the ledger write
         failed, between the message and the decision): the redelivery decides it, or
-        finds it decided by this message, and answers {duplicate: false, approval} so the
-        channel sends its line. A channel message is the
+        finds it decided by this message, and answers {duplicate: true, decided_on_replay:
+        true, approval} so the channel sends its line. A channel message is the
         sender's: the same ref from another sender is another message, which goes
         through every check (an unbound sender is refused, never handed the owner's
         first result). `channel_at` is when the
@@ -355,11 +355,11 @@ class StateChannels:
             return first if fresh else {**first, "duplicate": True}
         # The approval this message carries is not settled in the ledger: decided now, or
         # - a redelivery after a stop or a failed ledger write - decided (or found
-        # decided) again, so the channel gets its one line either way.
+        # decided) again and answered decided_on_replay, so the channel sends its one line.
         settled = self._settle(first, channel, sender_ref, channel_message_ref)
         if settled is None:  # being decided by the first delivery right now
             return {"message_id": first["message_id"], "duplicate": True, "approval": None}
-        return settled
+        return settled if fresh else {**settled, "duplicate": True, "decided_on_replay": True}
 
     def _relayed(self, conn, request_key, request_hash, channel, sender_ref, channel_message_ref, ref_key):
         """The ledger's record of this relay when it was relayed before (by request_key,
@@ -445,7 +445,9 @@ class StateChannels:
         decision checks the proposal's status and version in its own write transaction -
         and a proposal this very message already decided (the stop came after the
         decision, or the ledger write failed) is answered as that decision, not as
-        proposal_not_open. None while the first delivery is still running it."""
+        proposal_not_open. None while the first delivery is still running it. A failing
+        ledger write is raised: the decision stands in the proposal, the channel retries
+        on the failure, and that redelivery records the answer and sends the line."""
         pending = first["pending"]
         carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
                    "phrase": pending["phrase"]}
@@ -458,15 +460,11 @@ class StateChannels:
         if approval is _RUNNING:
             return None
         result = {"message_id": first["message_id"], "duplicate": False, "approval": approval}
-        try:
-            with self.store.transaction(write=True) as conn:
-                # Only records still pending: a concurrent settle that got there first stands.
-                conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND operation IN "
-                             "('relay_owner_message','relay_owner_message:ref') AND result_json=?",
-                             (json.dumps(result), self.actor, json.dumps(first)))
-        except Exception:  # noqa: BLE001 - the decision stands; a redelivery writes its answer
-            log.warning("owner channel approval answer not recorded: channel=%s sender_ref=%s message_id=%s; "
-                        "a redelivery records it", channel, sender_ref, first["message_id"], exc_info=True)
+        with self.store.transaction(write=True) as conn:
+            # Only records still pending: a concurrent settle that got there first stands.
+            conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND operation IN "
+                         "('relay_owner_message','relay_owner_message:ref') AND result_json=?",
+                         (json.dumps(result), self.actor, json.dumps(first)))
         return result
 
     def _own_decision(self, pending, carrier):

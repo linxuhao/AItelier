@@ -911,12 +911,15 @@ def test_a_stop_between_the_message_and_the_decision_is_decided_by_the_redeliver
     assert all(r["approval"] is None for r in ledger(world).values()), "committed before the decision"
     assert world.steward.steward.recover() == {"settled": 0}, "recover() does not revisit an open proposal"
     again = relay(world, "同意 proposal p-1", "ts-approve", key=key)
-    assert again["duplicate"] is False and again["approval"]["outcome"] == "executed", again
+    assert again["approval"] and again["approval"]["outcome"] == "executed", again
+    assert again["duplicate"] is True and again["decided_on_replay"] is True, "the channel sends this line"
     assert again["message_id"] == conversation(world)[0]["message_id"] and len(conversation(world)) == 1
     row = proposal(world)
     assert row["status"] == "done" and row["decided_by"] == f"owner:slack:{SLACK_USER}"
-    assert all(r == {k: v for k, v in again.items()} for r in ledger(world).values()), "the ledger is repaired"
-    assert relay(world, "同意 proposal p-1", "ts-approve", key="third") == {**again, "duplicate": True}
+    answer = {"message_id": again["message_id"], "duplicate": False, "approval": again["approval"]}
+    assert all(r == answer for r in ledger(world).values()), "the ledger is repaired"
+    assert relay(world, "同意 proposal p-1", "ts-approve", key="third") == {**answer, "duplicate": True}, \
+        "a true duplicate from now on"
     assert proposal(world)["version"] == row["version"], "decided once"
 
 
@@ -946,17 +949,20 @@ def test_a_failed_ledger_write_after_the_decision_keeps_the_answer_for_the_redel
     with monkeypatch.context() as patched:
         patched.setattr(world.steward.channels, "_decide", decide_then_arm)
         patched.setattr(store, "transaction", busy)
-        first = relay(world, "同意 proposal p-1", "ts-approve")
-    assert first["duplicate"] is False and first["approval"]["outcome"] == "executed", \
-        "the decision in hand is answered, not lost to the ledger write"
+        with pytest.raises(StateWriteBusy):  # a failure: the channel holds the message and retries
+            relay(world, "同意 proposal p-1", "ts-approve")
     decided = proposal(world)
     assert decided["status"] == "done"
-    assert all("pending" in r for r in ledger(world).values()), "the ledger write failed"
     again = relay(world, "同意 proposal p-1", "ts-approve")
-    assert again == first, "the redelivery answers the decision this message made, not proposal_not_open"
+    assert again["duplicate"] is True and again["decided_on_replay"] is True, again
+    assert again["approval"] == {"proposal_id": "p-1", "action": "approve", "outcome": "executed",
+                                 "kind": "create_project", "target": "gamma",
+                                 "result": world.owner.steward.get_proposal("p-1")}, \
+        "the decision this message made, not proposal_not_open"
     assert proposal(world)["version"] == decided["version"] and proposal(world)["decided_at"] == decided["decided_at"]
-    assert all(r == first for r in ledger(world).values())
-    assert relay(world, "同意 proposal p-1", "ts-approve", key="k2") == {**first, "duplicate": True}
+    answer = {"message_id": again["message_id"], "duplicate": False, "approval": again["approval"]}
+    assert all(r == answer for r in ledger(world).values()), "the ledger is repaired"
+    assert relay(world, "同意 proposal p-1", "ts-approve", key="k2") == {**answer, "duplicate": True}
 
 
 def test_a_stop_while_the_approval_executes_is_answered_once_recover_settles_it(world, monkeypatch):
@@ -978,9 +984,10 @@ def test_a_stop_while_the_approval_executes_is_answered_once_recover_settles_it(
     assert world.steward.steward.recover() == {"settled": 1}
     assert proposal(world)["status"] == "done"
     settled = relay(world, "同意 proposal p-1", "ts-approve")
-    assert settled["duplicate"] is False and settled["approval"]["outcome"] == "executed"
+    assert settled["decided_on_replay"] is True and settled["approval"]["outcome"] == "executed"
     assert settled["approval"]["result"]["status"] == "done" and settled["approval"]["target"] == "gamma"
-    assert relay(world, "同意 proposal p-1", "ts-approve") == {**settled, "duplicate": True}
+    assert relay(world, "同意 proposal p-1", "ts-approve") == {"message_id": settled["message_id"], "duplicate": True,
+                                                              "approval": settled["approval"]}
 
 
 @pytest.mark.parametrize("age,outcome", [(timedelta(minutes=9, seconds=59), "executed"),

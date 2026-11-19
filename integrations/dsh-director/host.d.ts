@@ -197,7 +197,11 @@ export interface DirectorHost {
    *    and its `result` is that proposal after the run: `status: 'failed'` when the run failed.
    *    `at` is when the channel says the message was written (ISO 8601): a phrase written
    *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
-   *    more than two minutes ahead of the host's clock (approval_clock_skew).
+   *    more than two minutes ahead of the host's clock (approval_clock_skew), nor one
+   *    without `at` (approval_undated: the message is still written; a host may instead
+   *    answer {refused: 'approval_undated'}). A channel passes the time it was given and
+   *    never one of its own. The bound owner's message that is a live binding code is
+   *    refused code_sent_to_bound_account (the code is retired; the owner issues a new one).
    *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
    *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
    *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).

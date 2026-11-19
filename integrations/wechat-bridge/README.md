@@ -114,7 +114,9 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   (capped at 25) for an event after `after`. Only 1:1 text messages from another
   contact: not the account's own, not rooms, not official accounts (`gh_` ids). Kept in
   memory, the last 500. Sequence numbers start at the boot time in milliseconds, so a
-  cursor kept from before a bridge restart never hides newer events.
+  cursor kept from before a bridge restart never hides newer events. `at` is when the
+  owner wrote it, as WeChat dates the message; a message WeChat does not date has no
+  `at` (the host then refuses it as an approval, `approval_undated`, and still writes it).
 - `POST /send {to, text}` → `{ref}`. Text longer than 1500 characters goes as
   consecutive messages; `ref` is the first part's message id, or `null` when the puppet
   returns none (puppet-neo does not). Refusals: `409 not_logged_in`, `409

@@ -46,6 +46,8 @@ export const channelReplies = Object.freeze({
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
   rate_limited: 'Not delivered: too many messages, try again later. 未送达：消息太频繁，请稍后再发。',
+  approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
+  code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
   approval({ proposal_id: id, action, outcome, refusal, kind, target, result }) {
     if (outcome === 'executed') {
@@ -56,6 +58,7 @@ export const channelReplies = Object.freeze({
         return en ? `proposal ${id}: approved, but it failed - ${en}. 已同意，但执行失败：${zh}。` : `proposal ${id}: approved, but it failed. 已同意，但执行失败。`;
       return en ? `proposal ${id}: approved and done - ${en}. 已同意并执行：${zh}。` : `proposal ${id}: approved and done. 已同意并执行。`;
     }
+    if (refusal === 'approval_undated') return `proposal ${id}: not done - the message carried no time, so it cannot decide; use the dashboard. 未执行：消息没有时间，不能用来决定，请在面板上操作。`;
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
     return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
   },
@@ -63,7 +66,7 @@ export const channelReplies = Object.freeze({
 
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
  *  generic `refused` line (a stranger is told none of them). */
-const TOLD = new Set(['body_too_long', 'rate_limited']);
+const TOLD = new Set(['body_too_long', 'rate_limited', 'approval_undated', 'code_sent_to_bound_account']);
 const CODE = /^[0-9]{6}$/;
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);

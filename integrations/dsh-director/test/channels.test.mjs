@@ -175,6 +175,27 @@ test('refusals: any other refusal of the bound owner\'s message (the credential 
   }
 });
 
+test('an undated approval and a pasted binding code: the bound owner is told in their own line, a stranger nothing; no time is made up', async () => {
+  for (const refused of ['approval_undated', 'code_sent_to_bound_account']) {
+    const s = setup();
+    s.host.next = { refused };
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: '同意 proposal p-1' }),
+      { accepted: false, reason: refused });
+    assert.deepEqual(s.slack.sent, [{ text: channelReplies[refused], options: { replyToRef: 'o-1', to: 'U-OWNER' } }]);
+    s.host.next = { refused };
+    await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'x-1', text: '同意 proposal p-1' });
+    assert.equal(s.slack.sent.length, 1, 'a stranger is told nothing');
+    assert.ok(!('at' in only(s.calls, 'relay')[0]), 'a message without a time is relayed without one');
+  }
+  assert.match(channelReplies.code_sent_to_bound_account, /binding code; it is now retired.*重新生成/);
+  // The host may answer it as the approval's refusal instead (the message written either way).
+  const s = setup();
+  s.host.next = { message_id: 'm', duplicate: false, approval: { proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'approval_undated' } };
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-2', text: '同意 proposal p-1', at: '2026-11-19T02:00:00.000Z' });
+  assert.match(s.slack.sent[0].text, /^proposal p-1: not done - the message carried no time/);
+  assert.equal(only(s.calls, 'relay')[0].at, '2026-11-19T02:00:00.000Z', "the channel's time is passed on as given");
+});
+
 test('an approval the host executed is answered with one line of its outcome; a redelivered message is not answered again', async () => {
   const s = setup();
   const approval = (action, outcome, refusal) => ({ message_id: 'm', duplicate: false,

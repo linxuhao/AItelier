@@ -1117,6 +1117,53 @@ test('a stop inside the refusal send: the reason is on disk before the send, so 
   assert.deepEqual(owed(file), []);
 });
 
+test('a stop inside the refusal\'s binding read: the reason is on disk BEFORE that read, so the restart owes the line', async () => {
+  // The window nobody sampled: every other test here reads the store when the SEND is entered,
+  // so a `remember` moved after the binding read (`host.list`, which can sit on the host's own
+  // 30 s timeout) left the store looking like a body the host never judged, and the whole suite
+  // stayed green. The fake's `list` IS that read: the store is read the moment it is entered for
+  // this message, and that call never settles - the process stops inside the read.
+  const fake = fakeHost(), logs = [], seenAtBinding = [];
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  const first = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), owedFile: file });
+  first.ready();
+  let atBinding;
+  const entered = new Promise(resolve => { atBinding = resolve; });
+  fake.host.list = async () => {
+    seenAtBinding.push(owed(file).map(record => [record.messageRef, record.refusal, record.text]));
+    atBinding();
+    return new Promise(() => {});  // the host never answers: this process is gone mid-read
+  };
+  // A live binding code: the host allows no body on disk, so the record can only carry the reason
+  // (the sharpest shape - a stop before the reason is written leaves nothing that says WHY).
+  fake.host.storeText = false;
+  fake.host.next = { refused: 'code_sent_to_bound_account' };
+  // Not awaited: this delivery never settles, which is the stopped process.
+  void first.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: 'binding code: 711833' });
+  await entered;
+  // The invariant: at the binding read the record for o-1 already says WHY it is owed, and holds
+  // no body (a live code is never written down). Written any later, a stop here would leave a
+  // record the drain can only read as a message the host never judged.
+  assert.deepEqual(seenAtBinding, [[['o-1', 'code_sent_to_bound_account', undefined]]],
+    'the reason joined the record only after the binding read, so a stop inside that read left no reason on it');
+  // The stop: this process is gone, the read never answered.
+  first.stop();
+  assert.deepEqual(owed(file).map(record => [record.messageRef, record.refusal, record.text]),
+    [['o-1', 'code_sent_to_bound_account', undefined]], 'the reason and no body are on disk at the stop');
+  // The restart drains the same file: the line that says WHY goes out - and nothing asks the owner
+  // for a new code ("send it again") or offers the refused body to the host a second time.
+  const second = setup(undefined, undefined, { owedFile: file, ready: false });
+  second.start();
+  await second.channels.pollOwed();
+  assert.deepEqual(second.slack.sent.map(line => line.text), [channelReplies.code_sent_to_bound_account]);
+  assert.deepEqual(second.slack.sent[0].options, { replyToRef: 'o-1', to: 'U-OWNER' });
+  assert.ok(!second.slack.sent.some(line => SEND_AGAIN.test(line.text)),
+    'the restart asked the owner to send the refused binding code again');
+  assert.deepEqual(only(second.calls, 'relay'), [], 'a message refused for good is relayed again');
+  assert.deepEqual(owed(file), [], 'the line went out: nothing is owed any more');
+  second.channels.stop();
+});
+
 test('one pending refusal line per channel: a second refused message is not owed a line while one is still owed', async () => {
   // The bound that keeps 'held' records from turning a flood into one line per refused message.
   const s = brokenSetup();

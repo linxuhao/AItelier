@@ -32,17 +32,20 @@ dashboard reads. Neither the detail nor the QR is ever logged.
 
 A binding attempt that names its channel message is remembered by that message
 (`state_owner_channel_bind_attempts`: who, which message, bound or the refusal), so a
-channel that delivers it again - the WeChat plugin replays the bridge's last minutes
-after a restart - neither counts a refused guess twice nor relays a code that already
-bound its sender as an owner message: bind and relay both answer it as a duplicate.
+channel that delivers it again - the WeChat plugin replays the bridge's whole ring, at
+any age, after a restart - neither counts a refused guess twice nor relays a code that
+already bound its sender as an owner message: bind and relay both answer it as a
+duplicate. The attempts are kept per channel by count (BIND_ATTEMPTS_KEPT), never aged out.
 
-A live binding code is never persisted in owner-written text: neither writer (the
-relayed channel message and the owner's dashboard message) stores a body or subject
-that carries a live code ANYWHERE in it - the check is on the digit runs the text
-contains (after `ascii_digits`, so the full-width, Arabic-Indic and Devanagari
-renderings of a code are the code), never on `body.strip() == six digits` - the code
-is retired and the write is refused code_sent_to_bound_account (the dashboard writer
-raises the same code). Without the pepper that keys the codes the check cannot run, so
+A live binding code is never persisted in owner-written text: no writer (the relayed
+channel message, the owner's dashboard conversation message and the owner's dashboard
+message to a driver - core.driver_inbox's `owner_text_guard`, installed here) stores a
+body or subject that carries a live code ANYWHERE in it - the check is on the digits the
+text contains, in order, with everything between them dropped (after `ascii_digits`, so
+the full-width, Arabic-Indic and Devanagari renderings of a code are the code, and a
+space, dash, newline or zero-width character between its digits does not hide it), never
+on `body.strip() == six digits` - the code is retired and the write is refused
+code_sent_to_bound_account (the dashboard writers raise the same code). Without the pepper that keys the codes the check cannot run, so
 it refuses channel_secret_missing instead of writing the text unjudged.
 
 An approval relayed by a channel is decided after its message commits, and the decision
@@ -120,10 +123,12 @@ CODE_TTL = timedelta(minutes=10)
 # code (code_retired until the owner issues a new one): a stranger gets at most this
 # many guesses at a code, whoever relays them.
 BIND_FAILURES_MAX = 5
-# How long a binding attempt is kept to answer its redelivery as a duplicate: far past
-# any channel's replay (a bridge restart replays its last ~10 minutes). Older attempts
-# are deleted by the next binding attempt, so the table does not grow for good.
-BIND_ATTEMPTS_KEPT = timedelta(days=1)
+# How many binding attempts per channel are kept to answer their redelivery as a
+# duplicate: counted, never aged out, because a WeChat plugin restart replays the bridge's
+# whole ring (integrations/wechat-bridge RING_SIZE, 500 messages of any age), so every
+# binding message still in it is among the channel's newest 1000 attempts. Older ones are
+# deleted by the channel's next binding attempt, so the table does not grow for good.
+BIND_ATTEMPTS_KEPT = 1000
 # An approval phrase written (on the channel) longer ago than this decides nothing
 # (approval_too_old): a channel that delivers late - a bridge that logs in again and
 # drains what was written while it was down - must not execute an old decision.
@@ -217,12 +222,17 @@ def ascii_digits(text):
 
 
 def digit_windows(body):
-    """The distinct 6-ASCII-digit substrings `body` carries, wherever they sit.
+    """The distinct 6-ASCII-digit strings `body` carries, wherever they sit.
 
     A binding code is six ASCII digits the owner may paste inside anything ('binding
     code: 711833', 'please use 711833 to bind slack', '711833 thanks'). The leak this
-    guards is the code in the text, not the text's shape, so the check is on every run
-    of digits (every 6-window of a longer run as well) and never on `body.strip()`.
+    guards is the code in the text, not the text's shape, so the check is on the text's
+    digits taken IN ORDER with everything between them dropped - every 6-window of that
+    one digit string - and never on `body.strip()`. A separator does not hide a code from
+    a reader of the stored bytes ('711 833', '7-1-1-8-3-3', a newline, a TAB, U+3000, a
+    zero-width joiner or space, keycaps '7\ufe0f\u20e3', '(7)(1)..' that NFKC makes of
+    U+2474..), so it does not hide it from this check either; a subject and body joined
+    by a newline are one text.
 
     The body's digits are folded to ASCII first (`ascii_digits`), because the leak is what
     a READER of the stored bytes can recover: '７１１８３３' (full-width) is one
@@ -231,16 +241,8 @@ def digit_windows(body):
     every rendering is the same code and is caught here. Folding only ADDS windows a body
     carries (a body with no digit in any script still yields none, and a folded digit is
     exactly the leak), so no shape that used to be refused is let through."""
-    body = ascii_digits(body)
-    windows, run = set(), []
-    for char in body:
-        if "0" <= char <= "9":
-            run.append(char)
-        elif run:
-            windows.update("".join(run)[start:start + 6] for start in range(len(run) - 5))
-            run = []
-    windows.update("".join(run)[start:start + 6] for start in range(len(run) - 5))
-    return windows
+    digits = "".join(char for char in ascii_digits(body) if "0" <= char <= "9")
+    return {digits[start:start + 6] for start in range(len(digits) - 5)}
 
 
 def live_codes(conn, moment):
@@ -384,6 +386,8 @@ class StateChannels:
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
                 conn.commit()
+            if inbox is not None:  # the inbox's owner writers scan their text first
+                inbox.owner_text_guard = self.owner_text_guard
             # Only the steward's own service repairs the steward's channel ledger: a
             # director's, an owner's or the recovery actor's starts nothing here.
             if self.driver_id is not None and self.steward.is_steward():
@@ -754,15 +758,24 @@ class StateChannels:
                                   "was not stored")
         return match_live_code(live, pepper, windows)
 
+    def owner_text_guard(self, subject, body):
+        """core.driver_inbox's hook (DriverInbox.owner_text_guard, installed in __init__):
+        both of its owner writers - the dashboard conversation message
+        (send_user_conversation_message) and the owner's dashboard message to a driver
+        (send_driver_message) - call it with the subject and the body before anything is
+        replayed or written. They are scanned as ONE text, joined by a newline, so a code
+        split between the heading and the message is the same leak as a code in either."""
+        self.refuse_owner_text_code(f"{subject}\n{body}" if subject else body)
+
     def refuse_owner_text_code(self, body):
-        """`send_user_conversation_message`'s half of the same rule: a live binding code
-        typed into the owner's conversation (any project's, any position in the text) is
-        retired and the message is refused code_sent_to_bound_account - it is never
-        written, and neither the message nor its request ledger row keeps the digits.
-        Called before the inbox writes anything, like the relay's own check, and on every
-        owner-written text field that lands in the row (`send_owner_message` passes the
-        subject with the body): a code in the heading is the same leak as a code in the
-        message."""
+        """The inbox writers' half of the same rule (owner_text_guard): a live binding code
+        an owner writes on the dashboard (any project's conversation, or a message to any
+        driver; any position in the text) is retired and the message is refused
+        code_sent_to_bound_account - it is never written, and neither the message nor its
+        request ledger row keeps the digits. Called before the inbox writes anything, like
+        the relay's own check, and on every owner-written text field that lands in the row
+        (the subject with the body): a code in the heading is the same leak as a code in
+        the message."""
         windows = digit_windows(body)
         if not windows:
             return
@@ -782,10 +795,10 @@ class StateChannels:
         with self.store.transaction(write=True) as conn:
             conn.execute("UPDATE state_owner_channel_codes SET retired_at=? WHERE code_hash=? "
                          "AND used_at IS NULL AND retired_at IS NULL", (moment.isoformat(), matched["code_hash"]))
-        log.warning("owner channel code retired: typed into the owner's own conversation code_channel=%s at=%s",
-                    matched["channel"], moment.isoformat())
-        raise StateGraphError("code_sent_to_bound_account: a live binding code was typed into the owner's "
-                              "conversation; it is retired - issue a new one on the dashboard")
+        log.warning("owner channel code retired: written in an owner message on the dashboard code_channel=%s "
+                    "actor=%s at=%s", matched["channel"], self.actor, moment.isoformat())
+        raise StateGraphError("code_sent_to_bound_account: a live binding code was written in the owner's "
+                              "message; it is retired - issue a new one on the dashboard")
 
     @staticmethod
     def _log_refusal(code, channel, sender_ref, size):
@@ -804,8 +817,9 @@ class StateChannels:
         refusal = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
-            conn.execute("DELETE FROM state_owner_channel_bind_attempts WHERE at<?",
-                         ((_now() - BIND_ATTEMPTS_KEPT).isoformat(),))
+            conn.execute("DELETE FROM state_owner_channel_bind_attempts WHERE channel=? AND rowid NOT IN "
+                         "(SELECT rowid FROM state_owner_channel_bind_attempts WHERE channel=? "
+                         "ORDER BY rowid DESC LIMIT ?)", (channel, channel, BIND_ATTEMPTS_KEPT))
             # Before the request_key replay: a binding message delivered again - also after
             # the channel was bound to another account since - is answered as the duplicate
             # it is ({bound: true, duplicate: true}, or its refusal), never as a fresh bind,
@@ -1019,11 +1033,9 @@ class StateChannels:
 
         This writer is held to the same rule as the relay: a live binding code the text
         carries anywhere is retired and the message refused code_sent_to_bound_account,
-        before the inbox (and its request ledger) writes anything. `subject` is the same
-        text field on the same stored row (core/driver_inbox.py writes it beside the body,
-        and the sibling credential guard scans both), so it is checked with the body - a
-        code in the heading is not a different leak."""
-        self.refuse_owner_text_code(f"{subject}\n{body}" if subject else body)
+        before the inbox (and its request ledger) writes anything - the inbox's own
+        owner_text_guard does it, with the subject and body as one text (the subject is the
+        same text field on the same stored row)."""
         matched = {}
 
         def written(conn, message_id):

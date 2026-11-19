@@ -480,21 +480,64 @@ def test_a_refused_guess_delivered_again_is_not_counted_again(world):
     assert conversation(world) == []
 
 
-def test_binding_attempts_older_than_a_day_are_deleted_by_the_next_attempt(world):
-    """The attempts table was never pruned: every binding message ever relayed stayed."""
-    code = world.owner.channels.issue_code("slack")["code"]
-    assert bind_message(world, code, "ts-recent")["bound"]
-    old = (state_channels._now() - state_channels.BIND_ATTEMPTS_KEPT - timedelta(minutes=1)).isoformat()
+def test_binding_attempts_past_the_newest_kept_per_channel_are_deleted_by_the_next_attempt(world, monkeypatch):
+    """The attempts table was never pruned: every binding message ever relayed stayed. It is
+    pruned by count per channel, never by age: a WeChat plugin restart replays the bridge's
+    whole ring, whatever its age."""
+    monkeypatch.setattr(state_channels, "BIND_ATTEMPTS_KEPT", 3)
+    code = world.owner.channels.issue_code("wechat")["code"]
+    assert bind_message(world, code, "w-owner", channel="wechat", sender="wxid-owner")["bound"]
+    for i in range(4):
+        refused(lambda: bind_message(world, "000000", f"ts-{i}", sender="U-STRANGER"), "invalid_code")
     with world.db.get_connection() as conn:
-        conn.execute("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,outcome,at) "
-                     "VALUES('slack','U-OLD','ts-old','invalid_code',?)", (old,))
-        conn.commit()
-    refused(lambda: bind_message(world, "000000", "ts-new", sender="U-STRANGER"), "invalid_code")
+        rows = {tuple(r) for r in conn.execute("SELECT channel, channel_message_ref "
+                                               "FROM state_owner_channel_bind_attempts")}
+    # Each attempt first keeps the channel's newest 3, then records itself.
+    assert rows == {("wechat", "w-owner"), ("slack", "ts-0"), ("slack", "ts-1"), ("slack", "ts-2"), ("slack", "ts-3")}
+    refused(lambda: bind_message(world, "000000", "ts-4", sender="U-STRANGER"), "invalid_code")
     with world.db.get_connection() as conn:
-        refs = {r[0] for r in conn.execute("SELECT channel_message_ref FROM state_owner_channel_bind_attempts")}
-    assert refs == {"ts-recent", "ts-new"}, "the day-old attempt is gone, the recent ones stay"
-    assert bind_message(world, code, "ts-recent", key="again") == {"bound": True, "channel": "slack",
-                                                                   "sender_ref": SLACK_USER, "duplicate": True}
+        rows = {tuple(r) for r in conn.execute("SELECT channel, channel_message_ref "
+                                               "FROM state_owner_channel_bind_attempts")}
+    assert rows == {("wechat", "w-owner"), *(("slack", f"ts-{i}") for i in range(1, 5))}, \
+        "the channel's oldest attempt is gone; another channel's attempts are its own count"
+    assert bind_message(world, code, "w-owner", key="again", channel="wechat", sender="wxid-owner") == {
+        "bound": True, "channel": "wechat", "sender_ref": "wxid-owner", "duplicate": True}
+
+
+def test_the_kept_attempts_outnumber_what_the_wechat_bridge_can_replay():
+    ring = (Path(__file__).resolve().parents[2] / "integrations" / "wechat-bridge" / "bridge.mjs").read_text()
+    assert "export const RING_SIZE = 500;" in ring
+    assert isinstance(state_channels.BIND_ATTEMPTS_KEPT, int) and state_channels.BIND_ATTEMPTS_KEPT >= 2 * 500
+
+
+def test_a_binding_message_replayed_days_later_is_still_a_duplicate_not_an_owner_message(world, monkeypatch):
+    """The WeChat ring is replayed whole after a plugin restart, at any age. The owner's
+    binding message came back two days later, after the attempts had been pruned by age,
+    and landed in the steward's conversation as a new owner message."""
+    code = world.owner.channels.issue_code("wechat")["code"]
+    assert bind_message(world, code, "w-1", channel="wechat", sender="wxid-owner")["bound"]
+    real = state_channels._now
+    monkeypatch.setattr(state_channels, "_now", lambda: real() + timedelta(days=2))
+    # Any binding attempt (here the owner binding Slack) runs the prune first.
+    assert bind_message(world, world.owner.channels.issue_code("slack")["code"], "s-1")["bound"]
+    again = relay(world, code, "w-1", key="relay:wechat:w-1", channel="wechat", sender="wxid-owner")
+    assert again == {"message_id": None, "duplicate": True, "approval": None}
+    assert conversation(world) == []
+
+
+def test_a_strangers_wrong_guesses_replayed_days_later_do_not_count_against_a_fresh_code(world, monkeypatch):
+    world.owner.channels.issue_code("wechat")
+    for i in range(state_channels.BIND_FAILURES_MAX):
+        refused(lambda: bind_message(world, f"00000{i}", f"x-{i}", channel="wechat", sender="wxid-stranger"),
+                "invalid_code")
+    real = state_channels._now
+    monkeypatch.setattr(state_channels, "_now", lambda: real() + timedelta(days=2))
+    fresh = world.owner.channels.issue_code("wechat")["code"]
+    for i in range(state_channels.BIND_FAILURES_MAX):  # the ring replayed after a restart
+        assert bind_message(world, f"00000{i}", f"x-{i}", key=f"replay-{i}", channel="wechat",
+                            sender="wxid-stranger")["duplicate"]
+    assert bind_message(world, fresh, "o-1", channel="wechat", sender="wxid-owner")["bound"], \
+        "the owner's fresh code is not retired by replayed old guesses"
 
 
 def test_a_new_code_retires_the_unused_one_and_a_rebind_replaces_the_account(world):
@@ -695,14 +738,16 @@ def test_a_live_code_in_the_dashboards_subject_is_refused_and_retired_like_one_i
     refused(lambda: bind_message(world, code, "m-steal", sender="intruder"), "code_retired")
 
 
-def test_six_digits_that_are_not_the_live_code_or_broken_up_are_ordinary_messages(world):
-    """The check must not swallow ordinary text: a five-digit run, the code broken up by a
-    space, and a full-width rendering of a code that is NOT live carry no six digits of a
-    live code, so they are messages - and the live code stays live for the owner."""
+def test_six_digits_that_are_not_the_live_code_are_ordinary_messages(world):
+    """The check must not swallow ordinary text: a five-digit run, a full-width rendering of
+    a code that is NOT live, another code broken up by a space, and an order number carry no
+    six digits of a live code, so they are messages - and the live code stays live for the
+    owner. (The live code broken up is NOT an ordinary message: a reader of the stored text
+    recovers it just as well - test_a_live_code_broken_up_or_folded_... below.)"""
     bind(world)
     code = world.owner.channels.issue_code("slack")["code"]
     other = f"{(int(code) + 1) % 10 ** 6:06d}"
-    split = f"{code[:3]} {code[3:]}"
+    split = f"{other[:3]} {other[3:]}"
     wide = "".join(chr(ord(digit) + 0xFEE0) for digit in other)
     bodies = [code[:5], split, wide, f"my code is {split}", "order 123456 shipped"]
     for index, body in enumerate(bodies):
@@ -1808,3 +1853,158 @@ def test_a_relayed_start_approval_runs_the_driver_manager_on_the_apps_loop(world
                     json={"request_key": "r2", "channel": "slack", "sender_ref": "U-STRANGER",
                           "channel_message_ref": "ts2", "body": "hi"})
     assert r.status_code == 422 and r.json()["detail"].startswith("channel_sender_not_bound"), r.text
+
+
+# --- a live code in ANY owner text: the driver-inbox writer, split, broken up or folded -------
+
+def _issue(world, monkeypatch, channel, code):
+    """issue_code with a code the test chooses (so a shape can be built around it)."""
+    with monkeypatch.context() as patch:
+        patch.setattr(state_channels.secrets, "randbelow", lambda _n: int(code))
+        assert world.owner.channels.issue_code(channel)["code"] == code
+    return code
+
+
+def _counts(world):
+    with world.db.get_connection() as conn:
+        return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("driver_inbox_requests", "driver_inbox_messages", "state_message_sources")}
+
+
+def _digit_windows_any(text):
+    """An independent reader: every digit-valued character after NFKC, in order, everything
+    else dropped, and each 6-window of that - what someone holding a copy recovers."""
+    import unicodedata
+    digits = "".join(str(unicodedata.digit(ch)) for ch in unicodedata.normalize("NFKC", text)
+                     if unicodedata.digit(ch, None) is not None)
+    return {digits[i:i + 6] for i in range(len(digits) - 5)}
+
+
+def _db_holds(world, tmp_path, code):
+    conn, hits = _copy(world, tmp_path), []
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            hits += [(table, cell[:120]) for cell in row if isinstance(cell, str) and code in _digit_windows_any(cell)]
+    conn.close()
+    return hits
+
+
+def _send_conversation(world, body, key, subject=None):
+    return execute(world.owner, "send_user_conversation_message",
+                   {"request_key": key, "project_id": HOME, "body": body,
+                    **({"subject": subject} if subject is not None else {})}, allow_write=True)
+
+
+def _send_driver(world, body, key, subject="Dashboard message"):
+    """The dashboard's message to a driver, as web/src/lib/api.ts messageDshDriver sends it."""
+    return execute(world.owner, "send_driver_message",
+                   {"request_key": key, "target_driver_id": world.steward_row["driver_id"], "project_id": HOME,
+                    "subject": subject, "body": body, "kind": "note", "delivery_mode": "transient"},
+                   allow_write=True)
+
+
+@pytest.mark.parametrize("body", ["binding code: {code}", "{code}", "wechat {code} thanks"])
+def test_a_live_code_in_the_owners_dashboard_message_to_a_driver_is_refused_retired_and_never_written(
+        world, tmp_path, caplog, monkeypatch, body):
+    """send_driver_message is the third writer of owner text (the dashboard's message to a
+    driver, the steward included) and had no check: 'binding code: 711833' was stored in
+    driver_inbox_messages.body and driver_inbox_requests.request_json, and the code stayed live
+    for whoever read the State file."""
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    code = _issue(world, monkeypatch, "slack", "711833")
+    before = _counts(world)
+    refused(lambda: _send_driver(world, body.format(code=code), "dm-1"), "code_sent_to_bound_account")
+    assert _counts(world) == before, "no message, no request record, no source row"
+    assert _db_holds(world, tmp_path, code) == []
+    assert "code retired" in caplog.text and code not in caplog.text
+    refused(lambda: bind_message(world, code, "m-steal", sender="U-INTRUDER"), "code_retired")
+    # An ordinary message to the driver still goes through.
+    assert _send_driver(world, "what is running?", "dm-2")["message_id"]
+
+
+def test_a_live_code_in_the_driver_messages_subject_is_refused_like_one_in_the_body(world, tmp_path, monkeypatch):
+    code = _issue(world, monkeypatch, "wechat", "711833")
+    refused(lambda: _send_driver(world, "please add it", "dm-s", subject=f"code {code}"), "code_sent_to_bound_account")
+    assert _db_holds(world, tmp_path, code) == []
+    refused(lambda: bind_message(world, code, "m-steal", channel="wechat", sender="wxid-intruder"), "code_retired")
+
+
+@pytest.mark.parametrize("subject,body", [("binding code 711", "833 please bind"), ("711", "833"),
+                                          ("code 71183", "3")])
+@pytest.mark.parametrize("writer", ["conversation", "driver_message"])
+def test_a_live_code_split_over_the_subject_and_the_body_is_refused(world, tmp_path, monkeypatch, writer, subject,
+                                                                    body):
+    """The subject and the body land on one row: a code split between them is read back by
+    joining the two, so it is scanned as one text."""
+    code = _issue(world, monkeypatch, "slack", "711833")
+    send = _send_conversation if writer == "conversation" else _send_driver
+    before = _counts(world)
+    refused(lambda: send(world, body, "split-1", subject=subject), "code_sent_to_bound_account")
+    assert _counts(world) == before
+    assert _db_holds(world, tmp_path, code) == []
+    refused(lambda: bind_message(world, code, "m-steal", sender="U-INTRUDER"), "code_retired")
+
+
+_SUPER = dict(zip("0123456789", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079"))
+# A live code with something between its digits, or in a rendering NFKC turns into its digits
+# with punctuation between them. A reader of the stored text recovers every one of them.
+BROKEN_UP = [
+    ("space_inside", lambda c: f"my code is {c[:3]} {c[3:]}"),
+    ("dashes_inside", lambda c: "-".join(c)),
+    ("newline_inside", lambda c: f"{c[:3]}\n{c[3:]}"),
+    ("tab_inside", lambda c: f"{c[:3]}\t{c[3:]}"),
+    ("u3000_inside", lambda c: f"{c[:3]}\u3000{c[3:]}"),
+    ("zwj_between", lambda c: "\u200d".join(c)),
+    ("zwsp_between", lambda c: "\u200b".join(c)),
+    ("keycaps", lambda c: "".join(d + "\ufe0f\u20e3" for d in c)),
+    ("parenthesized", lambda c: "".join(chr(0x2474 + int(d) - 1) for d in c)),
+    ("digit_full_stop", lambda c: "".join(chr(0x2488 + int(d) - 1) for d in c)),
+    ("comma_digit", lambda c: "".join(chr(0x1F101 + int(d)) for d in c)),
+    ("superscript_spaced", lambda c: " ".join(_SUPER[d] for d in c)),
+    # Folded forms that were already caught stay caught.
+    ("dingbat_sans_circled", lambda c: "".join(chr(0x2780 + int(d) - 1) for d in c)),
+    ("longer_run", lambda c: f"ref 4{c}9123"),
+]
+
+
+@pytest.mark.parametrize("label,shape", BROKEN_UP, ids=[label for label, _ in BROKEN_UP])
+@pytest.mark.parametrize("writer", ["relay", "conversation", "driver_message"])
+def test_a_live_code_broken_up_or_folded_is_refused_retired_and_never_written(world, tmp_path, monkeypatch, writer,
+                                                                              label, shape):
+    """digit_windows took windows inside each unbroken run of digits only, so '711 833',
+    '7-1-1-8-3-3', a newline, a TAB, U+3000, a zero-width joiner or space, keycaps and the
+    enclosed forms NFKC turns into '(7)(1)..', '7.1..' or '7,1,..' were written verbatim - and
+    the code stayed live: a reader of the State file bound their own account with it."""
+    bind(world)
+    code = _issue(world, monkeypatch, "wechat", "711833")
+    body = shape(code)
+    before = _counts(world)
+    if writer == "relay":
+        refused(lambda: relay(world, body, "ts-code"), "code_sent_to_bound_account")
+    elif writer == "conversation":
+        refused(lambda: _send_conversation(world, body, "d-code"), "code_sent_to_bound_account")
+    else:
+        refused(lambda: _send_driver(world, body, "dm-code"), "code_sent_to_bound_account")
+    assert _counts(world) == before, (label, "rows written")
+    assert _db_holds(world, tmp_path, code) == [], label
+    refused(lambda: bind_message(world, code, "m-steal", channel="wechat", sender="wxid-intruder"), "code_retired")
+
+
+def test_a_db_copy_holds_no_live_code_after_every_writer_refused_one(world, tmp_path, monkeypatch):
+    """After each writer has refused a code - the relay in three shapes, the conversation
+    writer and the message to a driver - a copy of the State file holds none of them in any
+    digit form, in any cell, nor in the raw bytes of the file and its journal."""
+    bind(world)
+    codes = []
+    for i, (channel, body) in enumerate([("slack", "binding code: {}"), ("wechat", "{} thanks"), ("slack", "x{}x")]):
+        code = _issue(world, monkeypatch, channel, f"{314159 + i}")
+        codes.append(code)
+        refused(lambda: relay(world, body.format(code), f"ts-{i}"), "code_sent_to_bound_account")
+    codes.append(_issue(world, monkeypatch, "slack", "271828"))
+    refused(lambda: _send_conversation(world, codes[-1], "d"), "code_sent_to_bound_account")
+    codes.append(_issue(world, monkeypatch, "slack", "161803"))
+    refused(lambda: _send_driver(world, f"code {codes[-1]}", "dm"), "code_sent_to_bound_account")
+    assert {code: _db_holds(world, tmp_path, code) for code in codes} == {code: [] for code in codes}
+    base = Path(world.db.db_path)
+    raw = b"".join(path.read_bytes() for path in base.parent.glob(base.name + "*") if path.is_file())
+    assert not [code for code in codes if code.encode() in raw]

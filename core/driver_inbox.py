@@ -109,6 +109,10 @@ class DriverInbox:
     def __init__(self, store, actor, driver_id=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
         self.project_read_trusted = store.project_read_trusted
+        # Called with (subject, body) of every text an OWNER writes here, before anything
+        # is replayed or written: core.state_channels installs its live binding code check
+        # (a hit retires the code and is refused code_sent_to_bound_account). None: no check.
+        self.owner_text_guard = None
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
@@ -343,6 +347,8 @@ class DriverInbox:
             raise StateGraphError("invalid_request: kind must be one of " + ", ".join(sorted(SYSTEM_KINDS if _system else KINDS)))
         if not _system and not self.driver_id and not human_owner:
             raise StateGraphError("invalid_request: sending requires a driver identity or an owner actor")
+        if human_owner and not _system and self.owner_text_guard is not None:
+            self.owner_text_guard(subject, body)
         refs = {} if refs is None else refs
         if not isinstance(refs, dict):
             raise StateGraphError("invalid_refs: refs must be an object mapping allowed keys to ids")
@@ -632,6 +638,8 @@ class DriverInbox:
         refuse_credential_body(subject, body, answers)
         if not self._project_user():
             raise StateGraphError("user_identity_required")
+        if self.owner_text_guard is not None:
+            self.owner_text_guard(subject, body)
         answers = self._answers(answers)
         # The answers are appended only when there are some, so the payload of
         # every request written before they existed still replays byte-identically.

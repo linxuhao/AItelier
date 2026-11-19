@@ -73,7 +73,9 @@ export const channelReplies = Object.freeze({
  *  here: the message is held and asked again (RETRYABLE). For rate_limited the owner is told
  *  exactly that, once a minute (replies.rate_limited: "Held ... no need to send them again"),
  *  so a burst still on its way is not sent again; that line has its own key, so the
- *  message's real answer (an approval's line) is still owed. */
+ *  message's real answer (an approval's line) is still owed. Every one of these lines is owed
+ *  until it has actually gone out: a send that fails is no line, so the owed store keeps the
+ *  reason and the drain says it later (see the refusal path in handleOnce). */
 const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_account']);
 /** The answers that are transient, not terminal: the host or the backend could not be
  *  reached, the channel's minute's share is spent, or the decision this message carries
@@ -204,15 +206,20 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       throw error;
     }
   };
-  const remember = (message, { judged = false } = {}) => {
+  const remember = (message, { judged = false, refusal } = {}) => {
     const key = owedKey(message);
     const previous = owed.get(key);
     const body = typeof message.text === 'string' ? message.text : undefined;
     const kept = judged ? body : (typeof previous?.text === 'string' ? previous.text : undefined);
+    // What this record still owes besides its delivery: a refusal line whose send failed. It
+    // is the host's reason for refusing the message (judged), never a body, so it is kept as
+    // it came and survives a restart like the rest of the record.
+    const pending = text(refusal) ? refusal : (text(previous?.refusal) ? previous.refusal : undefined);
     // `owedAt`: when this message was first owed here (kept across a restart) - with the
     // channel's `at`, what dates the line it may owe (lineExpired).
     owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
-      ...(kept === undefined ? {} : { text: kept }), ...(text(message.at) ? { at: message.at } : {}),
+      ...(kept === undefined ? {} : { text: kept }), ...(pending === undefined ? {} : { refusal: pending }),
+      ...(text(message.at) ? { at: message.at } : {}),
       owedAt: text(previous?.owedAt) ? previous.owedAt : new Date().toISOString() });
     // Past the bound, a record WITHOUT a text goes first (it can owe no replayable line, only
     // a "send it again" notice; a stranger's message is always one), so a flood never pushes
@@ -269,6 +276,21 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         }
       }
     } finally { answering.delete(key); }
+  };
+  // A line to the sender at most once per throttle key and minute, and the minute is spent
+  // only by a line that actually went out: a channel whose send is failing right now (a plugin
+  // reconnecting, a socket dropped) neither loses this line nor silences the next one in the
+  // same minute. The minute is claimed while the send is in flight (two lines never race into
+  // one minute) and given back when the send fails, so the caller's next attempt may use it.
+  // Answers 'sent', 'failed' (nothing was said, nothing spent) or 'held' (this key's line for
+  // this minute is already spent, by a line that did go out).
+  const tellThrottled = async (channel, throttle, line, options, key) => {
+    const spentAt = told.get(throttle);
+    if (Date.now() - (spentAt ?? 0) < 60000) return 'held';
+    told.set(throttle, Date.now());
+    if (await answer(channel, line, options, key)) return 'sent';
+    if (spentAt === undefined) told.delete(throttle); else told.set(throttle, spentAt);
+    return 'failed';
   };
   // One more binding attempt on `channel` within the minute, or false when it has had its share.
   const bindAllowed = channel => {
@@ -418,23 +440,38 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
           // line has its own key: the message's own answer is still to come.
           if (reason === 'rate_limited' && Date.now() - (told.get(channel) ?? 0) >= 60000
             && (await binding(channel))?.sender_ref === senderRef) {
-            told.set(channel, Date.now());
-            await answer(channel, replies.rate_limited, { replyToRef: messageRef, to: senderRef }, channel + '\nheld\n' + messageRef);
+            // A Held line the channel could not send spends nothing: this message's next
+            // delivery (the plugin holds it, the owed store keeps it) tries the line again,
+            // still inside the same minute if the channel is back by then.
+            await tellThrottled(channel, channel, replies.rate_limited, { replyToRef: messageRef, to: senderRef },
+              channel + '\nheld\n' + messageRef);
           }
           return { accepted: false, reason };
         }
-        // The host's answer for good: nothing is owed for this message any more.
-        forget(owed1);
+        // The host's answer for good: nothing more is relayed for this message - but the line
+        // that says WHY is owed until it has actually gone out. A send failing at this moment
+        // (a plugin reconnecting, a socket dropped) would otherwise cost the owner the reason
+        // for THIS message and, the minute being spent before the send, silence the next one in
+        // the same minute too. So the record keeps the reason (its refusal field) and the owed
+        // store's drain sends that same line, to the account still bound then, on a later tick.
         log('channel_relay_refused', { ...seen, reason });
         // Only the bound owner learns why: the binding is read again, not inferred from the code.
         // At most one such line per channel and minute, so a flood is not answered line for line.
         // The binding-code line has a minute of its own: no other line ever holds back the
         // news that a code was retired.
         const throttle = reason === 'code_sent_to_bound_account' ? channel + '\ncode' : channel;
-        if (reason !== 'channel_sender_not_bound' && Date.now() - (told.get(throttle) ?? 0) >= 60000
-          && (await binding(channel))?.sender_ref === senderRef) {
-          told.set(throttle, Date.now());
-          await answer(channel, TOLD.has(reason) ? replies[reason] : replies.refused(reason), { replyToRef: messageRef, to: senderRef });
+        if (reason === 'channel_sender_not_bound' || (await binding(channel))?.sender_ref !== senderRef) forget(owed1);
+        else {
+          const sent = await tellThrottled(channel, throttle, TOLD.has(reason) ? replies[reason] : replies.refused(reason),
+            { replyToRef: messageRef, to: senderRef });
+          // Not sent, because the minute was spent by a line that did go out: this message's
+          // reason is not owed (that is the flood guard, unchanged). Not sent because the
+          // channel could not: nothing was said and nothing was spent, so it stays owed.
+          if (sent !== 'failed') forget(owed1);
+          else {
+            remember(message, { refusal: reason });
+            log('channel_refusal_owed', { ...seen, reason });
+          }
         }
         return { accepted: false, reason };
       }
@@ -496,6 +533,31 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (!owed.size) return;
       for (const message of [...owed.values()]) {
         if (!owed.has(owedKey(message)) || handling.has(owedKey(message))) continue;
+        // A refusal line that could not be sent when the message was refused for good: the
+        // record keeps the host's reason, never a body, so there is nothing to relay again -
+        // only that same line to send, to the account bound NOW. It keeps the refusal's own
+        // minute: a stranger is told nothing, and a minute a line really did spend drops it,
+        // exactly as the refusal itself would have.
+        if (text(message.refusal)) {
+          let owner;
+          try { owner = (await binding(message.channel))?.sender_ref === message.senderRef; }
+          catch (error) {
+            log('channel_owed_failed', { channel: message.channel, error: short(error) });
+            continue;
+          }
+          if (!owner) {
+            log('channel_owed_dropped', { channel: message.channel, reason: 'not_bound' });
+            forget(owedKey(message));
+            continue;
+          }
+          const throttle = message.refusal === 'code_sent_to_bound_account' ? message.channel + '\ncode' : message.channel;
+          const sent = await tellThrottled(message.channel, throttle,
+            TOLD.has(message.refusal) ? replies[message.refusal] : replies.refused(message.refusal),
+            { replyToRef: message.messageRef, to: message.senderRef });
+          if (sent === 'failed') log('channel_owed_held', { channel: message.channel, reason: 'not_sent' });
+          else forget(owedKey(message));
+          continue;
+        }
         // A plugin still holds it and hands it in again: not a body lost to a restart.
         if (typeof message.text !== 'string' && held.has(owedKey(message))) continue;
         if (typeof message.text !== 'string') {

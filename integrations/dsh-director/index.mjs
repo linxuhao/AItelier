@@ -24,6 +24,7 @@ import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, 
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
   grepHistory, historyPage } from './lib/core.mjs';
 import { Outbox } from './lib/outbox.mjs';
+import { pumpFailure, startupFailure } from './lib/exit-cause.mjs';
 import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from './lib/capacity.mjs';
 import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
@@ -759,7 +760,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       throw error;
     }
   });
-  pump.catch(error => { ctx.logger.error(String(error)); ctx.get('appExit')?.(1); });
+  pump.catch(error => pumpFailure(ctx, error));
   return { host, events, agent, agentCtx, close, pump, api };
 }
 
@@ -769,7 +770,9 @@ export function apply(ctx) {
   // nothing is provided and no channel plugin loads.
   const channels = ownerChannelsFor(ctx, ctx.directorHost);
   if (channels) { ctx.provide('ownerChannels', channels.service); ctx.on('dispose', () => channels.stop()); }
-  // Awaiting loader settlement inside apply would deadlock its own startup.
-  void boot(ctx, { channels }).catch(error => { console.error('dsh-director startup:', String(error)); ctx.get('appExit')?.(1); });
+  // Awaiting loader settlement inside apply would deadlock its own startup. A boot
+  // that failed has no event stream to serve, so this process ends - and the record
+  // it leaves names the failure class, not only the exit code (iss-6df19ff31a3b449b).
+  void boot(ctx, { channels }).catch(error => startupFailure(ctx, error));
 }
 

@@ -25,6 +25,7 @@ import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit }
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
 import * as core from '../dsh-director/lib/core.mjs';
+import { exitCause, failureClass } from '../dsh-director/lib/exit-cause.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, rename, appendFile } from 'node:fs/promises';
@@ -361,9 +362,18 @@ export const settledAttempts = (plans, read, signal) => core.settledAttempts(pla
 
 // Pure transport/state controller is separate so the actual wait/refresh logic
 // is exercised without making model calls.
+/** How many consecutive ticks a subscription may fail to DELIVER before the driver
+ *  concludes it cannot serve and ends (iss-6df19ff31a3b449b). A single failed
+ *  completion is a failed turn and must not cost this process; a delivery that
+ *  fails this many times running is not a single failure. */
+const DELIVERY_FAILURE_LIMIT = 3;
+
 export class DriverRuntime {
-  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onConnectionRestored = () => {}, retryDelayMs = 1000, todoPlans = async () => [], batchRedispatch = async () => [] }) {
+  constructor({ project, driver, directory, request, onEvent = () => {}, onConnectionError = () => {}, onDeliveryError, onConnectionRestored = () => {}, retryDelayMs = 1000, todoPlans = async () => [], batchRedispatch = async () => [] }) {
     Object.assign(this, { project, driver, directory, request, onEvent, onConnectionError, onConnectionRestored, retryDelayMs, todoPlans, batchRedispatch });
+    // A failed DELIVERY is reported through the host's own channel when it has one
+    // (`onDeliveryError`), so a completion failure is not labelled a lost subscription.
+    this.onDeliveryError = onDeliveryError;
     this.after = 0;
     this.inboxAfter = 0;
     this.snapshot = null;
@@ -409,6 +419,9 @@ export class DriverRuntime {
       ...(this.todoError ? { todo_error: this.todoError } : {}) });
   }
   async pump() {
+    // Consecutive ticks this subscription could not DELIVER (see the inner catch).
+    // One is a failed turn; this many running is a driver that cannot serve.
+    let deliveryFailures = 0;
     while (!this.controller.signal.aborted) {
       try {
         if (Date.now() - this.lastHeartbeat >= 20 * 60 * 1000) {
@@ -429,7 +442,30 @@ export class DriverRuntime {
         const inbox = (result.driver_inbox ?? []).filter(message => message.status !== 'resolved');
         if (!result.timed_out && (result.events?.length || inbox.length)) {
           this.dirty = true;
-          await this.onEvent({ ...result, driver_inbox: inbox });
+          try {
+            await this.onEvent({ ...result, driver_inbox: inbox });
+            deliveryFailures = 0;
+          } catch (error) {
+            // A failure while DELIVERING one tick is not a failure of the
+            // subscription (iss-6df19ff31a3b449b): one failed completion is a failed
+            // turn, already reported through the agent's own error path, and the
+            // stream can still serve the next tick. So it is reported on the host's
+            // error channel - the existing one - and the tick is NOT consumed: the
+            // cursor stays where it was, so the same event is fetched again and
+            // reaches the director under the SAME id. That is the at-least-once
+            // delivery the conformance suite pins: a redelivery the director can
+            // recognise instead of a silent loss, and instead of a retry loop that
+            // releases the subscription for a failure it did not have.
+            // Consecutive failures are bounded: past the limit this driver cannot
+            // serve its stream, and the caller ends it with the class recorded.
+            if (this.controller.signal.aborted) throw error;
+            deliveryFailures += 1;
+            this.connectionLost = true;
+            await (this.onDeliveryError ?? this.onConnectionError)(error);
+            if (deliveryFailures >= DELIVERY_FAILURE_LIMIT) throw error;
+            await delay(this.retryDelayMs, undefined, { signal: this.controller.signal });
+            continue;
+          }
         }
         this.after = result.next_after ?? this.after;
         this.inboxAfter = result.next_inbox_after ?? this.inboxAfter;
@@ -829,6 +865,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         ctx.logger.warn(message);
         await setHostError(message);
       };
+      // The same channel for a tick that could not be DELIVERED: the subscription is
+      // healthy, one turn inside the delivery failed, and the driver keeps serving
+      // (iss-6df19ff31a3b449b). Labelled apart so the dashboard does not report a
+      // lost subscription for a failed completion.
+      runtime.onDeliveryError = async error => {
+        const message = connectionErrorMessage(error, 'AItelier event delivery');
+        ctx.logger.warn(message);
+        await setHostError(message);
+      };
       runtime.onConnectionRestored = () => clearHostError();
       runtime.onEvent = async raw => {
         // The owner's memory requests are the runtime's, never a model turn: run them and
@@ -967,6 +1012,14 @@ const diagnosed = new WeakSet();
  *    gone, so it writes with `writeSync`, and it says nothing when a cause was already
  *    named above: one death is still one line.
  *
+ *  A DELIBERATE exit carries a cause when the code that requested it recorded one
+ *  (`exitCause()`, set by the plugin's single exit decision): the line then names the
+ *  failure class - `HTTP 500`, `connection-level ECONNRESET after_send=true`, `abort` -
+ *  because `exit code 1` alone cannot tell those apart, which is exactly what two
+ *  resident drivers left behind on 2026-11-19 (iss-6df19ff31a3b449b). The same class
+ *  is added to an uncaught failure and an unhandled rejection, whose first line
+ *  (`TypeError: fetch failed`) names no status and no code either.
+ *
  * Installed by `apply()`, so it covers the runtime process and nothing else - and it
  * is NOT exported, because this file's export surface is pinned and neither that pin
  * nor the suite's file list is this change's to move. A second call for the same
@@ -983,12 +1036,16 @@ function installExitDiagnosis(target = process) {
   };
   target.on('uncaughtExceptionMonitor', (error, origin) => {
     if (!spoke) {
-      speak(origin === 'unhandledRejection' ? 'unhandled rejection' : 'uncaught exception',
-        causeOf(error));
+      const kind = origin === 'unhandledRejection' ? 'unhandled rejection' : 'uncaught exception';
+      speak(`${kind}: ${failureClass(error)}`, causeOf(error));
     }
   });
   target.on('exit', code => {
-    if (!spoke && code) speak(`exit code ${code}`);  // a clean exit says nothing
+    if (spoke || !code) return;  // a clean exit says nothing, a named death says it once
+    const recorded = exitCause();
+    speak(recorded
+      ? `exit code ${code}: ${failureClass(recorded.error)} (${recorded.where})`
+      : `exit code ${code}`, recorded ? causeOf(recorded.error) : '');
   });
   return true;
 }

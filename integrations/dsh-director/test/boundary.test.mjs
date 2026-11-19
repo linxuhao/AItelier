@@ -49,6 +49,7 @@ export const SHIPPED = [
   join('lib', 'host.mjs'),
   join('lib', 'outbox.mjs'),
   join('lib', 'capacity.mjs'),
+  join('lib', 'exit-cause.mjs'),
   join('lib', 'resume.mjs'),
   join('lib', 'roles.mjs'),
   join('lib', 'portfolio.mjs'),

@@ -384,7 +384,7 @@ test('a message is owed on disk BEFORE the host is asked, so a stop while the re
   second.channels.stop();
 });
 
-test('a six-digit message is never written to the owed store: it is the binding code, and no decision can hang on it', async () => {
+test('a text carrying six digits in a row is never written to the owed store: it may be the binding code', async () => {
   const s = setup();
   // The host is down: the binding attempt AND a message carrying a code both fail.
   s.host.bind = async () => { throw new Error('HTTP 502'); };
@@ -393,12 +393,24 @@ test('a six-digit message is never written to the owed store: it is the binding 
     { accepted: false, reason: 'unavailable' });
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-2', text: ' 711833 ' }),
     { accepted: false, reason: 'unavailable' });
+  // The code does not have to BE the message: the host reads six digits of a live code
+  // anywhere in the text, so one inside a sentence is the same secret on disk.
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-3',
+    text: 'binding code: 711833 - please bind my new laptop' }), { accepted: false, reason: 'unavailable' });
+  // Nor does it have to be written in ASCII digits: the host folds every Nd block, so
+  // Arabic-Indic (U+0660) or full-width (U+FF10) six digits are the same code.
+  for (const [ref, code] of [['b-4', '٧١١٨٣٣'], ['b-5', '７１１８３３']]) {
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: code }),
+      { accepted: false, reason: 'unavailable' });
+  }
   assert.deepEqual(owed(s.owedFile), [], 'a live code is never put on disk');
   // Any other message IS written ahead: its answer may be a decision, and a stop must not
-  // lose it.
-  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' }),
-    { accepted: false, reason: 'unavailable' });
-  assert.deepEqual(owed(s.owedFile).map(message => message.messageRef), ['a-1']);
+  // lose it. Five digits, or six broken up, cannot be the code.
+  for (const [ref, body] of [['a-1', '同意 proposal p-1'], ['a-2', 'order 12345 shipped'], ['a-3', 'code 123 456']]) {
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: body }),
+      { accepted: false, reason: 'unavailable' });
+  }
+  assert.deepEqual(owed(s.owedFile).map(message => message.messageRef), ['a-1', 'a-2', 'a-3']);
 });
 
 test('the plugin-facing service is exactly {register, inbound}; the director-side handle carries the polls', () => {

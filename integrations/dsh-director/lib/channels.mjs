@@ -76,6 +76,11 @@ const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_a
  *  is still running. The message is held and asked again; it is never dropped. */
 const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
+/** Six digits in a row in ANY decimal script (Nd: ASCII, full-width, Arabic-Indic,
+ *  Devanagari, ...). The host mints the binding code as six digits and folds every Nd block
+ *  to them, so text carrying a run like this can be a live code wherever it sits in the
+ *  sentence - not only when the message IS one. */
+const DIGITS6 = /\p{Nd}{6}/u;
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
 /** A message is owed while its delivery or the line its decision owes has not been
@@ -157,6 +162,15 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   }
   const remember = message => {
     const key = owedKey(message);
+    // The one text that is never written down: anything carrying six digits in a row is
+    // possibly the owner's live binding code - the one secret the owner sends, and no
+    // approval can hang on a run of digits. The host's own code check retires and refuses
+    // such a body, so nothing durable is owed for it; what a stop can cost is the sender
+    // retyping it, while a stored copy would put a live code on disk for its ten minutes -
+    // exactly what no writer-side check could ever cover here (on this path the code has to
+    // be live). The test lives here, not at the callers, so every path that makes a message
+    // durable is covered by it once.
+    if (DIGITS6.test(String(message.text ?? ''))) return null;
     owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
       text: message.text, ...(text(message.at) ? { at: message.at } : {}) });
     if (owed.size > limits.owedMax) owed.delete(owed.keys().next().value);
@@ -285,19 +299,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     // Write-ahead: the owe is on disk BEFORE the host is asked. A stop while a relay is in
     // flight (a start/stop_driver decision runs inside it, up to the host's own 30 s) then
     // still leaves the message for the restart to ask again - the whole point of the store.
-    // Every path that finishes this message forgets it; nothing else does.
-    //
-    // A body of exactly six digits is the ONE message that is never written there: that is
-    // the binding code's shape - the one secret the owner sends - and a code can never carry
-    // an approval (those are phrases), so nothing durable is owed for it. A lost binding line
-    // costs the sender retyping the code; a stored one would put a live code on disk for its
-    // ten minutes, which is exactly what the backend's code check exists to prevent and what
-    // no writer-side check can cover here (the code has to be live on this path).
-    const durable = !CODE.test(trimmed);
-    if (durable) {
-      handling.add(owed1);
-      remember(message);
-    }
+    // Every path that finishes this message forgets it; nothing else does. remember() itself
+    // refuses a text carrying six digits in a row (see there), which is the one message that
+    // can be the owner's live binding code.
+    handling.add(owed1);
+    remember(message);
     try {
       await hostReady();
       // Six digits from someone who is not the bound owner is a binding attempt; the bound
@@ -368,8 +374,9 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
       // No answer: the delivery is owed durably, so a restart asks again instead of the
-      // message existing only in this process's memory (a six-digit one excepted, above).
-      if (durable) remember(message);
+      // message existing only in this process's memory (a text carrying six digits in a row
+      // excepted, in remember()).
+      remember(message);
       log('channel_inbound_failed', { ...seen, error: short(error) });
       unanswered.add(channel + '\n' + messageRef);
       trimUnanswered();

@@ -645,12 +645,27 @@ def test_six_digits_that_are_not_the_live_code_or_broken_up_are_ordinary_message
     other = f"{(int(code) + 1) % 10 ** 6:06d}"
     split = f"{code[:3]} {code[3:]}"
     wide = "".join(chr(ord(digit) + 0xFEE0) for digit in other)
-    bodies = [code[:5], split, wide, _render(other, 0x0660), _render(code[:5], 0x0966),
-              f"my code is {split}", "order 123456 shipped"]
+    bodies = [code[:5], split, wide, f"my code is {split}", "order 123456 shipped"]
     for index, body in enumerate(bodies):
         assert relay(world, body, f"ts-{index}")["message_id"]
     assert sorted(m["body"] for m in conversation(world)) == sorted(bodies)
     assert bind_message(world, code, "m-ok")["bound"], "the code is still live"
+
+
+def test_the_digit_scripts_nfkc_does_not_fold_are_read_as_the_digits_they_are(world):
+    """NFKC folds the full-width block and nothing else: Arabic-Indic and Devanagari digits
+    come back unchanged, so a check that only normalised would read neither. A code written
+    in one of those scripts is the same live code (the RENDERINGS cases above), and a
+    non-live or five-digit run in one is still an ordinary message. Six messages are the
+    channel's minute, so this case stays apart from the one above."""
+    bind(world)
+    code = world.owner.channels.issue_code("slack")["code"]
+    other = f"{(int(code) + 1) % 10 ** 6:06d}"
+    bodies = [_render(other, 0x0660), _render(code[:5], 0x0966)]
+    for index, body in enumerate(bodies):
+        assert relay(world, body, f"ts-script-{index}")["message_id"]
+    assert sorted(m["body"] for m in conversation(world)) == sorted(bodies)
+    assert bind_message(world, code, "m-script")["bound"], "the code is still live"
 
 
 @pytest.mark.parametrize("writer", ["relay", "dashboard"])
@@ -872,7 +887,8 @@ def test_a_body_carrying_a_live_code_is_refused_as_a_code_even_when_the_channels
     for i in range(6):
         relay(world, f"m{i}", f"ts-{i}")
     refused(lambda: relay(world, f"binding code: {code}", "ts-code"), "code_sent_to_bound_account")
-    assert [m["body"] for m in conversation(world)] == [f"m{i}" for i in range(6)]
+    # the conversation reads newest first (created_at DESC), and the refused body is not in it
+    assert [m["body"] for m in conversation(world)] == [f"m{i}" for i in reversed(range(6))]
     refused(lambda: bind_message(world, code, "m-after", sender="intruder"), "code_retired")
 
 
@@ -1361,9 +1377,10 @@ def test_a_start_settles_a_driver_approval_whose_decision_already_ran(world, mon
 def test_a_driver_record_the_start_cannot_decide_is_parked_once_not_rescanned(world, monkeypatch):
     """A driver kind that is still OPEN needs the runtime to decide, so the start parks it
     for the channel's redelivery - it never answers driver_runtime_unavailable, which would
-    tell the owner the approval failed right before recover() runs it. Parked is NOT deferred:
-    the start's path stays settled, so the ledger scan does not run on every request of that
-    start."""
+    tell the owner the approval failed right before recover() runs it. The count is records,
+    not messages: the relay wrote two ledger rows (`relay_owner_message` and its `:ref`) and
+    both stay pending. Parked is NOT deferred: the start's path stays settled, so the ledger
+    scan does not run on every request of that start."""
     bind(world)
     plant_proposal(world, kind="start_driver", payload={"project_id": "alpha"})
     with monkeypatch.context() as patched:
@@ -1379,7 +1396,8 @@ def test_a_driver_record_the_start_cannot_decide_is_parked_once_not_rescanned(wo
         return result
     monkeypatch.setattr(state_channels.StateChannels, "settle_pending_relays", counting)
     _restart(world, monkeypatch)  # the start's scan
-    assert results and results[0]["parked"] == 1 and results[0]["deferred"] == 0, results
+    assert len(ledger(world)) == 2, "one relay writes two ledger records, both still pending"
+    assert results and results[0]["parked"] == 2 and results[0]["deferred"] == 0, results
     assert all("pending" in answer for answer in ledger(world).values())
     assert proposal(world)["status"] == "open", "not answered as a refusal while recover() may run it"
     _service(world), _service(world)  # two more requests of the same start

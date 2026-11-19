@@ -25,8 +25,11 @@ declares the `channels` capability). Design: step 19, §7.2.
   (`$AITELIER_DSH_STATE_DIR/channel-owed.json`, mode 0600; the owner's own text, like the
   State database that takes it) and asked again after a restart, in the order it arrived;
   the entry is cleared only once it has been answered for good - a line that could not be
-  sent is owed, not lost. Without a State dir the owe lives in memory only, so a restart
-  loses it.
+  sent is owed, not lost. One text is never written there: anything carrying six digits in a
+  row, in any decimal script, may be the live binding code (the host folds every Nd block to
+  the same digits and refuses such a body), so a stop costs the sender retyping that message
+  rather than putting a live code on disk. Without a State dir the owe lives in memory only,
+  so a restart loses it.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500

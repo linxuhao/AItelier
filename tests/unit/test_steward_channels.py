@@ -495,6 +495,47 @@ def test_a_bound_owner_message_lands_like_a_dashboard_message_with_its_source(wo
     assert execute(world.steward, "message_sources", {"message_ids": [out["message_id"]]})["sources"]
 
 
+@pytest.mark.parametrize("code_channel", ["slack", "wechat"])
+def test_a_live_code_sent_from_the_bound_account_is_refused_retired_and_never_written(world, tmp_path, caplog,
+                                                                                      code_channel):
+    """K-paste: the bound owner's six digits are relayed as a message. A live binding
+    code sent that way was stored as the message body, and the relay's request hash in
+    driver_inbox_requests was an unkeyed digest over it - a copy of the State file
+    within the code's 10 minutes gave the code away."""
+    from core.state_steward import _hash
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    bind(world)
+    code = world.owner.channels.issue_code(code_channel)["code"]
+    refused(lambda: relay(world, f" {code}\n", "ts-code"), "code_sent_to_bound_account")
+    assert conversation(world) == [], "the code is not written as a message"
+    assert execute(world.steward, "list_driver_messages", {})["messages"] == [], "nor wakes the steward"
+    assert "code retired" in caplog.text and code not in caplog.text
+    # Redelivered (same key, or the channel message under another): a duplicate that writes nothing.
+    for key in (None, "another-key"):
+        assert relay(world, f" {code}\n", "ts-code", key=key) == {"message_id": None, "duplicate": True,
+                                                                    "approval": None}
+    assert conversation(world) == []
+    conn = _copy(world, tmp_path)
+    forbidden = _unkeyed(code) | {_hash(["slack", SLACK_USER, "ts-code", body]) for body in (f" {code}\n", code)}
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    assert code not in cell and not any(digest in cell for digest in forbidden), table
+    conn.close()
+    # Retired: the code binds no one now.
+    refused(lambda: bind_message(world, code, "m-bind", channel=code_channel, sender="someone-else"), "code_retired")
+
+
+def test_six_digits_that_are_no_live_code_are_an_ordinary_message(world):
+    bind(world)
+    code = world.owner.channels.issue_code("wechat")["code"]
+    other = f"{(int(code) + 1) % 10 ** 6:06d}"
+    relay(world, other, "ts-1")
+    assert [m["body"] for m in conversation(world)] == [other]
+    assert bind_message(world, code, "m-1", channel="wechat", sender="wxid_owner")["bound"], "the code is still live"
+
+
 def test_a_relay_is_idempotent_by_request_key_and_by_channel_message(world):
     bind(world)
     first = relay(world, "hello", "ts-1", key="k1")

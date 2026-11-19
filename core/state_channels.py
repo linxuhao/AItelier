@@ -327,6 +327,12 @@ class StateChannels:
         refuse_credential_body(body)
         written_at = _written_at(channel_at)
         request_hash = _hash([channel, sender_ref, channel_message_ref, body])
+        # Six digits may be a live binding code (either channel's): its keyed digests, to
+        # look it up. Without the pepper no code can be checked or bound: a plain message.
+        digits, pepper = body.strip(), None
+        if len(digits) == 6 and digits.isascii() and digits.isdigit():
+            pepper = self._pepper_value()
+        codes = [_code_hash(pepper, name, digits) for name in CHANNELS] if pepper else []
         # The per-message record's key: the channel message of this sender.
         ref_key = f"{channel}:{_hash([sender_ref, channel_message_ref])}"
         home = steward_project()
@@ -336,10 +342,13 @@ class StateChannels:
                                   ref_key)
             if first is None:
                 first = self._write_relay(conn, home, request_key, request_hash, channel, sender_ref,
-                                          channel_message_ref, ref_key, body, size, written_at)
+                                          channel_message_ref, ref_key, body, size, written_at, codes)
                 fresh = True
             else:
                 fresh = False
+        if first.get("refused"):  # raised after the commit: the code's retirement must outlive it
+            raise StateGraphError(f"{first['refused']}: a live binding code was sent from the bound account; "
+                                  "it is retired - issue a new one on the dashboard")
         if fresh:
             self.steward._notify()
         if "pending" not in first:
@@ -373,11 +382,12 @@ class StateChannels:
         return None
 
     def _write_relay(self, conn, home, request_key, request_hash, channel, sender_ref, channel_message_ref,
-                     ref_key, body, size, written_at):
+                     ref_key, body, size, written_at, codes):
         """The owner message, its source row and its two ledger records, in the caller's
         transaction. An approval phrase to decide is recorded `pending` (the phrase, the
         version it names and when it was written): the decision runs after this commits,
-        and until the ledger holds its answer a redelivery decides it (_settle)."""
+        and until the ledger holds its answer a redelivery decides it (_settle). A live
+        binding code is not written: {refused: code_sent_to_bound_account} (see below)."""
         moment = _now()
         per_minute, per_hour = rate_limits()
         for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
@@ -393,6 +403,24 @@ class StateChannels:
         except StateGraphError:
             self._log_refusal("channel_sender_not_bound", channel, sender_ref, size)
             raise
+        # A LIVE binding code the bound owner sent as a message is never written: the code
+        # is retired and the relay refused code_sent_to_bound_account. The attempt is kept by
+        # its channel message like a binding attempt, so a redelivery is a duplicate that
+        # writes nothing (the digits, retired now, would otherwise land as a message).
+        live = [row for row in conn.execute(
+            f"SELECT code_hash,channel,expires_at FROM state_owner_channel_codes WHERE code_hash IN "
+            f"({','.join('?' * len(codes))}) AND used_at IS NULL AND retired_at IS NULL", codes).fetchall()
+            if datetime.fromisoformat(row["expires_at"]) > moment] if codes else []
+        if live:
+            conn.execute("UPDATE state_owner_channel_codes SET retired_at=? WHERE code_hash=?",
+                         (moment.isoformat(), live[0]["code_hash"]))
+            conn.execute("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,"
+                         "outcome,at) VALUES(?,?,?,?,?)",
+                         (channel, sender_ref, channel_message_ref, "code_sent_to_bound_account", moment.isoformat()))
+            log.warning("owner channel code retired: sent as a message from the bound account channel=%s "
+                        "code_channel=%s sender_ref=%s at=%s", channel, live[0]["channel"], sender_ref,
+                        moment.isoformat())
+            return {"refused": "code_sent_to_bound_account"}
         self.store._project(conn, home)
         message_id, _, _ = self.inbox.write_user_half(conn, home, USER_SUBJECT, body)
         conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
@@ -457,11 +485,16 @@ class StateChannels:
         return {"proposal_id": pending["proposal_id"], "action": pending["action"], "outcome": "executed",
                 **_subject(decided), "result": decided}
 
+    def _pepper_value(self):
+        """The pepper that keys the binding codes, or None when it is missing or short."""
+        pepper = self._pepper if self._pepper is not None else drivers.read_pepper()
+        return pepper if isinstance(pepper, str) and len(pepper) >= 32 else None
+
     def _code_key(self):
         """The pepper that keys the binding codes, or channel_secret_missing: without
         it no code is issued or tried - never an unkeyed digest in its place."""
-        pepper = self._pepper if self._pepper is not None else drivers.read_pepper()
-        if not isinstance(pepper, str) or len(pepper) < 32:
+        pepper = self._pepper_value()
+        if pepper is None:
             raise StateGraphError(f"channel_secret_missing: binding codes need the {drivers.PEPPER_SECRET_NAME} "
                                   "secret file (at least 32 characters)")
         return pepper

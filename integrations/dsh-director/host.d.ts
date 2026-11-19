@@ -193,11 +193,17 @@ export interface DirectorHost {
    *    now and answers it with duplicate: true and decided_on_replay: true; the director
    *    then sends the decision's line, which it sends once per channel message. A
    *    redelivery while the first delivery is still executing the approval answers
-   *    {duplicate: true, approval: null}: no line yet; a later redelivery carries it.
+   *    {duplicate: true, approval: null, approval_pending: true}: no line yet and NOT a
+   *    finished answer - the channel must ask again (it keeps the message owed), and a
+   *    later redelivery carries the decision. A channel that treats that answer as
+   *    terminal loses the owner's line; the shipped plugins retry it.
    *    The host refuses a sender that is not the channel's current binding
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
-   *    {refused: code}. When the text is exactly an approval phrase the host executes it
+   *    {refused: code}. `rate_limited` and `unavailable` are TRANSIENT: the message was
+   *    not taken, so a channel holds it and asks again with backoff (dropping it loses
+   *    the owner's message); every other refusal is final for that message.
+   *    When the text is exactly an approval phrase the host executes it
    *    in code and says so in `approval`; the model never does. An executed decision
    *    names the decided proposal's `kind` and `target` from the host's own record of it,
    *    and its `result` is that proposal after the run: `status: 'failed'` when the run failed.
@@ -226,7 +232,7 @@ export interface DirectorHost {
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
       Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
-        outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object } } | { refused: string; reason?: string }>;
+        outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object }; approval_pending?: boolean } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
       Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;
     sourceOf(messageId: string, signal?: AbortSignal): Promise<null | { direction: 'in' | 'out'; channel: 'slack' | 'wechat';
@@ -262,10 +268,20 @@ export interface DirectorHost {
  *  that is not bound is a binding attempt. Nothing but the root's own message to its owner
  *  and one-line answers about the sender's own message is ever sent. `status` is read when
  *  the channel registers and every 30 s after; `qrSvg` is a login QR drawn as an SVG while
- *  the channel needs a scan (it goes to the host's optional channels.reportStatus). */
+ *  the channel needs a scan (it goes to the host's optional channels.reportStatus).
+ *
+ *  What a message still OWES survives the process: an `inbound` that got no answer, a
+ *  transient answer, and a decision whose line has not been sent yet are kept in a durable
+ *  owed store (`owedFile` in createOwnerChannels, mode 0600: channel, sender, the message
+ *  ref and the owner's own text, like the State database that took it), re-asked at
+ *  `ready()` and every 30 s, and cleared only once the line is actually sent. `pollOwed()`
+ *  asks every owed message now; `stop()` ends that poll. A plugin must not answer a
+ *  message it could not send and forget it - the store is what a restart inherits. */
 export interface OwnerChannels {
   register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
     status(): { connected: boolean; detail?: string; qrSvg?: string } }): () => void;
   inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
     Promise<{ accepted: boolean; reason?: string }>;
+  /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */
+  pollOwed(): Promise<void>;
 }

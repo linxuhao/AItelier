@@ -1162,6 +1162,190 @@ test("a refusal line held by a minute another line spent is kept, not thrown awa
   s.channels.stop();
 });
 
+// --- what the non-author review still measured, reachable at 9dab5b09ab ---------------------
+// Three losses left in the refusal path: the reason was written only when no other refusal line
+// was pending (1), a record was forgotten whenever another line was pending, whatever the send
+// returned (2), and the pending-slot check matched the minute-key but not the sender (3).
+
+for (const [label, refused, storeText, first1, second1] of [
+  ['a refused message whose body the host let be kept', 'approval_undated', true, '同意 proposal p-1', '同意 proposal p-2'],
+  ['a refused binding code the host would not let be kept', 'code_sent_to_bound_account', false, 'binding code: 711833', '711833'],
+]) {
+  test(`a stop inside the refusal send while another line is pending (${label}): the reason is on disk before it, so the restart neither asks for a resend nor relays it again`, async () => {
+    // The window defect (1): with another refusal line already owed, the reason never joined the
+    // record, so the record held the write-ahead alone. A stop during the binding read or the send
+    // (two 30 s timeouts plus the retry wait) then left the restart reading it as a body the host
+    // never judged: "please send it again" about a message refused for good (the code variant: the
+    // store must never hold the code, so the record has no body at all), or the refused body
+    // relayed again (the variant whose body the host allowed to be kept). A send that never answers
+    // is the fake's second call; the store is read as it is when that send begins, and a second
+    // process over the same file is the restart.
+    const fake = fakeHost(), logs = [], seenAtSend = [];
+    fake.host.storeText = storeText;
+    const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+    const first = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+      limits: { ...CHANNEL_LIMITS, answerAttempts: 1, answerRetryMs: 1 }, owedFile: file });
+    first.ready();
+    let released, atSend, calls = 0;
+    const entered = new Promise(resolve => { atSend = resolve; });
+    first.service.register({ name: 'slack', status: () => ({ connected: true }),
+      async send() {
+        calls++;
+        seenAtSend.push(owed(file).map(record => [record.messageRef, record.refusal, record.throttled, record.text]));
+        if (calls === 2) { atSend(); return new Promise((_, reject) => { released = () => reject(new Error('channels_stopped')); }); }
+        throw new Error('socket closed');  // the first refusal's line did not go out
+      } });
+    // o-1: refused for good, and its line could not be sent - so the channel owes that line.
+    fake.host.next = { refused };
+    assert.deepEqual(await first.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: first1 }),
+      { accepted: false, reason: refused });
+    assert.equal(calls, 1, 'the line could not be sent');
+    assert.deepEqual(owed(file).map(record => [record.messageRef, record.refusal]), [['o-1', refused]]);
+    // o-2: refused while that line is still owed. Its send is entered and never answers.
+    fake.host.next = { refused };
+    const run = first.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-2', text: second1 });
+    await entered;
+    // A stop inside that send: this process is gone, the send never answers.
+    first.stop();
+    const atStop = owed(file).map(record => [record.messageRef, record.refusal, record.throttled]);
+    // The restart drains: the pending line goes out once, o-2 owes none of its own - and above all
+    // there is no "send it again" notice about a refusal and no relay of a refused body.
+    const second = setup(undefined, undefined, { owedFile: file, ready: false });
+    second.start();
+    await second.channels.pollOwed();
+    assert.ok(!second.slack.sent.some(line => SEND_AGAIN.test(line.text)),
+      'the restart asked the owner to send a refused message again');
+    assert.deepEqual(only(second.calls, 'relay'), [], 'a message the host refused for good was relayed again');
+    assert.deepEqual(second.slack.sent.map(line => line.text), [channelReplies[refused]]);
+    assert.deepEqual(second.slack.sent[0].options, { replyToRef: 'o-1', to: 'U-OWNER' });
+    assert.ok(second.logs.some(([event, fields]) => event === 'channel_owed_dropped' && fields.reason === 'throttled'));
+    assert.deepEqual(owed(file), [], 'the pending line went out and the record that owed none of its own is done');
+    second.channels.stop();
+    // What the review measured missing: at the moment the send began, and at the stop, o-2's record
+    // said WHY it is owed - and that it owes no line of its own (the pending line carries the
+    // channel's news). This is the root cause of the two losses above.
+    assert.deepEqual(seenAtSend.at(-1),
+      [['o-1', refused, undefined, storeText ? first1 : undefined], ['o-2', refused, true, storeText ? second1 : undefined]],
+      'the reason was written only after the send, or not at all while another line was pending');
+    assert.deepEqual(atStop, [['o-1', refused, undefined], ['o-2', refused, true]], 'the reason is on disk at the stop');
+    // The stopped process's send finally answers: its own memory is not the store the restart
+    // drained, and nothing more goes out here.
+    released();
+    assert.deepEqual(await run, { accepted: false, reason: refused });
+    assert.equal(second.slack.sent.length, 1);
+  });
+}
+
+test("a drain's refusal send in flight is not a spent minute: the lane's 'held' line is still owed, and the freed minute carries it", async () => {
+  // The race in defect (2): the drain's refusal send holds the minute (told.set), the lane is
+  // refused the same minute-key, tellThrottled says the minute is taken and the lane forgot its
+  // record. The drain's send then fails and gives the minute back - so the minute was never
+  // spent, and the lane's line was gone. 'inflight' is now told apart from 'held'.
+  const fake = fakeHost(), logs = [], sent = [];
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  const script = [];  // what the next sends do: 'fail' (socket closed), 'hold' (never answers), else send
+  const holds = [];
+  let heldStarted;
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, answerAttempts: 1, answerRetryMs: 1 }, owedFile: file });
+  channels.ready();
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }),
+    async send(text, options) {
+      sent.push({ text, options });
+      const step = script.shift() ?? 'ok';
+      if (step === 'fail') throw new Error('socket closed');
+      if (step === 'hold') {
+        heldStarted?.(); heldStarted = undefined;
+        await new Promise((_, reject) => holds.push(() => reject(new Error('socket closed'))));
+      }
+      return { ref: `slack-ref-${sent.length}` };
+    } });
+  const inbound = message => channels.service.inbound(message);
+  const owedNow = () => owed(file).map(record => [record.messageRef, record.refusal, record.throttled]);
+  // o-1: refused for good, its line could not be sent - the channel owes that line.
+  script.push('fail');
+  fake.host.next = { refused: 'body_too_long' };
+  assert.deepEqual(await inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text: 'x'.repeat(5000) }),
+    { accepted: false, reason: 'body_too_long' });
+  assert.deepEqual(owedNow(), [['o-1', 'body_too_long', undefined]]);
+  // A drain tick starts sending that line; the send is in flight and will fail.
+  script.push('hold');
+  const held = new Promise(resolve => { heldStarted = resolve; });
+  const drain = channels.pollOwed();
+  await held;
+  // The lane is refused o-2 while that send holds the minute.
+  const sentBefore = sent.length;
+  fake.host.next = { refused: 'approval_undated' };
+  assert.deepEqual(await inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-2', text: '同意 proposal p-1' }),
+    { accepted: false, reason: 'approval_undated' });
+  assert.equal(sent.length, sentBefore, 'the minute was taken: the lane attempted no send for o-2');
+  assert.deepEqual(owedNow(), [['o-1', 'body_too_long', undefined], ['o-2', 'approval_undated', undefined]],
+    'a line that never went out was dropped for a minute that was not spent');
+  assert.ok(logs.some(([event, fields]) => event === 'channel_refusal_throttled' && fields.reason === 'approval_undated'));
+  assert.ok(logs.some(([event, fields]) => event === 'channel_refusal_owed' && fields.outcome === 'inflight'));
+  // That send fails (nothing was said, the minute is given back): a later tick sends o-1's line
+  // again - it fails once more, which frees the minute for o-2's own line in the same tick.
+  script.push('fail', 'ok');
+  holds.shift()();
+  await drain;
+  await channels.pollOwed();
+  assert.deepEqual(sent.map(line => line.text),
+    [channelReplies.body_too_long, channelReplies.body_too_long, channelReplies.body_too_long, channelReplies.approval_undated]);
+  assert.deepEqual(sent.at(-1).options, { replyToRef: 'o-2', to: 'U-OWNER' });
+  assert.deepEqual(owedNow(), [['o-1', 'body_too_long', undefined]], "o-2's line went out; the failing one is still owed");
+  // The line that kept failing goes out in a later minute (the one o-2's line spent is over),
+  // after which nothing is owed.
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 61000;
+    await channels.pollOwed();
+    assert.deepEqual(sent.map(line => line.text).at(-1), channelReplies.body_too_long);
+    assert.deepEqual(owedNow(), []);
+  } finally { Date.now = realNow; }
+  channels.stop();
+});
+
+test("a stale refusal record never holds the bound owner's slot: after a rebind the owner's line is owed and goes out", async () => {
+  // Defect (3): pendingRefusal matched the minute-key alone, so a refusal line still owed to the
+  // account Slack was bound to BEFORE the owner rebound silenced the new owner's line - and the
+  // drain then reads the binding, drops that stale record as not_bound, and the owner is told
+  // nothing at all. The pending slot is the sender's: it is counted for the sender the line would
+  // go to, so a record another account owes never holds the owner's.
+  const fake = fakeHost({ bindings: { slack: 'U-OLD' } }), logs = [];
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, answerAttempts: 1, answerRetryMs: 1 }, owedFile: file });
+  channels.ready();
+  const slack = fakeChannel('slack');
+  const s = { broken: true };
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }),
+    async send(text, options) { if (s.broken) throw new Error('socket closed'); return slack.channel.send(text, options); } });
+  const owedNow = () => owed(file).map(record => [record.messageRef, record.refusal, record.throttled]);
+  // The account bound at the time is refused for good and its line cannot be sent: it stays owed.
+  fake.host.next = { refused: 'body_too_long' };
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OLD', messageRef: 'r-1', text: 'x'.repeat(5000) }),
+    { accepted: false, reason: 'body_too_long' });
+  assert.deepEqual(owedNow(), [['r-1', 'body_too_long', undefined]]);
+  // The owner rebinds Slack; the stale line is still owed to U-OLD, and the drain would drop it.
+  fake.bindings.slack = 'U-NEW';
+  fake.host.next = { refused: 'body_too_long' };
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-NEW', messageRef: 'o-1', text: 'x'.repeat(5000) }),
+    { accepted: false, reason: 'body_too_long' });
+  assert.deepEqual(owedNow(), [['r-1', 'body_too_long', undefined], ['o-1', 'body_too_long', undefined]],
+    "another account's owed line throttled the owner's, and the owner's line was then dropped");
+  assert.ok(!logs.some(([event, fields]) => event === 'channel_refusal_throttled' && fields.length === 5000),
+    "the owner's refusal was held back by the account the channel was bound to before");
+  // The channel is back: the drain drops the stale record as not_bound and says the owner's line,
+  // to the account bound now and under the owner's own message ref.
+  s.broken = false;
+  await channels.pollOwed();
+  assert.deepEqual(logs.filter(([event, fields]) => event === 'channel_owed_dropped' && fields.reason === 'not_bound').length, 1);
+  assert.deepEqual(slack.sent, [{ text: channelReplies.body_too_long, options: { replyToRef: 'o-1', to: 'U-NEW' } }],
+    'the owner was told nothing about a message the host refused');
+  assert.deepEqual(owedNow(), []);
+  channels.stop();
+});
+
 /** A backend outage: precheck, relay and the binding read all fail until `down` is false. */
 const outage = s => {
   const { relay, codeCheck, list } = s.host;

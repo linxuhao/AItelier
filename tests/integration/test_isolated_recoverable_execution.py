@@ -175,14 +175,41 @@ def _gate_entries(home: Path, run_id: str) -> list[Path]:
     return sorted(root.glob("rt-*/effect"))
 
 
-def _wait_for_started(home: Path, run_id: str, timeout: float = 15) -> Path:
-    deadline = time.monotonic() + timeout
+# How long a spawned worker gets to reach the gate's start marker.
+#
+# This is a PREPARATION wait, not the property the rows using it guard. It covers
+# spawning a fresh interpreter, importing the engine and letting the authored gate
+# create its ticket and its `started` marker, so its cost tracks host load, not the
+# product. Measured ALONE on 2026-11-19 (16 shared cores, load average 11-43): the two
+# rows using it passed alone in 14.61 s and 11.49 s -- 97% and 77% of the previous 15 s
+# bound with no contention of their own -- and the whole-suite arm reddened on this wait
+# ("timed out waiting for the gate start marker"). 90 s is ~6.2x the larger measured
+# alone wall / ~7.8x the smaller one, and 6x the bound those walls nearly filled; a
+# worker that never reaches the gate still fails, in minutes and with its elapsed wait,
+# never as a skip or a pass.
+START_MARKER_TIMEOUT_S = 90.0
+
+
+def _wait_for_started(home: Path, run_id: str,
+                      timeout: float = START_MARKER_TIMEOUT_S) -> Path:
+    started = time.monotonic()
+    deadline = started + timeout
     while time.monotonic() < deadline:
         for entry in _gate_entries(home, run_id):
             if (entry / "started").exists():
                 return entry
         time.sleep(0.02)
-    raise AssertionError(f"timed out waiting for the gate start marker under {home}")
+    elapsed = time.monotonic() - started
+    seen = [str(entry) for entry in _gate_entries(home, run_id)]
+    raise AssertionError(
+        f"the spawned worker never reached the gate: waited {elapsed:.1f}s of the "
+        f"{timeout:.1f}s preparation bound for the start marker `{run_id}` under {home} "
+        f"(gate entries seen: {seen or 'none'}). This wait is preparation, not the "
+        f"property under test: the bound is ~6x the 14.61 s / 11.49 s walls those rows "
+        f"measured ALONE on 2026-11-19, so a host slower than that can expire it. A "
+        f"worker that never started and a worker whose engine failed to spawn the gate "
+        f"look identical from here -- compare the elapsed wait with those walls and read "
+        f"the worker's own error in the engine log before calling this a product defect.")
 
 
 def _logical_effects(home: Path, run_id: str) -> list[str]:

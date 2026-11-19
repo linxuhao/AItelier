@@ -16,7 +16,7 @@ from core import ai_router
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers, completion_route
 from core.state_commands import ProjectPrivate, execute
-from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound
+from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound, StateWriteBusy
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
 
 router = APIRouter(prefix="/api/dsh-drivers", tags=["DSH drivers"])
@@ -156,6 +156,14 @@ async def start(project_id: str, body: Start, request: Request, runtime=Depends(
     try:
         return await runtime.start(project_id, provider=body.provider, model=body.model,
                                    actor=authz.request_actor(request))
+    except StateWriteBusy:
+        # A CONTROL-PLANE stamp (`enabled`) that could not take SQLite's write
+        # lock is retryable, not a ValueError describing a broken request. It is
+        # re-raised so the app-wide default answers 503 + `Retry-After`; the
+        # clause below would otherwise relabel it 422 and the caller would read a
+        # "retry in a second" condition as "your request is invalid". It cannot
+        # be a silent 200 either: the row was not written, so nothing started.
+        raise
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -164,6 +172,11 @@ async def start(project_id: str, body: Start, request: Request, runtime=Depends(
 async def stop(project_id: str, runtime=Depends(manager)):
     try:
         return await runtime.stop(project_id)
+    except StateWriteBusy:
+        # Same refusal, same answer as `start`: the stop was NOT recorded
+        # (`enabled=0` was refused), so it must not answer 200 and must not be
+        # relabelled as an invalid request.
+        raise
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

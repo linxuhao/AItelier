@@ -18,7 +18,7 @@ from core.datadir import owner_secrets_dir
 from core.driver_credentials import read_token_file
 from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.off_loop_sqlite import retry_while_locked
-from core.state_graph import now
+from core.state_graph import STATE_WRITE_BUSY_CODE, STATE_WRITE_BUSY_RETRY_AFTER, StateWriteBusy, now
 from core.state_schema_migration import add_column_if_missing
 
 SCHEMA = """
@@ -106,6 +106,35 @@ SERVED_BY_SEEN_LIMIT = 8
 # error still re-raised after the bound.
 STAMP_LOCK_ATTEMPTS = 3
 STAMP_LOCK_PAUSE = 0.2
+# How long ONE attempt waits for the lock, in milliseconds. It is the value
+# `sqlite3.connect` already applies when no timeout is passed (`DBManager._connect`
+# passes none), named here for two reasons: the stamp's patience is then stated
+# once instead of inherited from a stdlib default, and a witness can shrink it to
+# observe a refusal inside a test rather than by really waiting the ~15.4 s
+# budget out. It is a PRAGMA on the attempt's own connection, so it never
+# outlives the attempt.
+STAMP_BUSY_TIMEOUT_MS = 5000
+
+
+class DriverStampBusy(StateWriteBusy, sqlite3.OperationalError):
+    """A driver stamp whose write lock outlived the whole stamp budget.
+
+    The refused stamp is RETRYABLE and it wrote NOTHING - the failed statement is
+    one `UPDATE`, so nothing was half-applied - but it is still, deliberately,
+    a `sqlite3.OperationalError`: every caller that already treats a locked
+    database as an operational failure (the log line, the test that pins the
+    bounded give-up) keeps seeing exactly that, with SQLite's own wording in
+    the message.
+
+    What is NEW is the second half: it is also a `StateWriteBusy`, the
+    repository's typed busy refusal, so a transport answers it as the retryable
+    thing it is. Without that, `POST /api/dsh-drivers/<project>/activity` let
+    `sqlite3.OperationalError('database is locked')` escape as an untyped HTTP
+    500 (`iss-89b4c2a1e8c048b3`) while the SAME busy condition was answered 503 +
+    `Retry-After` on the State command routes: one condition, two answers, and
+    the caller of the stamp had no way to tell "retry in a second" from "the
+    request is broken".
+    """
 
 
 def _is_lock_error(error):
@@ -469,9 +498,14 @@ class DshDrivers:
         patience is bounded from the OUTSIDE - `STAMP_LOCK_ATTEMPTS` fresh
         connections, each still waiting the full timeout - and not by shortening
         the timeout, which would break the short locks that already worked.
-        Exhausted attempts re-raise the ORIGINAL lock error unchanged: a
-        database that stays busy is still a failure the caller must see, never a
-        silent success and never a load on the writer that outlasts the bound.
+        A database that stays busy is still a failure the caller must see, never a
+        silent success and never a load on the writer that outlasts the bound -
+        but the failure is now TYPED and RETRYABLE (`DriverStampBusy`): it is
+        still a `sqlite3.OperationalError` naming the locked database, and it is
+        also the repository's busy refusal, so an HTTP transport answers it 503
+        with `Retry-After` instead of an untyped 500 the caller cannot act on.
+        Nothing is written by a refused stamp: the statement is one `UPDATE` and
+        it never ran.
         """
         allowed = {"enabled", "phase", "subagents_json", "last_error"}
         if not fields.keys() <= allowed:
@@ -486,12 +520,22 @@ class DshDrivers:
                 # the connection that waited it out, so retrying on the failed
                 # one would retry with no patience left.
                 with self.db.get_connection() as conn:
+                    # Stated, not inherited from `sqlite3.connect`'s default.
+                    conn.execute(f"PRAGMA busy_timeout={int(STAMP_BUSY_TIMEOUT_MS)}")
                     conn.execute(statement, params)
                     conn.commit()
                 return
             except sqlite3.OperationalError as error:
-                if not _is_lock_error(error) or attempt == STAMP_LOCK_ATTEMPTS:
+                if not _is_lock_error(error):
                     raise
+                if attempt == STAMP_LOCK_ATTEMPTS:
+                    raise DriverStampBusy(
+                        f"{STATE_WRITE_BUSY_CODE}: another writer held the write lock on "
+                        f"{getattr(self.db, 'db_path', 'the database')} for the whole "
+                        f"{STAMP_LOCK_ATTEMPTS} x {STAMP_BUSY_TIMEOUT_MS / 1000:g} s stamp "
+                        f"budget (sqlite said {str(error)!r}); nothing was written, so retry "
+                        f"the same request after {STATE_WRITE_BUSY_RETRY_AFTER} s",
+                        STATE_WRITE_BUSY_RETRY_AFTER) from error
             time.sleep(STAMP_LOCK_PAUSE)
 
     def _discard_provision(self, project_id, driver_id, directory, actor):
@@ -724,6 +768,16 @@ class DshDrivers:
                 task = asyncio.create_task(self._observe(project_id, proc))
                 self.monitors.add(task)
                 task.add_done_callback(self.monitors.discard)
+            except DriverStampBusy:
+                # The CONTROL-PLANE stamp itself was refused, so nothing was
+                # started and there is no failed start to record: this refusal is
+                # retryable ("the lock was busy"), not a ValueError describing a
+                # broken request. The clause sits FIRST because
+                # `DriverStampBusy` is a `ValueError` (through `StateGraphError`),
+                # so the branch below would otherwise answer it 422 and stamp
+                # `enabled=0, phase="failed"` - claiming a start that was never
+                # attempted, and relabelling a retryable condition as invalid.
+                raise
             except (OSError, ValueError) as exc:
                 await asyncio.to_thread(self.update, project_id, enabled=0, phase="failed",
                                         last_error=str(exc))

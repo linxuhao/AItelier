@@ -38,7 +38,8 @@ bound its sender as an owner message: bind and relay both answer it as a duplica
 
 A live binding code is never persisted in owner-written text: neither writer (the
 relayed channel message and the owner's dashboard message) stores a body that carries
-a live code ANYWHERE in it - the check is on the digit runs the body contains, never on
+a live code ANYWHERE in it - the check is on the digit runs the body contains (after
+NFKC, so the full-width rendering of a code is the code), never on
 `body.strip() == six digits` - the code is retired and the write is refused
 code_sent_to_bound_account (the dashboard writer raises the same code).
 
@@ -58,6 +59,7 @@ import logging
 import os
 import re
 import secrets
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
 
@@ -193,7 +195,15 @@ def digit_windows(body):
     code: 711833', 'please use 711833 to bind slack', '711833 thanks'). The leak this
     guards is the code in the text, not the text's shape, so the check is on every run
     of digits (every 6-window of a longer run as well) and never on `body.strip()`.
-    Full-width digits are not digits of a code (`code.isascii()`), so they are not here."""
+
+    The body is folded to NFKC first, because the leak is what a READER of the stored
+    bytes can recover: '７１１８３３' (full-width) or '٧١١٨٣٣' (Arabic-Indic) is one
+    `unicodedata.normalize('NFKC', cell)` away from '711833', so those renderings are the
+    same code and are caught here. Folding only ADDS windows a body carries - a body with
+    no digit run in any compatibility form still yields none, and a compatibility digit
+    that folds to one is exactly the leak - so no shape that used to be refused is let
+    through."""
+    body = unicodedata.normalize("NFKC", body)
     windows, run = set(), []
     for char in body:
         if "0" <= char <= "9":
@@ -641,16 +651,18 @@ class StateChannels:
         keyed digest like a binding attempt (match_live_code).
 
         Reads no secret for a body with no six-digit run (it can carry no code), and
-        reads no secret when no code is live either. With a live code and no pepper the
-        text cannot be checked and is refused channel_secret_missing - fail closed: a
-        copy of the State file must never be able to read the code out of stored text."""
+        reads no secret when no code is live either - the live rows are read first, so a
+        flood of ordinary text carrying six digits costs no pepper read. With a live code
+        and no pepper the text cannot be checked and is refused channel_secret_missing -
+        fail closed: a copy of the State file must never be able to read the code out of
+        stored text."""
         windows = digit_windows(body)
         if not windows:
             return None
-        pepper = self._pepper_value()
         live = live_codes(conn, moment)
         if not live:
             return None
+        pepper = self._pepper_value()
         if pepper is None:
             raise StateGraphError(f"channel_secret_missing: a live binding code cannot be checked without the "
                                   f"{drivers.PEPPER_SECRET_NAME} secret file (at least 32 characters); the text "

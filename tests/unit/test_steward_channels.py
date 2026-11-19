@@ -604,14 +604,15 @@ def test_a_live_code_typed_on_the_dashboard_is_refused_retired_and_never_written
     assert [m["body"] for m in conversation(world)] == ["what is running?"] and written["message_id"]
 
 
-def test_six_digits_that_are_not_the_live_code_broken_up_or_full_width_are_ordinary_messages(world):
+def test_six_digits_that_are_not_the_live_code_or_broken_up_are_ordinary_messages(world):
     """The check must not swallow ordinary text: a five-digit run, the code broken up by a
-    space, and its full-width form carry no six ASCII digits of the code, so they are
-    messages - and the code stays live for the owner."""
+    space, and a full-width rendering of a code that is NOT live carry no six digits of a
+    live code, so they are messages - and the live code stays live for the owner."""
     bind(world)
     code = world.owner.channels.issue_code("slack")["code"]
+    other = f"{(int(code) + 1) % 10 ** 6:06d}"
     split = f"{code[:3]} {code[3:]}"
-    wide = "".join(chr(ord(digit) + 0xFEE0) for digit in code)
+    wide = "".join(chr(ord(digit) + 0xFEE0) for digit in other)
     bodies = [code[:5], split, wide, f"my code is {split}", "order 123456 shipped"]
     for index, body in enumerate(bodies):
         assert relay(world, body, f"ts-{index}")["message_id"]
@@ -619,9 +620,33 @@ def test_six_digits_that_are_not_the_live_code_broken_up_or_full_width_are_ordin
     assert bind_message(world, code, "m-ok")["bound"], "the code is still live"
 
 
+@pytest.mark.parametrize("code_channel", ["slack", "wechat"])
+def test_the_full_width_rendering_of_a_live_code_is_refused_on_both_writers(world, code_channel):
+    """NFKC: the leak is what a reader of the stored bytes recovers, and one
+    `unicodedata.normalize('NFKC', cell)` turns '７１１８３３' into '711833'. So the
+    full-width rendering is the same code: it is refused and retired by the relay AND by
+    the dashboard writer, and neither the code nor its rendering is ever stored."""
+    bind(world)
+    for writer in ("relay", "dashboard"):
+        code = world.owner.channels.issue_code(code_channel)["code"]
+        wide = "".join(chr(ord(digit) + 0xFEE0) for digit in code)
+        body = f"绑定码：{wide}"
+        if writer == "relay":
+            refused(lambda: relay(world, body, "ts-wide"), "code_sent_to_bound_account")
+        else:
+            refused(lambda: execute(world.owner, "send_user_conversation_message",
+                                    {"request_key": "d-wide", "project_id": HOME, "body": body}, allow_write=True),
+                    "code_sent_to_bound_account")
+        assert conversation(world) == [], writer
+        refused(lambda: bind_message(world, code, f"m-{writer}", channel=code_channel, sender="intruder"),
+                "code_retired")
+
+
 def test_a_relay_reads_the_pepper_only_for_the_bound_owners_six_digits(world, monkeypatch):
     """As for a bind (K-order): the code lookup's pepper read comes after the steward
-    check and the binding check, never for a stranger's or a non-steward's relay."""
+    check and the binding check, never for a stranger's or a non-steward's relay - and
+    never for a bound owner's text when no code is live (the live rows are read first),
+    so ordinary text carrying six digits costs no secret read."""
     bind(world)
     reads = []
     monkeypatch.setattr(drivers, "read_pepper", lambda: reads.append(1) or PEPPER)
@@ -630,7 +655,13 @@ def test_a_relay_reads_the_pepper_only_for_the_bound_owners_six_digits(world, mo
             "steward_role_required")
     assert reads == []
     relay(world, "123456", "ts-3")
-    assert reads == [1] and [m["body"] for m in conversation(world)] == ["123456"]
+    assert reads == [] and [m["body"] for m in conversation(world)] == ["123456"]
+    # With a live code the same text IS checked, and the check reads the pepper once
+    # (issue_code's own read is the digest's, so only the check's read is counted here).
+    code = world.owner.channels.issue_code("wechat")["code"]
+    reads.clear()
+    refused(lambda: relay(world, f"code {code}", "ts-4"), "code_sent_to_bound_account")
+    assert reads == [1]
 
 
 def test_six_digits_that_are_no_live_code_are_an_ordinary_message(world):

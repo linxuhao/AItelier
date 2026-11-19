@@ -18,7 +18,8 @@ the rest), median 1.92 s, max 9.65 s.
 
 WHAT IS WITNESSED, and what is not. The subject is the loop, so the assertion is
 about a request that is NOT the writer: a trivial `GET /health` must be answered
-in under 500 ms while the slow database operation is still IN FLIGHT. The
+while the slow database operation is still IN FLIGHT, and it must not cost the
+machine's own speed several times over (see "the read allowance" below). The
 slowness is put INSIDE the database operation by a connection proxy - this file
 never sleeps in the test coroutine, so the loop is only ever held by the code
 under test. The slow operation's own clock (`gate.began_at`) is the reference
@@ -29,7 +30,8 @@ on a tree that stalls for seconds.
 
 ALL THREE ARE RED ON `7b9baacdfb`: there the loop thread IS the thread that runs
 the operation, so `/health` is answered only after it ends. `_STALL` is 2 s
-against the 0.5 s allowance - the base failures are ~2.0 s, not a flake margin.
+against a control sample of a few milliseconds - the base failures are ~2.0 s,
+not a flake margin.
 
 Durability and ordering are pinned too, not traded away: witness 1 never
 releases the slow write, so the completion response can only arrive after the
@@ -54,10 +56,31 @@ import pytest
 # second request gets, and long enough that no plausible scheduler hiccup can
 # turn the base tree's ~2.0 s stall into a pass.
 _STALL = 2.0
-# The second request's allowance while the slow operation is in flight.
-_BUDGET = 0.5
+# ── the read allowance: a CONTROL SAMPLE, not a host constant ────────────────
+# These witnesses used to assert that the second request finished within 0.5 s.
+# That is a property of the HOST, not of the product: on a loaded machine the
+# same trivial read takes seconds while the invariant holds - measured 2.44 s in
+# a whole-suite arm whose row passes alone on the same tree - so the constant
+# accused the product of a defect it did not have. What is decided now is
+# RELATIVE: the contended read is compared with the SAME read taken in this same
+# process while NO writer is in flight. `_DEGRADATION` is how many times the
+# machine's own speed a read may cost before the delay is attributed to the
+# writer rather than to the machine.
+_DEGRADATION = 4.0
+# A healthy read is a few milliseconds, so a control sample can itself be noise;
+# the allowance has a floor instead of scaling a near-zero sample.
+_ALLOWANCE_FLOOR = 0.25
+# How many samples a control takes. The WORST is used: one lucky fast sample on
+# a host that is stalling reads must not set the allowance.
+_CONTROL_SAMPLES = 3
+# The ABSOLUTE CEILING, kept as the backstop the old constant used to be: a read
+# that takes longer than two whole injected stalls is not "a slow machine" by
+# any reading, it is a reader that never came back. It sits far above the 0.5 s
+# the rows used to demand, because that bound itself was the flake.
+_CEILING = 2 * _STALL
 # Everything the proxies may wait on is bounded, so a regression can never hang
-# the suite: the stall gives up on its own, and the handshake gives up too.
+# the suite: the stall gives up on its own, the handshake gives up too, and every
+# control sample is an ordinary request the client already bounds.
 _HANDSHAKE_TIMEOUT = 10.0
 
 ROOT_SESSION = "sess-root"
@@ -258,6 +281,47 @@ def _client(app) -> httpx.AsyncClient:
                              base_url="http://testserver")
 
 
+async def _worst_read(client, path: str) -> float:
+    """Time the SAME trivial read with NO writer holding the lock: the CONTROL.
+
+    This is what the latency decision is made against: the machine's own speed
+    for exactly this request, in exactly this process, measured while nothing
+    contends. It is taken before the slow operation starts and again once it has
+    settled (callers pass the worse of the two), so a host that is stalling
+    reads - and would stall this one too - sets the allowance instead of being
+    reported as the writer's fault.
+    """
+    worst = 0.0
+    for _ in range(_CONTROL_SAMPLES):
+        started = time.monotonic()
+        response = await client.get(path)
+        worst = max(worst, time.monotonic() - started)
+        assert response.status_code == 200, response.text
+    return worst
+
+
+def _assert_read_not_queued(contended: float, control: float, what: str) -> None:
+    """Decide a read's latency against its own control, never against the host.
+
+    The failure message quotes BOTH numbers, so a reader can tell "the reader
+    queued behind the writer" (control fast, contended slow) from "the whole
+    machine was slow" (both slow) - the distinction the single host constant
+    could not draw, and the reason this row used to accuse a healthy product on
+    a loaded machine.
+    """
+    allowance = max(_ALLOWANCE_FLOOR, _DEGRADATION * control)
+    assert contended < allowance, (
+        f"{what} took {contended:.3f}s while the writer was in flight, against a "
+        f"control of {control:.3f}s for the same read with no writer in flight: "
+        f"{contended / max(control, 1e-9):.1f}x the machine's own speed (allowance "
+        f"{allowance:.3f}s = {_DEGRADATION:g}x the control, floor "
+        f"{_ALLOWANCE_FLOOR:.2f}s) - the reader waited for the writer")
+    assert contended < _CEILING, (
+        f"{what} took {contended:.3f}s while the writer was in flight (control "
+        f"{control:.3f}s): past the {_CEILING:.2f}s absolute ceiling - the reader "
+        f"did not come back")
+
+
 async def _health_while_in_flight(client, gate):
     """Time a trivial GET from the moment the slow database operation STARTED.
 
@@ -306,9 +370,10 @@ async def test_a_completion_write_does_not_stall_the_loop(driver_world, monkeypa
 
     The write is forced to take 2 s. On the base tree that is 2 s of the WHOLE
     backend, because `record_model_call` runs on the loop thread; here a request
-    that has nothing to do with it must still be answered in under 500 ms, and
-    the completion response itself must still wait for the write (the row is
-    recorded before the answer, or the answer carries the failure).
+    that has nothing to do with it must still be answered while the write is in
+    flight, at no more than a few times what the same read costs with no writer
+    in flight, and the completion response itself must still wait for the write
+    (the row is recorded before the answer, or the answer carries the failure).
     """
     world = driver_world
     gate = _Gate()
@@ -318,6 +383,7 @@ async def test_a_completion_write_does_not_stall_the_loop(driver_world, monkeypa
     _slow_down(monkeypatch, gate,
                statement=lambda sql: sql.strip().upper() == "COMMIT")
     async with _client(world.app) as client:
+        control = await _worst_read(client, "/health")
         in_flight = await _begin_slow_request(
             client, gate, lambda: client.post(
                 "/api/dsh-drivers/alpha/completion", json=world.completion,
@@ -326,10 +392,6 @@ async def test_a_completion_write_does_not_stall_the_loop(driver_world, monkeypa
             health, latency = await _health_while_in_flight(client, gate)
             assert gate.stalls >= 1, "the completion write was never made slow"
             assert health.status_code == 200, health.text
-            assert latency < _BUDGET, (
-                f"a trivial GET /health took {latency:.3f}s while the completion "
-                f"write's COMMIT was in flight: the event loop waited for the "
-                f"database (budget {_BUDGET:.2f}s)")
             assert gate.ended_at is None, (
                 "the slow write had already finished when the second request was answered")
         finally:
@@ -339,10 +401,12 @@ async def test_a_completion_write_does_not_stall_the_loop(driver_world, monkeypa
             # fire-and-forget write would answer at ~10 ms with its write still
             # stalled, and there would be no row on disk.
             response = await _finish_quietly(in_flight)
+        control = max(control, await _worst_read(client, "/health"))
         assert response is not None and response.status_code == 200, response
         assert gate.ended_at is not None, (
             "the completion answered while its write was still in flight: the row "
             "is not guaranteed to be recorded when the driver gets the turn")
+    _assert_read_not_queued(latency, control, "a trivial GET /health")
     with world.db.get_connection() as conn:
         rows = conn.execute("SELECT served_by FROM dsh_driver_session_models "
                             "WHERE project_id=? AND session_id=?",
@@ -359,12 +423,15 @@ async def test_a_per_operation_connection_close_does_not_stall_the_loop(driver_w
     runs `sqlite3WalClose -> sqlite3WalCheckpoint -> fdatasync`.
 
     Every close is forced to take 2 s. The connection that write closes is the
-    one the loop used to finish; the second request must not wait for it.
+    one the loop used to finish; the second request must not wait for it, and
+    must not cost several times what the same read costs with no close in
+    flight.
     """
     world = driver_world
     gate = _Gate()
     _slow_down(monkeypatch, gate, close=True)
     async with _client(world.app) as client:
+        control = await _worst_read(client, "/health")
         in_flight = await _begin_slow_request(
             client, gate, lambda: client.post(
                 "/api/dsh-drivers/alpha/completion", json=world.completion,
@@ -373,15 +440,13 @@ async def test_a_per_operation_connection_close_does_not_stall_the_loop(driver_w
             health, latency = await _health_while_in_flight(client, gate)
             assert gate.stalls >= 1, "no connection close was made slow"
             assert health.status_code == 200, health.text
-            assert latency < _BUDGET, (
-                f"a trivial GET /health took {latency:.3f}s while a per-operation "
-                f"connection close (WAL checkpoint) was in flight: the event loop "
-                f"finished the connection (budget {_BUDGET:.2f}s)")
             assert gate.ended_at is None, (
                 "the slow close had already finished when the second request was answered")
         finally:
             response = await _settle(in_flight, gate)
+        control = max(control, await _worst_read(client, "/health"))
         assert response is not None and response.status_code == 200, response
+    _assert_read_not_queued(latency, control, "a trivial GET /health")
     with world.db.get_connection() as conn:
         rows = conn.execute("SELECT calls FROM dsh_driver_session_models "
                             "WHERE project_id=? AND session_id=?",
@@ -452,6 +517,7 @@ async def test_the_write_gate_does_not_stall_the_loop(driver_world, monkeypatch)
                statement=lambda sql: sql.lstrip().upper().startswith(
                    "UPDATE DRIVERS SET LAST_SEEN_AT"))
     async with _client(world.app) as client:
+        control = await _worst_read(client, "/health")
         in_flight = await _begin_slow_request(
             client, gate, lambda: client.post(
                 "/api/not-a-route", json={}, headers=world.headers))
@@ -459,15 +525,13 @@ async def test_the_write_gate_does_not_stall_the_loop(driver_world, monkeypatch)
             health, latency = await _health_while_in_flight(client, gate)
             assert gate.stalls >= 1, "the last-seen UPDATE was never made slow"
             assert health.status_code == 200, health.text
-            assert latency < _BUDGET, (
-                f"a trivial GET /health took {latency:.3f}s while the write gate's "
-                f"last-seen UPDATE/COMMIT was in flight: the event loop waited for "
-                f"the auth check (budget {_BUDGET:.2f}s)")
             assert gate.ended_at is None, (
                 "the slow last-seen write had already finished when the second "
                 "request was answered")
         finally:
             response = await _settle(in_flight, gate)
+        control = max(control, await _worst_read(client, "/health"))
+    _assert_read_not_queued(latency, control, "a trivial GET /health")
     # The gate answered "this caller may write" - routing then rejected the
     # request itself (405 from the SPA mount, which serves no such path): the
     # verdict is unchanged by moving it off the loop, and it was not cut short.
@@ -565,6 +629,7 @@ async def test_two_state_writers_still_serialize_while_a_read_is_answered(
         return {"request_key": request_key, "project_id": "alpha", "body": "hello"}
 
     async with _client(_state_app(world)) as client:
+        control = await _worst_read(client, "/api/state/projects")
         first = asyncio.create_task(client.post(COMMAND, json=body("writer-a")))
         assert await asyncio.to_thread(holding.wait, _HANDSHAKE_TIMEOUT), \
             "the first writer never got the write lock"
@@ -576,6 +641,7 @@ async def test_two_state_writers_still_serialize_while_a_read_is_answered(
             first_response, second_response = await asyncio.gather(first, second)
         finally:
             release.set()
+        control = max(control, await _worst_read(client, "/api/state/projects"))
 
     assert first_response.status_code == 200, first_response.text
     assert second_response.status_code == 503, second_response.text
@@ -584,11 +650,11 @@ async def test_two_state_writers_still_serialize_while_a_read_is_answered(
     assert payload["code"] == state_graph.STATE_WRITE_BUSY_CODE == "state_write_busy"
     assert payload["retry_after"] == state_graph.STATE_WRITE_BUSY_RETRY_AFTER
 
-    # The read was answered WHILE a writer held the lock and another waited.
+    # The read was answered WHILE a writer held the lock and another waited, at
+    # no more than a few times what the SAME read costs with no writer in flight:
+    # a WAL reader must not wait for a writer, and a slow host is not a queue.
     assert read.status_code == 200, read.text
-    assert read_latency < _BUDGET, (
-        f"a State read took {read_latency:.3f}s while a writer held the lock: "
-        f"reads now queue behind writes")
+    _assert_read_not_queued(read_latency, control, "a State read")
 
     requests_a, messages = _stored(world, "writer-a")
     requests_b, _ = _stored(world, "writer-b")

@@ -37,6 +37,37 @@ def _owner_settings():
     return {"scheduler_type": "interval", "scheduler_interval": INTERVAL_S}
 
 
+# How long a row waits for the claim handback to become OBSERVABLE. The release
+# write runs inside the cancelled tick, but it is a database write, and what the
+# row asserts is a fact about the ROW once that write landed. Sampling the
+# instant `stop_scheduler` returned let the assertion race the write: under load
+# the read saw `status='claimed', release_count=0` while the handback was still
+# on its way, and the row called a healthy product broken. Bounded, so a
+# scheduler that really does stop without releasing still makes the row RED
+# (after this long) instead of hanging the suite.
+_RELEASE_TIMEOUT_S = 10.0
+_POLL_S = 0.02
+
+
+async def _awaited(read, predicate):
+    """Poll `read()` until `predicate(value)`, bounded; return the last value.
+
+    A witness waits for the observation it measures. The deadline is a ceiling,
+    never the verdict: what the caller asserts afterwards is still a fact about
+    the product, and when it never becomes true the row fails on the value the
+    poll last saw, naming the wait it gave up on.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RELEASE_TIMEOUT_S
+    value = read()
+    while not predicate(value):
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(_POLL_S)
+        value = read()
+    return value
+
+
 async def test_owner_interval_job_is_registered_as_a_coroutine_job(env):
     """The poll job `_add_scheduler_job` builds for an owner must be one
     apscheduler itself recognizes as a coroutine and awaits.
@@ -85,7 +116,11 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
     per-owner scheduler and one real claimed step in flight. Stopping ONLY
     Alice (the supported `stop_scheduler` route) cancels Alice's tick and
     releases her claim; Bob's scheduler stays live and his task, claim, retry
-    and release counters are untouched."""
+    and release counters are untouched.
+
+    The handback is waited for, bounded, because it is a WRITE: the verdict this
+    row reaches is about the claim row, so it waits for the row to say so rather
+    than for the cancellation to return."""
     sf = _real_sf(tmp_path)
     sf.register_graph(_work_graph())
     owners = {"alice": OWNER, "bob": "bob@example.com"}
@@ -132,18 +167,28 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
         assert not bob_task.done(), (
             "Bob's live task was cancelled with Alice's scheduler")
 
+        # THE CANCELLATION IS THE TRIGGER, NOT THE OBSERVATION. Alice's claim is
+        # handed back by the code that runs while her task unwinds, and that
+        # handback is a database write: reading the row the instant the task is
+        # cancelled samples a moment the write may not have reached yet. Wait,
+        # bounded, for the condition this row asserts - exactly once - and then
+        # assert it.
+        alice_row = await _awaited(
+            lambda: rows()[runs[pids["alice"]]],
+            lambda row: row["status"] == "pending" and row["release_count"] == 1)
         bob_row = rows()[runs[pids["bob"]]]
         assert bob_row["status"] == "claimed", (
             f"Bob's claim was released by Alice's stop: {bob_row}")
         assert bob_row["retry_count"] == 0 and bob_row["release_count"] == 0, (
             f"Bob's retry/release budget was charged by Alice's stop: {bob_row}")
-        alice_row = rows()[runs[pids["alice"]]]
         assert alice_row["status"] == "pending", (
-            f"Alice's claim was not handed back: {alice_row}")
+            f"Alice's claim was not handed back within {_RELEASE_TIMEOUT_S:g}s: "
+            f"{alice_row}")
         assert alice_row["retry_count"] == 0, (
             f"retry budget charged on stop: {alice_row}")
         assert alice_row["release_count"] == 1, (
-            f"not released via release_claim: {alice_row}")
+            f"not released via release_claim within {_RELEASE_TIMEOUT_S:g}s: "
+            f"{alice_row}")
         assert scheds["bob"].running, "Bob's scheduler died with Alice's"
         assert OWNER not in sc._user_scheduler_map, "Alice's map entry left"
         assert pids["alice"] not in sc._detached_ticks, "Alice's slot left"

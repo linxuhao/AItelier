@@ -45,6 +45,9 @@ from core.state_service import StateService
 COMMAND = "/api/state/commands/send_user_conversation_message"
 OWNER = "owner:user@example.test"
 BODY = "node a first"
+# Everything a row waits on is bounded, so a regression can never hang the
+# suite. It is a CEILING, never the answer: the answer is an observation.
+_HANDSHAKE_TIMEOUT = 10.0
 
 
 @pytest.fixture
@@ -85,24 +88,41 @@ def stored(world, request_key):
 
 
 class _ObservedConnection:
-    """The acquisition loop's view of one connection: records what it ASKED for."""
+    """The acquisition loop's view of one connection: records what it ASKED for.
 
-    def __init__(self, conn, record):
+    `on_attempt(number, error)` is told the OUTCOME of every `BEGIN IMMEDIATE`
+    the loop issues, on the thread that issued it (`error` is None when the lock
+    was taken). That is what lets a row wait for an OBSERVED attempt instead of
+    placing one with a timer.
+    """
+
+    def __init__(self, conn, record, on_attempt=None):
         self._conn, self._record = conn, record
+        self._on_attempt = on_attempt or (lambda number, error: None)
 
     def execute(self, sql, *args):
         if sql.startswith("PRAGMA busy_timeout="):
             self._record["timeouts"].append(int(sql.split("=", 1)[1]))
         elif sql.startswith("BEGIN IMMEDIATE"):
             self._record["begins"] += 1
+            try:
+                result = self._conn.execute(sql, *args)
+            except BaseException as error:
+                self._on_attempt(self._record["begins"], error)
+                raise
+            self._on_attempt(self._record["begins"], None)
+            return result
         return self._conn.execute(sql, *args)
 
 
-def observe_acquisition(monkeypatch):
+def observe_acquisition(monkeypatch, on_attempt=None):
     """Record every `PRAGMA busy_timeout` and `BEGIN IMMEDIATE` the loop issues.
 
     One record per `_begin_write` call, i.e. per write transaction, so a body
     that ran twice or a `BEGIN` that was retried is visible in the counts.
+    `on_attempt` is the optional observer of each attempt's outcome, so a row
+    that has to HOLD a lock until an attempt is observed can key its release on
+    the observation rather than on a duration.
     """
     real = state_graph._begin_write
     calls = []
@@ -110,7 +130,7 @@ def observe_acquisition(monkeypatch):
     def observed(conn):
         record = {"timeouts": [], "begins": 0}
         calls.append(record)
-        return real(_ObservedConnection(conn, record))
+        return real(_ObservedConnection(conn, record, on_attempt))
 
     monkeypatch.setattr(state_graph, "_begin_write", observed)
     return calls
@@ -204,30 +224,79 @@ def test_a_lock_released_inside_the_budget_is_waited_out(world, monkeypatch):
     The per-attempt patience is shrunk so the OUTER loop - not SQLite's internal
     busy handler - is what waits the lock out: with `STATE_WRITE_LOCK_ATTEMPT_MS`
     at 100 the first attempt gives up long before the release, so a second
-    `BEGIN IMMEDIATE` (and a third) is the only way this request can succeed.
+    `BEGIN IMMEDIATE` is the only way this request can succeed.
+
+    THE HANDOVER IS A HANDSHAKE, not a delay. A timer used to release the holder
+    after 0.35 s, so the row silently assumed its first 100 ms attempt had begun
+    inside that window: under load the request had not even started when the
+    holder was already gone, the FIRST `BEGIN` took the lock, and the row
+    reported "BEGIN IMMEDIATE was not retried" about a product that was never
+    asked to retry. Now the holder stays held until the row has OBSERVED the
+    first attempt REFUSED, and only then releases - inside the budget - so the
+    retry and the success are facts about what happened, not about how fast the
+    host ran.
     """
     monkeypatch.setenv(state_graph.STATE_WRITE_LOCK_SECONDS_ENV, "3")
     monkeypatch.setattr(state_graph, "STATE_WRITE_LOCK_ATTEMPT_MS", 100)
-    calls = observe_acquisition(monkeypatch)
+
+    first_refused_at: dict[str, float] = {}
+    refused = threading.Event()
+
+    def note_attempt(number: int, error) -> None:
+        if error is not None and "at" not in first_refused_at:
+            first_refused_at["at"] = time.monotonic()
+            refused.set()
+
+    calls = observe_acquisition(monkeypatch, note_attempt)
     holder = hold_write_lock(world)
-    release = threading.Timer(0.35, holder.rollback)
-    release.start()
+    released_at: dict[str, float] = {}
+
+    def release_after_observation() -> None:
+        # The OBSERVATION is the handshake: the holder does not go away until
+        # the row has seen its first attempt refused, so neither the refusal nor
+        # the retry can be an artefact of the host being fast enough to run the
+        # request inside a timer. Bounded, so a request that never attempts
+        # cannot strand the holder (and the row still fails, blaming the lock).
+        if not refused.wait(_HANDSHAKE_TIMEOUT):
+            return
+        released_at["at"] = time.monotonic()
+        holder.rollback()
+
+    releaser = threading.Thread(target=release_after_observation,
+                                name="witness-lock-release", daemon=True)
+    releaser.start()
     try:
         with client(world) as http:
             started = time.monotonic()
             response = http.post(COMMAND, json=body("arm-b-late"))
             elapsed = time.monotonic() - started
     finally:
-        release.cancel()
-        release.join()
+        releaser.join(timeout=_HANDSHAKE_TIMEOUT)
         holder.rollback()
         holder.close()
 
-    assert response.status_code == 200, response.text
-    assert elapsed > 0.2, f"the request did not wait for the lock ({elapsed:.3f}s)"
+    # 1. The particular ordering this row depends on, asserted instead of
+    # assumed: the lock really was held when the loop asked (its first attempt
+    # was refused), and the holder was released only AFTER the row observed
+    # that refusal.
+    assert refused.is_set(), (
+        "the first BEGIN IMMEDIATE was never refused: the lock was not held "
+        "when the acquisition loop asked, so this row witnessed nothing")
+    assert "at" in released_at, "the holder was never released"
+    assert released_at["at"] >= first_refused_at["at"], (
+        f"the holder was released at {released_at['at']:.6f} before the first "
+        f"refusal was observed at {first_refused_at['at']:.6f}: the release did "
+        f"not follow the observation")
+    # 2. And the product's answer to that refusal: it retried `BEGIN IMMEDIATE`
+    # (at least twice, the refused attempt and the one that took the lock),
+    # stayed inside its shrunken per-attempt patience, and the write landed.
     assert len(calls) == 1, calls
-    assert calls[0]["begins"] >= 2, f"BEGIN IMMEDIATE was not retried: {calls[0]}"
+    assert calls[0]["begins"] >= 2, (
+        f"BEGIN IMMEDIATE was not retried after a refused first attempt: "
+        f"{calls[0]} (HTTP {response.status_code})")
+    assert response.status_code == 200, response.text
     assert all(1 <= ms <= 100 for ms in calls[0]["timeouts"]), calls[0]["timeouts"]
+    assert elapsed < _HANDSHAKE_TIMEOUT, f"the bounded wait took {elapsed:.3f}s"
 
     requests, messages = stored(world, "arm-b-late")
     assert requests == 1 and messages == [response.json()["message_id"]]

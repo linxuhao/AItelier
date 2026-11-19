@@ -347,7 +347,13 @@ export class VectorChannel {
     if (this.store.faults()?.vectorBeforeReconcile) await this.store.faults().vectorBeforeReconcile();
     if (gen !== this.gen) return;
     // What left `entries` while the load ran is dropped from memory and from the file too.
-    for (const id of mem.rows.keys()) if (!entries.has(id)) { mem.delete(id); extras.add(id); }
+    // In turns: 100k rows here, and the worker's first scan after it, were one 18 ms block.
+    let k = 0;
+    for (const id of mem.rows.keys()) {
+      if (!entries.has(id)) { mem.delete(id); extras.add(id); }
+      if (++k % 16 === 0 && due()) await turn();
+    }
+    if (gen !== this.gen) return;
     let fileOk = true;
     if (rebuild) {
       // 1. Another model, dims or input size: the whole file goes, everything is embedded again.
@@ -408,19 +414,26 @@ export class VectorChannel {
     });
   }
 
-  #next() {
-    const entries = this.store.entries();
-    const wanted = id => entries.has(id) && !this.mem.has(id) && !this.skipped.has(id);
+  /** The next id to embed. Refilling the list scans every entry; at 100k entries that took
+   *  22-32 ms in one go right after a load, so the scan takes turns (slices.mjs) like rank. */
+  async #next() {
+    const wanted = id => this.store.entries().has(id) && !this.mem.has(id) && !this.skipped.has(id);
     while (this.queue.length) { const id = this.queue.shift(); if (wanted(id)) return id; }
     // The list is empty: compute it once from the entries (newest first). They come in log
     // order, which is time order unless a restore or a clock step broke it; reversed, that is
     // newest first, and only an out-of-order list pays for a sort (100k: 25 ms at once).
     const list = [];
-    let ordered = true;
-    for (const e of entries.values()) if (wanted(e.id)) { if (list.length && list[list.length - 1].at > e.at) ordered = false; list.push(e); }
+    let ordered = true, n = 0;
+    await turn();
+    for (const e of this.store.entries().values()) {
+      if (wanted(e.id)) { if (list.length && list[list.length - 1].at > e.at) ordered = false; list.push(e); }
+      if (++n % 16 === 0 && due()) await turn();
+    }
     if (ordered) list.reverse(); else list.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
-    this.queue = list.map(e => e.id);
-    return this.queue.shift();
+    // Ids queued by add() while the scan waited stay first (they are the newest).
+    this.queue = this.queue.concat(list.map(e => e.id));
+    while (this.queue.length) { const id = this.queue.shift(); if (wanted(id)) return id; }
+    return undefined;
   }
 
   async #work() {
@@ -428,7 +441,10 @@ export class VectorChannel {
     while (!this.closed) {
       if (!this.loaded) { await this.#sleep(); continue; }
       const gen = this.gen;
-      const id = this.#next();
+      const id = await this.#next();
+      // The scan takes turns: a close or a new load may have come meanwhile.
+      if (this.closed) return;
+      if (gen !== this.gen || !this.loaded) continue;
       if (id === undefined && this.answered) { this.#healthy(); await this.#sleep(); continue; }
       // Nothing to embed and no answer seen in this process: one probe, so health is seen and
       // not assumed - a vector-down notice an earlier process left goes once the server answers.

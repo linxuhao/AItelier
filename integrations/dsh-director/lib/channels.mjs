@@ -21,7 +21,7 @@
  *  taken back. The detail and the QR are never logged (the QR is a login token). */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
@@ -48,7 +48,6 @@ export const channelReplies = Object.freeze({
   bound: 'Bound: this account now talks to the steward. 已绑定：这个账号现在可以和管家对话。',
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
-  rate_limited: 'Not delivered: too many messages, try again later. 未送达：消息太频繁，请稍后再发。',
   approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
   code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
   refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
@@ -68,8 +67,10 @@ export const channelReplies = Object.freeze({
 });
 
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
- *  generic `refused` line (a stranger is told none of them). */
-const TOLD = new Set(['body_too_long', 'rate_limited', 'approval_undated', 'code_sent_to_bound_account']);
+ *  generic `refused` line (a stranger is told none of them). A TRANSIENT refusal is not in
+ *  here on purpose: the message is held and asked again (RETRYABLE), so "too many messages,
+ *  try later" would be a line about a message that is still on its way. */
+const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_account']);
 /** The answers that are transient, not terminal: the host or the backend could not be
  *  reached, the channel's minute's share is spent, or the decision this message carries
  *  is still running. The message is held and asked again; it is never dropped. */
@@ -80,13 +81,19 @@ const short = error => String(error?.message ?? error).slice(0, 300);
 /** A message is owed while its delivery or the line its decision owes has not been
  *  acknowledged: keyed by the channel message the host takes once. */
 const owedKey = ({ channel, senderRef, messageRef }) => `${channel}\n${senderRef}\n${messageRef}`;
-/** Where the owed messages are kept across a restart: `owedFile` when given, else
- *  $DSH_CHANNEL_OWED_FILE, else $AITELIER_DSH_STATE_DIR/channel-owed.json (the director's
- *  own State dir), else none - memory only, i.e. a restart loses what was owed. The file
- *  holds the owner's own text, like the State database that took it, in mode 0600. */
+/** Where the owed messages are kept across a restart when the caller names no file: the
+ *  path $DSH_CHANNEL_OWED_FILE gives, else none - memory only, i.e. a restart loses what was
+ *  owed (the director plugin passes the host's own state dir instead). The file holds the
+ *  owner's own text verbatim, in mode 0600, and it holds it in exactly the case the backend
+ *  has NOT judged it yet (the host was unreachable, threw, or the text was never handed in) -
+ *  so a body carrying a live binding code can be here until the host answers. Its bounds:
+ *  0600 in the director's own directory, never the backend's world-readable database;
+ *  cleared as soon as the host answers; and a binding code expires within minutes, so a
+ *  stored one is dead by the time the retry lands. The backend also answers a code-carrying
+ *  body BEFORE any transient refusal (its own `_write_relay`), so no transient refusal can
+ *  put a live code here at all. */
 export function defaultOwedFile(env = process.env) {
-  if (text(env.DSH_CHANNEL_OWED_FILE)) return env.DSH_CHANNEL_OWED_FILE;
-  return text(env.AITELIER_DSH_STATE_DIR) ? join(env.AITELIER_DSH_STATE_DIR, 'channel-owed.json') : undefined;
+  return text(env.DSH_CHANNEL_OWED_FILE) ? env.DSH_CHANNEL_OWED_FILE : undefined;
 }
 /** `promise`, or a rejection naming `what` after `ms`: a hung channel or host never holds a
  *  queue for good. */
@@ -125,6 +132,9 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // `owedFile` when there is one, so a restart claims them (see drainOwed). Only a
   // successful answer clears one: a line that could not be sent is owed, not lost.
   const owed = new Map(), answering = new Set();
+  // The messages this process is handling right now: the owed poll must not ask one of them
+  // again while its relay is still in flight (the write-ahead put it in the store first).
+  const handling = new Set();
   const owedSave = () => {
     if (!owedFile) return;
     try {
@@ -267,6 +277,27 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     const trimmed = body.trim();
     const message = { channel, senderRef, messageRef, text: body, at };
     const owed1 = owedKey(message);
+    // Was this message ALREADY owed when it arrived - by an earlier process (a restart) or by
+    // an earlier attempt here? That is what "a line the store still says is owed" means; the
+    // write-ahead below puts every message in the store, so asking it afterwards would read
+    // "yes" for a message whose line went out long ago.
+    const carried = owed.has(owed1);
+    // Write-ahead: the owe is on disk BEFORE the host is asked. A stop while a relay is in
+    // flight (a start/stop_driver decision runs inside it, up to the host's own 30 s) then
+    // still leaves the message for the restart to ask again - the whole point of the store.
+    // Every path that finishes this message forgets it; nothing else does.
+    //
+    // A body of exactly six digits is the ONE message that is never written there: that is
+    // the binding code's shape - the one secret the owner sends - and a code can never carry
+    // an approval (those are phrases), so nothing durable is owed for it. A lost binding line
+    // costs the sender retyping the code; a stored one would put a live code on disk for its
+    // ten minutes, which is exactly what the backend's code check exists to prevent and what
+    // no writer-side check can cover here (the code has to be live on this path).
+    const durable = !CODE.test(trimmed);
+    if (durable) {
+      handling.add(owed1);
+      remember(message);
+    }
     try {
       await hostReady();
       // Six digits from someone who is not the bound owner is a binding attempt; the bound
@@ -294,9 +325,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (result?.refused) {
         const reason = String(result.refused);
         if (RETRYABLE.has(reason)) {
-          // Transient (too many messages this minute): held here and in the owed store, so
+          // Transient (too many messages this minute): still owed from the write-ahead, so
           // the same message is asked again - by this channel's hold, and by a restart.
-          remember(message);
           log('channel_relay_retrying', { ...seen, reason });
           return { accepted: false, reason };
         }
@@ -329,7 +359,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       // a line a restart inherited is sent too. Only a successful send clears it.
       const key = channel + '\n' + messageRef, lost = unanswered.has(key);
       if (result?.approval || !result?.duplicate) unanswered.delete(key);
-      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || owed.has(owed1))) {
+      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || carried)) {
         if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
         else remember(message);
       } else {
@@ -338,12 +368,14 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
       // No answer: the delivery is owed durably, so a restart asks again instead of the
-      // message existing only in this process's memory.
-      remember(message);
+      // message existing only in this process's memory (a six-digit one excepted, above).
+      if (durable) remember(message);
       log('channel_inbound_failed', { ...seen, error: short(error) });
       unanswered.add(channel + '\n' + messageRef);
       trimUnanswered();
       return { accepted: false, reason: 'unavailable' };
+    } finally {
+      handling.delete(owed1);
     }
   };
   const trimUnanswered = () => {
@@ -358,7 +390,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     owedQueue = owedQueue.then(async () => {
       if (!owed.size) return;
       for (const message of [...owed.values()]) {
-        if (!owed.has(owedKey(message))) continue;
+        if (!owed.has(owedKey(message)) || handling.has(owedKey(message))) continue;
         try { await handle(message); }
         catch (error) { log('channel_owed_failed', { channel: message.channel, error: short(error) }); }
       }

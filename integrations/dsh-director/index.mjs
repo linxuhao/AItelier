@@ -47,7 +47,12 @@ export function hostWording(host) {
 /** The owner's chat channels (design-steward 7.2), when the host declares them. */
 export function ownerChannelsFor(ctx, host) {
   if (!Array.isArray(host?.capabilities) || !host.capabilities.includes('channels') || !host.channels) return undefined;
-  return createOwnerChannels({ host: host.channels, log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
+  // The owed store lives in the director's own state dir: a message that still owes a line
+  // outlives the process, and it does so in the one directory this session already owns.
+  const stateDir = host.config?.stateDir;
+  return createOwnerChannels({ host: host.channels,
+    ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
+    log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
 }
 
 export async function boot(ctx, { host = ctx.directorHost, channels = ownerChannelsFor(ctx, host) } = {}) {

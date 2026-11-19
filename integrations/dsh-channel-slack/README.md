@@ -97,11 +97,23 @@ These hold for every owner channel (Slack and WeChat):
   cannot take the binding over: the code is stored only as an HMAC keyed with the driver
   pepper secret file (like the driver tokens), so a copy of the State database does not
   reveal it - without the pepper no code is issued or checked (`channel_secret_missing`) -
-  and online guessing stays bounded at 5 guesses in 10^6. A live code is never persisted
-  either, wherever it sits in an owner-written message (relayed, or typed on the
-  dashboard): the write is refused `code_sent_to_bound_account` and the code is retired,
-  so the owner issues a new one. The refusals are in the log with the sender, and the
-  owner just issues a new code.
+  and online guessing stays bounded at 5 guesses in 10^6. The State writers never persist
+  a live code, wherever it sits in an owner-written text (relayed, or typed on the
+  dashboard, body or subject): the write is refused `code_sent_to_bound_account` and the
+  code is retired, so the owner issues a new one. The refusals are in the log with the
+  sender, and the owner just issues a new code.
+- One place beside the State database holds owner text: the director's owed store
+  (`channel-owed.json` in the director's own state dir, mode 0600, `createOwnerChannels` in
+  `integrations/dsh-director/lib/channels.mjs`) keeps a message until the backend has
+  judged it - it is written BEFORE the host is asked, so a stop during the call loses
+  nothing. A body of exactly six digits - the binding code's shape, which can never carry
+  an approval - is never written there. Any other text is, so if such a message carries a
+  live binding code, the code sits there until the host answers. It is 0600 in the
+  director's own directory (not the world-readable State database), it is cleared as soon
+  as the host answers, and the code expires within minutes, so a stored one is dead by the
+  retry. A transient refusal cannot put a code there: the backend answers a code-carrying
+  body before it answers `rate_limited`. Revisit if a channel client ever holds text for
+  longer than a code's life, or if the owed file moves out of the director's own directory.
 - Token files (`slack-app-token`, `slack-bot-token`, `wechat-bridge-token`) should be
   mode 0600; nothing enforces it.
 

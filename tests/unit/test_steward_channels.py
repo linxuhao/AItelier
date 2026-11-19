@@ -114,6 +114,15 @@ def refused(call, code):
     assert str(caught.value).split(":", 1)[0] == code, str(caught.value)
 
 
+def _render(digits, base):
+    """The same six digits in another script's DECIMAL block (0xFF10 full-width,
+    0x0660 Arabic-Indic, 0x0966 Devanagari)."""
+    return "".join(chr(base + int(digit)) for digit in digits)
+
+
+RENDERINGS = [("full_width", 0xFF10), ("arabic_indic", 0x0660), ("devanagari", 0x0966)]
+
+
 # --- binding -------------------------------------------------------------------------------
 
 def test_a_code_the_owner_issued_binds_the_sender_once(world):
@@ -604,6 +613,29 @@ def test_a_live_code_typed_on_the_dashboard_is_refused_retired_and_never_written
     assert [m["body"] for m in conversation(world)] == ["what is running?"] and written["message_id"]
 
 
+def test_a_live_code_in_the_dashboards_subject_is_refused_and_retired_like_one_in_the_body(world, tmp_path):
+    """`send_owner_message` stores a heading on the same row as the body, and the sibling
+    credential guard already scans both: the code check has to cover the same two fields, or
+    a code typed as the heading is stored as it was typed."""
+    bind(world)
+    code = world.owner.channels.issue_code("slack")["code"]
+    refused(lambda: execute(world.owner, "send_user_conversation_message",
+                            {"request_key": "d-subject", "project_id": HOME, "subject": f"binding code {code}",
+                             "body": "add it to the app"}, allow_write=True), "code_sent_to_bound_account")
+    assert conversation(world) == [], "nothing is written"
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM driver_inbox_requests WHERE request_key='d-subject'"
+                            ).fetchone()[0] == 0
+    conn = _copy(world, tmp_path)
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    assert code not in cell, table
+    conn.close()
+    refused(lambda: bind_message(world, code, "m-steal", sender="intruder"), "code_retired")
+
+
 def test_six_digits_that_are_not_the_live_code_or_broken_up_are_ordinary_messages(world):
     """The check must not swallow ordinary text: a five-digit run, the code broken up by a
     space, and a full-width rendering of a code that is NOT live carry no six digits of a
@@ -613,31 +645,54 @@ def test_six_digits_that_are_not_the_live_code_or_broken_up_are_ordinary_message
     other = f"{(int(code) + 1) % 10 ** 6:06d}"
     split = f"{code[:3]} {code[3:]}"
     wide = "".join(chr(ord(digit) + 0xFEE0) for digit in other)
-    bodies = [code[:5], split, wide, f"my code is {split}", "order 123456 shipped"]
+    bodies = [code[:5], split, wide, _render(other, 0x0660), _render(code[:5], 0x0966),
+              f"my code is {split}", "order 123456 shipped"]
     for index, body in enumerate(bodies):
         assert relay(world, body, f"ts-{index}")["message_id"]
     assert sorted(m["body"] for m in conversation(world)) == sorted(bodies)
     assert bind_message(world, code, "m-ok")["bound"], "the code is still live"
 
 
+@pytest.mark.parametrize("writer", ["relay", "dashboard"])
+def test_without_the_pepper_a_text_that_may_carry_a_live_code_is_refused_not_written(world, monkeypatch, writer):
+    """The check cannot run without the pepper, so it must never run as "no code here": a
+    live code is in the table, the secret goes missing, and both writers refuse
+    channel_secret_missing with nothing written. Failing open would store the plaintext with
+    only the digest left unguarded."""
+    bind(world)
+    code = world.owner.channels.issue_code("slack")["code"]
+    monkeypatch.setattr(drivers, "read_pepper", lambda: None)
+    if writer == "relay":
+        refused(lambda: relay(world, f"binding code: {code}", "ts-nope"), "channel_secret_missing")
+    else:
+        refused(lambda: execute(world.owner, "send_user_conversation_message",
+                                {"request_key": "d-nope", "project_id": HOME, "body": f"binding code: {code}"},
+                                allow_write=True), "channel_secret_missing")
+    assert conversation(world) == [], "nothing is written"
+
+
+@pytest.mark.parametrize("name,base", RENDERINGS, ids=[name for name, _ in RENDERINGS])
 @pytest.mark.parametrize("code_channel", ["slack", "wechat"])
-def test_the_full_width_rendering_of_a_live_code_is_refused_on_both_writers(world, code_channel):
-    """NFKC: the leak is what a reader of the stored bytes recovers, and one
-    `unicodedata.normalize('NFKC', cell)` turns '７１１８３３' into '711833'. So the
-    full-width rendering is the same code: it is refused and retired by the relay AND by
-    the dashboard writer, and neither the code nor its rendering is ever stored."""
+def test_every_unicode_rendering_of_a_live_code_is_refused_on_both_writers(world, code_channel, name, base):
+    """The leak is what a reader of the stored bytes recovers, and each of these renderings
+    is one lookup away from the ASCII code: NFKC turns '７１１８３３' into '711833', and
+    `unicodedata.decimal` turns '٧١١٨٣٣' (Arabic-Indic) and '७११८३३' (Devanagari) into
+    7 1 1 8 3 3 - NFKC leaves BOTH decimal blocks alone (measured), so folding through the
+    digits, not NFKC, is what catches them. Each is refused and retired by the relay AND by
+    the dashboard writer, and neither the code nor its rendering is stored."""
     bind(world)
     for writer in ("relay", "dashboard"):
         code = world.owner.channels.issue_code(code_channel)["code"]
-        wide = "".join(chr(ord(digit) + 0xFEE0) for digit in code)
-        body = f"绑定码：{wide}"
+        rendered = _render(code, base)
+        assert rendered != code
+        body = f"绑定码：{rendered}"
         if writer == "relay":
-            refused(lambda: relay(world, body, "ts-wide"), "code_sent_to_bound_account")
+            refused(lambda: relay(world, body, "ts-rendered"), "code_sent_to_bound_account")
         else:
             refused(lambda: execute(world.owner, "send_user_conversation_message",
-                                    {"request_key": "d-wide", "project_id": HOME, "body": body}, allow_write=True),
-                    "code_sent_to_bound_account")
-        assert conversation(world) == [], writer
+                                    {"request_key": "d-rendered", "project_id": HOME, "body": body},
+                                    allow_write=True), "code_sent_to_bound_account")
+        assert conversation(world) == [], (name, writer)
         refused(lambda: bind_message(world, code, f"m-{writer}", channel=code_channel, sender="intruder"),
                 "code_retired")
 
@@ -805,6 +860,20 @@ def test_the_rate_limit_counts_accepted_messages_per_channel(world, monkeypatch,
     refused(lambda: relay(world, "sixty-first", "ts-8"), "rate_limited")
     monkeypatch.setenv("AITELIER_CHANNEL_RATE_PER_HOUR", "61")
     relay(world, "the env override raises it", "ts-9")
+
+
+def test_a_body_carrying_a_live_code_is_refused_as_a_code_even_when_the_channels_minute_is_spent(world):
+    """The channel client stores a TRANSIENTLY refused message in a durable owed store
+    (integrations/dsh-director/lib/channels.mjs writes it ahead of the host's answer), so
+    `rate_limited` must never be the answer to a body that carries a live code: the code
+    check runs first, retires the code, and the answer is terminal - nothing to persist."""
+    bind(world)
+    code = world.owner.channels.issue_code("slack")["code"]
+    for i in range(6):
+        relay(world, f"m{i}", f"ts-{i}")
+    refused(lambda: relay(world, f"binding code: {code}", "ts-code"), "code_sent_to_bound_account")
+    assert [m["body"] for m in conversation(world)] == [f"m{i}" for i in range(6)]
+    refused(lambda: bind_message(world, code, "m-after", sender="intruder"), "code_retired")
 
 
 # --- steward only / owner only ----------------------------------------------------------------
@@ -1169,11 +1238,27 @@ def test_a_delivery_while_the_decision_runs_is_retryable_not_terminal(world):
     assert len(conversation(world)) == 1, "one message, decided once"
 
 
+def _service(world):
+    """The service one request builds (api.state_graph_routers.get_service): the start's scan
+    runs here only when the start left the path open for it."""
+    return StateService(world.db, actor="driver:" + world.steward_row["driver_id"],
+                        driver_id=world.steward_row["driver_id"], project_read_trusted=True)
+
+
 def _restart(world, monkeypatch):
     """A new process over the same State file: the start's scan runs again."""
     monkeypatch.setattr(state_channels, "_START_SETTLED", set())
-    return StateService(world.db, actor="driver:" + world.steward_row["driver_id"],
-                        driver_id=world.steward_row["driver_id"], project_read_trusted=True)
+    return _service(world)
+
+
+def _restore_ledger(world, answers):
+    """Put the relay records back as a stop between the decision and its ledger write leaves
+    them (the decision itself is never re-run by this)."""
+    with world.db.get_connection() as conn:
+        for operation, answer in answers.items():
+            conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE operation=?",
+                         (json.dumps(answer), operation))
+        conn.commit()
 
 
 def test_a_start_settles_the_relay_record_a_stop_left_pending(world, monkeypatch):
@@ -1229,11 +1314,81 @@ def test_a_start_settles_a_record_left_pending_after_the_decision_began(world, m
     assert all("pending" in answer for answer in ledger(world).values()), "the decision is still executing"
     assert world.steward.steward.recover() == {"settled": 1}
     assert proposal(world)["status"] == "done"
-    _restart(world, monkeypatch)
+    # The same start, another request: it settles the ledger BECAUSE the deferral re-opened
+    # the path (_START_SETTLED.discard). Delete that and the record stays pending for good.
+    _service(world)
     answers = ledger(world)
     assert all(answer["approval"] and answer["approval"]["outcome"] == "executed" for answer in answers.values()), \
         answers
     assert all("pending" not in answer for answer in answers.values())
+
+
+def test_a_start_settles_a_driver_approval_whose_decision_already_ran(world, monkeypatch):
+    """The start's scan runs from StateChannels.__init__, where `driver_runner` is always
+    None (api/state_graph_routers.get_service installs it after building the service), so it
+    used to park EVERY driver-kind record - including the one whose decision the stop had
+    already executed. Reading that decision needs no runtime (_own_decision reads the row),
+    so the scan answers it now, and only an undecided one waits for the redelivery."""
+    bind(world)
+    plant_proposal(world, kind="start_driver", payload={"project_id": "alpha"})
+    with monkeypatch.context() as patched:  # the message commits; the process stops before the decision
+        patched.setattr(world.steward.channels, "_settle", lambda *args, **kwargs: None)
+        relay(world, "同意 proposal p-1", "ts-approve")
+    stopped = ledger(world)
+    assert all("pending" in answer and answer["approval"] is None for answer in stopped.values())
+    # The decision runs inside a request (which has the runtime); the stop lands before its
+    # ledger write, so the proposal is done while the ledger still says pending.
+    calls = []
+
+    def runner(kind, project_id, actor):
+        calls.append((kind, project_id, actor))
+        return {"project_id": project_id, "phase": "starting"}
+    world.steward.steward.driver_runner = runner
+    answered = world.steward.channels._settle(dict(stopped["relay_owner_message"]), "slack", SLACK_USER, "ts-approve")
+    assert answered["approval"]["outcome"] == "executed"
+    assert calls == [("start_driver", "alpha", f"owner:slack:{SLACK_USER}")]
+    world.steward.steward.driver_runner = None
+    _restore_ledger(world, stopped)
+    assert all("pending" in answer for answer in ledger(world).values())
+    _restart(world, monkeypatch)  # the start, with no driver runtime anywhere yet
+    answers = ledger(world)
+    assert all(answer["approval"] and answer["approval"]["outcome"] == "executed" for answer in answers.values()), \
+        answers
+    assert all(answer["duplicate"] is False and "pending" not in answer for answer in answers.values())
+    assert proposal(world)["status"] == "done"
+
+
+def test_a_driver_record_the_start_cannot_decide_is_parked_once_not_rescanned(world, monkeypatch):
+    """A driver kind that is still OPEN needs the runtime to decide, so the start parks it
+    for the channel's redelivery - it never answers driver_runtime_unavailable, which would
+    tell the owner the approval failed right before recover() runs it. Parked is NOT deferred:
+    the start's path stays settled, so the ledger scan does not run on every request of that
+    start."""
+    bind(world)
+    plant_proposal(world, kind="start_driver", payload={"project_id": "alpha"})
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.channels, "_settle", lambda *args, **kwargs: None)
+        relay(world, "同意 proposal p-1", "ts-approve")
+    scans, results = [], []
+    original = state_channels.StateChannels.settle_pending_relays
+
+    def counting(service):
+        result = original(service)
+        scans.append(1)
+        results.append(result)
+        return result
+    monkeypatch.setattr(state_channels.StateChannels, "settle_pending_relays", counting)
+    _restart(world, monkeypatch)  # the start's scan
+    assert results and results[0]["parked"] == 1 and results[0]["deferred"] == 0, results
+    assert all("pending" in answer for answer in ledger(world).values())
+    assert proposal(world)["status"] == "open", "not answered as a refusal while recover() may run it"
+    _service(world), _service(world)  # two more requests of the same start
+    assert scans == [1], "parked once per start, not re-scanned on every request"
+    # The redelivery is what decides it, inside a request that has the runtime.
+    world.steward.steward.driver_runner = lambda kind, project_id, actor: {"project_id": project_id}
+    out = relay(world, "同意 proposal p-1", "ts-approve")
+    assert out["duplicate"] is True and out.get("decided_on_replay") is True
+    assert out["approval"]["outcome"] == "executed" and proposal(world)["status"] == "done"
 
 
 @pytest.mark.parametrize("age,outcome", [(timedelta(minutes=9, seconds=59), "executed"),

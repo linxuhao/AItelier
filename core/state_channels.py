@@ -37,16 +37,20 @@ after a restart - neither counts a refused guess twice nor relays a code that al
 bound its sender as an owner message: bind and relay both answer it as a duplicate.
 
 A live binding code is never persisted in owner-written text: neither writer (the
-relayed channel message and the owner's dashboard message) stores a body that carries
-a live code ANYWHERE in it - the check is on the digit runs the body contains (after
-NFKC, so the full-width rendering of a code is the code), never on
-`body.strip() == six digits` - the code is retired and the write is refused
-code_sent_to_bound_account (the dashboard writer raises the same code).
+relayed channel message and the owner's dashboard message) stores a body or subject
+that carries a live code ANYWHERE in it - the check is on the digit runs the text
+contains (after `ascii_digits`, so the full-width, Arabic-Indic and Devanagari
+renderings of a code are the code), never on `body.strip() == six digits` - the code
+is retired and the write is refused code_sent_to_bound_account (the dashboard writer
+raises the same code). Without the pepper that keys the codes the check cannot run, so
+it refuses channel_secret_missing instead of writing the text unjudged.
 
 An approval relayed by a channel is decided after its message commits, and the decision
 is recorded in the request ledger (`pending` until then). A stop between the two leaves
 the record pending; a start settles it (`settle_pending_relays`), and the channel's
-redelivery then answers the decision (`decided_on_replay`) instead of nothing.
+redelivery then answers the decision (`decided_on_replay`) instead of nothing. A record
+whose decision needs the driver runtime is parked for that redelivery, unless the
+message's own decision already ran - reading that needs no runtime.
 
 All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
@@ -188,6 +192,30 @@ def _code_hash(pepper: str, channel: str, code: str) -> str:
     return hmac.new(subkey, f"owner-channel-code:{channel}:{code}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def ascii_digits(text):
+    """`text` with every Unicode digit of every script written as an ASCII digit: NFKC
+    folds the compatibility forms ('７' -> '7', '⁷' -> '7') but leaves the DECIMAL blocks
+    of the other scripts alone - '٧١١٨٣٣' (Arabic-Indic) and '७११८३३' (Devanagari)
+    normalise to themselves - and `unicodedata.decimal` is what turns those into 7, 1, 1,
+    8, 3, 3. Measured, so this is not a guess: NFKC of the Arabic-Indic and Devanagari
+    renderings equals itself, while `unicodedata.decimal` gives 7 for both."""
+    out = []
+    for char in unicodedata.normalize("NFKC", text):
+        if "0" <= char <= "9":
+            out.append(char)
+            continue
+        try:
+            out.append(str(unicodedata.decimal(char)))
+            continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            out.append(str(unicodedata.digit(char)))  # a digit value without a decimal one ('⁷')
+        except (TypeError, ValueError):
+            out.append(char)
+    return "".join(out)
+
+
 def digit_windows(body):
     """The distinct 6-ASCII-digit substrings `body` carries, wherever they sit.
 
@@ -196,14 +224,14 @@ def digit_windows(body):
     guards is the code in the text, not the text's shape, so the check is on every run
     of digits (every 6-window of a longer run as well) and never on `body.strip()`.
 
-    The body is folded to NFKC first, because the leak is what a READER of the stored
-    bytes can recover: '７１１８３３' (full-width) or '٧١١٨٣٣' (Arabic-Indic) is one
-    `unicodedata.normalize('NFKC', cell)` away from '711833', so those renderings are the
-    same code and are caught here. Folding only ADDS windows a body carries - a body with
-    no digit run in any compatibility form still yields none, and a compatibility digit
-    that folds to one is exactly the leak - so no shape that used to be refused is let
-    through."""
-    body = unicodedata.normalize("NFKC", body)
+    The body's digits are folded to ASCII first (`ascii_digits`), because the leak is what
+    a READER of the stored bytes can recover: '７１１８３３' (full-width) is one
+    `unicodedata.normalize('NFKC', cell)` away from '711833', and '٧١١٨٣٣' (Arabic-Indic),
+    '७११८३३' (Devanagari) or '⁷¹¹⁸³³' are one `unicodedata` decimal/digit lookup away -
+    every rendering is the same code and is caught here. Folding only ADDS windows a body
+    carries (a body with no digit in any script still yields none, and a folded digit is
+    exactly the leak), so no shape that used to be refused is let through."""
+    body = ascii_digits(body)
     windows, run = set(), []
     for char in body:
         if "0" <= char <= "9":
@@ -379,7 +407,10 @@ class StateChannels:
             return
         if result["deferred"]:
             # A proposal whose decision is still executing here: recover() settles the
-            # proposal at this start, and the next service then settles its ledger.
+            # proposal at this start, and the next service then settles its ledger. Only
+            # that case re-opens the scan - a record left for a driver request (`parked`)
+            # is settled by the channel's own redelivery, so re-scanning for it on every
+            # request would buy nothing and cost the ledger read each time.
             _START_SETTLED.discard(path)
 
     def settle_pending_relays(self):
@@ -391,18 +422,21 @@ class StateChannels:
 
         Runs once per start (see _settle_at_start) and is safe to re-run: the decision
         checks the proposal's status and version like any other, buys nothing twice, and
-        a record already settled is left alone. Takes no driver runtime into account: a
-        proposal that only a request can run (start/stop_driver) is deferred to the
-        channel's own redelivery, which runs inside such a request.
+        a record already settled is left alone. A proposal that only a REQUEST can run
+        (start/stop_driver, no driver runtime here) is parked - the channel's own
+        redelivery decides it inside such a request - but one whose decision this very
+        message already took is answered here, because reading the proposal needs no
+        runtime (_own_decision).
 
         Returns {"settled": how many records now carry their answer,
-                 "deferred": how many were left pending (their decision is running)}."""
+                 "deferred": how many were left pending because their decision is running,
+                 "parked": how many need a driver request to decide them}."""
         with self.store.transaction() as conn:
             rows = [dict(row) for row in conn.execute(
                 "SELECT actor,operation,request_key,result_json FROM driver_inbox_requests "
                 "WHERE operation IN ('relay_owner_message','relay_owner_message:ref') "
                 "AND result_json LIKE '%\"pending\"%'")]
-        settled = deferred = 0
+        settled = deferred = parked = 0
         for row in rows:
             try:
                 first = json.loads(row["result_json"])
@@ -418,9 +452,17 @@ class StateChannels:
                 continue
             try:
                 with self.store.transaction() as conn:
-                    if self.steward._get(conn, first["pending"].get("proposal_id"))["kind"] in DRIVER_KINDS \
-                            and self.steward.driver_runner is None:
-                        deferred += 1  # only a request with the driver runtime can decide it
+                    kind = self.steward._get(conn, first["pending"].get("proposal_id"))["kind"]
+                if kind in DRIVER_KINDS and self.steward.driver_runner is None:
+                    # A driver kind without the runtime can only be PARKED: deciding it here
+                    # would answer driver_runtime_unavailable and then watch recover() run
+                    # the very approval it refused. Exception: a decision this message
+                    # already took can be read from the row and needs nothing else.
+                    carrier = {"channel": source["channel"], "sender_ref": source["sender_ref"],
+                               "channel_message_ref": source["channel_message_ref"],
+                               "phrase": first["pending"].get("phrase")}
+                    if self._own_decision(first["pending"], carrier) in (None, _RUNNING):
+                        parked += 1
                         continue
                 answer = self._settle(first, source["channel"], source["sender_ref"],
                                       source["channel_message_ref"], actor=row["actor"])
@@ -432,7 +474,7 @@ class StateChannels:
                 settled += 1
         if settled:
             log.warning("owner channel relay records settled at the start: %d", settled)
-        return {"settled": settled, "deferred": deferred}
+        return {"settled": settled, "deferred": deferred, "parked": parked}
 
     # ---------------------------------------------------------------- the steward's host
     def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body,
@@ -532,15 +574,6 @@ class StateChannels:
         binding code the message carries anywhere in it is not written:
         {refused: code_sent_to_bound_account} (see below)."""
         moment = _now()
-        per_minute, per_hour = rate_limits()
-        for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
-            accepted = conn.execute("SELECT COUNT(*) FROM state_message_sources WHERE channel=? "
-                                    "AND direction='in' AND at>?",
-                                    (channel, (moment - window).isoformat())).fetchone()[0]
-            if accepted >= limit:
-                self._log_refusal("rate_limited", channel, sender_ref, size)
-                raise StateGraphError(f"rate_limited: {channel} took {accepted} messages in the last "
-                                      f"{int(window.total_seconds())} s; at most {limit}")
         try:
             require_bound(conn, channel, sender_ref)
         except StateGraphError:
@@ -565,6 +598,22 @@ class StateChannels:
                         "code_channel=%s sender_ref=%s at=%s", channel, live["channel"], sender_ref,
                         moment.isoformat())
             return {"refused": "code_sent_to_bound_account"}
+        # The minute's and the hour's share, checked AFTER the binding and code checks on
+        # purpose: `rate_limited` is a TRANSIENT answer, and a channel client holds a
+        # transiently refused message for a retry (integrations/dsh-director/lib/
+        # channels.mjs keeps it in a durable owed store). A body carrying a live code must
+        # therefore never be answered that way - the only text a client may ever persist is
+        # text the backend has not judged yet - and a stranger never learns that their
+        # digits are a live code (the binding check runs first).
+        per_minute, per_hour = rate_limits()
+        for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
+            accepted = conn.execute("SELECT COUNT(*) FROM state_message_sources WHERE channel=? "
+                                    "AND direction='in' AND at>?",
+                                    (channel, (moment - window).isoformat())).fetchone()[0]
+            if accepted >= limit:
+                self._log_refusal("rate_limited", channel, sender_ref, size)
+                raise StateGraphError(f"rate_limited: {channel} took {accepted} messages in the last "
+                                      f"{int(window.total_seconds())} s; at most {limit}")
         self.store._project(conn, home)
         message_id, _, _ = self.inbox.write_user_half(conn, home, USER_SUBJECT, body)
         conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
@@ -671,10 +720,13 @@ class StateChannels:
 
     def refuse_owner_text_code(self, body):
         """`send_user_conversation_message`'s half of the same rule: a live binding code
-        typed into the owner's conversation (any project's, any position in the body) is
+        typed into the owner's conversation (any project's, any position in the text) is
         retired and the message is refused code_sent_to_bound_account - it is never
         written, and neither the message nor its request ledger row keeps the digits.
-        Called before the inbox writes anything, like the relay's own check."""
+        Called before the inbox writes anything, like the relay's own check, and on every
+        owner-written text field that lands in the row (`send_owner_message` passes the
+        subject with the body): a code in the heading is the same leak as a code in the
+        message."""
         windows = digit_windows(body)
         if not windows:
             return
@@ -931,8 +983,11 @@ class StateChannels:
 
         This writer is held to the same rule as the relay: a live binding code the text
         carries anywhere is retired and the message refused code_sent_to_bound_account,
-        before the inbox (and its request ledger) writes anything."""
-        self.refuse_owner_text_code(body)
+        before the inbox (and its request ledger) writes anything. `subject` is the same
+        text field on the same stored row (core/driver_inbox.py writes it beside the body,
+        and the sibling credential guard scans both), so it is checked with the body - a
+        code in the heading is not a different leak."""
+        self.refuse_owner_text_code(f"{subject}\n{body}" if subject else body)
         matched = {}
 
         def written(conn, message_id):

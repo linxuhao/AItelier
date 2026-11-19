@@ -270,18 +270,43 @@ export interface DirectorHost {
  *  the channel registers and every 30 s after; `qrSvg` is a login QR drawn as an SVG while
  *  the channel needs a scan (it goes to the host's optional channels.reportStatus).
  *
- *  What a message still OWES survives the process: an `inbound` that got no answer, a
- *  transient answer, and a decision whose line has not been sent yet are kept in a durable
- *  owed store (`owedFile` in createOwnerChannels, mode 0600: channel, sender, the message
- *  ref and the owner's own text, like the State database that took it), re-asked at
- *  `ready()` and every 30 s, and cleared only once the line is actually sent. `pollOwed()`
- *  asks every owed message now; `stop()` ends that poll. A plugin must not answer a
- *  message it could not send and forget it - the store is what a restart inherits. */
+ *  What a message still OWES survives the process: an `inbound` is written to a durable
+ *  owed store BEFORE the host is asked (`owedFile` in createOwnerChannels, mode 0600:
+ *  channel, sender, the message ref and the owner's own text verbatim), so a stop while
+ *  the host call is still in flight loses nothing; a transient answer and a decision whose
+ *  line has not been sent yet leave it there too. A body of exactly six digits is the one
+ *  exception - that is the binding code's shape and no approval can hang on it, so it is
+ *  never written there and a lost binding line costs the sender retyping the code. It is re-asked at `ready()` and every
+ *  30 s and cleared only once the line is actually sent or the host has answered for good.
+ *  A plugin must not answer a message it could not send and forget it - the store is what a
+ *  restart inherits. The store is the one place beside the backend's own records that holds
+ *  owner text, and it holds it while the host has NOT judged it, so a body carrying a live
+ *  binding code can sit there until the host answers: it is 0600 in the director's own
+ *  directory (never the backend's world-readable database), it is cleared as soon as the
+ *  host answers, the code expires within minutes, and the backend answers a code-carrying
+ *  before every transient refusal (`rate_limited` included), so no transient answer can put
+ *  a live code there. An answer of `{duplicate: true, approval: null}` with no
+ *  `approval_pending` is read as finished (a backend that predates that marker cannot say
+ *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before
+ *  running a director plugin against an older backend. */
 export interface OwnerChannels {
   register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
     status(): { connected: boolean; detail?: string; qrSvg?: string } }): () => void;
   inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
     Promise<{ accepted: boolean; reason?: string }>;
+}
+
+/** What `createOwnerChannels` returns: `service` is the whole plugin-facing surface (it is
+ *  what the host provides as `ownerChannels`, so `register`/`inbound` and nothing else), and
+ *  the rest is the director's own control of it. `ready()` hands the host's handle in and
+ *  starts the status and owed polls; `pollStatus()`/`pollOwed()` are those polls' own steps;
+ *  `ownerMessageSent` mirrors the root's message to the owner; `stop()` ends both timers. */
+export interface OwnerChannelsHandle {
+  service: OwnerChannels;
+  ownerMessageSent(messageId: string, body: string, replyTo?: string): Promise<{ mirrored: boolean; reason?: string }>;
+  ready(): void;
+  pollStatus(): Promise<void>;
   /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */
   pollOwed(): Promise<void>;
+  stop(): void;
 }

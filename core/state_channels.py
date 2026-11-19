@@ -36,6 +36,17 @@ channel that delivers it again - the WeChat plugin replays the bridge's last min
 after a restart - neither counts a refused guess twice nor relays a code that already
 bound its sender as an owner message: bind and relay both answer it as a duplicate.
 
+A live binding code is never persisted in owner-written text: neither writer (the
+relayed channel message and the owner's dashboard message) stores a body that carries
+a live code ANYWHERE in it - the check is on the digit runs the body contains, never on
+`body.strip() == six digits` - the code is retired and the write is refused
+code_sent_to_bound_account (the dashboard writer raises the same code).
+
+An approval relayed by a channel is decided after its message commits, and the decision
+is recorded in the request ledger (`pending` until then). A stop between the two leaves
+the record pending; a start settles it (`settle_pending_relays`), and the channel's
+redelivery then answers the decision (`decided_on_replay`) instead of nothing.
+
 All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
@@ -139,6 +150,11 @@ _QR_ATTRIBUTES = frozenset({"viewBox", "width", "height", "d", "fill", "stroke",
 _QR_VALUE = re.compile(r"[A-Za-z0-9#., -]*")
 # _own_decision: the proposal is executing under this very message's decision.
 _RUNNING = object()
+# The State files whose pending relay records this process has already settled at a
+# start: one scan per start and file, not one per State service (a service is built per
+# request). A file whose decision is still running stays out of it, so a later service
+# of the same start tries again.
+_START_SETTLED: set[str] = set()
 
 
 def rate_limits() -> tuple[int, int]:
@@ -168,6 +184,44 @@ def _code_hash(pepper: str, channel: str, code: str) -> str:
     unused one anyway."""
     subkey = hmac.new(pepper.encode("utf-8"), b"owner-channel-code", hashlib.sha256).digest()
     return hmac.new(subkey, f"owner-channel-code:{channel}:{code}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def digit_windows(body):
+    """The distinct 6-ASCII-digit substrings `body` carries, wherever they sit.
+
+    A binding code is six ASCII digits the owner may paste inside anything ('binding
+    code: 711833', 'please use 711833 to bind slack', '711833 thanks'). The leak this
+    guards is the code in the text, not the text's shape, so the check is on every run
+    of digits (every 6-window of a longer run as well) and never on `body.strip()`.
+    Full-width digits are not digits of a code (`code.isascii()`), so they are not here."""
+    windows, run = set(), []
+    for char in body:
+        if "0" <= char <= "9":
+            run.append(char)
+        elif run:
+            windows.update("".join(run)[start:start + 6] for start in range(len(run) - 5))
+            run = []
+    windows.update("".join(run)[start:start + 6] for start in range(len(run) - 5))
+    return windows
+
+
+def live_codes(conn, moment):
+    """The binding codes that can still bind (unused, unretired, unexpired), as
+    {code_hash: channel}. Read without the pepper: only the digests are stored."""
+    return {row["code_hash"]: row["channel"] for row in conn.execute(
+        "SELECT code_hash,channel,expires_at FROM state_owner_channel_codes "
+        "WHERE used_at IS NULL AND retired_at IS NULL")
+        if datetime.fromisoformat(row["expires_at"]) > moment}
+
+
+def match_live_code(live, pepper, windows):
+    """The row of `live` one of `windows` names, looked up by its keyed digest, or None."""
+    for channel in CHANNELS:
+        for code in windows:
+            digest = _code_hash(pepper, channel, code)
+            if live.get(digest) == channel:
+                return {"code_hash": digest, "channel": channel}
+    return None
 
 
 def require_bound(conn, channel, sender_ref):
@@ -292,6 +346,83 @@ class StateChannels:
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
                 conn.commit()
+            # Only the steward's own service repairs the steward's channel ledger: a
+            # director's, an owner's or the recovery actor's starts nothing here.
+            if self.driver_id is not None and self.steward.is_steward():
+                self._settle_at_start()
+
+    # ---------------------------------------------------------------- a start's repair
+    def _settle_at_start(self):
+        """A start settles the relay records a stop left `pending`: once per process, State
+        file and steward - the steward's first service of a start does it, not its every
+        request. It never blocks the service it is built for: a failure is logged and the
+        next service tries again."""
+        path = self.store.db.db_path
+        if path in _START_SETTLED:
+            return
+        _START_SETTLED.add(path)
+        try:
+            result = self.settle_pending_relays()
+        except Exception:  # noqa: BLE001 - a startup repair never fails a request
+            log.exception("owner channel relay records were not settled at startup")
+            _START_SETTLED.discard(path)
+            return
+        if result["deferred"]:
+            # A proposal whose decision is still executing here: recover() settles the
+            # proposal at this start, and the next service then settles its ledger.
+            _START_SETTLED.discard(path)
+
+    def settle_pending_relays(self):
+        """Decide every approval a relayed message left undecided when the process went
+        away: the ledger record is `pending` from the message's commit until the decision
+        is recorded, and nothing else ever revisited it, so a stop there executed the
+        approval at the next start (recover settles the proposal) while the ledger kept
+        approval: null for good - the decision the channel then never learned.
+
+        Runs once per start (see _settle_at_start) and is safe to re-run: the decision
+        checks the proposal's status and version like any other, buys nothing twice, and
+        a record already settled is left alone. Takes no driver runtime into account: a
+        proposal that only a request can run (start/stop_driver) is deferred to the
+        channel's own redelivery, which runs inside such a request.
+
+        Returns {"settled": how many records now carry their answer,
+                 "deferred": how many were left pending (their decision is running)}."""
+        with self.store.transaction() as conn:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT actor,operation,request_key,result_json FROM driver_inbox_requests "
+                "WHERE operation IN ('relay_owner_message','relay_owner_message:ref') "
+                "AND result_json LIKE '%\"pending\"%'")]
+        settled = deferred = 0
+        for row in rows:
+            try:
+                first = json.loads(row["result_json"])
+            except ValueError:
+                continue
+            if not isinstance(first, dict) or not isinstance(first.get("pending"), dict):
+                continue
+            with self.store.transaction() as conn:
+                source = conn.execute("SELECT channel,sender_ref,channel_message_ref FROM state_message_sources "
+                                      "WHERE message_id=?", (first.get("message_id"),)).fetchone()
+            if source is None or source["channel"] not in CHANNELS or not source["sender_ref"] \
+                    or not source["channel_message_ref"]:
+                continue
+            try:
+                with self.store.transaction() as conn:
+                    if self.steward._get(conn, first["pending"].get("proposal_id"))["kind"] in DRIVER_KINDS \
+                            and self.steward.driver_runner is None:
+                        deferred += 1  # only a request with the driver runtime can decide it
+                        continue
+                answer = self._settle(first, source["channel"], source["sender_ref"],
+                                      source["channel_message_ref"], actor=row["actor"])
+            except (StateGraphError, StateNotFound, StateConflict):
+                continue
+            if answer is None:
+                deferred += 1
+            else:
+                settled += 1
+        if settled:
+            log.warning("owner channel relay records settled at the start: %d", settled)
+        return {"settled": settled, "deferred": deferred}
 
     # ---------------------------------------------------------------- the steward's host
     def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body,
@@ -302,7 +433,10 @@ class StateChannels:
         answer the ledger does not hold yet (the process stopped, or the ledger write
         failed, between the message and the decision): the redelivery decides it, or
         finds it decided by this message, and answers {duplicate: true, decided_on_replay:
-        true, approval} so the channel sends its line. A channel message is the
+        true, approval} so the channel sends its line - and a delivery that arrives WHILE
+        the first one is still executing the decision is answered {duplicate: true,
+        approval: null, approval_pending: true}: retryable, never a finished answer, so
+        the channel asks again instead of counting the line as sent. A channel message is the
         sender's: the same ref from another sender is another message, which goes
         through every check (an unbound sender is refused, never handed the owner's
         first result). `channel_at` is when the
@@ -352,7 +486,11 @@ class StateChannels:
         # decided) again and answered decided_on_replay, so the channel sends its one line.
         settled = self._settle(first, channel, sender_ref, channel_message_ref)
         if settled is None:  # being decided by the first delivery right now
-            return {"message_id": first["message_id"], "duplicate": True, "approval": None}
+            # Retryable, not terminal: this answer says nothing about the decision, which
+            # is still running, so the channel must ask again (a plain duplicate would
+            # read as "answered" and the line would never be sent).
+            return {"message_id": first["message_id"], "duplicate": True, "approval": None,
+                    "approval_pending": True}
         return settled if fresh else {**settled, "duplicate": True, "decided_on_replay": True}
 
     def _relayed(self, conn, request_key, request_hash, channel, sender_ref, channel_message_ref, ref_key):
@@ -381,7 +519,8 @@ class StateChannels:
         transaction. An approval phrase to decide is recorded `pending` (the phrase, the
         version it names and when it was written): the decision runs after this commits,
         and until the ledger holds its answer a redelivery decides it (_settle). A live
-        binding code is not written: {refused: code_sent_to_bound_account} (see below)."""
+        binding code the message carries anywhere in it is not written:
+        {refused: code_sent_to_bound_account} (see below)."""
         moment = _now()
         per_minute, per_hour = rate_limits()
         for window, limit in ((timedelta(minutes=1), per_minute), (timedelta(hours=1), per_hour)):
@@ -397,28 +536,23 @@ class StateChannels:
         except StateGraphError:
             self._log_refusal("channel_sender_not_bound", channel, sender_ref, size)
             raise
-        # A LIVE binding code the bound owner sent as a message is never written: the code
-        # is retired and the relay refused code_sent_to_bound_account. The attempt is kept by
-        # its channel message like a binding attempt, so a redelivery is a duplicate that
-        # writes nothing (the digits, retired now, would otherwise land as a message). The
-        # pepper is read only here, past the steward and binding checks; without it no code
-        # can be checked or bound, and six digits are a plain message.
-        digits, pepper = body.strip(), None
-        if len(digits) == 6 and digits.isascii() and digits.isdigit():
-            pepper = self._pepper_value()
-        codes = [_code_hash(pepper, name, digits) for name in CHANNELS] if pepper else []
-        live = [row for row in conn.execute(
-            f"SELECT code_hash,channel,expires_at FROM state_owner_channel_codes WHERE code_hash IN "
-            f"({','.join('?' * len(codes))}) AND used_at IS NULL AND retired_at IS NULL", codes).fetchall()
-            if datetime.fromisoformat(row["expires_at"]) > moment] if codes else []
-        if live:
-            conn.execute("UPDATE state_owner_channel_codes SET retired_at=? WHERE code_hash=?",
-                         (moment.isoformat(), live[0]["code_hash"]))
+        # A LIVE binding code the bound owner's message carries - ANYWHERE in it, not only
+        # as the whole body - is never written: the code is retired and the relay refused
+        # code_sent_to_bound_account. The attempt is kept by its channel message like a
+        # binding attempt, so a redelivery is a duplicate that writes nothing (the digits,
+        # retired now, would otherwise land as a message). The pepper is read only here,
+        # past the steward and binding checks; a text carrying no six-digit run reads no
+        # secret and can carry no code.
+        live = self.code_in_text(conn, body, moment)
+        if live is not None:
+            conn.execute("UPDATE state_owner_channel_codes SET retired_at=? WHERE code_hash=? "
+                         "AND used_at IS NULL AND retired_at IS NULL",
+                         (moment.isoformat(), live["code_hash"]))
             conn.execute("INSERT INTO state_owner_channel_bind_attempts(channel,sender_ref,channel_message_ref,"
                          "outcome,at) VALUES(?,?,?,?,?)",
                          (channel, sender_ref, channel_message_ref, "code_sent_to_bound_account", moment.isoformat()))
             log.warning("owner channel code retired: sent as a message from the bound account channel=%s "
-                        "code_channel=%s sender_ref=%s at=%s", channel, live[0]["channel"], sender_ref,
+                        "code_channel=%s sender_ref=%s at=%s", channel, live["channel"], sender_ref,
                         moment.isoformat())
             return {"refused": "code_sent_to_bound_account"}
         self.store._project(conn, home)
@@ -439,7 +573,7 @@ class StateChannels:
         self.steward._record(conn, "relay_owner_message:ref", ref_key, request_hash, result)
         return result
 
-    def _settle(self, first, channel, sender_ref, channel_message_ref):
+    def _settle(self, first, channel, sender_ref, channel_message_ref, actor=None):
         """Decide the approval a relayed message carries and put the answer in its two
         ledger records: {message_id, duplicate: false, approval}. Re-entry is safe - the
         decision checks the proposal's status and version in its own write transaction -
@@ -447,7 +581,9 @@ class StateChannels:
         decision, or the ledger write failed) is answered as that decision, not as
         proposal_not_open. None while the first delivery is still running it. A failing
         ledger write is raised: the decision stands in the proposal, the channel retries
-        on the failure, and that redelivery records the answer and sends the line."""
+        on the failure, and that redelivery records the answer and sends the line.
+        `actor` is whose ledger rows these are (the steward driver's, by default this
+        service's): a start settles rows the stopped process wrote under its own actor."""
         pending = first["pending"]
         carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
                    "phrase": pending["phrase"]}
@@ -464,7 +600,7 @@ class StateChannels:
             # Only records still pending: a concurrent settle that got there first stands.
             conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND operation IN "
                          "('relay_owner_message','relay_owner_message:ref') AND result_json=?",
-                         (json.dumps(result), self.actor, json.dumps(first)))
+                         (json.dumps(result), actor or self.actor, json.dumps(first)))
         return result
 
     def _own_decision(self, pending, carrier):
@@ -496,6 +632,60 @@ class StateChannels:
             raise StateGraphError(f"channel_secret_missing: binding codes need the {drivers.PEPPER_SECRET_NAME} "
                                   "secret file (at least 32 characters)")
         return pepper
+
+    def code_in_text(self, conn, body, moment):
+        """The live binding code `body` carries ANYWHERE in it (its stored row, as
+        {code_hash, channel}), or None. The one rule both owner-message writers apply:
+        a code's plaintext is never stored, so the check is on the digit runs of a body
+        (digit_windows), never on the body's shape, and the code is looked up by its
+        keyed digest like a binding attempt (match_live_code).
+
+        Reads no secret for a body with no six-digit run (it can carry no code), and
+        reads no secret when no code is live either. With a live code and no pepper the
+        text cannot be checked and is refused channel_secret_missing - fail closed: a
+        copy of the State file must never be able to read the code out of stored text."""
+        windows = digit_windows(body)
+        if not windows:
+            return None
+        pepper = self._pepper_value()
+        live = live_codes(conn, moment)
+        if not live:
+            return None
+        if pepper is None:
+            raise StateGraphError(f"channel_secret_missing: a live binding code cannot be checked without the "
+                                  f"{drivers.PEPPER_SECRET_NAME} secret file (at least 32 characters); the text "
+                                  "was not stored")
+        return match_live_code(live, pepper, windows)
+
+    def refuse_owner_text_code(self, body):
+        """`send_user_conversation_message`'s half of the same rule: a live binding code
+        typed into the owner's conversation (any project's, any position in the body) is
+        retired and the message is refused code_sent_to_bound_account - it is never
+        written, and neither the message nor its request ledger row keeps the digits.
+        Called before the inbox writes anything, like the relay's own check."""
+        windows = digit_windows(body)
+        if not windows:
+            return
+        moment = _now()
+        with self.store.transaction() as conn:
+            live = live_codes(conn, moment)
+        if not live:
+            return
+        pepper = self._pepper_value()
+        if pepper is None:
+            raise StateGraphError(f"channel_secret_missing: a live binding code cannot be checked without the "
+                                  f"{drivers.PEPPER_SECRET_NAME} secret file (at least 32 characters); the message "
+                                  "was not written")
+        matched = match_live_code(live, pepper, windows)
+        if matched is None:
+            return
+        with self.store.transaction(write=True) as conn:
+            conn.execute("UPDATE state_owner_channel_codes SET retired_at=? WHERE code_hash=? "
+                         "AND used_at IS NULL AND retired_at IS NULL", (moment.isoformat(), matched["code_hash"]))
+        log.warning("owner channel code retired: typed into the owner's own conversation code_channel=%s at=%s",
+                    matched["channel"], moment.isoformat())
+        raise StateGraphError("code_sent_to_bound_account: a live binding code was typed into the owner's "
+                              "conversation; it is retired - issue a new one on the dashboard")
 
     @staticmethod
     def _log_refusal(code, channel, sender_ref, size):
@@ -725,7 +915,12 @@ class StateChannels:
         """`send_user_conversation_message`: the inbox writes the dashboard message; an
         owner session's exact phrase in the steward's conversation then decides a
         proposal like a relayed one (the owner's terminal, CLI_OWNER_ACTOR, may talk
-        to the steward but never approves - core.state_steward.is_owner_session)."""
+        to the steward but never approves - core.state_steward.is_owner_session).
+
+        This writer is held to the same rule as the relay: a live binding code the text
+        carries anywhere is retired and the message refused code_sent_to_bound_account,
+        before the inbox (and its request ledger) writes anything."""
+        self.refuse_owner_text_code(body)
         matched = {}
 
         def written(conn, message_id):

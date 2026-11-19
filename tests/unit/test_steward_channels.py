@@ -527,6 +527,98 @@ def test_a_live_code_sent_from_the_bound_account_is_refused_retired_and_never_wr
     refused(lambda: bind_message(world, code, "m-bind", channel=code_channel, sender="someone-else"), "code_retired")
 
 
+# The shapes a live code leaks in today: the digits inside other text, wherever they sit
+# (a label copied with the code, a sentence, a trailing thanks). Only the bare-digits body
+# was checked before, so every one of these was written verbatim into the conversation.
+CODE_IN_TEXT = ["binding code: {code}", "please use {code} to bind slack", "{code} thanks", "code {code}",
+                "this is my code {code} ok?", " {code}\n", "{code}"]
+
+
+@pytest.mark.parametrize("shape", CODE_IN_TEXT)
+@pytest.mark.parametrize("code_channel", ["slack", "wechat"])
+def test_a_live_code_anywhere_in_the_owners_message_is_refused_retired_and_never_written(
+        world, tmp_path, caplog, shape, code_channel):
+    """The rule core/state_channels wrote down ("a live binding code is never written")
+    held only for a body that IS six digits: `binding code: 711833` from the bound account
+    was written verbatim, so a copy of the State file within the code's 10 minutes handed
+    the code to whoever read it - the copy holder then bound their own account and decided
+    proposals. The check is on the digit runs a body carries, so every position is caught,
+    the code is retired, the attempt is kept by its channel message, and nothing of the
+    text (nor an unkeyed digest of it) reaches the State file."""
+    from core.state_steward import _hash
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    bind(world)
+    code = world.owner.channels.issue_code(code_channel)["code"]
+    body = shape.format(code=code)
+    refused(lambda: relay(world, body, "ts-code"), "code_sent_to_bound_account")
+    assert conversation(world) == [], "the code is not written as a message"
+    assert execute(world.steward, "list_driver_messages", {})["messages"] == [], "nor wakes the steward"
+    assert "code retired" in caplog.text and code not in caplog.text
+    # Redelivered (same key, or the channel message under another): a duplicate that writes nothing.
+    for key in (None, "another-key"):
+        assert relay(world, body, "ts-code", key=key) == {"message_id": None, "duplicate": True, "approval": None}
+    assert conversation(world) == []
+    conn = _copy(world, tmp_path)
+    forbidden = _unkeyed(code) | {_hash(["slack", SLACK_USER, "ts-code", body])}
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    assert code not in cell and not any(digest in cell for digest in forbidden), table
+    conn.close()
+    # Retired: the code binds no one now, from any account.
+    refused(lambda: bind_message(world, code, "m-bind", channel=code_channel, sender="someone-else"), "code_retired")
+
+
+@pytest.mark.parametrize("shape", ["wechat {code}", "binding code: {code}", "{code} thanks", "{code}"])
+@pytest.mark.parametrize("code_channel", ["slack", "wechat"])
+def test_a_live_code_typed_on_the_dashboard_is_refused_retired_and_never_written(world, tmp_path, caplog,
+                                                                                shape, code_channel):
+    """The other writer had no check at all: a live code typed into the dashboard
+    conversation was stored in driver_inbox_messages.body AND in
+    driver_inbox_requests.request_json (the request's payload), contradicting issue_code's
+    own promise that the plaintext exists only in its answer. It is refused before the
+    inbox writes anything, and the code - which the owner clearly meant to use - is retired."""
+    caplog.set_level(logging.WARNING, logger="core.state_channels")
+    bind(world)
+    code = world.owner.channels.issue_code(code_channel)["code"]
+    body = shape.format(code=code)
+    refused(lambda: execute(world.owner, "send_user_conversation_message",
+                            {"request_key": "d-code", "project_id": HOME, "body": body}, allow_write=True),
+            "code_sent_to_bound_account")
+    assert conversation(world) == [], "nothing is written"
+    assert "code retired" in caplog.text and code not in caplog.text
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM driver_inbox_requests WHERE request_key='d-code'").fetchone()[0] == 0
+    conn = _copy(world, tmp_path)
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        for row in conn.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    assert code not in cell, table
+    conn.close()
+    refused(lambda: bind_message(world, code, "m-steal", channel=code_channel, sender="intruder"), "code_retired")
+    # An ordinary dashboard message still goes through.
+    written = execute(world.owner, "send_user_conversation_message",
+                      {"request_key": "d-ok", "project_id": HOME, "body": "what is running?"}, allow_write=True)
+    assert [m["body"] for m in conversation(world)] == ["what is running?"] and written["message_id"]
+
+
+def test_six_digits_that_are_not_the_live_code_broken_up_or_full_width_are_ordinary_messages(world):
+    """The check must not swallow ordinary text: a five-digit run, the code broken up by a
+    space, and its full-width form carry no six ASCII digits of the code, so they are
+    messages - and the code stays live for the owner."""
+    bind(world)
+    code = world.owner.channels.issue_code("slack")["code"]
+    split = f"{code[:3]} {code[3:]}"
+    wide = "".join(chr(ord(digit) + 0xFEE0) for digit in code)
+    bodies = [code[:5], split, wide, f"my code is {split}", "order 123456 shipped"]
+    for index, body in enumerate(bodies):
+        assert relay(world, body, f"ts-{index}")["message_id"]
+    assert sorted(m["body"] for m in conversation(world)) == sorted(bodies)
+    assert bind_message(world, code, "m-ok")["bound"], "the code is still live"
+
+
 def test_a_relay_reads_the_pepper_only_for_the_bound_owners_six_digits(world, monkeypatch):
     """As for a bind (K-order): the code lookup's pepper read comes after the steward
     check and the binding check, never for a stranger's or a non-steward's relay."""
@@ -994,7 +1086,9 @@ def test_a_stop_while_the_approval_executes_is_answered_once_recover_settles_it(
             relay(world, "同意 proposal p-1", "ts-approve")
     assert proposal(world)["status"] == "executing"
     running = relay(world, "同意 proposal p-1", "ts-approve")
-    assert running == {"message_id": running["message_id"], "duplicate": True, "approval": None}
+    # No line yet - and retryable, so the channel asks again instead of counting it sent.
+    assert running == {"message_id": running["message_id"], "duplicate": True, "approval": None,
+                       "approval_pending": True}
     assert world.steward.steward.recover() == {"settled": 1}
     assert proposal(world)["status"] == "done"
     settled = relay(world, "同意 proposal p-1", "ts-approve")
@@ -1002,6 +1096,113 @@ def test_a_stop_while_the_approval_executes_is_answered_once_recover_settles_it(
     assert settled["approval"]["result"]["status"] == "done" and settled["approval"]["target"] == "gamma"
     assert relay(world, "同意 proposal p-1", "ts-approve") == {"message_id": settled["message_id"], "duplicate": True,
                                                               "approval": settled["approval"]}
+
+
+def test_a_delivery_while_the_decision_runs_is_retryable_not_terminal(world):
+    """The window the review measured: the host's State call times out at 30 s while the
+    decision keeps running, so the channel asks again - and was answered
+    {duplicate: true, approval: null}, which both plugins take as terminal (they only
+    retry `unavailable`). The decision then executed and the owner was told nothing. The
+    answer is now marked approval_pending: retryable, so the channel asks again and gets
+    the decision's line once the ledger holds it."""
+    import threading
+    bind(world)
+    plant_proposal(world)
+    gate, begun = threading.Event(), threading.Event()
+    real = world.steward.steward.execute_create_project
+
+    def slow(proposal_id):
+        begun.set()
+        gate.wait(10)
+        return real(proposal_id)
+
+    world.steward.steward.execute_create_project = slow
+    first = {}
+    worker = threading.Thread(target=lambda: first.update(out=relay(world, "同意 proposal p-1", "ts-approve",
+                                                                   key="relay-A")))
+    worker.start()
+    try:
+        assert begun.wait(10), "the first delivery began the decision"
+        assert proposal(world)["status"] == "executing"
+        second = relay(world, "同意 proposal p-1", "ts-approve", key="relay-B")
+        assert second["duplicate"] is True and second["approval"] is None
+        assert second.get("approval_pending") is True, second
+    finally:
+        gate.set()
+        worker.join(20)
+    assert first["out"]["approval"]["outcome"] == "executed"
+    # The retry after that answer carries the decision, so the line is sent (duplicate or not).
+    third = relay(world, "同意 proposal p-1", "ts-approve", key="relay-C")
+    assert third["duplicate"] is True and third["approval"]["outcome"] == "executed"
+    assert proposal(world)["status"] == "done" and proposal(world)["version"] == 3
+    assert len(conversation(world)) == 1, "one message, decided once"
+
+
+def _restart(world, monkeypatch):
+    """A new process over the same State file: the start's scan runs again."""
+    monkeypatch.setattr(state_channels, "_START_SETTLED", set())
+    return StateService(world.db, actor="driver:" + world.steward_row["driver_id"],
+                        driver_id=world.steward_row["driver_id"], project_read_trusted=True)
+
+
+def test_a_start_settles_the_relay_record_a_stop_left_pending(world, monkeypatch):
+    """f3's first window: the message and its `pending` ledger records commit, then the
+    process stops before the decision. recover() settles proposals, never the ledger, so
+    the approval stayed open forever and even a redelivery's answer was never recorded.
+    A start now settles the pending relay records: the approval is decided (as the
+    message that carried it) and both records hold the answer, so the redelivery the
+    channel sends gets it."""
+    bind(world)
+    plant_proposal(world)
+
+    def stop(*args, **kwargs):
+        raise Stopped()
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.channels, "_decide", stop)
+        with pytest.raises(Stopped):
+            relay(world, "同意 proposal p-1", "ts-approve")
+    assert proposal(world)["status"] == "open" and proposal(world)["decided_by"] is None
+    assert all("pending" in answer and answer["approval"] is None for answer in ledger(world).values())
+    # The restart: building the steward's service runs the start's scan.
+    fresh = _restart(world, monkeypatch)
+    assert fresh.channels is not None
+    assert proposal(world)["status"] == "done", "the start decided the approval the stop left"
+    assert proposal(world)["decided_by"] == f"owner:slack:{SLACK_USER}"
+    answers = ledger(world)
+    assert all(answer["approval"] and answer["approval"]["outcome"] == "executed" for answer in answers.values()), \
+        answers
+    assert all(answer["duplicate"] is False and "pending" not in answer for answer in answers.values())
+    # A redelivery now answers the decision (the channel's one line), and decides nothing again.
+    again = relay(world, "同意 proposal p-1", "ts-approve")
+    assert again["duplicate"] is True and again["approval"]["outcome"] == "executed"
+    assert proposal(world)["version"] == 3 and len(conversation(world)) == 1
+
+
+def test_a_start_settles_a_record_left_pending_after_the_decision_began(world, monkeypatch):
+    """The other half of the start's repair: a stop after decide_begin leaves the
+    proposal executing, so the start cannot answer yet - it leaves the record pending,
+    recover() settles the proposal, and the next service of the same start repairs the
+    ledger. Besides, the decision the stop left executed does not go unanswered."""
+    bind(world)
+    plant_proposal(world)
+
+    def stop(*args, **kwargs):
+        raise Stopped()
+    with monkeypatch.context() as patched:
+        patched.setattr(world.steward.steward, "execute_create_project", stop)
+        with pytest.raises(Stopped):
+            relay(world, "同意 proposal p-1", "ts-approve")
+    assert proposal(world)["status"] == "executing"
+    assert all("pending" in answer for answer in ledger(world).values())
+    assert _restart(world, monkeypatch) is not None
+    assert all("pending" in answer for answer in ledger(world).values()), "the decision is still executing"
+    assert world.steward.steward.recover() == {"settled": 1}
+    assert proposal(world)["status"] == "done"
+    _restart(world, monkeypatch)
+    answers = ledger(world)
+    assert all(answer["approval"] and answer["approval"]["outcome"] == "executed" for answer in answers.values()), \
+        answers
+    assert all("pending" not in answer for answer in answers.values())
 
 
 @pytest.mark.parametrize("age,outcome", [(timedelta(minutes=9, seconds=59), "executed"),

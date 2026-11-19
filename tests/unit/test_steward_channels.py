@@ -72,7 +72,14 @@ def bind(world, channel="slack", sender=SLACK_USER, key="bind-1"):
                    {"request_key": key, "channel": channel, "sender_ref": sender, "code": code}, allow_write=True)
 
 
-def relay(world, body, ref, key=None, channel="slack", sender=SLACK_USER, service=None, channel_at=None):
+NOW = object()
+
+
+def relay(world, body, ref, key=None, channel="slack", sender=SLACK_USER, service=None, channel_at=NOW):
+    """A relay as the host sends it. Both shipped channels date every message, so the
+    message is dated now unless the test says otherwise; channel_at=None sends none."""
+    if channel_at is NOW:
+        channel_at = state_channels._now().isoformat()
     return execute(service or world.steward, "relay_owner_message",
                    {"request_key": key or f"relay-{ref}", "channel": channel, "sender_ref": sender,
                     "channel_message_ref": ref, "body": body,
@@ -807,6 +814,33 @@ def test_an_approval_dated_ahead_of_now_by_more_than_two_minutes_is_refused(worl
     assert proposal(world)["status"] == ("done" if outcome == "executed" else "open")
 
 
+def test_an_undated_approval_is_refused_approval_undated_and_the_message_is_still_written(world):
+    """approval-semantics_f2: the age and skew bounds applied only when channel_at was
+    sent, so an undated phrase - from any channel that does not date its messages -
+    executed however late it arrived. An approval now needs the channel's time."""
+    bind(world)
+    plant_proposal(world)
+    out = relay(world, "同意 proposal p-1", "ts-1", channel_at=None)
+    assert out == {"message_id": out["message_id"], "duplicate": False,
+                   "approval": {"proposal_id": "p-1", "action": "approve", "outcome": "refused",
+                                "refusal": "approval_undated"}}
+    assert [m["message_id"] for m in conversation(world)] == [out["message_id"]], "the message is written either way"
+    assert proposal(world)["status"] == "open" and proposal(world)["decided_by"] is None
+    declined = relay(world, "拒绝 proposal p-1", "ts-2", channel_at=None)["approval"]
+    assert declined["refusal"] == "approval_undated" and proposal(world)["status"] == "open"
+    assert relay(world, "同意 proposal p-1", "ts-1", channel_at=None) == {**out, "duplicate": True}
+    dated = relay(world, "同意 proposal p-1", "ts-3", channel_at=state_channels._now().isoformat())
+    assert dated["approval"]["outcome"] == "executed" and proposal(world)["status"] == "done"
+
+
+def test_an_ordinary_message_needs_no_channel_time(world):
+    bind(world)
+    plant_proposal(world)
+    out = relay(world, "what is running?", "ts-1", channel_at=None)
+    assert out == {"message_id": out["message_id"], "duplicate": False, "approval": None}
+    assert [m["body"] for m in conversation(world)] == ["what is running?"]
+
+
 def test_channel_at_without_an_offset_is_utc_and_garbage_is_refused(world):
     bind(world)
     plant_proposal(world)
@@ -1038,7 +1072,8 @@ def test_a_relayed_start_approval_runs_the_driver_manager_on_the_apps_loop(world
     plant_proposal(world, kind="start_driver", payload={"project_id": "alpha"})
     r = client.post("/api/state/commands/relay_owner_message", headers=steward,
                     json={"request_key": "r", "channel": "slack", "sender_ref": SLACK_USER,
-                          "channel_message_ref": "ts", "body": "同意 proposal p-1"})
+                          "channel_message_ref": "ts", "body": "同意 proposal p-1",
+                          "channel_at": state_channels._now().isoformat()})
     assert r.status_code == 200, r.text
     assert r.json()["approval"]["result"]["status"] == "done", r.text
     assert calls == [("alpha", "aitelier", None, f"owner:slack:{SLACK_USER}")]

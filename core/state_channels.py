@@ -113,6 +113,9 @@ APPROVAL_MAX_AGE = timedelta(minutes=10)
 # (approval_clock_skew): without a bound on that side a skewed or wrong channel time
 # (now + 365 days) would pass the age check forever and quietly switch it off.
 APPROVAL_CLOCK_SKEW = timedelta(minutes=2)
+# Both bounds need the channel's time: an approval phrase relayed WITHOUT channel_at
+# decides nothing (approval_undated) - undated, it would execute however late it came.
+# The message is written either way; an ordinary message needs no time.
 MESSAGE_SOURCES_MAX = 200
 APPROVE, DECLINE = "同意 proposal ", "拒绝 proposal "
 DRIVER_KINDS = ("start_driver", "stop_driver")
@@ -291,8 +294,9 @@ class StateChannels:
         sender's: the same ref from another sender is another message, which goes
         through every check (an unbound sender is refused, never handed the owner's
         first result). `channel_at` is when the
-        channel says the message was written (else: now); it dates an approval phrase
-        and is not part of the request's identity (a redelivery may stamp it anew)."""
+        channel says the message was written; it dates an approval phrase - an approval
+        without it is refused approval_undated - and is not part of the request's
+        identity (a redelivery may stamp it anew)."""
         if channel not in CHANNELS:
             raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
         try:
@@ -352,6 +356,10 @@ class StateChannels:
                          (message_id, channel, sender_ref, channel_message_ref, moment.isoformat()))
             matched = match_phrase(conn, body)
             result = {"message_id": message_id, "duplicate": False, "approval": None}
+            if matched is not None and written_at is None:
+                result["approval"] = {"proposal_id": matched["proposal_id"], "action": matched["action"],
+                                      "outcome": "refused", "refusal": "approval_undated"}
+                matched = None
             self.steward._record(conn, "relay_owner_message", request_key, request_hash, result)
             # The per-message record: a second relay of this channel message (under any
             # request_key) answers the first result.
@@ -361,7 +369,7 @@ class StateChannels:
             carrier = {"channel": channel, "sender_ref": sender_ref, "channel_message_ref": channel_message_ref,
                        "phrase": matched["phrase"]}
             result = {**result, "approval": self._decide(matched, f"owner:{channel}:{sender_ref}", carrier,
-                                                         written_at or moment)}
+                                                         written_at)}
             with self.store.transaction(write=True) as conn:
                 conn.execute("UPDATE driver_inbox_requests SET result_json=? WHERE actor=? AND "
                              "((operation='relay_owner_message' AND request_key=?) OR "

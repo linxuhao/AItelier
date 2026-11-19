@@ -14,16 +14,19 @@ through the dispatch door went dark.
 Two independent over-refusals met in that clause, and each has its own witness
 below (so a fix for one cannot hide behind the other):
 
-* a followed helper that hands over neither an action nor a parameter cannot
-  move the dispatch identity — there is nothing to hand over;
-* a call that only BUILDS A VALUE (``str``, ``len``, a framework response
-  class) cannot run a State action in a body of its own, and its ARGUMENTS are
-  walked like any other expression, so an action handed to it is still seen.
+* a followed helper that hands over nothing at all — no delivered action, no
+  action parameter, no action site even in a discarded or yielded position —
+  cannot move the dispatch identity;
+* a call that only BUILDS A VALUE (``str``, ``len``, an eager response class)
+  cannot run a State action in a body of its own, and its ARGUMENTS are walked
+  like any other expression, so an action handed to it is still seen.
 
-The negatives are what keeps that narrowing from being a hole: a locally
-defined builder class, a subclass of a response class, ``eval``, a shadowed
-``str``, and a private action passed INTO a response constructor are all still
-refused.
+"By identity, never by name" is the whole safety argument, so the negatives pin
+the ways a NAME can lie: a local ``def``, a module global, a closure variable, a
+function-local import, a subclass of a response class, ``eval``, a private action
+passed INTO a response constructor, a helper whose own module binds
+``JSONResponse`` to something else, and a private action only a ``yield``
+carries. Each must still be refused.
 """
 from __future__ import annotations
 
@@ -69,19 +72,19 @@ def _namespace() -> dict:
             "_call": _call, "_Sneaky": _Sneaky, "_LeakyResponse": _LeakyResponse}
 
 
+def _register(name: str, source: str) -> str:
+    filename = f"<value_construction/{name}>"
+    linecache.cache[filename] = (len(source), None,
+                                 source.splitlines(keepends=True), filename)
+    return filename
+
+
 def _compiled(name: str, source: str, extra: dict | None = None):
     """Build a handler whose source ``inspect.getsource`` can read."""
     ns = _namespace()
     ns.update(extra or {})
-    filename = f"<value_construction/{name}>"
-    linecache.cache[filename] = (len(source), None,
-                                 source.splitlines(keepends=True), filename)
-    exec(compile(source, filename, "exec"), ns)
+    exec(compile(source, _register(name, source), "exec"), ns)
     return ns[name]
-
-
-def _busy_body(inner: str) -> dict:
-    return {"JSONResponse": JSONResponse, "str": str, "StateWriteBusy": StateWriteBusy}
 
 
 # ── the two over-refusals, each isolated ─────────────────────────────────────
@@ -183,20 +186,97 @@ def _private_action_inside_a_response_constructor():
          f"                                {{'project_id': {GEN_PID!r}}}))\n"))
 
 
-def _shadowed_builtin():
+def _shadowed_builtin_in_a_local_def():
+    """`str` is a nested `def` here: the reader's `_locals` branch decides, not identity."""
     return _compiled(
-        "h_shadowed_str",
-        ("def h_shadowed_str(action: str, arguments: dict, service=Depends(get_service)):\n"
+        "h_shadowed_str_local",
+        ("def h_shadowed_str_local(action: str, arguments: dict, service=Depends(get_service)):\n"
          "    def str(value):\n"
          f"        return execute(service, {PRIVATE_ACTION!r},\n"
          f"                       {{'project_id': {GEN_PID!r}}})\n"
          "    return _call(service, action, {'x': str(action)})\n"))
 
 
+def _shadowed_builtin_in_a_module_global():
+    """`str` bound to a State action runner in the module: identity must reject it."""
+    leaky = lambda value: execute(value, PRIVATE_ACTION, {"project_id": GEN_PID})
+    return _compiled(
+        "h_shadowed_str_global",
+        ("def h_shadowed_str_global(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return str(service)\n"),
+        {"str": leaky})
+
+
+def _shadowed_builtin_in_a_closure():
+    """`str` is a CLOSURE variable of the handler - the product's own layout."""
+    ns = _namespace()
+    ns["_leaky"] = lambda value: execute(value, PRIVATE_ACTION,
+                                         {"project_id": GEN_PID})
+    source = ("def _make(leaky):\n"
+              "    def str(value):\n"
+              "        return leaky(value)\n"
+              "    def h_closure(action: str, arguments: dict, service=Depends(get_service)):\n"
+              "        try:\n"
+              "            return _call(service, action, arguments)\n"
+              "        except StateWriteBusy:\n"
+              "            return str(service)\n"
+              "    return h_closure\n")
+    exec(compile(source, _register("h_closure", source), "exec"), ns)
+    return ns["_make"](ns["_leaky"])
+
+
+def _shadowed_builtin_by_a_local_import():
+    """`str` is a FUNCTION-LOCAL import of the action callable."""
+    return _compiled(
+        "h_shadowed_str_import",
+        ("def h_shadowed_str_import(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    from core.state_commands import execute as str\n"
+         "    return {'graph': _call(service, action, {}),\n"
+         f"            'mail': str(service, {PRIVATE_ACTION!r},\n"
+         f"                        {{'project_id': {GEN_PID!r}}})}}\n"))
+
+
+def _helper_whose_own_module_shadows_the_response_class():
+    """The helper lives where `JSONResponse` is a leaky subclass, not starlette's."""
+    handler_ns = _namespace()
+    helper_ns = dict(handler_ns)
+    helper_ns["JSONResponse"] = handler_ns["_LeakyResponse"]
+    helper_source = ("def _busy_response(exc):\n"
+                     "    return JSONResponse({'detail': 'busy'})\n")
+    exec(compile(helper_source, _register("helper_module", helper_source), "exec"),
+         helper_ns)
+    handler_ns["_busy_response"] = helper_ns["_busy_response"]
+    source = ("def h_cross_module(action: str, arguments: dict, service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy:\n"
+              "        return _busy_response(service)\n")
+    exec(compile(source, _register("h_cross_module", source), "exec"), handler_ns)
+    return handler_ns["h_cross_module"]
+
+
+def _private_action_a_yield_carries():
+    """The private body leaves through a generator the handler returns."""
+    return _compiled(
+        "h_yielded_tail",
+        ("def _tail(service):\n"
+         f"    yield execute(service, {PRIVATE_ACTION!r}, {{'project_id': {GEN_PID!r}}})\n"
+         "def h_yielded_tail(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    return [_call(service, action, arguments), _tail(service)]\n"))
+
+
 @pytest.mark.parametrize("build", [_local_builder_class, _response_subclass,
                                    _eval_in_a_delivered_position,
                                    _private_action_inside_a_response_constructor,
-                                   _shadowed_builtin])
+                                   _shadowed_builtin_in_a_local_def,
+                                   _shadowed_builtin_in_a_module_global,
+                                   _shadowed_builtin_in_a_closure,
+                                   _shadowed_builtin_by_a_local_import,
+                                   _helper_whose_own_module_shadows_the_response_class,
+                                   _private_action_a_yield_carries])
 def test_a_delivery_the_reader_cannot_explain_is_still_refused(build):
     binding = binding_for(build(), "get_graph", TEMPLATE)
     assert binding.ok is False, (binding,)

@@ -54,9 +54,8 @@ from typing import NamedTuple
 
 from core.state_commands import is_public_read
 from core.state_commands import execute as _execute
-from starlette.responses import (FileResponse, HTMLResponse, JSONResponse,
-                                 PlainTextResponse, RedirectResponse, Response,
-                                 StreamingResponse)
+from starlette.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
+                                 RedirectResponse, Response)
 
 # The attribute a route's endpoint carries its declaration on.
 DECLARATION_ATTR = "_state_route"
@@ -71,23 +70,28 @@ _ACTION_CALLABLES = ("execute", "_call")
 # ARGUMENTS exactly like any other expression, so an action handed to one is
 # still delivered: `return JSONResponse(execute(service, "get_driver_note", {}))`
 # is refused by the private-delivery branch, not excused here. What such a call
-# cannot do is run a State action in a body of its own - `str`/`len` are C code
-# and a framework response class only stores what it is given - so following it
-# found nothing, and refusing it made an ordinary `except ...: return
-# build_the_refusal(exc)` blind the whole action-dispatch family: one refusal
-# builder that wraps its body in `JSONResponse` turned
-# `POST /api/state/query/get_graph` into a 403 "state route declaration does not
-# match its handler" (iss-393c02b9ed844e04), while the same action over its own
-# GET route answered 200.
+# cannot do is run a State action in a body of its own - `str`/`len` are C code,
+# and these response classes format or package the value they are handed at
+# construction time - so following one found nothing, and refusing it made an
+# ordinary `except ...: return build_the_refusal(exc)` blind the whole
+# action-dispatch family: one refusal builder that wraps its body in
+# `JSONResponse` turned `POST /api/state/query/get_graph` into a 403 "state route
+# declaration does not match its handler" (iss-393c02b9ed844e04), while the same
+# action over its own GET route answered 200.
 #
-# Membership is by OBJECT IDENTITY, never by name: a handler that shadows `str`
-# with its own function, or subclasses a response class to run something in
-# `__init__`, resolves to a different object and stays fail-closed (opaque).
+# Membership is by OBJECT IDENTITY, never by name, and only for a name the
+# analyzed function resolves in ITS OWN module globals or in `builtins`. A name
+# the function binds itself (parameter, assignment, local import, walrus) or
+# closes over is NOT inert - the reader cannot see through that binding - and
+# neither is a subclass or a same-named function of the author's. `StreamingResponse`
+# and `FileResponse` are deliberately absent: they consume an iterator or a path
+# at send time, so "packages what it is handed at construction" is not true of them.
+# Adding an entry here is a claim that the callable cannot run a State action.
 _VALUE_CONSTRUCTORS = (str, repr, format, bytes, bool, int, float, len,
                        list, tuple, dict, set, frozenset, sorted, min, max,
                        abs, round)
 _RESPONSE_CONSTRUCTORS = (Response, HTMLResponse, PlainTextResponse, JSONResponse,
-                          RedirectResponse, StreamingResponse, FileResponse)
+                          RedirectResponse)
 _INERT_CALLABLES = _VALUE_CONSTRUCTORS + _RESPONSE_CONSTRUCTORS
 
 
@@ -154,6 +158,42 @@ def _action_slot(node: ast.Call, resolver=None) -> ast.expr | None:
     return None
 
 
+def _bound_names(function) -> set[str]:
+    """Every name BOUND inside `function`, at any depth.
+
+    Parameters, assignment and walrus targets, `for`/`with`/`except` targets,
+    imports, nested `def`/`class` names and comprehension targets. A name in
+    this set is NOT whatever a module global or a builtin of the same name is -
+    `str` may be a local `def`, a function-local import or a loop variable - so
+    the reader may not explain a call to it by identity. Erring towards
+    OVER-counting is correct here: a false positive only refuses.
+    """
+    names: set[str] = set()
+    arguments = getattr(function, "args", None)
+    if arguments is not None:
+        for argument in (list(arguments.posonlyargs) + list(arguments.args)
+                         + list(arguments.kwonlyargs)
+                         + [arguments.vararg, arguments.kwarg]):
+            if argument is not None:
+                names.add(argument.arg)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+    return names
+
+
 def _static_truth(test: ast.expr) -> bool | None:
     """The truth value of a statically decidable test, else None."""
     if isinstance(test, ast.Constant):
@@ -175,7 +215,7 @@ class _Analysis:
     resolver cannot explain is OPAQUE — see `_delivery_of`.
     """
 
-    def __init__(self, source: str, resolver=None, depth: int = 0):
+    def __init__(self, source: str, resolver=None, depth: int = 0, closure=()):
         tree = ast.parse(textwrap.dedent(source))
         function = next((node for node in tree.body
                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
@@ -190,6 +230,14 @@ class _Analysis:
         self._resolver = resolver
         self._depth = depth
         self.followed = False
+        # Anything this function BINDS or closes over shadows a module global or a
+        # builtin of the same name, so neither may be used to explain a call to it.
+        self._bound = _bound_names(function)
+        self._closure = set(closure)
+        # Set when the body names an action site at all - delivered, discarded or
+        # yielded. A helper that does that hands over SOMETHING, even if no
+        # `return` carries it.
+        self.saw_action_site = False
 
     def run(self) -> "_Analysis":
         self._walk_block(self._body)
@@ -246,6 +294,7 @@ class _Analysis:
                 slot = _action_slot(node)
                 if slot is None:
                     continue
+                self.saw_action_site = True
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
                     continue  # discarded delivery: binds nothing
                 if isinstance(slot, ast.Name):
@@ -263,6 +312,7 @@ class _Analysis:
                 continue
             slot = _action_slot(node, self._resolver)
             if slot is not None:
+                self.saw_action_site = True
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
                     self.delivered.add(slot.value)
                 elif isinstance(slot, ast.Name):
@@ -303,8 +353,13 @@ class _Analysis:
         handler's OWN globals - and only then compared by identity with the
         constructors above. A handler that binds the name to something else (a
         function of its own, a subclass of a response class) resolves to a
-        different object and is NOT inert.
+        different object and is NOT inert. Neither does a name this function
+        BINDS or CLOSES OVER: `str` may be a local `def`, a function-local
+        import or a walrus target, and the reader cannot see through a binding
+        it did not resolve.
         """
+        if name in self._bound or name in self._closure:
+            return False
         target = None
         if self._resolver is not None:
             try:
@@ -338,23 +393,34 @@ class _Analysis:
             source = inspect.getsource(target)
         except (OSError, TypeError):
             return False
+        # The helper's body resolves names where the HELPER lives, not where the
+        # handler lives: a module that binds `JSONResponse` to its own class must
+        # not be read through the handler's module, where the name may mean
+        # starlette's class.
+        helper_globals = getattr(target, "__globals__", None)
+        resolver = (helper_globals.get if isinstance(helper_globals, dict)
+                    else self._resolver)
+        freevars = getattr(getattr(target, "__code__", None), "co_freevars", ())
         try:
-            sub = _Analysis(source, resolver=self._resolver,
-                            depth=self._depth + 1).run()
+            sub = _Analysis(source, resolver=resolver, depth=self._depth + 1,
+                            closure=freevars).run()
         except (SyntaxError, IndentationError, ValueError, RecursionError):
             return False
         # Record that this handler's action sites were reached THROUGH an
         # intermediate call: the judged parameter is not handed to the action
         # site directly, so the dispatch identity can no longer be trusted.
         #
-        # Only a helper that DELIVERS something can move that identity. A helper
-        # that hands over neither an action nor a parameter - a refusal builder
-        # called from an `except` clause - is followed for its own deliverable
-        # set, which is empty, so the dispatch stays where it was. Counting it
-        # was the second half of iss-393c02b9ed844e04: together with the refusal
-        # builder's own JSONResponse body it made every public action on
+        # Only a helper that HANDS SOMETHING OVER can move that identity: a
+        # delivered action, an action parameter, an action site it names without
+        # returning it (a discarded call, a `yield`), a helper of its own, or a
+        # delivery it could not explain. A refusal builder called from an
+        # `except` clause hands over none of those - it formats a message and
+        # returns it - so the dispatch identity stays where it was. Counting it
+        # was the second half of iss-393c02b9ed844e04: together with that
+        # builder's own `JSONResponse(...)` body it made every public action on
         # `POST /api/state/query/{action}` an unverifiable declaration.
-        if sub.delivered or sub.params:
+        if (sub.delivered or sub.params or sub.opaque or sub.followed
+                or sub.saw_action_site):
             self.followed = True
         self.delivered |= sub.delivered
         self.params |= sub.params
@@ -371,8 +437,10 @@ def delivered_actions(handler) -> Delivery:
         return Delivery(frozenset(), frozenset(), False, False, False)
     try:
         globals_map = getattr(handler, "__globals__", None)
+        freevars = getattr(getattr(handler, "__code__", None), "co_freevars", ())
         analysis = _Analysis(source,
-                             resolver=(globals_map.get if globals_map else None)).run()
+                             resolver=(globals_map.get if globals_map else None),
+                             closure=freevars).run()
     except (SyntaxError, IndentationError, ValueError):
         return Delivery(frozenset(), frozenset(), False, False, False)
     return Delivery(frozenset(analysis.delivered), frozenset(analysis.params),

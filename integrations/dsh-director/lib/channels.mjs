@@ -216,7 +216,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       owedAt: text(previous?.owedAt) ? previous.owedAt : new Date().toISOString() });
     // Past the bound, a record WITHOUT a text goes first (it can owe no replayable line, only
     // a "send it again" notice; a stranger's message is always one), so a flood never pushes
-    // out the owner's owed line. Only a store of owner texts alone loses its oldest.
+    // out the owner's owed line. Only a store of owner texts alone loses its oldest. Such a
+    // record counts against the bound like any other - the drain now keeps one owed until its
+    // notice went out, so it may hold its slot for good; being counted, and being the victim
+    // chosen first here, is what keeps it from ever costing the owner a texted line.
     if (owed.size > limits.owedMax) {
       let victim = owed.keys().next().value;
       for (const [candidate, record] of owed) if (typeof record.text !== 'string') { victim = candidate; break; }
@@ -497,14 +500,28 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         if (typeof message.text !== 'string' && held.has(owedKey(message))) continue;
         if (typeof message.text !== 'string') {
           // The host never judged this body, so there is nothing to ask again: the bound
-          // owner is told once that it has to be sent again, a stranger is told nothing, and
-          // either way the record is done - retrying it could only repeat a line or answer a
-          // stranger, and the body itself was never written down to replay.
-          try {
-            if ((await binding(message.channel))?.sender_ref === message.senderRef)
-              await answer(message.channel, replies.unknowable, { replyToRef: message.messageRef, to: message.senderRef });
-          } catch (error) { log('channel_owed_failed', { channel: message.channel, error: short(error) }); }
-          forget(owedKey(message));
+          // owner is told that it has to be sent again, a stranger is told nothing. A stranger
+          // owes no line at all, so that record is done; the owner's is done only once the
+          // notice actually went out (answer reports a failed send, tried a bounded number of
+          // times, and then says so instead of counting it sent) - the same invariant the
+          // with-text branch below keeps. Until then it stays owed and this drain asks again on
+          // its own owedMs tick: this drain runs at ready(), and a channel registers LATER
+          // (Slack's socket-mode connect, the WeChat bridge's probe), so at the first drain
+          // there is often nothing that could send the line at all.
+          let owner;
+          try { owner = (await binding(message.channel))?.sender_ref === message.senderRef; }
+          catch (error) {
+            // The binding cannot be read: whether a line is owed here is unknown, and an
+            // unknown debt is not a settled one - the record stays for the next drain.
+            log('channel_owed_failed', { channel: message.channel, error: short(error) });
+            continue;
+          }
+          if (!owner) {
+            log('channel_owed_dropped', { channel: message.channel, reason: 'not_bound' });
+            forget(owedKey(message));
+          } else if (await answer(message.channel, replies.unknowable, { replyToRef: message.messageRef, to: message.senderRef }))
+            forget(owedKey(message));
+          else log('channel_owed_held', { channel: message.channel, reason: 'not_sent' });
           continue;
         }
         try { await handle(message); }

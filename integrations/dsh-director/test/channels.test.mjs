@@ -428,6 +428,46 @@ test('a text the host will not keep is owed without it, and its sender is told t
   second.channels.stop();
 });
 
+test('a "send it again" line that could not be sent keeps the record owed: the first drain runs before a channel registers', async () => {
+  // The normal boot order this is about: ready() drains at the host's start, a channel plugin
+  // registers later (Slack's socket-mode connect, the WeChat bridge's probe). The record here
+  // is a stop's leftover without a body - the host never judged that text, so no line can be
+  // replayed and the owner has to be told to send it again.
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  writeFileSync(file, JSON.stringify({ 'slack\nU-OWNER\nb-1': { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'b-1',
+    owedAt: new Date().toISOString() } }), { mode: 0o600 });
+  const fake = fakeHost(), logs = [];
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, answerRetryMs: 1 }, owedFile: file });
+  channels.ready();
+  await channels.pollOwed();
+  assert.deepEqual(owed(file).map(message => message.messageRef), ['b-1'],
+    'no channel is registered, so nothing was sent and the record is still owed');
+  assert.deepEqual(logs.filter(([event]) => event === 'channel_answer_failed'), [], 'no line was reported sent');
+  assert.ok(logs.some(([event, fields]) => event === 'channel_answer_skipped' && fields.reason === 'not_registered'));
+  assert.ok(logs.some(([event, fields]) => event === 'channel_owed_held' && fields.reason === 'not_sent'),
+    'the drain says so instead of forgetting it');
+  // The channel registers, but its send fails: a failed notice is no notice either.
+  const sent = [];
+  let broken = true;
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }),
+    async send(text, options) { if (broken) throw new Error('socket closed'); sent.push({ text, options }); return { ref: 'r-' + sent.length }; } });
+  await channels.pollOwed();
+  assert.equal(sent.length, 0);
+  assert.equal(logs.filter(([event]) => event === 'channel_answer_failed').length, CHANNEL_LIMITS.answerAttempts,
+    'the send was tried its bounded number of times and reported unsent');
+  assert.deepEqual(owed(file).map(message => message.messageRef), ['b-1'], 'the record is still owed, not lost');
+  // The send works now: the notice goes out once, and only then does the record leave the store.
+  broken = false;
+  await channels.pollOwed();
+  assert.deepEqual(sent.map(line => line.text), [channelReplies.unknowable], 'the owner is told, in one line');
+  assert.deepEqual(sent[0].options, { replyToRef: 'b-1', to: 'U-OWNER' });
+  assert.deepEqual(owed(file), [], 'and the record is gone once the notice went out');
+  await channels.pollOwed();
+  assert.equal(sent.length, 1, 'and it is not sent twice');
+  channels.stop();
+});
+
 test('nothing is written down before the host has allowed it, whatever digits the text carries', async () => {
   const s = setup();
   // The host cannot answer at all: no permission, and no relay either.

@@ -926,3 +926,41 @@ export function deleteStewardSchedule(id: string, expectedVersion: number): Prom
 export function previewStewardSchedule(schedule: StewardScheduleSpec, tz: string): Promise<string[]> {
   return _post<{next_runs?: string[]}>('/api/steward/schedules/preview', {schedule, tz}).then(r => r.next_runs ?? []);
 }
+
+// ── Owner chat channels (plugin step 19, design 7.2). Owner session only: the
+//    plaintext bind code exists in exactly one response, the POST below.
+export type OwnerChannelName = 'slack' | 'wechat';
+export interface OwnerChannel {
+  channel: OwnerChannelName; bound: boolean; sender_ref: string | null;
+  bound_at: string | null; revoked_at: string | null; is_default: boolean | number;
+  /** What the steward's host last reported for this channel (and when); null when it reported nothing. */
+  status?: {connected: boolean; detail?: string | null; at?: string} | null;
+  /** While a WeChat login needs a scan: its QR as an SVG document (the backend checked it). */
+  qr_svg?: string | null;
+}
+export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null }
+export function listOwnerChannels(): Promise<OwnerChannels> {
+  return _get('/api/steward/channels');
+}
+export function createOwnerChannelCode(channel: OwnerChannelName): Promise<{code: string; expires_at: string}> {
+  return _post('/api/steward/channels/' + encodeURIComponent(channel) + '/code');
+}
+export function unbindOwnerChannel(channel: OwnerChannelName): Promise<unknown> {
+  return _del('/api/steward/channels/' + encodeURIComponent(channel));
+}
+export function setDefaultOwnerChannel(channel: OwnerChannelName | null): Promise<unknown> {
+  return _put('/api/steward/channels/default', {channel});
+}
+/** Where a steward-conversation message came from ('in') or was mirrored to ('out'). */
+export interface MessageSource {
+  direction: 'in' | 'out'; channel: OwnerChannelName; sender_ref: string | null;
+  channel_message_ref: string | null; at: string; error: string | null;
+}
+/** At most this many ids per request (the backend's bound). */
+export const MESSAGE_SOURCES_BATCH = 200;
+/** An id absent from the map came from (or stayed on) the dashboard. */
+export function stewardMessageSources(ids: string[]): Promise<Record<string, MessageSource>> {
+  return _get<{sources?: Record<string, MessageSource>}>(
+    '/api/steward/message-sources?ids=' + ids.map(encodeURIComponent).join(','))
+    .then(r => r.sources ?? {});
+}

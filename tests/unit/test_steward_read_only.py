@@ -142,7 +142,14 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "acknowledge_driver_message",
         # Step 16 (design-steward 7.4): the steward's own scheduled reminders; the
         # service writes only state_steward_schedules, for the steward of its own project.
-        "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule"}
+        "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
+        # Step 19 (design-steward 7.2): the steward's HOST relays what an owner chat channel
+        # received; each command checks the channel's bound account or the owner's code itself,
+        # and none approves on the steward's say (tests/unit/test_steward_channels.py).
+        "relay_owner_message", "bind_owner_channel", "record_channel_delivery",
+        # ...and reports each channel's status (a detail line, the WeChat login QR as a
+        # checked SVG) into its private status row, which only the owner's dashboard reads.
+        "report_channel_status"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

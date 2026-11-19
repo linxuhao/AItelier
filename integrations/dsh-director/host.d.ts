@@ -85,6 +85,20 @@ export interface DirectorApi {
    *  [{role: 'owner'|'steward', text}]) and runs the owner's own operations (forget,
    *  restore, purge, profile edits) through it - purge exists only here, never as a tool. */
   readonly memory?: unknown;
+  /** v1.2, capability `channels`: the host calls this after the root wrote message
+   *  `messageId` to its owner (replying to `replyTo` when given), with the text it wrote.
+   *  The director sends the same text on the owner's chat channel: a reply goes to the
+   *  channel the answered message came from, an unprompted message to the default channel
+   *  when one is set and bound, a reply to a dashboard message nowhere. Each message is
+   *  sent once and recorded with channels.recordDelivery, a failed send included; a send
+   *  is never retried. The delivery row is what keeps a message from being sent again
+   *  after a restart (channels.sourceOf), so a record that fails is retried a bounded
+   *  number of times (CHANNEL_LIMITS: 6 tries over about 30 s) as the same request, which
+   *  the host must take once; a refusal is not retried. A record that fails every try is
+   *  logged (channel_record_failed): within the process the message is still not sent
+   *  again, but after a restart a replay of the same message id would send it a second
+   *  time. Never rejects; without channels it resolves {mirrored: false}. */
+  ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -94,7 +108,7 @@ export interface DirectorHost {
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
   capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
-    | 'portfolio' | 'handoff' | 'proposals'>;
+    | 'portfolio' | 'handoff' | 'proposals' | 'channels'>;
   config: HostConfig;
 
   // ---- required ----
@@ -166,6 +180,77 @@ export interface DirectorHost {
     propose(proposal: { kind: string; payload: object; reason: string; supersedes?: string }, signal?: AbortSignal): Promise<object>;
     withdraw(withdrawal: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
   };
+  /** v1.2, design-steward 7.2: the owner's chat channels (Slack, WeChat). Declared, the
+   *  director provides the cordis service `ownerChannels` to channel plugins [none: the
+   *  service is not provided and channel plugins do not load]. The host owns who the owner
+   *  is and the conversation; the director only connects channel plugins to these:
+   *  - relay: one channel message from `senderRef` into the owner's conversation, exactly
+   *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
+   *    (channel, senderRef, messageRef): a redelivery answers the first result with
+   *    duplicate: true; the same messageRef from another sender is another message.
+   *    A redelivery of an approval phrase whose decision was lost (the host stopped
+   *    after writing the message, before the decision was recorded) runs the decision
+   *    now and answers it with duplicate: true and decided_on_replay: true; the director
+   *    then sends the decision's line, which it sends once per channel message. A
+   *    redelivery while the first delivery is still executing the approval answers
+   *    {duplicate: true, approval: null, approval_pending: true}: no line yet and NOT a
+   *    finished answer - the channel must ask again (it keeps the message owed), and a
+   *    later redelivery carries the decision. A channel that treats that answer as
+   *    terminal loses the owner's line; the shipped plugins retry it.
+   *    The host refuses a sender that is not the channel's current binding
+   *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
+   *    Unicode text (invalid_body), and too many messages (rate_limited), as
+   *    {refused: code}. `rate_limited` and `unavailable` are TRANSIENT: the message was
+   *    not taken, so a channel holds it and asks again with backoff (dropping it loses
+   *    the owner's message); every other refusal is final for that message.
+   *    When the text is exactly an approval phrase the host executes it
+   *    in code and says so in `approval`; the model never does. An executed decision
+   *    names the decided proposal's `kind` and `target` from the host's own record of it,
+   *    and its `result` is that proposal after the run: `status: 'failed'` when the run failed.
+   *    `at` is when the channel says the message was written (ISO 8601): a phrase written
+   *    too long ago decides nothing (approval refusal approval_too_old), nor one dated
+   *    more than two minutes ahead of the host's clock (approval_clock_skew), nor one
+   *    without `at` (approval_undated: the message is still written; a host may instead
+   *    answer {refused: 'approval_undated'}). A channel passes the time it was given and
+   *    never one of its own. The bound owner's message that is a live binding code is
+   *    refused code_sent_to_bound_account (the code is retired; the owner issues a new one).
+   *  - bind: a six-digit code the owner got on the dashboard, sent from the account to bind;
+   *    {bound: true} or {refused: invalid_code | code_expired | code_used | code_retired}
+   *    (code_retired: too many refused attempts at the channel's code; the owner issues a new one).
+   *    Idempotent by (channel, senderRef, messageRef): the same binding message delivered
+   *    again answers {bound, duplicate: true, refusal?} and counts nothing; relayed (its
+   *    sender is bound now) it answers {message_id: null, duplicate: true} and writes nothing.
+   *  - codeCheck (optional): may this text be kept in the plugin's durable owed store?
+    {store_text: boolean}. The host answers with its own rule for a live binding code - a
+    bound sender, and no code in the text in any rendering it folds - because the plugin
+    writes the owner's own words down before it relays them and must never write a code.
+    Absent (an older host), the plugin keeps no text: durability degrades, never a secret.
+  - sourceOf: where a message came from or went to: null for the dashboard, else
+   *    {direction: 'in'|'out', channel, sender_ref, channel_message_ref, at, error}.
+   *  - recordDelivery: that the root's message `messageId` was sent on `channel` (with the
+   *    channel's own ref) or failed (`error`).
+   *  - list: every channel's binding and the default channel for unprompted messages.
+ *  - reportStatus (optional): a channel's status changed - connected or not, a detail line
+ *    (at most 300 characters), and while a login needs a scan its QR as an SVG document
+ *    (`qrSvg`, a login token: shown to the owner, never logged). Called only on a change;
+ *    {refused: code} when the host will not take it. */
+  channels?: {
+    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
+      Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
+        outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object }; approval_pending?: boolean } | { refused: string; reason?: string }>;
+    bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
+      Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;
+    sourceOf(messageId: string, signal?: AbortSignal): Promise<null | { direction: 'in' | 'out'; channel: 'slack' | 'wechat';
+      sender_ref: string | null; channel_message_ref: string | null; at: string; error: string | null }>;
+    recordDelivery(delivery: { messageId: string; channel: 'slack' | 'wechat'; channelMessageRef?: string; error?: string },
+      signal?: AbortSignal): Promise<object>;
+    list(signal?: AbortSignal): Promise<{ channels: Array<{ channel: 'slack' | 'wechat'; bound: boolean; sender_ref: string | null;
+      bound_at: string | null; revoked_at: string | null; is_default: boolean }>; default_channel: 'slack' | 'wechat' | null }>;
+    codeCheck?(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string },
+      signal?: AbortSignal): Promise<{ store_text: boolean }>;
+    reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
+      Promise<object>;
+  };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role
    *  allowed_actions / notes) and a Promise or an invalid table refuses the start. */
@@ -179,4 +264,62 @@ export interface DirectorHost {
   texts?: Record<string, unknown>;
   /** Message source kinds and section names (persisted in session logs) [dsh-director-*]. */
   labels?: Record<string, string>;
+}
+
+/** The cordis service `ownerChannels` (provided only with the host's `channels`), what a
+ *  channel plugin injects. `register` returns the function that takes the channel back.
+ *  `send` is given the text and where it goes: `to` is the account it is for (the bound
+ *  owner, or the sender a binding answer is for), `replyToRef` the channel message it
+ *  answers when there is one; it resolves with the channel's own ref for the sent message.
+ *  `inbound` is one message that arrived; a text of exactly six digits from an account
+ *  that is not bound is a binding attempt. Nothing but the root's own message to its owner
+ *  and one-line answers about the sender's own message is ever sent. `status` is read when
+ *  the channel registers and every 30 s after; `qrSvg` is a login QR drawn as an SVG while
+ *  the channel needs a scan (it goes to the host's optional channels.reportStatus).
+ *
+ *  What a message still OWES survives the process: an `inbound` is written to a durable
+ *  owed store BEFORE the host is asked (`owedFile` in createOwnerChannels, mode 0600:
+ *  channel, sender, the message ref and the owner's own text), so a stop while the host call
+ *  is still in flight loses nothing - a decision runs longer than the client's own bound, so
+ *  a timeout there is ordinary, and the line it owes must still go out; a transient answer
+ *  and a decision whose line has not been sent yet leave it there too. It is re-asked at
+ *  `ready()` and every 30 s and cleared only once the line is actually sent or the host has
+ *  answered for good. A plugin must not answer a message it could not send and forget it -
+ *  the store is what a restart inherits.
+ *
+ *  The store must never hold a live binding code, the one secret the owner sends, and the
+ *  text is written down only when the host says it may be: `channels.codeCheck` answers
+ *  {store_text} with the same rule the relay applies (a bound sender, and no live code
+ *  anywhere in the text in any rendering the backend folds - NFKC, every Nd block, and the
+ *  code points unicodedata calls a digit). A digit rule of the client's own cannot do this:
+ *  a run of six digits refuses an approval whose proposal id carries one (ids are 20 hex
+ *  characters, about 38% of them carry such a run, and their line was lost outright), while
+ *  `\p{Nd}{6}` misses every folded rendering (superscripts, circled, dingbat: measured 99
+ *  code points) and wrote the live code down. Until the host says store_text the record is
+ *  kept WITHOUT the text: a stop in that window costs the sender one "send it again" line,
+ *  never a live code on disk. The store is 0600 in the director's own directory, never the
+ *  backend's world-readable database. An answer of `{duplicate: true, approval: null}` with no
+ *  `approval_pending` is read as finished (a backend that predates that marker cannot say
+ *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before
+ *  running a director plugin against an older backend. */
+export interface OwnerChannels {
+  register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
+    status(): { connected: boolean; detail?: string; qrSvg?: string } }): () => void;
+  inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
+    Promise<{ accepted: boolean; reason?: string }>;
+}
+
+/** What `createOwnerChannels` returns: `service` is the whole plugin-facing surface (it is
+ *  what the host provides as `ownerChannels`, so `register`/`inbound` and nothing else), and
+ *  the rest is the director's own control of it. `ready()` hands the host's handle in and
+ *  starts the status and owed polls; `pollStatus()`/`pollOwed()` are those polls' own steps;
+ *  `ownerMessageSent` mirrors the root's message to the owner; `stop()` ends both timers. */
+export interface OwnerChannelsHandle {
+  service: OwnerChannels;
+  ownerMessageSent(messageId: string, body: string, replyTo?: string): Promise<{ mirrored: boolean; reason?: string }>;
+  ready(): void;
+  pollStatus(): Promise<void>;
+  /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */
+  pollOwed(): Promise<void>;
+  stop(): void;
 }

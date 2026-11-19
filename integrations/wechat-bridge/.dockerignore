@@ -1,0 +1,6 @@
+# The image installs its own dependencies from package-lock.json (npm ci).
+node_modules
+*.test.mjs
+README.md
+run.sh
+test-fixtures

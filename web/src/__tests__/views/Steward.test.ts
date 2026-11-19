@@ -28,7 +28,7 @@ const api = vi.hoisted(() => ({
   listStewardProposals: vi.fn(), approveStewardProposal: vi.fn(), declineStewardProposal: vi.fn(),
   stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(),
   listStewardSchedules: vi.fn(), createStewardSchedule: vi.fn(), updateStewardSchedule: vi.fn(),
-  deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(),
+  deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(), stewardMessageSources: vi.fn(),
 }));
 // The real module underneath, so ApiError is the class the components check.
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
@@ -101,6 +101,7 @@ beforeEach(() => {
   api.listStewardProposals.mockImplementation(async (status: string) =>
     status === 'open' ? [proposal(), proposal({proposal_id: 'p2'})] : [proposal()]);
   api.stewardProposalImpact.mockResolvedValue({running_subagents: [], unsettled_attempts: []});
+  api.stewardMessageSources.mockResolvedValue({});
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -170,7 +171,7 @@ describe('the steward card', () => {
     await fireEvent.click(pinned);
     const pane = await view.findByRole('complementary');
     await waitFor(() => expect(api.dshDriverConversation).toHaveBeenCalledWith('aitelier-home'));
-    for (const name of ['Proposals', 'Open questions by project', 'Reminders', 'Profile']) {
+    for (const name of ['Proposals', 'Open questions by project', 'Reminders', 'Channels', 'Profile']) {
       expect(within(pane).getByRole('tab', {name})).toBeTruthy();
     }
   });

@@ -39,6 +39,10 @@ STEWARD_PRIVATE={'state_steward_proposals','state_steward_memory_requests'}
 # Step 16: a scheduled reminder's instruction is the owner's (or the steward's)
 # standing order to the steward, so the table is PRIVATE with its own canary too.
 STEWARD_SCHEDULE_PRIVATE={'state_steward_schedules'}
+# Step 19: the owner's bound chat accounts, the binding codes and the messages'
+# channel sources are PRIVATE, each with its own canary as well.
+CHANNEL_PRIVATE={'state_owner_channels','state_owner_channel_codes','state_message_sources',
+                 'state_owner_channel_status','state_owner_channel_bind_attempts'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 # Both history rows replay a pre-policy source out of the git object store, so
 # they need a checkout WITH history, not a docker daemon.
@@ -71,11 +75,11 @@ def old_sets():
            "worktree mounted without the shared repository has no objects)")
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
     assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC|ARCHIVE_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
-    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE) & set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def stored_director_event(service,project_id,event_type,delivery_id):
     """The one stored state_events row of this type for this delivery, payload decoded."""

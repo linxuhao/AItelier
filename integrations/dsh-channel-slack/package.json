@@ -1,0 +1,9 @@
+{
+  "name": "dsh-channel-slack",
+  "private": true,
+  "type": "module",
+  "description": "The owner's Slack direct messages as an owner channel (ownerChannels service). Its Slack SDK is installed with the DSH runtime (integrations/dsh-driver/package.json), not here.",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/slack.test.mjs"
+  }
+}

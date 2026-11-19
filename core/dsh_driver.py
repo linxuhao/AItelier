@@ -14,6 +14,7 @@ import sys
 import time
 import uuid
 
+from core.datadir import owner_secrets_dir
 from core.driver_credentials import read_token_file
 from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.off_loop_sqlite import retry_while_locked
@@ -293,6 +294,30 @@ def load_roles(path=None):
 RESERVED_ROLES = {"aitelier-home": "steward"}
 # The memory owner the steward's runtime is started for (AITELIER_DSH_MEMORY_USER).
 STEWARD_MEMORY_USER = "owner"
+# The steward's chat channel plugins (step 19, design-steward 7.2): each is loaded only
+# when the secret files it reads exist under ~/.aitelier-secrets (the plugins read them
+# from the same home), so a host without them runs exactly as before.
+CHANNEL_PLUGINS = {
+    "dsh-channel-slack": ("slack-app-token", "slack-bot-token"),
+    "dsh-channel-wechat": ("wechat-bridge-token",),
+}
+
+
+def enabled_channel_plugins(checkout=None):
+    """The channel plugin entries the steward's profile inserts: those whose secret files
+    all exist (and whose plugin is in this checkout - a secret alone must not name a
+    plugin DSH cannot load)."""
+    checkout = Path(checkout or Path(__file__).resolve().parents[1])
+    # Fixed to ~/.aitelier-secrets on purpose: the channel plugins read their tokens there
+    # (step 19 contract C, D), whatever AITELIER_SECRETS_DIR says for the rest of the DSH
+    # host (deploy/install_dsh_host.py). Moving one means moving all three together.
+    secrets = owner_secrets_dir()
+    entries = []
+    for plugin, files in CHANNEL_PLUGINS.items():
+        entry = checkout / "integrations" / plugin / "index.mjs"
+        if entry.is_file() and all((secrets / name).is_file() for name in files):
+            entries.append({"id": plugin, "name": str(entry)})
+    return entries
 
 
 def role_for_project(project_id):
@@ -621,7 +646,9 @@ class DshDrivers:
                     "serverName": "aitelier", "transport": "streamable-http",
                     "url": self.base_url.rstrip("/") + "/mcp",
                     "headers": {"X-AItelier-Driver-Token": "__DRIVER_TOKEN__"},
-                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}]) + extra},
+                    "failOnStartupError": True, "toolCallTimeoutMs": 960000}}]) + extra
+                # The steward's chat channels, each only when its secrets exist.
+                + (enabled_channel_plugins() if role == "steward" else [])},
         ]
         import yaml
         (profile / "cordis.patch.yml").write_text(yaml.safe_dump(patches, sort_keys=False).replace(

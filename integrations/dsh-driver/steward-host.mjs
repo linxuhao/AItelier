@@ -99,7 +99,8 @@ function privateInboxItem(row) {
   };
 }
 
-const textOf = message => [message.body, ...(message.segments ?? []).map(s => s.text)]
+/** A message as its owner reads it: the body, then each block's text. */
+export const textOf = message => [message.body, ...(message.segments ?? []).map(s => s.text)]
   .filter(t => typeof t === 'string' && t.trim()).join('\n\n');
 const older = (a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.message_id < b.message_id ? -1 : 1);
 
@@ -312,6 +313,9 @@ export function turnWatcher(onFinalText) {
   };
 }
 
+/** What an automatic reply stores: the steward's last words, clipped to what a message holds. */
+export const autoReplyBody = text => (text.length > 8000 ? text.slice(0, 7990) + '\n[…]' : text);
+
 /** A turn that was given an owner message ended with that message still unanswered: what
  *  the steward said last goes to the owner as the answer to the newest such message (the
  *  steward's words reach the owner only as a sent message). Not sent when the turn was not
@@ -324,7 +328,7 @@ export async function forwardFinalText({ request, project, me, text, input = '',
     .filter(m => input.includes(m.message_id));
   if (!waiting.length) return { forwarded: false };
   const newest = waiting.at(-1);
-  const body = text.length > 8000 ? text.slice(0, 7990) + '\n[…]' : text;
+  const body = autoReplyBody(text);
   try {
     const result = await request('/api/state/commands/send_user_message', { request_key: `auto-reply:${newest.message_id}`,
       project_id: project, subject: ('Re: ' + (newest.subject ?? '')).slice(0, 200), body, reply_to_message_id: newest.message_id }, signal);
@@ -475,6 +479,82 @@ export function issuesSummary(page) {
     ...(page.has_more === true ? { issues_next_after: page.next_after } : {}) };
 }
 
+/** The refusal code a State write answered with: the leading snake_case word of a 4xx
+ *  detail (`AItelier <path>: HTTP 422 "rate_limited: ..."`), or a `code` the answer names.
+ *  Anything else - a 5xx, a dropped connection - is not a refusal and stays an error. */
+export function refusalCode(error) {
+  const message = String(error?.message ?? error);
+  const named = /"code"\s*:\s*"([a-z][a-z0-9_]*)"/.exec(message) ?? /HTTP 4\d\d "([a-z][a-z0-9_]*)/.exec(message);
+  return error?.status >= 400 && error?.status < 500 && named ? named[1] : undefined;
+}
+
+/** The refusals the step 19 commands answer with. Any other named code, and an auth failure
+ *  (401/403), is not something the sender did: it is thrown, logged as a failure, never hidden
+ *  as a refusal (a 400 or 422 that names no code is invalid_request: channelOps). */
+export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'invalid_body', 'body_too_long', 'invalid_request', 'rate_limited',
+  'channel_sender_not_bound', 'approval_undated', 'code_sent_to_bound_account', 'idempotency_conflict', 'invalid_code', 'code_used', 'code_expired', 'code_retired', 'unknown_message', 'delivery_recorded',
+  'detail_too_long', 'qr_svg_too_large', 'qr_svg_refused']);
+
+/** Design-steward 7.2: the host side of the owner's chat channels, over the State commands
+ *  and queries of step 19 (relay_owner_message, bind_owner_channel, record_channel_delivery,
+ *  report_channel_status, list_owner_channels, message_sources). The server checks
+ *  everything again - the binding, the bounds, the approval phrase, the QR image; this only
+ *  maps the plugin's calls onto it. A refusal is {refused: code}; a failure that is not one
+ *  (5xx, transport) is thrown for the plugin to log.
+ *  Request keys derive from the channel's own message identity (its sender and ref), so a
+ *  redelivered channel message is State's replay, never a second owner message, and another
+ *  sender's message with a colliding ref is its own request, judged on its own. A status report is called only
+ *  on a change (the plugin's ownerChannels), so each gets its own key: a status that comes
+ *  back later is a new report, not a replay of the first. Its detail and QR are never logged. */
+export function channelOps(request) {
+  const refused = error => {
+    const code = refusalCode(error);
+    if (CHANNEL_REFUSALS.has(code)) return { refused: code };
+    // A 400 or 422 that names no code at all - a validation 422 whose detail is a list of
+    // field errors (a sender_ref over 200 characters, say) - fails the same way every time
+    // it is sent: it is the request's own fault, refused invalid_request, so a channel moves
+    // on instead of retrying that one message and holding its lane. A named code these
+    // commands never answer, an auth failure (401/403) and any other codeless 4xx (404,
+    // 405, 408, 409, 413, 429: a wrong route, a timeout, a busy server) stay errors as above.
+    if (code === undefined && (error?.status === 400 || error?.status === 422)) return { refused: 'invalid_request' };
+    throw error;
+  };
+  const answered = response => {
+    const result = response?.result ?? response ?? {};
+    return result.code && !result.message_id && !result.bound ? { refused: String(result.code) } : result;
+  };
+  return {
+    relay: ({ channel, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_owner_message', {
+      request_key: `relay:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
+      body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
+    // The channel client's one question before it writes the owner's own words down: may
+    // this text be kept? The host's own rule answers it (a bound sender, and no live binding
+    // code in the text in ANY rendering - core/state_channels.py:_store_text_verdict), so the
+    // client never has to guess with a digit rule of its own. Nothing is relayed or recorded.
+    codeCheck: ({ channel, senderRef, messageRef, text }, signal) => request('/api/state/commands/relay_owner_message', {
+      request_key: `relay-check:${channel}:${digest(senderRef + '\n' + messageRef)}`, precheck: true, channel,
+      sender_ref: senderRef, channel_message_ref: messageRef, body: text }, signal)
+      .then(answered, refused),
+    bind: ({ channel, senderRef, code, messageRef }, signal) => request('/api/state/commands/bind_owner_channel', {
+      request_key: `bind:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, code,
+      channel_message_ref: messageRef }, signal)
+      .then(answered, refused),
+    async sourceOf(messageId, signal) {
+      const listed = await request('/api/state/query/message_sources', { message_ids: [messageId] }, signal);
+      return (listed?.result ?? listed)?.sources?.[messageId] ?? null;
+    },
+    recordDelivery: ({ messageId, channel, channelMessageRef, error }, signal) => request('/api/state/commands/record_channel_delivery', {
+      request_key: `delivery:${messageId}:${channel}`, message_id: messageId, channel,
+      ...(channelMessageRef ? { channel_message_ref: channelMessageRef } : {}), ...(error ? { error: String(error).slice(0, 500) } : {}) }, signal)
+      .then(answered, refused),
+    list: signal => request('/api/state/query/list_owner_channels', {}, signal).then(r => r?.result ?? r),
+    reportStatus: ({ channel, connected, detail, qrSvg }, signal) => request('/api/state/commands/report_channel_status', {
+      request_key: `channel-status:${channel}:${Date.now()}:${digest(JSON.stringify([connected, detail ?? null, qrSvg ?? null]))}`,
+      channel, connected: connected === true, ...(typeof detail === 'string' && detail ? { detail } : {}),
+      ...(typeof qrSvg === 'string' && qrSvg ? { qr_svg: qrSvg } : {}) }, signal).then(answered, refused),
+  };
+}
+
 export function stewardOps({ request, project, me, stateDir }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
   return {
@@ -601,6 +681,7 @@ export function stewardOps({ request, project, me, stateDir }) {
       withdraw: ({ id, reason }, signal) => request('/api/state/commands/withdraw_steward_proposal',
         { request_key: `withdraw-proposal:${id}`, proposal_id: id, reason }, signal).then(r => r.result ?? r, refusedBy),
     },
+    channels: channelOps(request),
     async handoff({ projectId, text, citesUserMessageId }, signal) {
       if (typeof projectId !== 'string' || !projectId || projectId === project) return { refused: 'invalid_project', reason: 'name another project' };
       if (typeof text !== 'string' || !text.trim()) return { refused: 'empty_text' };

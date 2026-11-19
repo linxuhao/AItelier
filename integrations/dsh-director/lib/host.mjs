@@ -18,10 +18,10 @@ import { ROOT_ROLES } from './roles.mjs';
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
 export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory',
-  'portfolio', 'handoff', 'proposals'];
+  'portfolio', 'handoff', 'proposals', 'channels'];
 /** v1.2 (plugin step 12): what each object-shaped capability must implement. */
 const OBJECT_OPS = { attention: ['ask', 'close', 'list'], memory: ['ownerMessage'], portfolio: ['projects', 'project', 'conversation'],
-  proposals: ['propose', 'withdraw'] };
+  proposals: ['propose', 'withdraw'], channels: ['relay', 'bind', 'sourceOf', 'recordDelivery', 'list'] };
 /** The states a work item can be in (aligned with MCP Tasks / A2A task states). */
 export const WORK_STATES = ['working', 'input_required', 'completed', 'failed', 'cancelled', 'unknown'];
 /** States after which nothing of the work item may run again. */
@@ -133,6 +133,7 @@ export const optionalDefaults = Object.freeze({
   portfolio: undefined,                // no cross-project view: the portfolio tools are not registered
   handoff: undefined,                  // no handoff channel: handoff is not registered
   proposals: undefined,                // no proposals: propose / withdraw_proposal are not registered
+  channels: undefined,                 // no owner chat channels: the ownerChannels service is not provided
 });
 
 /** Whether a work state means nothing of that work may run again. */

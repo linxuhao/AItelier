@@ -658,8 +658,13 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # owner's memory-request read, the decision endpoints, and the steward's wake
 # (a driver-inbox delivery carrying the result) - refuses the anonymous identity
 # and delivers neither canary. Step 16 adds state_steward_schedules: its list
-# query and the owner's schedule routes.
-STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules")
+# query and the owner's schedule routes. Step 19 adds the three channel tables:
+# both channel queries, the owner's channel routes and the steward's channel commands;
+# and the channels' status table: the owner's channel list with status, and the report;
+# and the remembered binding attempts, read by the steward's bind and relay commands.
+STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
+                  "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
+                  "state_owner_channel_status", "state_owner_channel_bind_attempts")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -692,6 +697,11 @@ def _steward_calls(svc):
         "read_memory_request": lambda: svc.steward.read_memory_request(C.STEWARD_MEMORY_REQUEST),
         "execute list_steward_schedules": lambda: execute(svc, "list_steward_schedules", {}),
         "list_schedules": lambda: svc.steward.list_schedules(),
+        "execute list_owner_channels": lambda: execute(svc, "list_owner_channels", {}),
+        "execute message_sources": lambda: execute(svc, "message_sources", {"message_ids": [C.CHANNEL_MESSAGE]}),
+        "list_owner_channels": lambda: svc.channels.list_owner_channels(),
+        "list_owner_channels with status": lambda: svc.channels.list_owner_channels(with_status=True),
+        "message_sources": lambda: svc.channels.message_sources([C.CHANNEL_MESSAGE]),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -747,6 +757,33 @@ class TestTheStewardReadersRefuseTheAnonymous:
                                                 "schedule": {"kind": "cron", "expr": "0 9 * * *"}}),
             ("PUT", f"/api/steward/schedules/{C.STEWARD_SCHEDULE}", {"expected_version": 1, "title": "t"}),
             ("DELETE", f"/api/steward/schedules/{C.STEWARD_SCHEDULE}?expected_version=1", None),
+            ("POST", "/api/state/query/list_owner_channels", {}),
+            ("POST", "/api/state/query/message_sources", {"message_ids": [C.CHANNEL_MESSAGE]}),
+            ("GET", "/api/steward/channels", None),
+            ("GET", f"/api/steward/message-sources?ids={C.CHANNEL_MESSAGE}", None),
+            ("POST", "/api/steward/channels/wechat/code", None),
+            ("DELETE", "/api/steward/channels/slack", None),
+            ("PUT", "/api/steward/channels/default", {"channel": "wechat"}),
+            ("POST", "/api/state/commands/relay_owner_message",
+             {"project_id": steward_project(), "request_key": "r", "channel": "slack", "body": "b",
+              "sender_ref": C.canary("state_owner_channels"), "channel_message_ref": "m"}),
+            ("POST", "/api/state/commands/bind_owner_channel",
+             {"project_id": steward_project(), "request_key": "b", "channel": "wechat", "sender_ref": "x",
+              "code": "123456"}),
+            # The canary's own remembered attempt, delivered again (bind and relay read it).
+            ("POST", "/api/state/commands/bind_owner_channel",
+             {"project_id": steward_project(), "request_key": "b2", "channel": "slack",
+              "sender_ref": C.canary("state_owner_channel_bind_attempts"), "code": "123456",
+              "channel_message_ref": C.canary("state_owner_channel_bind_attempts")}),
+            ("POST", "/api/state/commands/relay_owner_message",
+             {"project_id": steward_project(), "request_key": "r2", "channel": "slack", "body": "123456",
+              "sender_ref": C.canary("state_owner_channel_bind_attempts"),
+              "channel_message_ref": C.canary("state_owner_channel_bind_attempts")}),
+            ("POST", "/api/state/commands/record_channel_delivery",
+             {"project_id": steward_project(), "request_key": "d", "channel": "slack",
+              "message_id": C.CHANNEL_MESSAGE}),
+            ("POST", "/api/state/commands/report_channel_status",
+             {"project_id": steward_project(), "request_key": "s", "channel": "wechat", "connected": True}),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -769,6 +806,17 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 1
             assert [tuple(r) for r in conn.execute("SELECT version, deleted_at FROM state_steward_schedules")] \
                 == [(1, None)]
+            assert [tuple(r) for r in conn.execute("SELECT channel, revoked_at, is_default FROM "
+                                                   "state_owner_channels")] == [("slack", None, 1)]
+            assert [tuple(r) for r in conn.execute("SELECT code_hash FROM state_owner_channel_codes")] \
+                == [(C.canary("state_owner_channel_codes"),)]
+            assert [tuple(r) for r in conn.execute("SELECT message_id FROM state_message_sources")] \
+                == [(C.CHANNEL_MESSAGE,)]
+            assert [tuple(r) for r in conn.execute("SELECT channel, connected, detail FROM "
+                                                   "state_owner_channel_status")] \
+                == [("wechat", 0, C.canary("state_owner_channel_status"))]
+            assert [tuple(r) for r in conn.execute("SELECT outcome FROM state_owner_channel_bind_attempts")] \
+                == [("invalid_code",)]
 
 
 def _trusted_db(anonymous):

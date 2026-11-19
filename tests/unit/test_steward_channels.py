@@ -1082,6 +1082,46 @@ def test_a_driver_proposal_runs_the_driver_entry_or_is_refused_without_one(world
         "the confirmation record keeps the chat record"
 
 
+def test_an_approval_whose_driver_run_fails_is_answered_as_the_failed_proposal(world):
+    """The failed-run branch of the decision: the driver entry raises, the proposal ends
+    'failed' with the error, and the answer carries that failed proposal (the channel
+    says "approved, but it failed")."""
+    bind(world)
+    plant_proposal(world, kind="start_driver", payload={"project_id": "alpha"})
+
+    def runner(kind, project_id, actor):
+        raise RuntimeError("the driver would not start")
+    world.steward.steward.driver_runner = runner
+    approval = relay(world, "同意 proposal p-1", "ts-1")["approval"]
+    assert (approval["outcome"], approval["kind"], approval["target"]) == ("executed", "start_driver", "alpha")
+    assert approval["result"]["status"] == "failed"
+    assert approval["result"]["result"]["error"] == "RuntimeError: the driver would not start"
+    row = proposal(world)
+    assert row["status"] == "failed" and row["decided_by"] == f"owner:slack:{SLACK_USER}"
+    assert row["result"]["channel_message_ref"] == "ts-1", "the chat record stays on the failed row"
+
+
+@pytest.mark.parametrize("kind,archived_before,status", [("archive_project", False, "done"),
+                                                         ("unarchive_project", True, "done"),
+                                                         ("archive_project", True, "failed")])
+def test_an_archive_approval_runs_the_archive_as_the_bound_account(world, kind, archived_before, status):
+    """The archive branch of the decision: archive / unarchive run through the store's
+    archive write, recorded as the chat account that approved; a project already in
+    the asked state fails the proposal, untouched."""
+    bind(world)
+    if archived_before:
+        world.owner.store.set_project_archive("alpha", True, "owner:" + OWNER, "before")
+    plant_proposal(world, kind=kind, payload={"project_id": "alpha"})
+    approval = relay(world, "同意 proposal p-1", "ts-1")["approval"]
+    assert (approval["outcome"], approval["kind"], approval["target"]) == ("executed", kind, "alpha")
+    assert approval["result"]["status"] == status and proposal(world)["status"] == status
+    wanted = kind == "archive_project"
+    assert world.owner.store.is_project_archived("alpha") == (wanted if status == "done" else archived_before)
+    with world.db.get_connection() as conn:
+        actor = conn.execute("SELECT actor FROM state_project_archive WHERE project_id='alpha'").fetchone()[0]
+    assert actor == (f"owner:slack:{SLACK_USER}" if status == "done" else "owner:" + OWNER)
+
+
 # --- HTTP ------------------------------------------------------------------------------------
 
 @pytest.fixture

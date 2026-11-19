@@ -28,6 +28,7 @@ import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, pa
 import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
 import { RRF_K, VectorChannel, candidates, filterVectorFile, scanVectorFile } from './vector.mjs';
 import { git, gitOk } from './git.mjs';
+import { GrepHelper } from './grep-helper.mjs';
 import { due, turn } from './slices.mjs';
 import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
@@ -204,7 +205,8 @@ export class MemoryStore {
    *  date words in the index (design 3.8.1); read once here, so a process never mixes two.
    *  vector: {url, model, timeoutMs} - the local vector channel fused with BM25 (design 3.8.2;
    *  absent: off, the ranking is BM25's alone); vectorTuning: the worker's backoff and request
-   *  limit (tests). */
+   *  limit (tests); grepHelper: options for the resident grep helper (grep-helper.mjs; tests
+   *  hand it a broken helper on purpose). */
   static async open(o) {
     const store = new MemoryStore(o);
     await store.#boot();
@@ -213,7 +215,7 @@ export class MemoryStore {
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
     grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE,
-    vector, vectorTuning }) {
+    vector, vectorTuning, grepHelper }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
     const zoneProblem = memoryTimeZoneProblem(timeZone);
     if (zoneProblem) throw new Error('memory: ' + zoneProblem);
@@ -243,6 +245,9 @@ export class MemoryStore {
     this.queue = Promise.resolve();
     this.lockHeld = false;
     this.faults = faults; // test hooks: a crash point is a hook that throws or kills the process
+    // Design 3.8.2's 20 ms: grep is forked by this small resident helper, not by this process
+    // (grep-helper.mjs), and a search falls back to the direct spawn if it cannot serve.
+    this.grepHelper = new GrepHelper({ log: (event, fields) => this.log(event, fields), ...(grepHelper ?? {}) });
     if (vector !== undefined) {
       const vectorProblem = memoryVectorProblem({ vector, ...(ranked ? { remote: ranked } : {}) });
       if (vectorProblem) throw new Error('memory: ' + vectorProblem);
@@ -296,6 +301,11 @@ export class MemoryStore {
     this.vector?.startLoad();
     await this.#replaySpool();
     await this.#replayPending(true);
+    // Last, and while this process is still small: the grep helper is forked here, at open, so
+    // that the fork a search pays is that small process's and not one of however big this
+    // store grows (grep-helper.mjs). It never fails the open: a helper that cannot start only
+    // costs each search the direct spawn.
+    this.grepHelper.start();
   }
 
   /** f6: the takeover of a dead holder's lock is a rename to a name of our own (atomic: of
@@ -336,9 +346,11 @@ export class MemoryStore {
   }
 
   /** Release the process lock (the store is unusable afterwards); a lock that no longer
-   *  names this process is someone else's and is left alone. */
+   *  names this process is someone else's and is left alone. The resident grep helper goes
+   *  with it, so no process outlives its store. */
   async close() {
     this.vector?.close();
+    await this.grepHelper.close();
     await this.queue;
     if (!this.lockHeld) return;
     this.lockHeld = false;
@@ -929,9 +941,10 @@ export class MemoryStore {
     const q = String(query ?? '');
     if (!q.trim()) return { refused: 'empty_query' };
     const k = Math.max(1, Math.min(TOP_K_MAX, Number.isInteger(topK) ? topK : 10));
-    // grep's spawn is a fork of this process, a synchronous 12-15 ms at 100k entries (it
-    // grows with the RSS): it waits for a turn of its own (slices.mjs), not after the ranked
-    // answer's start (BM25, or the query's embedding request) nor beside a scan's slice.
+    // Asking the resident helper to grep is a pipe write, not a fork (grep-helper.mjs): the
+    // query still takes a turn of its own (slices.mjs), so the request goes out between a
+    // scan's slices - not after the ranked answer's start (BM25, or the query's embedding
+    // request) and not beside one.
     const [grep, ranked] = await Promise.all([turn().then(() => this.#grep(q, k)), this.#ranked(q, k)]);
     const answers = [{ name: 'grep', items: grep.items, omitted: [] }];
     if (ranked.items) answers.push({ name: 'ranked', items: ranked.items, omitted: [] });
@@ -1060,18 +1073,32 @@ export class MemoryStore {
   }
 
   /** grep's items, newest first, at most k: `{hit, entry}` for a log line (the entry as the
-   *  log holds it) and `{hit, entry: {text}, profileLine}` for a line of the profile. */
+   *  log holds it) and `{hit, entry: {text}, profileLine}` for a line of the profile.
+   *
+   *  The grep itself runs in the store's resident helper (grep-helper.mjs), asked for this very
+   *  argv, cwd, environment and umask wrapper: the fork costs 2-3 ms there instead of ~24 ms per
+   *  GiB of this process (design 3.8.2's 20 ms). A helper that cannot start, dies or stops
+   *  answering is logged and this query runs the direct spawn instead - the same command, taken
+   *  from the same gitSpawnSpec - so a search never fails because of the helper. */
   async #grep(query, k) {
     const source = 'grep · 字面匹配 · 本地记忆日志';
     const needle = JSON.stringify(query).slice(1, -1);
-    const matches = grepMatches(query, k);
-    const reader = recordReader(matches.take);
-    const r = await git(this.dir, ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'],
-      { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; }, onStdout: reader.push });
-    await reader.end();
+    const args = ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'];
+    // One collector per attempt, so a helper that dies mid-stream (or a fallback) leaves no
+    // half-taken record behind: what it streamed is dropped with its reader.
+    const attempt = () => {
+      const matches = grepMatches(query, k);
+      const reader = recordReader(matches.take);
+      return { matches, reader, options: { timeoutMs: this.grepTimeoutMs,
+        onSpawn: pid => { this.lastGrepPid = pid; }, onStdout: reader.push } };
+    };
+    let taken = attempt();
+    let r = await this.grepHelper.grep(this.dir, args, taken.options);
+    if (r.fallback) { taken = attempt(); r = await git(this.dir, args, taken.options); }
+    await taken.reader.end();
     return { source, complete: !r.killed && (r.code === 0 || r.code === 1),
       ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}),
-      items: matches.items() };
+      items: taken.matches.items() };
   }
 
   /** Design 3.8.1: a local ranked hit that shares no word with the query and only meets it

@@ -33,6 +33,36 @@ MARGIN_S = 2.0          # explicit slack on top of one interval
 LONG_STEP_S = 8.0       # the "gate": long next to INTERVAL_S + MARGIN_S
 OWNER = "alice@example.com"
 
+# The bounded wait for a claim handback to become OBSERVABLE. This is the same
+# idiom (constants, poll interval and `_awaited`) as
+# tests/unit/test_owner_stop_isolates_only_that_owner.py::_awaited, mirroring
+# that verified row: a cancellation is the TRIGGER, and the handback it performs
+# is a database write, so a row that asserts a fact about the claim ROW must
+# wait for the row to say so rather than sampling the instant the trigger
+# returned. Bounded, so a product that really never releases still makes the row
+# RED (after this long) instead of hanging the suite.
+_RELEASE_TIMEOUT_S = 10.0
+_POLL_S = 0.02
+
+
+async def _awaited(read, predicate):
+    """Poll `read()` until `predicate(value)`, bounded; return the last value.
+
+    A witness waits for the observation it measures. The deadline is a ceiling,
+    never the verdict: what the caller asserts afterwards is still a fact about
+    the product, and when it never becomes true the row fails on the value the
+    poll last saw, naming the wait it gave up on.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RELEASE_TIMEOUT_S
+    value = read()
+    while not predicate(value):
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(_POLL_S)
+        value = read()
+    return value
+
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
@@ -345,12 +375,29 @@ async def test_shutdown_cancels_detached_ticks_and_releases_their_claims(
             f"by the scheduler shutdown")
         assert all(t.cancelled() for t in done), \
             [t for t in done if not t.cancelled()]
-        after = rows()
+        # THE CANCELLATION IS THE TRIGGER, NOT THE OBSERVATION. Each claim is
+        # handed back by the code that runs while the cancelled tick unwinds
+        # (`except asyncio.CancelledError:` -> release_claim_on_cancel), and that
+        # handback is a database write: reading the rows the instant the tasks
+        # report `cancelled()` samples a moment the writes may not have reached
+        # yet, and the row then called a healthy product broken (it saw
+        # `status='claimed', release_count=0`). Wait, bounded, for the condition
+        # this row asserts - every claim back to `pending` with release_count 1 -
+        # and only then assert, on the value the wait last saw. Same idiom as
+        # tests/unit/test_owner_stop_isolates_only_that_owner.py::_awaited.
+        after = await _awaited(
+            rows,
+            lambda seen: all(r["status"] == "pending"
+                             and r["release_count"] == 1
+                             for r in seen.values()))
         for rid in runs.values():
             r = after[rid]
-            assert r["status"] == "pending", f"claim not handed back: {r}"
+            assert r["status"] == "pending", (
+                f"claim not handed back within {_RELEASE_TIMEOUT_S:g}s: {r}")
             assert r["retry_count"] == 0, f"retry budget charged: {r}"
-            assert r["release_count"] == 1, f"not released via release_claim: {r}"
+            assert r["release_count"] == 1, (
+                f"not released via release_claim within {_RELEASE_TIMEOUT_S:g}s: "
+                f"{r}")
         assert not sc._detached_ticks, "slots still held"
         assert not any(lk.locked() for lk in sc._tick_locks.values()), \
             "a project lock outlived its cancelled tick"

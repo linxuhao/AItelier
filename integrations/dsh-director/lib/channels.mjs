@@ -95,6 +95,9 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
  *    yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS }) {
   const registered = new Map(), told = new Map(), binds = new Map(), lanes = new Map(), answeredRefs = new Set();
+  // Channel messages this process handed to the host and got no answer for: whatever the
+  // host decided then, no line about it went out.
+  const unanswered = new Set();
   let ready;
   const started = new Promise(resolve => { ready = resolve; });
   const hostReady = () => within(started, limits.readyMs, 'host_not_ready');
@@ -226,12 +229,18 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         }
         return { accepted: false, reason };
       }
-      // A redelivered channel message was handled the first time, its answer included.
-      if (result?.approval && !result.duplicate)
+      // A decision is answered once per channel message (answer() keeps that within the
+      // process). A redelivery of a message whose line went out is not answered again; one
+      // whose line never went out is: this process got no answer the first time, or the
+      // host ran the decision only now (decided_on_replay: the first delivery's was lost).
+      const key = channel + '\n' + messageRef, lost = unanswered.delete(key);
+      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true))
         await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef });
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
       log('channel_inbound_failed', { ...seen, error: short(error) });
+      unanswered.add(channel + '\n' + messageRef);
+      if (unanswered.size > limits.answeredRefs) unanswered.delete(unanswered.values().next().value);
       return { accepted: false, reason: 'unavailable' };
     }
   };

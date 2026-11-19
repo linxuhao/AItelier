@@ -188,6 +188,10 @@ export interface DirectorHost {
    *    as a message the owner wrote on the dashboard (it wakes the root). Idempotent by
    *    (channel, senderRef, messageRef): a redelivery answers the first result with
    *    duplicate: true; the same messageRef from another sender is another message.
+   *    A redelivery of an approval phrase whose decision was lost (the host stopped
+   *    after writing the message, before the decision was recorded) runs the decision
+   *    now and answers it with duplicate: true and decided_on_replay: true; the director
+   *    then sends the decision's line, which it sends once per channel message.
    *    The host refuses a sender that is not the channel's current binding
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as
@@ -219,7 +223,7 @@ export interface DirectorHost {
  *    {refused: code} when the host will not take it. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
-      Promise<{ message_id: string | null; duplicate: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
+      Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
         outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object } } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
       Promise<{ bound: boolean; channel: string; sender_ref: string; duplicate?: boolean; refusal?: string } | { refused: string; reason?: string }>;

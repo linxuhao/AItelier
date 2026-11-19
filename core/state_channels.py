@@ -40,6 +40,8 @@ All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLE
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -151,17 +153,21 @@ def _now() -> datetime:
 
 
 def _code_hash(pepper: str, channel: str, code: str) -> str:
-    """A binding code as it is stored and looked up: HMAC-SHA256 keyed with the driver
-    pepper (core.drivers.token_hash, the driver tokens' own scheme), over the code and
-    the channel it was issued for. A copy of the State file (it is world-readable) must
+    """A binding code as it is stored and looked up: HMAC-SHA256 over the code and the
+    channel it was issued for, keyed with a subkey of the driver pepper for this one use,
+    HMAC-SHA256(pepper, 'owner-channel-code') - never the pepper itself, so the driver
+    tokens' digests (core.drivers.token_hash) stay a domain of their own. A copy of the
+    State file (it is world-readable) must
     not give the code away: an unkeyed digest of a 6-digit code is undone offline in
     under a second, after which the copy's holder binds their own account and approves
     proposals over chat. Keyed, the 10^6 candidates cannot be tried without the pepper,
     and online guessing stays bounded at BIND_FAILURES_MAX per code.
 
-    Rows written before this (an unkeyed sha256) match no code: they expire with their
-    CODE_TTL, and the owner's next issue_code deletes an unused one anyway."""
-    return drivers.token_hash(pepper, f"owner-channel-code:{channel}:{code}")
+    Rows written before this (an unkeyed sha256, or keyed with the pepper itself) match
+    no code: they expire with their CODE_TTL, and the owner's next issue_code deletes an
+    unused one anyway."""
+    subkey = hmac.new(pepper.encode("utf-8"), b"owner-channel-code", hashlib.sha256).digest()
+    return hmac.new(subkey, f"owner-channel-code:{channel}:{code}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def require_bound(conn, channel, sender_ref):

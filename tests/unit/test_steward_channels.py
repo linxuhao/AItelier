@@ -218,15 +218,23 @@ def _copy(world, tmp_path):
     return sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
 
 
+def _keyed(pepper, channel, code):
+    """The stored digest: HMAC under a subkey of the pepper for this one use."""
+    subkey = hmac.new(pepper.encode(), b"owner-channel-code", hashlib.sha256).digest()
+    return hmac.new(subkey, f"owner-channel-code:{channel}:{code}".encode(), hashlib.sha256).hexdigest()
+
+
 def test_the_stored_code_is_hmac_keyed_with_the_driver_pepper_not_an_unkeyed_digest(world):
     code = world.owner.channels.issue_code("slack")["code"]
     with world.db.get_connection() as conn:
         (stored,), = conn.execute("SELECT code_hash FROM state_owner_channel_codes").fetchall()
-    keyed = lambda pepper: hmac.new(pepper.encode(), f"owner-channel-code:slack:{code}".encode(),  # noqa: E731
-                                    hashlib.sha256).hexdigest()
-    assert stored == keyed(PEPPER)
+    assert stored == _keyed(PEPPER, "slack", code)
     assert stored not in _unkeyed(code), "an unkeyed digest of a 6-digit code is undone offline"
-    assert keyed("another-pepper-of-at-least-32-chars!") != stored, "the digest changes with the pepper"
+    assert _keyed("another-pepper-of-at-least-32-chars!", "slack", code) != stored, \
+        "the digest changes with the pepper"
+    # K-subkey: never the pepper itself as the key - the driver tokens' own scheme
+    # (drivers.token_hash) stays a domain of its own.
+    assert stored != drivers.token_hash(PEPPER, f"owner-channel-code:slack:{code}")
 
 
 def test_a_db_copy_cannot_be_brute_forced_offline_for_the_live_code(world, tmp_path):
@@ -322,6 +330,22 @@ def test_a_code_stored_unkeyed_before_the_upgrade_matches_nothing(world):
     assert execute(world.steward, "bind_owner_channel",
                    {"request_key": "new", "channel": "slack", "sender_ref": SLACK_USER, "code": code},
                    allow_write=True)["bound"]
+
+
+def test_a_code_keyed_directly_with_the_pepper_before_the_subkey_matches_nothing(world):
+    """Rows written while the code was keyed with the pepper itself (token_hash) match
+    no code, like the unkeyed ones before them."""
+    old = "424242"
+    moment = state_channels._now()
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_owner_channel_codes(code_hash,channel,issued_at,expires_at) VALUES(?,?,?,?)",
+                     (drivers.token_hash(PEPPER, f"owner-channel-code:slack:{old}"), "slack",
+                      moment.isoformat(), (moment + state_channels.CODE_TTL).isoformat()))
+        conn.commit()
+    refused(lambda: execute(world.steward, "bind_owner_channel",
+                            {"request_key": "old", "channel": "slack", "sender_ref": SLACK_USER, "code": old},
+                            allow_write=True), "invalid_code")
+    assert not execute(world.owner, "list_owner_channels", {})["channels"][0]["bound"]
 
 
 def bind_message(world, code, ref, key=None, channel="slack", sender=SLACK_USER):

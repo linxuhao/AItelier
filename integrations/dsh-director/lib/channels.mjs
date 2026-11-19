@@ -20,6 +20,9 @@
  *  when the channel registers, every `statusMs` after, and as disconnected when it is
  *  taken back. The detail and the QR are never logged (the QR is a login token). */
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
 /** What an executed decision was about, in both languages: the host's own record of the
@@ -67,9 +70,24 @@ export const channelReplies = Object.freeze({
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
  *  generic `refused` line (a stranger is told none of them). */
 const TOLD = new Set(['body_too_long', 'rate_limited', 'approval_undated', 'code_sent_to_bound_account']);
+/** The answers that are transient, not terminal: the host or the backend could not be
+ *  reached, the channel's minute's share is spent, or the decision this message carries
+ *  is still running. The message is held and asked again; it is never dropped. */
+const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
+/** A message is owed while its delivery or the line its decision owes has not been
+ *  acknowledged: keyed by the channel message the host takes once. */
+const owedKey = ({ channel, senderRef, messageRef }) => `${channel}\n${senderRef}\n${messageRef}`;
+/** Where the owed messages are kept across a restart: `owedFile` when given, else
+ *  $DSH_CHANNEL_OWED_FILE, else $AITELIER_DSH_STATE_DIR/channel-owed.json (the director's
+ *  own State dir), else none - memory only, i.e. a restart loses what was owed. The file
+ *  holds the owner's own text, like the State database that took it, in mode 0600. */
+export function defaultOwedFile(env = process.env) {
+  if (text(env.DSH_CHANNEL_OWED_FILE)) return env.DSH_CHANNEL_OWED_FILE;
+  return text(env.AITELIER_DSH_STATE_DIR) ? join(env.AITELIER_DSH_STATE_DIR, 'channel-owed.json') : undefined;
+}
 /** `promise`, or a rejection naming `what` after `ms`: a hung channel or host never holds a
  *  queue for good. */
 const within = (promise, ms, what) => {
@@ -80,39 +98,91 @@ const within = (promise, ms, what) => {
 /** Bounds: a channel's send, the wait for the host, and binding attempts per channel and
  *  minute (each costs a binding read, a bind write and a line through the owner's bot).
  *  A delivery record is tried recordAttempts times, recordRetryMs doubling between tries
- *  (1+2+4+8+16 s: a backend restart). */
+ *  (1+2+4+8+16 s: a backend restart); an answer line answerAttempts times, answerRetryMs
+ *  between tries; the owed store is re-asked every owedMs, at most owedMax messages. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
-  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000 });
+  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
  *  @param log   (event, fields) => void; fields never carry a body.
- *  @returns { service, ownerMessageSent, ready, pollStatus, stop }: `service` is what channel
- *    plugins get as `ownerChannels`; `ownerMessageSent` is the director's half (DirectorApi);
- *    `ready()` says the host can be called (and starts the status poll); `stop()` ends that
- *    poll. The service exists from the plugin's apply on, so a channel plugin can hand a
+ *  @param owedFile  where the messages that still owe an answer are kept (defaultOwedFile;
+ *    none = this process's memory only).
+ *  @returns { service, ownerMessageSent, ready, pollStatus, pollOwed, stop }: `service` is
+ *    what channel plugins get as `ownerChannels`; `ownerMessageSent` is the director's half
+ *    (DirectorApi); `ready()` says the host can be called (and starts the status poll and
+ *    the owed re-asks); `pollOwed()` re-asks every owed message now; `stop()` ends both
+ *    timers. The service exists from the plugin's apply on, so a channel plugin can hand a
  *    message in before the host has installed itself (measured: its caller did not exist
  *    yet); every call to the host waits for ready(). */
-export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS }) {
+export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
+  owedFile = defaultOwedFile() }) {
   const registered = new Map(), told = new Map(), binds = new Map(), lanes = new Map(), answeredRefs = new Set();
   // Channel messages this process handed to the host and got no answer for: whatever the
   // host decided then, no line about it went out.
   const unanswered = new Set();
+  // The messages whose delivery, or whose decision's line, is still owed - kept in
+  // `owedFile` when there is one, so a restart claims them (see drainOwed). Only a
+  // successful answer clears one: a line that could not be sent is owed, not lost.
+  const owed = new Map(), answering = new Set();
+  const owedSave = () => {
+    if (!owedFile) return;
+    try {
+      mkdirSync(dirname(owedFile), { recursive: true });
+      const temporary = `${owedFile}.tmp`;
+      writeFileSync(temporary, JSON.stringify(Object.fromEntries(owed)), { mode: 0o600 });
+      renameSync(temporary, owedFile);
+    } catch (error) { log('channel_owed_unwritable', { error: short(error) }); }
+  };
+  if (owedFile) {
+    try {
+      const stored = JSON.parse(readFileSync(owedFile, 'utf8'));
+      for (const [key, message] of Object.entries(stored ?? {})) {
+        if (message && text(message.channel) && text(message.senderRef) && text(message.messageRef) && typeof message.text === 'string')
+          owed.set(key, message);
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') log('channel_owed_unreadable', { error: short(error) });
+    }
+  }
+  const remember = message => {
+    const key = owedKey(message);
+    owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
+      text: message.text, ...(text(message.at) ? { at: message.at } : {}) });
+    if (owed.size > limits.owedMax) owed.delete(owed.keys().next().value);
+    owedSave();
+    return key;
+  };
+  const forget = key => { if (owed.delete(key)) owedSave(); };
   let ready;
   const started = new Promise(resolve => { ready = resolve; });
   const hostReady = () => within(started, limits.readyMs, 'host_not_ready');
   // A reply goes out on the channel it is about, at most once per channel message (a
   // redelivered message is not answered again, whatever the host answers the second time);
-  // a failure to answer is logged, never thrown into the caller (the message itself was handled).
+  // a failure to answer is logged and tried a bounded number of times, and then REPORTED -
+  // what owes the line keeps it owed instead of counting it sent. Never throws into the
+  // caller (the message itself was handled).
   const answer = async (channel, line, options) => {
     const entry = registered.get(channel);
-    if (!entry) return log('channel_answer_skipped', { channel, reason: 'not_registered' });
+    if (!entry) { log('channel_answer_skipped', { channel, reason: 'not_registered' }); return false; }
     const key = channel + '\n' + options.replyToRef;
-    if (answeredRefs.has(key)) return log('channel_answer_skipped', { channel, reason: 'already_answered' });
-    answeredRefs.add(key);
-    if (answeredRefs.size > limits.answeredRefs) answeredRefs.delete(answeredRefs.values().next().value);
-    try { await within(entry.send(line, options), limits.sendMs, 'send_timeout'); }
-    catch (error) { log('channel_answer_failed', { channel, error: short(error) }); }
+    if (answeredRefs.has(key)) { log('channel_answer_skipped', { channel, reason: 'already_answered' }); return true; }
+    if (answering.has(key)) { log('channel_answer_skipped', { channel, reason: 'already_answering' }); return false; }
+    answering.add(key);
+    try {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await within(entry.send(line, options), limits.sendMs, 'send_timeout');
+          answeredRefs.add(key);
+          while (answeredRefs.size > limits.answeredRefs) answeredRefs.delete(answeredRefs.values().next().value);
+          return true;
+        } catch (error) {
+          log('channel_answer_failed', { channel, attempt, error: short(error) });
+          if (attempt >= limits.answerAttempts) return false;
+          await new Promise(resolve => setTimeout(resolve, limits.answerRetryMs * attempt));
+        }
+      }
+    } finally { answering.delete(key); }
   };
   // One more binding attempt on `channel` within the minute, or false when it has had its share.
   const bindAllowed = channel => {
@@ -138,7 +208,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // A refusal is the host's answer to that status (not reported again); a failure to reach
   // it is tried again at the next poll.
   const reported = new Map();
-  let statusQueue = Promise.resolve(), statusTimer;
+  let statusQueue = Promise.resolve(), statusTimer, owedTimer;
   const reportStatus = (channel, status) => {
     if (typeof host.reportStatus !== 'function') return statusQueue;
     statusQueue = statusQueue.then(async () => {
@@ -195,6 +265,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   const handle = async ({ channel, senderRef, messageRef, text: body, at }) => {
     const seen = { channel, sender_ref: senderRef, at: at ?? new Date().toISOString(), length: body.length };
     const trimmed = body.trim();
+    const message = { channel, senderRef, messageRef, text: body, at };
+    const owed1 = owedKey(message);
     try {
       await hostReady();
       // Six digits from someone who is not the bound owner is a binding attempt; the bound
@@ -210,15 +282,26 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         // answered the first time: no second line, whatever this process remembers.
         if (result?.duplicate) {
           log('channel_bind_duplicate', seen);
+          forget(owed1);
           return { accepted: bound, duplicate: true, ...(bound ? {} : { reason: String(result?.refusal ?? 'refused') }) };
         }
         log(bound ? 'channel_bound' : 'channel_bind_refused', { ...seen, ...(bound ? {} : { reason: result?.refused ?? 'refused' }) });
-        await answer(channel, bound ? replies.bound : replies.bindRefused, { replyToRef: messageRef, to: senderRef });
+        if (await answer(channel, bound ? replies.bound : replies.bindRefused, { replyToRef: messageRef, to: senderRef }))
+          forget(owed1);
         return bound ? { accepted: true } : { accepted: false, reason: String(result?.refused ?? 'refused') };
       }
       const result = await host.relay({ channel, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}) });
       if (result?.refused) {
         const reason = String(result.refused);
+        if (RETRYABLE.has(reason)) {
+          // Transient (too many messages this minute): held here and in the owed store, so
+          // the same message is asked again - by this channel's hold, and by a restart.
+          remember(message);
+          log('channel_relay_retrying', { ...seen, reason });
+          return { accepted: false, reason };
+        }
+        // The host's answer for good: nothing is owed for this message any more.
+        forget(owed1);
         log('channel_relay_refused', { ...seen, reason });
         // Only the bound owner learns why: the binding is read again, not inferred from the code.
         // At most one such line per channel and minute, so a flood is not answered line for line.
@@ -229,23 +312,58 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         }
         return { accepted: false, reason };
       }
+      if (result?.approval_pending === true) {
+        // The decision this message carries is still running: this is no answer yet, so the
+        // line is owed. Retryable, never terminal - the channel asks again, and a restart
+        // re-asks from the owed store.
+        remember(message);
+        unanswered.add(channel + '\n' + messageRef);
+        trimUnanswered();
+        log('channel_relay_pending', { ...seen, message_id: result.message_id });
+        return { accepted: false, reason: 'approval_pending' };
+      }
       // A decision is answered once per channel message (answer() keeps that within the
       // process). A redelivery of a message whose line went out is not answered again; one
-      // whose line never went out is: this process got no answer the first time, or the
-      // host ran the decision only now (decided_on_replay: the first delivery's was lost).
-      // A duplicate without an approval (the first delivery is still executing it) leaves
-      // the line owed to the next redelivery.
+      // whose line never went out is: this process got no answer the first time, the host
+      // says it decided only now (decided_on_replay), or the owed store still says so - so
+      // a line a restart inherited is sent too. Only a successful send clears it.
       const key = channel + '\n' + messageRef, lost = unanswered.has(key);
       if (result?.approval || !result?.duplicate) unanswered.delete(key);
-      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true))
-        await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef });
+      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || owed.has(owed1))) {
+        if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
+        else remember(message);
+      } else {
+        forget(owed1);
+      }
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };
     } catch (error) {
+      // No answer: the delivery is owed durably, so a restart asks again instead of the
+      // message existing only in this process's memory.
+      remember(message);
       log('channel_inbound_failed', { ...seen, error: short(error) });
       unanswered.add(channel + '\n' + messageRef);
-      if (unanswered.size > limits.answeredRefs) unanswered.delete(unanswered.values().next().value);
+      trimUnanswered();
       return { accepted: false, reason: 'unavailable' };
     }
+  };
+  const trimUnanswered = () => {
+    while (unanswered.size > limits.answeredRefs) unanswered.delete(unanswered.values().next().value);
+  };
+  // The messages a stop (or a lost answer) left owed, asked again in the order they were
+  // handed in: the line a decision owes goes out, and a message that was refused for the
+  // minute survives the restart that follows. One drain at a time; a channel that is not
+  // registered, or a host still unreachable, leaves every entry owed for the next drain.
+  let owedQueue = Promise.resolve();
+  const drainOwed = () => {
+    owedQueue = owedQueue.then(async () => {
+      if (!owed.size) return;
+      for (const message of [...owed.values()]) {
+        if (!owed.has(owedKey(message))) continue;
+        try { await handle(message); }
+        catch (error) { log('channel_owed_failed', { channel: message.channel, error: short(error) }); }
+      }
+    }).catch(error => log('channel_owed_drain_failed', { error: short(error) }));
+    return owedQueue;
   };
 
   // One mirror at a time, in the order the messages were written: a channel shows them in
@@ -320,9 +438,19 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         statusTimer = setInterval(pollStatus, limits.statusMs);
         statusTimer.unref?.();
       }
+      if (!owedTimer) {
+        void drainOwed();  // what a stop left owed is claimed now, not on the next restart
+        owedTimer = setInterval(() => void drainOwed(), limits.owedMs);
+        owedTimer.unref?.();
+      }
     },
     /** Every registered channel's status now, reported if it changed (the poll's own step). */
     pollStatus,
-    stop: () => { clearInterval(statusTimer); statusTimer = undefined; },
+    /** Every owed message asked again now (what the owedMs poll does on its own). */
+    pollOwed: drainOwed,
+    stop: () => {
+      clearInterval(statusTimer); statusTimer = undefined;
+      clearInterval(owedTimer); owedTimer = undefined;
+    },
   };
 }

@@ -23,9 +23,12 @@ export const CHANNEL = 'wechat';
 // ring (up to 500 messages) is passed on again and the host takes each message
 // ref once; an approval phrase is dated by the host from `at` (refused when too old
 // or undated), and the message itself is written either way.
-// ownerChannels.inbound answers `unavailable` (or throws) when the host or the
-// backend cannot be reached: the message is kept, not dropped.
-const RETRY_REASONS = new Set(['unavailable']);
+// The answers that are TRANSIENT, not final: the host or the backend cannot be reached
+// (`unavailable`), the channel's minute's share is spent (`rate_limited`: the replay of
+// the bridge's ring after an outage is a burst by nature), or the decision this message
+// carries is still running (`approval_pending`). The message is kept and asked again -
+// the cursor does not move past it - never dropped.
+const RETRY_REASONS = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 
 const defaultTokenFile = () => join(homedir(), '.aitelier-secrets', 'wechat-bridge-token');
 // 18741, not the bridge's in-container 18731: on the owner's host 127.0.0.1:18731 is
@@ -73,9 +76,10 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
   }
 
   /** Passes one message on. Returns once the host has answered it for good (accepted
-   *  or refused); while the host is unavailable the message is held and retried with a
-   *  growing pause, however long that takes, so the cursor stays on it and nothing
-   *  after it overtakes it. */
+   *  or refused); while the host answers a transient reason (`unavailable`,
+   *  `rate_limited`, `approval_pending`) the message is held and retried with a growing
+   *  pause, however long that takes, so the cursor stays on it and nothing after it
+   *  overtakes it. */
   async function deliver(event) {
     const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, text: event.text, at: event.at };
     let pause = retryMs;

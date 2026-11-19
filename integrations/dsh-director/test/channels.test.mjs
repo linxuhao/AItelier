@@ -45,15 +45,19 @@ function fakeChannel(name, { fail } = {}) {
     async send(text, options) { sent.push({ text, options }); if (fail) throw new Error(fail); return { ref: `${name}-ref-${sent.length}` }; } } };
 }
 
-const setup = (options, limits) => {
+/** A fresh owed store per setup (the file mode is what a restart reads); pass `owedFile` to
+ *  share one between two setups (a restart), or `ready: false` to start the poll later. */
+const setup = (options, limits, { owedFile, ready = true } = {}) => {
   const fake = fakeHost(options), logs = [];
+  const file = owedFile ?? join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
   const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
-    ...(limits ? { limits: { ...CHANNEL_LIMITS, ...limits } } : {}) });
-  channels.ready();
+    ...(limits ? { limits: { ...CHANNEL_LIMITS, ...limits } } : {}), owedFile: file });
+  if (ready) channels.ready();
   const slack = fakeChannel('slack'), wechat = fakeChannel('wechat');
   channels.service.register(slack.channel);
   channels.service.register(wechat.channel);
-  return { ...fake, channels, logs, slack, wechat, inbound: message => channels.service.inbound(message) };
+  return { ...fake, channels, logs, slack, wechat, owedFile: file, start: () => channels.ready(),
+    inbound: message => channels.service.inbound(message) };
 };
 const only = (calls, kind) => calls.filter(([name]) => name === kind).map(([, value]) => value);
 
@@ -255,16 +259,18 @@ test('a redelivery whose decision line never went out gets it, once: the first d
   assert.equal(r.slack.sent.length, 1, 'the decision the host ran on this redelivery is answered, once');
 });
 
-test('a redelivery the host answers while the first delivery still executes the approval keeps the line owed for the next one', async () => {
+test('a redelivery the host answers while the first delivery still executes the approval is retryable and keeps the line owed', async () => {
   const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
   const s = setup();
   // The host timed out while the approval's run went on.
   s.host.relay = async message => { s.calls.push(['relay', message]); throw new Error('HTTP 504'); };
   const owner = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'e-1', text: '同意 proposal p-1' };
   assert.deepEqual(await s.inbound(owner), { accepted: false, reason: 'unavailable' });
-  // A redelivery while it still runs: the host has no decision to answer yet.
-  s.host.relay = async message => { s.calls.push(['relay', message]); return { message_id: 'm', duplicate: true, approval: null }; };
-  assert.deepEqual(await s.inbound(owner), { accepted: true, duplicate: true });
+  // A redelivery while it still runs: the host has no decision to answer yet, and says so -
+  // retryable, never a finished answer (a terminal duplicate here lost the line for good).
+  s.host.relay = async message => { s.calls.push(['relay', message]);
+    return { message_id: 'm', duplicate: true, approval: null, approval_pending: true }; };
+  assert.deepEqual(await s.inbound(owner), { accepted: false, reason: 'approval_pending' });
   assert.equal(s.slack.sent.length, 0);
   // Once the run has ended the host answers the decision as a plain duplicate: its line never went out.
   s.host.relay = async message => { s.calls.push(['relay', message]); return { message_id: 'm', duplicate: true, approval: executed }; };
@@ -272,6 +278,89 @@ test('a redelivery the host answers while the first delivery still executes the 
   await s.inbound(owner);
   assert.equal(s.slack.sent.length, 1, 'the decision is answered once, on the first redelivery that carries it');
   assert.match(s.slack.sent[0].text, /proposal p-1: approved and done/);
+});
+
+test('the line a decision owes survives a restart: the owed message is kept in the store, asked again, and its line sent', async () => {
+  const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
+  const owner = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1', at: '2026-11-19T02:00:00.000Z' };
+  // The first process asks; its call times out while the backend keeps deciding, so the
+  // answer (with the decision) never comes back. The message is owed durably, not in memory.
+  const first = setup();
+  first.host.relay = async message => { first.calls.push(['relay', message]); throw new Error('The operation was aborted due to timeout'); };
+  assert.deepEqual(await first.inbound(owner), { accepted: false, reason: 'unavailable' });
+  assert.equal(first.slack.sent.length, 0);
+  first.channels.stop();  // the process stops (a restart, a container recreate)
+  // A fresh process over the same owed store: the host now holds the decision as a plain
+  // duplicate, and the line goes out because this process knows it is owed.
+  const second = setup(undefined, undefined, { owedFile: first.owedFile, ready: false });
+  second.host.next = { message_id: 'm', duplicate: true, approval: executed };
+  second.start();
+  await second.channels.pollOwed();
+  assert.equal(second.slack.sent.length, 1, 'the decision the stop left owed is reported');
+  assert.match(second.slack.sent[0].text, /proposal p-1: approved and done - start director of wuxia/);
+  assert.deepEqual(second.slack.sent[0].options, { replyToRef: 'a-1', to: 'U-OWNER' });
+  assert.deepEqual(only(second.calls, 'relay').map(m => m.messageRef), ['a-1'], 'asked under the same ref');
+  assert.deepEqual(only(second.calls, 'relay')[0].at, '2026-11-19T02:00:00.000Z', 'with the time the owner wrote it');
+  second.channels.stop();
+  // Sent once: the store was cleared, so the next start has nothing to claim.
+  const third = setup(undefined, undefined, { owedFile: first.owedFile, ready: false });
+  third.host.next = { message_id: 'm', duplicate: true, approval: executed };
+  third.start();
+  await third.channels.pollOwed();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(third.slack.sent.length, 0);
+  assert.deepEqual(only(third.calls, 'relay'), [], 'nothing owed, nothing asked');
+  third.channels.stop();
+});
+
+test('a line whose send failed stays owed and goes out on the next delivery, never counted as sent', async () => {
+  const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
+  const fake = fakeHost({ bindings: { slack: 'U-OWNER' } }), logs = [];
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, answerRetryMs: 1 } });
+  channels.ready();
+  const sent = [];
+  let broken = true;
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }),
+    async send(text) { if (broken) throw new Error('socket closed'); sent.push(text); return { ref: 'r-' + sent.length }; } });
+  const owner = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'a-1', text: '同意 proposal p-1' };
+  fake.host.next = { message_id: 'm', duplicate: false, approval: executed };
+  assert.deepEqual(await channels.service.inbound(owner), { accepted: true });
+  assert.equal(sent.length, 0);
+  assert.equal(logs.filter(([event]) => event === 'channel_answer_failed').length, CHANNEL_LIMITS.answerAttempts,
+    'the send was tried its bounded number of times');
+  // The send works now: the next delivery of that message sends the line that never went out.
+  broken = false;
+  await channels.service.inbound(owner);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /proposal p-1: approved and done/);
+  await channels.service.inbound(owner);
+  assert.equal(sent.length, 1, 'and it is not sent twice');
+  channels.stop();
+});
+
+test('a rate_limited answer is kept and asked again - by the channel and, after a restart, from the owed store', async () => {
+  const message = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'm-7', text: 'written during the outage',
+    at: '2026-11-19T02:00:00.000Z' };
+  const first = setup();
+  // The backend's minute is spent: the seventh message of a replay burst is refused.
+  first.host.relay = async call => { first.calls.push(['relay', call]); return { refused: 'rate_limited' }; };
+  assert.deepEqual(await first.inbound(message), { accepted: false, reason: 'rate_limited' });
+  assert.equal(first.slack.sent.length, 0, 'a refusal is not answered with a line');
+  assert.ok(first.logs.some(([event, fields]) => event === 'channel_relay_retrying' && fields.reason === 'rate_limited'));
+  first.channels.stop();
+  // The restart: the message the minute refused is asked again, and taken.
+  const second = setup(undefined, undefined, { owedFile: first.owedFile, ready: false });
+  second.host.relay = async call => { second.calls.push(['relay', call]); return { message_id: 'm', duplicate: false, approval: null }; };
+  second.start();
+  await second.channels.pollOwed();
+  assert.deepEqual(only(second.calls, 'relay').map(m => m.messageRef), ['m-7'], 'the refused message is not lost');
+  second.channels.stop();
+  const third = setup(undefined, undefined, { owedFile: first.owedFile, ready: false });
+  third.start();
+  await third.channels.pollOwed();
+  assert.deepEqual(only(third.calls, 'relay'), [], 'taken once: nothing is owed any more');
+  third.channels.stop();
 });
 
 test("an executed decision's line names the host's kind and target in both languages; an unknown kind reads as itself; a long target is cut", () => {

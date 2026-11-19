@@ -145,7 +145,7 @@ test('an inbound the host answers unavailable is held and retried, under the sam
   await channel.stop();
 });
 
-test('an inbound that throws is retried the same way; a refusal other than unavailable is final', async () => {
+test('an inbound that throws is retried the same way; a refusal other than a transient one is final', async () => {
   let failures = 2;
   const refusals = { 'c-2': 'channel_sender_not_bound', 'c-3': 'invalid_request' };
   const ownerChannels = registry(message => {
@@ -158,6 +158,27 @@ test('an inbound that throws is retried the same way; a refusal other than unava
   await tick(30);
   assert.deepEqual(ownerChannels.calls.map(m => m.messageRef), ['c-1', 'c-1', 'c-1', 'c-2', 'c-3']);
   await channel.stop();
+});
+
+test('a transient refusal (rate_limited, approval_pending) is held and retried, never dropped', async () => {
+  // The backend refuses a channel's 7th message per minute with rate_limited - what a
+  // replay after an outage runs into - and answers approval_pending while an earlier
+  // delivery's decision still runs. Neither is final: the message is this process's only
+  // copy, so it is held and asked again instead of being dropped.
+  const reasons = ['rate_limited', 'approval_pending'];
+  const ownerChannels = registry(() => (reasons.length ? { accepted: false, reason: reasons.shift() } : { accepted: true }));
+  const { channel, socket } = await started(ownerChannels, { retryMs: 5 });
+  const env = envelope(dm({ client_msg_id: 'r-1' }));
+  socket.emit('slack_event', env);
+  await until(() => ownerChannels.calls.length === 3);
+  await tick(30);
+  assert.deepEqual(ownerChannels.calls.map(m => m.messageRef), ['r-1', 'r-1', 'r-1'], 'held under the same ref');
+  assert.deepEqual(ownerChannels.calls[2], ownerChannels.calls[0], 'every attempt is the same message');
+  assert.deepEqual(env.acks, [true], 'acked once, first');
+  await channel.stop();
+  const seen = ownerChannels.calls.length;
+  await tick(30);
+  assert.equal(ownerChannels.calls.length, seen, 'and not asked again after stop');
 });
 
 test("a held message is not overtaken by its sender's next one; another sender is not held up by it", async () => {

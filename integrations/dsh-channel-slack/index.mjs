@@ -26,9 +26,12 @@ export const SLACK_TEXT_LIMIT = 3500;
 // reconnect is off (it leaves a rejected promise nobody handles when Slack refuses the
 // token, which would end the steward's process); this plugin reconnects instead.
 export const reconnectDelay = attempt => Math.min(5 * 60_000, 1000 * 2 ** attempt);
-// ownerChannels.inbound answers `unavailable` (or throws) when the host or the backend
-// cannot be reached: the message is held and retried, not dropped (as dsh-channel-wechat).
-const RETRY_REASONS = new Set(['unavailable']);
+// The answers that are TRANSIENT, not final: the host or the backend could not be
+// reached (`unavailable`), the channel's minute's share is spent (`rate_limited` - a
+// burst after an outage is ordinary), or the decision this message carries is still
+// running (`approval_pending`). The message is held and asked again, never dropped; a
+// refusal that names anything else (a body too long, an unbound sender) is final.
+const RETRY_REASONS = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 // Messages one sender may have waiting while the host is unavailable.
 export const HELD_PER_SENDER = 100;
 
@@ -90,9 +93,10 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   const lanes = new Map(); // user -> { run: the delivery of their latest message, held: messages waiting }
 
   /** Passes one message on. An acknowledged envelope is never redelivered by Slack, so
-   *  this is the message's only copy: while the host answers `unavailable` (or throws) it
-   *  is held and retried with a growing pause, under the same message ref, which the host
-   *  takes once. It ends when the host has answered for good (accepted or refused) or
+   *  this is the message's only copy: while the host answers a transient reason
+   *  (`unavailable`, `rate_limited`, `approval_pending`) - or throws - it is held and
+   *  retried with a growing pause, under the same message ref, which the host takes
+   *  once. It ends when the host has answered for good (accepted or refused) or
    *  the channel stops. */
   async function deliver(message) {
     let pause = retryMs;

@@ -235,6 +235,24 @@ test('an inbound that throws is retried the same way', async () => {
   } finally { await channel.stop(); await bridge.close(); }
 });
 
+test('a transient refusal (rate_limited, approval_pending) is held and retried: the cursor does not move past it', async () => {
+  // The replay of the bridge's ring after an outage is a burst, and the backend takes six
+  // messages a channel a minute: the seventh is refused rate_limited (and a delivery that
+  // overlaps a still-running decision is answered approval_pending). Neither is final.
+  const bridge = await fakeBridge();
+  const reasons = ['rate_limited', 'approval_pending'];
+  const channels = fakeChannels({ answer: () => (reasons.length ? { accepted: false, reason: reasons.shift() } : { accepted: true }) });
+  bridge.events.push(event(1, { text: 'written during the outage' }), event(2));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
+    waitSeconds: 1, retryMs: 10 });
+  try {
+    await until(() => channels.received.some(m => m.messageRef === 'm2'));
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm1', 'm1', 'm2'], 'm1 kept until accepted, in order');
+    const polls = bridge.requests.filter(r => r.path === '/events').map(r => r.query.after);
+    assert.ok(!polls.includes('1'), 'the cursor never moved past the held message on its own');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
 test('a refusal other than `unavailable` is final: not retried', async () => {
   const bridge = await fakeBridge();
   // invalid_request: what the host answers a deterministic 4xx with (a field over its bound) -

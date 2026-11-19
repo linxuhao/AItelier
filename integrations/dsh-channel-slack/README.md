@@ -12,13 +12,21 @@ declares the `channels` capability). Design: step 19, §7.2.
   acknowledged, whatever it is. Whether the sender is the bound owner is the service's
   decision, not this plugin's.
 - Slack never redelivers an acknowledged envelope, so the plugin keeps the message: while
-  the service answers `unavailable` (the host or the backend cannot be reached) or
-  throws, the message is held and handed in again under the same `messageRef` (which the
-  host takes once), 5 s doubling to at most 60 s between attempts, until it is accepted
-  or refused or the plugin stops. Each sender's messages stay in order (a held one is not
-  overtaken by the next); other senders are not held up. At most 100 messages per sender
-  are held; past that a message is logged by sender and length and not held. A held
-  message lives in memory only: a restart of the steward while the host is down loses it.
+  the service answers a transient reason - `unavailable` (the host or the backend cannot be
+  reached), `rate_limited` (the channel's minute's share is spent: a replay after an outage
+  is a burst by nature) or `approval_pending` (the decision this message carries is still
+  running) - or throws, the message is held and handed in again under the same `messageRef`
+  (which the host takes once), 5 s doubling to at most 60 s between attempts, until it is
+  accepted or refused for good or the plugin stops. Each sender's messages stay in order (a
+  held one is not overtaken by the next); other senders are not held up. At most 100
+  messages per sender are held in memory (past that one is logged by sender and length and
+  not held). A message whose answer never came back, or whose
+  decision's line could not be sent, is also written to the director's owed store
+  (`$AITELIER_DSH_STATE_DIR/channel-owed.json`, mode 0600; the owner's own text, like the
+  State database that takes it) and asked again after a restart, in the order it arrived;
+  the entry is cleared only once it has been answered for good - a line that could not be
+  sent is owed, not lost. Without a State dir the owe lives in memory only, so a restart
+  loses it.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500
@@ -62,6 +70,23 @@ dependencies itself, so it needs no pin of its own (the lock has 8.11.2).
 
 These hold for every owner channel (Slack and WeChat):
 
+- **A message can be delivered to the owner twice after a long record outage.** The
+  steward's message is sent first and its delivery row recorded after (the row is what
+  keeps a restart from sending it again: `sourceOf`). The record is retried 6 times,
+  1+2+4+8+16 s - about 31 s - and then logged as failed. If the record endpoint cannot be
+  reached for longer than that (a redeploy that includes container start-up, a 502 window),
+  the message went out with no row, so a steward start that replays the same State message
+  id sends the owner a second copy. Consequence: a duplicate, never a silent loss; the
+  duplicate is one message and the owner can see it is the same text. Revisit when the
+  delivery can be recorded durably before the send (a reservation the send confirms), or
+  when a channel offers an idempotent send keyed by message id.
+- **A decision's line is sent at least once, not exactly once.** It is owed while its
+  answer has not come back or its send failed, and the owed store is cleared only after
+  the send, so the two windows that stay are a duplicate line, never a silent one: with no
+  State dir (the owe in memory only) a restart loses the owe, and a stop between a
+  successful send and the store's clear re-sends that one line after the restart. Revisit
+  when the host can be told a line went out (an acknowledgement command for answers),
+  which would make it exactly-once.
 - Approval power over chat rests on the steward host's driver token. A process running
   as the same user that holds it could relay an approval phrase in-protocol with false
   attribution (recorded as decided by the owner on a channel). Under the current
@@ -72,8 +97,11 @@ These hold for every owner channel (Slack and WeChat):
   cannot take the binding over: the code is stored only as an HMAC keyed with the driver
   pepper secret file (like the driver tokens), so a copy of the State database does not
   reveal it - without the pepper no code is issued or checked (`channel_secret_missing`) -
-  and online guessing stays bounded at 5 guesses in 10^6. The refusals are in the log
-  with the sender, and the owner just issues a new code.
+  and online guessing stays bounded at 5 guesses in 10^6. A live code is never persisted
+  either, wherever it sits in an owner-written message (relayed, or typed on the
+  dashboard): the write is refused `code_sent_to_bound_account` and the code is retired,
+  so the owner issues a new one. The refusals are in the log with the sender, and the
+  owner just issues a new code.
 - Token files (`slack-app-token`, `slack-bot-token`, `wechat-bridge-token`) should be
   mode 0600; nothing enforces it.
 

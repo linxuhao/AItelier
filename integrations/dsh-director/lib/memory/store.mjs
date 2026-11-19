@@ -12,6 +12,7 @@
  *    <userId>.ranked-pending.json   remote batches whose add failed
  *    <userId>.notices.jsonl    what the owner must be told (an interrupted purge), until acknowledged
  *    <userId>.profile-pending.json  who wrote a profile change whose commit failed (its author survives)
+ *    <userId>.vectors.jsonl    the local vector channel's int8 vectors (derived, never in git; vector.mjs)
  *  The lock, spool, journal and pending file sit beside the repository, not in it, so the
  *  purge's directory swap can never move or drop them.
  *
@@ -24,7 +25,8 @@ import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, re
 import { join } from 'node:path';
 import { Bm25Index, bm25Ranked, documentTokens, queryTokens } from './bm25.mjs';
 import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, parseAt } from './render.mjs';
-import { memoryTimeZoneProblem } from '../host.mjs';
+import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
+import { RRF_K, VectorChannel, candidates, filterVectorFile, scanVectorFile } from './vector.mjs';
 import { git, gitOk } from './git.mjs';
 import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
@@ -119,7 +121,10 @@ export class MemoryStore {
    *  logger(event, fields); now(): ISO time; grepTimeoutMs (5000); syncMonths (12);
    *  backupRemote: a git remote URL pushed after each commit (failures only degrade);
    *  timeZone: the owner's IANA zone (UTC) - search's line dates and day groups, and the
-   *  date words in the index (design 3.8.1); read once here, so a process never mixes two. */
+   *  date words in the index (design 3.8.1); read once here, so a process never mixes two.
+   *  vector: {url, model, timeoutMs} - the local vector channel fused with BM25 (design 3.8.2;
+   *  absent: off, the ranking is BM25's alone); vectorTuning: the worker's backoff and request
+   *  limit (tests). */
   static async open(o) {
     const store = new MemoryStore(o);
     await store.#boot();
@@ -127,7 +132,8 @@ export class MemoryStore {
   }
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
-    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE }) {
+    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE,
+    vector, vectorTuning }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
     const zoneProblem = memoryTimeZoneProblem(timeZone);
     if (zoneProblem) throw new Error('memory: ' + zoneProblem);
@@ -141,6 +147,7 @@ export class MemoryStore {
     this.pendingFile = join(root, userId + '.ranked-pending.json');
     this.noticesFile = join(root, userId + '.notices.jsonl');
     this.profilePendingFile = join(root, userId + '.profile-pending.json');
+    this.vectorFile = join(root, userId + '.vectors.jsonl');
     this.budget = { ...BUDGET, ...budget };
     this.overBudget = new Map(); // kind -> line
     this.writeMs = [];           // the last 100 writes, fsync to commit
@@ -156,6 +163,14 @@ export class MemoryStore {
     this.queue = Promise.resolve();
     this.lockHeld = false;
     this.faults = faults; // test hooks: a crash point is a hook that throws or kills the process
+    if (vector !== undefined) {
+      const vectorProblem = memoryVectorProblem({ vector, ...(ranked ? { remote: ranked } : {}) });
+      if (vectorProblem) throw new Error('memory: ' + vectorProblem);
+      this.vector = new VectorChannel(vector, { file: this.vectorFile, tuning: vectorTuning, store: {
+        faults: () => this.faults,
+        entries: () => this.entries, locked: fn => this.#locked(fn), log: (event, fields) => this.log(event, fields),
+        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields) } });
+    }
   }
 
   /** Serialize every repository change (the in-process half of the write lock). */
@@ -175,7 +190,7 @@ export class MemoryStore {
     // A boot that recovers the same purge again (a crash loop) adds no second copy.
     if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
       appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
-    this.notices = parseLines(this.noticesFile).map(n => n.text);
+    this.#readNotices();
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
       if (leftovers.length) throw new MemoryUnavailable(`memory: ${this.dir} is missing while ${leftovers.join(', ')} exists; refusing to start an empty repository over it`);
@@ -192,6 +207,9 @@ export class MemoryStore {
     // says forgotten, so this is also the reading the disk supports.)
     const finished = this.#finishForget(this.#load(), { loaded: true });
     if (finished) await this.#commitIfDirty('recover: finished an interrupted forget at boot');
+    // Design 3.8.2: the vector file loads in the background, never inside the synchronous
+    // #load; the worker starts once it and its reconciliation are done.
+    this.vector?.startLoad();
     await this.#replaySpool();
     await this.#replayPending(true);
   }
@@ -236,6 +254,7 @@ export class MemoryStore {
   /** Release the process lock (the store is unusable afterwards); a lock that no longer
    *  names this process is someone else's and is left alone. */
   async close() {
+    this.vector?.close();
     await this.queue;
     if (!this.lockHeld) return;
     this.lockHeld = false;
@@ -245,7 +264,39 @@ export class MemoryStore {
   /** The owner has seen the notices: they leave status and the snapshot. */
   acknowledgeNotices() {
     if (existsSync(this.noticesFile)) writeDurable(this.noticesFile, '');
-    this.notices = [];
+    this.notices = []; this.noticeRows = [];
+  }
+
+  /** The owner notices file, as rows ({at, text, kind?, …}); kept in memory once read. */
+  #readNotices() {
+    this.noticeRows = parseLines(this.noticesFile);
+    this.notices = this.noticeRows.map(n => n.text);
+    return this.noticeRows;
+  }
+
+  /** Add the notice of `kind` (at most one of each kind, so a crash or a restart adds no
+   *  second; without a kind, at most one of the same text) or, with no text, take the one of
+   *  that kind out (only it). Returns the row taken out. A
+   *  notice that cannot be written is logged: it never fails what reported it. */
+  #notice(kind, text, fields = {}) {
+    try {
+      const rows = this.noticeRows ?? this.#readNotices();
+      if (text) {
+        if (rows.some(r => (kind === undefined ? r.text === text : r.kind === kind))) return undefined;
+        appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), kind, text, ...fields }) + '\n');
+        this.#readNotices();
+        return undefined;
+      }
+      const gone = rows.find(r => r.kind === kind);
+      if (!gone) return undefined;
+      const kept = rows.filter(r => r.kind !== kind);
+      writeDurable(this.noticesFile, kept.map(r => JSON.stringify(r) + '\n').join(''));
+      this.#readNotices();
+      return gone;
+    } catch (error) {
+      this.log('memory/notice-failed', { kind, reason: String(error.message).slice(0, 200) });
+      return undefined;
+    }
   }
 
   async #init(dir = this.dir) {
@@ -408,6 +459,8 @@ export class MemoryStore {
       ...(this.notices.length ? { notices: this.notices } : {}),
       ...(this.pendingStuck?.length ? { ranked_pending_stuck: this.pendingStuck } : {}),
       ...(this.overBudget.size ? { over_budget: [...this.overBudget.values()] } : {}),
+      ...(this.vector ? { vector: this.vector.statusText() } : {}),
+      ...(this.vector?.skippedCount() ? { vector_skipped: this.vector.skippedCount() } : {}),
     };
   }
 
@@ -499,6 +552,9 @@ export class MemoryStore {
     for (const [m, rows] of byMonth) appendDurable(join(this.dir, 'log', m + '.jsonl'), rows.map(e => JSON.stringify(e)).join('\n') + '\n');
     for (const e of fresh) { this.entries.set(e.id, e); this.index.add(e.id, this.#docTokens(e), e.at); }
     if (fresh.length) this.log('memory/written', { ids: fresh.map(e => e.id), lengths: fresh.map(e => e.text.length) });
+    // Design 3.8.2: never embedded on the write path - the ids go to the front of the
+    // background worker's list (turns, notes, spool replay and restore all come through here).
+    if (fresh.length) this.vector?.enqueue(fresh.map(e => e.id));
     return fresh;
   }
 
@@ -627,8 +683,14 @@ export class MemoryStore {
    *  go. That order is the point: a crash in between leaves the id in BOTH places, which the
    *  next boot finishes (`#finishForget`), while the other order leaves a window where the id
    *  is in neither and the text is gone with no record that it ever existed. Returns the
-   *  entries it dropped. */
-  async #dropFromWorkTree(ids, { reason, by }) {
+   *  entries it dropped.
+   *
+   *  Their vectors leave memory at once; the vector file on disk is filtered once per call,
+   *  best effort (design 3.8.2): the records are written and the log lines gone, there is no
+   *  way back, so a failure (ENOSPC, EACCES) is only logged and the next load's
+   *  reconciliation removes those rows. A purge filters the file itself, with its checks, and
+   *  passes filterVectors: false. */
+  async #dropFromWorkTree(ids, { reason, by }, { filterVectors = true } = {}) {
     const at = this.now();
     const rows = [];
     for (const id of ids) {
@@ -645,10 +707,22 @@ export class MemoryStore {
       const e = this.entries.get(r.id);
       if (!e) continue;
       this.entries.delete(e.id); this.index.remove(e.id, this.#docTokens(e));
+      this.vector?.drop(e.id);
       this.forgotten.set(e.id, { id: e.id, at, by, batch: e.batch });
       dropped.push(e);
     }
+    if (dropped.length && filterVectors) await this.#filterVectorsBestEffort(dropped.map(e => e.id));
     return dropped;
+  }
+
+  /** Filter the vector file, never failing the caller; the reason, or undefined. */
+  async #filterVectorsBestEffort(ids) {
+    try { await filterVectorFile(this.vectorFile, new Set(ids)); return undefined; }
+    catch (error) {
+      const reason = String(error?.message ?? error).slice(0, 200);
+      this.log('memory/vector-filter-failed', { ids, reason });
+      return reason;
+    }
   }
 
   /** Forget (design 3.6 level 1): out of the working tree, grep and BM25; recoverable
@@ -737,6 +811,7 @@ export class MemoryStore {
     const out = answer => ({ text: this.#grouped(answer), hits: answer.items.map(it => it.hit), omitted: answer.omitted });
     const { items: _g, ...grepHead } = grep;
     const { items: _r, filtered_forgotten, remote_forget, ...rankedHead } = ranked;
+    if (this.vector && ranked.items) rankedHead.vector = this.vector.statusText();
     return { query: q,
       grep: { ...grepHead, ...out(answers[0]) },
       ranked: ranked.items ? { ...rankedHead, ...out(answers[1]), filtered_forgotten, ...(remote_forget ? { remote_forget } : {}) } : ranked,
@@ -894,17 +969,44 @@ export class MemoryStore {
     return words.some(t => dates.has(t));
   }
 
+  /** Design 3.8.1/3.8.2 with the vector channel on: BM25's and the vectors' first
+   *  C = max(5·top_k, 50) candidates fused by RRF (k = 60, equal weights, ranks from 1;
+   *  equal scores newest first, then by id), the first top_k kept. Vectors only from what is
+   *  loaded and embedded so far (ranked.vector says how far). A query that cannot be embedded
+   *  makes this search BM25's alone, and the source says so. */
+  async #fused(query, k) {
+    const C = candidates(k);
+    const vector = await this.vector.rank(query, C);
+    const bm = this.index.search(query, C);
+    if (!vector) {
+      return { source: 'bm25 · 本地索引 · 向量不可用',
+        hits: bm.slice(0, k).map(h => ({ text: this.entries.get(h.id)?.text ?? '', score: Math.round(h.score * 100) / 100, at: h.at, ref: h.id })) };
+    }
+    this.faults?.onFusion?.({ C, bm25: bm.length, vector: vector.length });
+    const score = new Map();
+    bm.forEach((h, i) => score.set(h.id, (score.get(h.id) ?? 0) + 1 / (RRF_K + i + 1)));
+    vector.forEach((id, i) => score.set(id, (score.get(id) ?? 0) + 1 / (RRF_K + i + 1)));
+    const at = id => this.entries.get(id)?.at ?? '';
+    const fused = [...score].filter(([id]) => this.entries.has(id))
+      .sort(([a, x], [b, y]) => y - x || (at(b) > at(a) ? 1 : at(b) < at(a) ? -1 : 0) || byId(a, b)).slice(0, k);
+    return { source: this.vector.source,
+      hits: fused.map(([id, s]) => ({ text: this.entries.get(id).text, score: Math.round(s * 1e4) / 1e4, at: at(id), ref: id })) };
+  }
+
   /** The ranked items, best first, or {source, error} (a remote that failed: no answer).
    *  Local hits are read from `entries` (live entries only). A remote hit whose text is a
    *  live local entry's - any entry, not only one grep found (a hit close in meaning rarely
    *  holds the query's words) - is shown as that entry and carries its id, which memory_read
    *  takes; one with no local twin is the remote's own line, without an id. */
   async #ranked(query, k) {
-    const source = this.ranked.name;
+    let source = this.ranked.name;
     if (this.remote) await this.#replayPending().catch(() => {});
     let hits;
-    try { hits = await this.ranked.search(query, k); }
-    catch (error) { return { source, error: String(error?.message ?? error).slice(0, 500) }; }
+    if (this.vector) ({ source, hits } = await this.#fused(query, k));
+    else {
+      try { hits = await this.ranked.search(query, k); }
+      catch (error) { return { source, error: String(error?.message ?? error).slice(0, 500) }; }
+    }
     let filtered = 0;
     let remoteForget;
     if (this.remote) {
@@ -998,14 +1100,30 @@ export class MemoryStore {
           // Journalled before the first destructive edit: a crash inside step 1 has to be
           // recognisable at the next boot, and step 1 IS a forget, the remote included.
           this.#journal({ ...plan, phase: 'forgetting' });
-          const dropped = await this.#dropFromWorkTree(live, { reason: 'purge', by });
+          const dropped = await this.#dropFromWorkTree(live, { reason: 'purge', by }, { filterVectors: false });
           if (dropped.length && this.remote?.remove) {
             try { await this.remote.remove(dropped.map(e => e.id)); }
             catch (error) { this.log('memory/remote-forget-failed', { ids: dropped.map(e => e.id), reason: String(error.message).slice(0, 200) }); }
           }
         }
-        if (!await this.#commitIfDirty(`forget ${ids.join(',')} (${by}, before purge)`)) return { refused: 'commit_failing', status: this.statusLine() };
+        if (!await this.#commitIfDirty(`forget ${ids.join(',')} (${by}, before purge)`)) {
+          // After `forgetting` the journal must end: a row left there would read as an
+          // interrupted purge at the next boot. Before it, nothing was journalled at all.
+          if (live.length) this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason: 'commit_failing' });
+          return { refused: 'commit_failing', status: this.statusLine() };
+        }
         this.#journal({ ...plan, phase: 'forget_done' });
+        // Step 1, vectors (design 3.8.2): whenever the file exists - vectors on or off now, the
+        // ids live or forgotten before - every purged id leaves it, with the two-sided check.
+        // The only place a vector file may stop a purge: only a purge promises "gone for good".
+        let vectors;
+        try { vectors = await filterVectorFile(this.vectorFile, new Set(ids), { write: this.faults?.vectorFilterWrite }); }
+        catch (error) {
+          const reason = 'vector filter failed: ' + String(error?.message ?? error).slice(0, 300);
+          this.log('memory/vector-filter-failed', { ids, reason });
+          this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason });
+          return { purged: false, reason: reason + '; nothing was purged (the entries stay forgotten)' };
+        }
         // 2. build
         this.#journal({ ...plan, phase: 'building' });
         if (this.faults?.beforeBuild) await this.faults.beforeBuild();
@@ -1029,12 +1147,15 @@ export class MemoryStore {
         if (this.faults?.afterRenameNew) await this.faults.afterRenameNew();
         this.#journal({ ...plan, phase: 'renamed_new' });
         if (this.faults?.afterSwap) await this.faults.afterSwap();
-        // 5. verify again, at the final path
+        // 5. verify again, at the final path; then the vector file once more, before the last
+        // recoverable copy goes (a row written back since step 1 is caught here).
         const again = await this.verifyPurged(this.dir, plan.pre_purge_dir, new Set(ids));
+        if (!again.length) { const problem = await this.#vectorsStillPurged(vectors, new Set(ids)); if (problem) again.push(problem); }
         if (again.length) {
           await this.#rollbackSwap(plan, { reason: again.join('; ') });
           this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason: again.join('; ').slice(0, 500) });
           this.#load();
+          this.vector?.startLoad();
           return { purged: false, reason: 'the re-check after the swap failed; the old repository is back', failures: again };
         }
         this.#journal({ ...plan, phase: 'rechecked' });
@@ -1044,6 +1165,7 @@ export class MemoryStore {
         rmSync(plan.pre_purge_dir, { recursive: true, force: true }); fsyncDir(this.root);
         this.#journal({ ...plan, phase: 'done', outcome: 'completed' });
         this.#load();
+        this.vector?.startLoad();
         this.log('memory/purged', { ids });
         return { purged: true, ids, not_reached: this.#notReached(ids), status: this.statusLine() };
       });
@@ -1053,6 +1175,21 @@ export class MemoryStore {
     }
     if (result && 'status' in result) result.status = this.statusLine();
     return result;
+  }
+
+  /** Step 5's vector check (design 3.8.2): the file is as step 1 left it - same header line,
+   *  no purged id, every line whole, as many rows (the lock was held, the worker could not
+   *  append); a file absent then is absent now. A failure's description, or undefined. */
+  async #vectorsStillPurged(step1, ids) {
+    const now = await scanVectorFile(this.vectorFile, ids);
+    if (!step1.exists || step1.deleted) return now.exists ? 'vector file: it exists again after step 1 removed or never had it' : undefined;
+    if (!now.exists) return 'vector file: gone since step 1';
+    const problems = [];
+    if (now.hits) problems.push(`${now.hits} purged rows are back`);
+    if (now.headerLine !== step1.headerLine) problems.push('the header line changed');
+    if (now.bad) problems.push(`${now.bad} lines do not parse`);
+    if (now.rows !== step1.rows) problems.push(`${now.rows} rows, ${step1.rows} after step 1`);
+    return problems.length ? 'vector file: ' + problems.join('; ') : undefined;
   }
 
   #notReached(ids) {
@@ -1163,7 +1300,9 @@ export class MemoryStore {
     const both = ids.filter(id => this.entries.has(id) && this.forgotten.has(id));
     if (!both.length) return 0;
     this.#stripLogLines(both);
-    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, this.#docTokens(e)); }
+    // The vector file is not touched here (this runs at boot, before it loads): the load's
+    // reconciliation takes these rows out.
+    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, this.#docTokens(e)); this.vector?.drop(id); }
     this.log('memory/forget-finished', { ids: both });
     return both.length;
   }
@@ -1226,6 +1365,12 @@ export class MemoryStore {
       // delete finished). The layout cannot say which; the last phase can.
       outcome = PRE_SWAP_PHASES.has(last.phase) ? 'rolled_back' : 'completed';
     }
+    // Design 3.8.2: the purged ids leave the vector file whatever the outcome (they are
+    // forgotten either way); keyed by plan.ids, since a finished forget left `entries`
+    // already. Idempotent; a failure never stops the boot - the owner is told, and this
+    // boot's load reconciles again.
+    const vectorProblem = await this.#filterVectorsBestEffort(plan.ids ?? []);
+    if (vectorProblem) this.#notice(undefined, `向量文件里仍有已彻底删除的编号 ${(plan.ids ?? []).join(', ')}，原因 ${vectorProblem}；下次载入会再去掉`);
     const finished = this.#finishForget(plan.ids ?? []);
     this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,
       ...(finished ? { forget_finished: finished } : {}) });

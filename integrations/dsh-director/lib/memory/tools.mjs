@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryStore, PROFILE_LIMIT, READ_CHARS, READ_IDS_MAX, TOP_K_MAX } from './store.mjs';
 import { remoteRanked } from './remote.mjs';
-import { memoryTimeZoneProblem } from '../host.mjs';
+import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
 
 export const MEMORY_TOOLS = ['memory_search', 'memory_read', 'memory_note', 'memory_profile_update', 'memory_forget'];
 export const defaultMemoryRoot = () => join(homedir(), '.local', 'share', 'dsh-director', 'memory');
@@ -14,13 +14,14 @@ export const defaultMemoryRoot = () => join(homedir(), '.local', 'share', 'dsh-d
  *  {error}, and every memory tool answers that error while the rest of the role runs. */
 export async function openMemory(memory, { logger, sessionId } = {}) {
   try {
-    const zoneProblem = memoryTimeZoneProblem(memory.timeZone);
+    const zoneProblem = memoryTimeZoneProblem(memory.timeZone) ?? memoryVectorProblem(memory);
     if (zoneProblem) throw new Error(zoneProblem);
     const ranked = memory.remote ? remoteRanked({ ...memory.remote, userId: memory.remote.userId ?? memory.userId,
       sessionId: memory.remote.sessionId ?? sessionId,
       onCheck: r => logger?.('memory/remote-id-check', r) }) : undefined;
     const store = await MemoryStore.open({ root: memory.root ?? defaultMemoryRoot(), userId: memory.userId, ranked, logger,
       ...(memory.timeZone ? { timeZone: memory.timeZone } : {}),
+      ...(memory.vector ? { vector: memory.vector } : {}),
       ...(memory.grepTimeoutMs ? { grepTimeoutMs: Number(memory.grepTimeoutMs) } : {}),
       ...(memory.backupRemote ? { backupRemote: memory.backupRemote } : {}) });
     return { store };
@@ -51,7 +52,7 @@ export async function profileSection(memory) {
 export function registerMemoryTools(scope, { defineTool, jsonOutput, memory, ownerMessage }) {
   const unavailable = () => ({ refused: 'memory_unavailable', reason: memory.error });
   scope.tools.register(defineTool({ name: 'memory_search',
-    description: `Search your owner's memory. Two answers come back, each naming its source and each giving the whole entries it found as text - grouped by day in your owner's time zone, every line dated - with hits beside it (ids for memory_read): grep (literal, case-insensitive match of the whole query in the memory log and the profile - quote these as the owner's own words) and ranked (BM25, or the configured remote index: records close in meaning - say they are similar records, not quotes). A ranked line marked （日期命中） is a record from that day: its text has none of your words, so it is neither a quote nor close in meaning. An entry both answers found is whole in one of them; the other says → 见 grep / → 见 ranked. ranked with an error has no ranked answer this time; when ranked.vector is there and is not ok, the ranked answer is only part of the memory - say it may be incomplete. Both answers share one budget: when budget says omitted above 0, the entries listed in omitted did not fit - read them with memory_read. Use exact words, names, dates or ids for grep; describe the idea for ranked. top_k 1-${TOP_K_MAX} (default 10).`,
+    description: `Search your owner's memory. Two answers come back, each naming its source and each giving the whole entries it found as text - grouped by day in your owner's time zone, every line dated - with hits beside it (ids for memory_read): grep (literal, case-insensitive match of the whole query in the memory log and the profile - quote these as the owner's own words) and ranked (BM25 - fused with local vectors when they are configured - or the configured remote index: records close in meaning - say they are similar records, not quotes). A ranked line marked （日期命中） is a record from that day: its text has none of your words, so it is neither a quote nor close in meaning. An entry both answers found is whole in one of them; the other says → 见 grep / → 见 ranked. ranked with an error has no ranked answer this time; when ranked.vector is there and is not ok, the ranked answer is only part of the memory - say it may be incomplete. Both answers share one budget: when budget says omitted above 0, the entries listed in omitted did not fit - read them with memory_read. Use exact words, names, dates or ids for grep; describe the idea for ranked. top_k 1-${TOP_K_MAX} (default 10).`,
     parameters: { query: { type: 'string', required: true }, top_k: { type: 'integer' } }, output: jsonOutput,
     execute: args => memory.error ? unavailable() : memory.store.search(args.query, args.top_k ?? 10),
   }));

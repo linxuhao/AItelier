@@ -191,7 +191,9 @@ export interface DirectorHost {
    *    A redelivery of an approval phrase whose decision was lost (the host stopped
    *    after writing the message, before the decision was recorded) runs the decision
    *    now and answers it with duplicate: true and decided_on_replay: true; the director
-   *    then sends the decision's line, which it sends once per channel message.
+   *    then sends the decision's line, which it sends once per channel message. A
+   *    redelivery while the first delivery is still executing the approval answers
+   *    {duplicate: true, approval: null}: no line yet; a later redelivery carries it.
    *    The host refuses a sender that is not the channel's current binding
    *    (channel_sender_not_bound), a body over its bound (body_too_long) or not valid
    *    Unicode text (invalid_body), and too many messages (rate_limited), as

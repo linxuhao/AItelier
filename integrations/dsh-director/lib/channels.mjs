@@ -233,7 +233,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       // process). A redelivery of a message whose line went out is not answered again; one
       // whose line never went out is: this process got no answer the first time, or the
       // host ran the decision only now (decided_on_replay: the first delivery's was lost).
-      const key = channel + '\n' + messageRef, lost = unanswered.delete(key);
+      // A duplicate without an approval (the first delivery is still executing it) leaves
+      // the line owed to the next redelivery.
+      const key = channel + '\n' + messageRef, lost = unanswered.has(key);
+      if (result?.approval || !result?.duplicate) unanswered.delete(key);
       if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true))
         await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef });
       return { accepted: true, ...(result?.duplicate ? { duplicate: true } : {}) };

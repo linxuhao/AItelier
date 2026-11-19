@@ -255,6 +255,25 @@ test('a redelivery whose decision line never went out gets it, once: the first d
   assert.equal(r.slack.sent.length, 1, 'the decision the host ran on this redelivery is answered, once');
 });
 
+test('a redelivery the host answers while the first delivery still executes the approval keeps the line owed for the next one', async () => {
+  const executed = { proposal_id: 'p-1', action: 'approve', outcome: 'executed', kind: 'start_driver', target: 'wuxia' };
+  const s = setup();
+  // The host timed out while the approval's run went on.
+  s.host.relay = async message => { s.calls.push(['relay', message]); throw new Error('HTTP 504'); };
+  const owner = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'e-1', text: '同意 proposal p-1' };
+  assert.deepEqual(await s.inbound(owner), { accepted: false, reason: 'unavailable' });
+  // A redelivery while it still runs: the host has no decision to answer yet.
+  s.host.relay = async message => { s.calls.push(['relay', message]); return { message_id: 'm', duplicate: true, approval: null }; };
+  assert.deepEqual(await s.inbound(owner), { accepted: true, duplicate: true });
+  assert.equal(s.slack.sent.length, 0);
+  // Once the run has ended the host answers the decision as a plain duplicate: its line never went out.
+  s.host.relay = async message => { s.calls.push(['relay', message]); return { message_id: 'm', duplicate: true, approval: executed }; };
+  await s.inbound(owner);
+  await s.inbound(owner);
+  assert.equal(s.slack.sent.length, 1, 'the decision is answered once, on the first redelivery that carries it');
+  assert.match(s.slack.sent[0].text, /proposal p-1: approved and done/);
+});
+
 test("an executed decision's line names the host's kind and target in both languages; an unknown kind reads as itself; a long target is cut", () => {
   const line = (action, kind, target) => channelReplies.approval({ proposal_id: 'prop-x', action, outcome: 'executed', kind, target });
   assert.equal(line('approve', 'stop_driver', 'alpha'),

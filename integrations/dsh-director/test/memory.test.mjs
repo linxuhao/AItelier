@@ -37,8 +37,8 @@ test('BM25 cuts a run at the script boundary: a Latin word glued to Chinese is o
   console.log('documentTokens(' + JSON.stringify(glued) + ') =', JSON.stringify(gluedTokens));
   console.log('documentTokens(' + JSON.stringify(spaced) + ') =', JSON.stringify(spacedTokens));
   const index = new Bm25Index();
-  index.add('glued', glued, '2026-11-01');
-  index.add('spaced', spaced, '2026-11-02');
+  index.add('glued', documentTokens(glued), '2026-11-01');
+  index.add('spaced', documentTokens(spaced), '2026-11-02');
   const ids = q => index.search(q, 10).map(h => h.id).sort();
   const hits = ids('memory');
   console.log('search("memory") =', JSON.stringify(hits));
@@ -68,7 +68,7 @@ test('BM25 keeps the kana prolonged sound mark inside the CJK segment: トー an
   console.log('queryTokens("トーク") =', JSON.stringify(query));
   assert.deepEqual(query, ['トー', 'ーク']);
   const index = new Bm25Index();
-  index.add('jp', sample, '2026-11-01');
+  index.add('jp', documentTokens(sample), '2026-11-01');
   const hits = index.search('トーク', 10).map(h => h.id);
   console.log('search("トーク") =', JSON.stringify(hits));
   assert.deepEqual(hits, ['jp'], 'a query that crosses the mark reaches the record');
@@ -76,10 +76,10 @@ test('BM25 keeps the kana prolonged sound mark inside the CJK segment: トー an
 
 test('BM25 ranks mixed and pure-Chinese queries, newest first on a tie', () => {
   const index = new Bm25Index();
-  index.add('a', '我想做个记账小工具', '2026-11-01');
-  index.add('b', '今天天气不错', '2026-11-02');
-  index.add('c', '记账本要支持多币种 multi currency', '2026-11-03');
-  index.add('d', '我想做个记账小工具', '2026-11-04');
+  index.add('a', documentTokens('我想做个记账小工具'), '2026-11-01');
+  index.add('b', documentTokens('今天天气不错'), '2026-11-02');
+  index.add('c', documentTokens('记账本要支持多币种 multi currency'), '2026-11-03');
+  index.add('d', documentTokens('我想做个记账小工具'), '2026-11-04');
   const ids = q => index.search(q, 10).map(h => h.id);
   assert.deepEqual(ids('记账').slice(0, 2).sort(), ['a', 'd']);
   assert.ok(!ids('记账').includes('b'));
@@ -87,7 +87,7 @@ test('BM25 ranks mixed and pure-Chinese queries, newest first on a tie', () => {
   assert.deepEqual(ids('Currency'), ['c']);
   assert.deepEqual(ids('币').sort(), ['c']);
   assert.equal(ids('multi 记账')[0], 'c', 'the record matching both parts ranks first');
-  index.remove('c', '记账本要支持多币种 multi currency');
+  index.remove('c', documentTokens('记账本要支持多币种 multi currency'));
   assert.deepEqual(ids('currency'), []);
 });
 
@@ -113,9 +113,12 @@ test('one search, both answers, each naming its source and marking the other', a
   assert.equal(r.ranked.source, 'bm25 · 本地索引');
   assert.equal(r.grep.complete, true);
   assert.deepEqual(r.grep.hits.map(h => h.id), ['t-t1-0']);
-  assert.equal(r.grep.hits[0].also_in_ranked, true);
+  assert.equal(r.grep.hits[0].shown, 'full', 'grep is placed first, so it has the whole entry');
   assert.equal(r.ranked.hits[0].ref, 't-t1-0');
-  assert.equal(r.ranked.hits[0].also_in_grep, true);
+  assert.equal(r.ranked.hits[0].id, 't-t1-0');
+  assert.equal(r.ranked.hits[0].shown, 'see_grep');
+  assert.match(r.grep.text, /^\[\d{4}-\d{2}-\d{2} 周. \d{2}:\d{2}\+00:00\] 业主 \{t-t1-0\}: I want a small Ledger app for 记账$/);
+  assert.match(r.ranked.text, /^\[[^\]]+\] 业主 \{t-t1-0\}: → 见 grep$/);
   assert.equal(r.ranked.filtered_forgotten, 0, 'reported on every search, 0 included');
   assert.equal(r.ranked.coverage, 'all');
   assert.equal(r.status.git, 'ok');
@@ -133,8 +136,10 @@ test('memory_read: the whole text a search only excerpted, the profile, and the 
   await store.recordTurn('t2', [{ role: 'owner', text: '别的事' }]);
   const p = await store.profile();
   await store.updateProfile('喜欢简洁', p.version, 'test');
-  const hit = (await store.search('LEDGER_MARK')).grep.hits[0];
-  assert.ok(hit.excerpt.length < long.length && !hit.excerpt.includes('结尾'), 'search gives an excerpt only');
+  const found = await store.search('LEDGER_MARK');
+  const hit = found.grep.hits[0];
+  assert.equal(hit.shown, 'full');
+  assert.ok(found.grep.text.endsWith(`{${hit.id}}: ${long}`), 'search gives the whole entry');
   const r = await store.read([hit.id]);
   assert.deepEqual(r.entries.map(e => [e.id, e.role, e.source, e.turn, e.text]), [['t-t1-0', 'owner', 'conversation', 't1', long]]);
   assert.equal(r.omitted, undefined); assert.equal(r.status.git, 'ok');

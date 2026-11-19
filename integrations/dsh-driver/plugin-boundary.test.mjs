@@ -32,6 +32,7 @@ import '../dsh-director/test/memory.test.mjs';
 import '../dsh-director/test/memory-purge.test.mjs';
 import '../dsh-director/test/memory-recovery.test.mjs';
 import '../dsh-director/test/memory-remote.test.mjs';
+import '../dsh-director/test/memory-search.test.mjs';
 import '../dsh-director/test/steward-tools.test.mjs';
 import '../dsh-director/test/channels.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';

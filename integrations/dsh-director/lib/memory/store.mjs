@@ -22,12 +22,16 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync,
   rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { Bm25Index, bm25Ranked } from './bm25.mjs';
+import { Bm25Index, bm25Ranked, documentTokens, queryTokens } from './bm25.mjs';
+import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, parseAt } from './render.mjs';
+import { memoryTimeZoneProblem } from '../host.mjs';
 import { git, gitOk } from './git.mjs';
 import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
 export const PROFILE_LIMIT = 4000;
 export const TOP_K_MAX = 20;
+/** memory_search (design 3.8.1): both answers together, rendered lines with their heads. */
+export const SEARCH_CHARS = 6000;
 /** memory_read: at most this many ids per call and this many characters of text in all. */
 export const READ_IDS_MAX = 20;
 export const READ_CHARS = 60000;
@@ -106,18 +110,16 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
-function excerpt(text, query) {
-  const at = query ? text.toLowerCase().indexOf(String(query).toLowerCase()) : -1;
-  if (at < 0) return text.length > 160 ? text.slice(0, 160) + '…' : text;
-  const start = Math.max(0, at - 60), end = Math.min(text.length, at + query.length + 60);
-  return (start ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
-}
+/** Entry ids in number order (`t-9-…` before `t-10-…`), as memory_read orders a turn. */
+const byId = (a = '', b = '') => a.localeCompare(b, 'en', { numeric: true });
 
 export class MemoryStore {
   /** @param {object} o
    *  root, userId; ranked: a remote RankedIndex (absent: the built-in BM25);
    *  logger(event, fields); now(): ISO time; grepTimeoutMs (5000); syncMonths (12);
-   *  backupRemote: a git remote URL pushed after each commit (failures only degrade). */
+   *  backupRemote: a git remote URL pushed after each commit (failures only degrade);
+   *  timeZone: the owner's IANA zone (UTC) - search's line dates and day groups, and the
+   *  date words in the index (design 3.8.1); read once here, so a process never mixes two. */
   static async open(o) {
     const store = new MemoryStore(o);
     await store.#boot();
@@ -125,8 +127,11 @@ export class MemoryStore {
   }
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
-    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET }) {
+    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
+    const zoneProblem = memoryTimeZoneProblem(timeZone);
+    if (zoneProblem) throw new Error('memory: ' + zoneProblem);
+    this.timeZone = timeZone;
     this.root = root; this.userId = userId; this.log = logger; this.now = now;
     this.grepTimeoutMs = grepTimeoutMs; this.syncMonths = syncMonths; this.backupRemote = backupRemote; this.warnEntries = warnEntries;
     this.dir = join(root, userId);
@@ -278,7 +283,7 @@ export class MemoryStore {
     for (const name of files) {
       const rows = parseLines(join(this.dir, 'log', name));
       for (const e of rows) this.entries.set(e.id, e);
-      if (name.slice(0, 7) >= cutoff) for (const e of rows) this.index.add(e.id, e.text, e.at);
+      if (name.slice(0, 7) >= cutoff) for (const e of rows) this.index.add(e.id, this.#docTokens(e), e.at);
       else later.push(rows);
     }
     if (this.entries.size > this.warnEntries) this.log('memory/large', { entries: this.entries.size });
@@ -297,7 +302,7 @@ export class MemoryStore {
       this.coverage = 'since ' + cutoff;
       const next = () => {
         const rows = later.shift();
-        if (rows) for (const e of rows) if (this.entries.has(e.id)) this.index.add(e.id, e.text, e.at);
+        if (rows) for (const e of rows) if (this.entries.has(e.id)) this.index.add(e.id, this.#docTokens(e), e.at);
         if (later.length) setImmediate(next); else this.coverage = 'all';
       };
       setImmediate(next);
@@ -308,6 +313,15 @@ export class MemoryStore {
     return [...this.forgotten.values()]
       .filter(r => !r.purged && r.sha256 && this.entries.has(r.id))
       .map(r => r.id);
+  }
+
+  /** The index's token list for an entry (design 3.5): its text's tokens, then the date words
+   *  of its time in the owner's zone. Every add and every remove of the index takes the list
+   *  from here, so a remove takes back exactly what the add put in (the zone is fixed for the
+   *  process). The text itself is never changed: grep, memory_read and the log never see the
+   *  date words. */
+  #docTokens(e) {
+    return [...documentTokens(e.text), ...dateTokens(e.at, this.timeZone)];
   }
 
   #cutoffMonth() {
@@ -483,7 +497,7 @@ export class MemoryStore {
       byMonth.get(month(e.at)).push(e);
     }
     for (const [m, rows] of byMonth) appendDurable(join(this.dir, 'log', m + '.jsonl'), rows.map(e => JSON.stringify(e)).join('\n') + '\n');
-    for (const e of fresh) { this.entries.set(e.id, e); this.index.add(e.id, e.text, e.at); }
+    for (const e of fresh) { this.entries.set(e.id, e); this.index.add(e.id, this.#docTokens(e), e.at); }
     if (fresh.length) this.log('memory/written', { ids: fresh.map(e => e.id), lengths: fresh.map(e => e.text.length) });
     return fresh;
   }
@@ -630,7 +644,7 @@ export class MemoryStore {
     for (const r of rows) {
       const e = this.entries.get(r.id);
       if (!e) continue;
-      this.entries.delete(e.id); this.index.remove(e.id, e.text);
+      this.entries.delete(e.id); this.index.remove(e.id, this.#docTokens(e));
       this.forgotten.set(e.id, { id: e.id, at, by, batch: e.batch });
       dropped.push(e);
     }
@@ -707,35 +721,87 @@ export class MemoryStore {
 
   // ---------------------------------------------------------------- search
 
-  /** memory_search (design 3.5): grep and the ranked index, both, each with its source. */
+  /** memory_search (design 3.5, 3.8.1): grep and the ranked index, both, each with its source.
+   *  Each answer gives its hits' whole entries as `text` - grouped by the owner's calendar
+   *  day, every line dated - and the machine-readable `hits` beside it (memory_read takes
+   *  `hits[].id`). Both answers share one budget (SEARCH_CHARS); a hit is whole or listed in
+   *  `omitted`, never cut and never dropped. */
   async search(query, topK = 10) {
     const q = String(query ?? '');
     if (!q.trim()) return { refused: 'empty_query' };
     const k = Math.max(1, Math.min(TOP_K_MAX, Number.isInteger(topK) ? topK : 10));
     const [grep, ranked] = await Promise.all([this.#grep(q, k), this.#ranked(q, k)]);
-    const grepIds = new Set(grep.hits.map(h => h.id));
-    // A remote hit has the remote's ref. When its text is a live local entry's - any entry,
-    // not only one grep found (a hit close in meaning rarely holds the query's words) - it
-    // also gets that entry's id, which memory_read takes. One pass over the entries, only
-    // on a remote search that returned hits.
-    const localTexts = new Map();
-    // Identical texts: the newest entry by `at` (its turn is the one with_turn brings).
-    if (this.remote && ranked.hits?.length) for (const e of this.entries.values()) {
-      const seen = localTexts.get(e.text);
-      if (!seen || e.at >= seen.at) localTexts.set(e.text, e);
-    }
-    if (ranked.hits) {
-      const rankedIds = new Set();
-      for (const h of ranked.hits) {
-        const id = this.remote ? localTexts.get(h.text)?.id : h.ref;
-        if (this.remote && id) h.id = id;
-        if (id && grepIds.has(id)) { h.also_in_grep = true; rankedIds.add(id); }
+    const answers = [{ name: 'grep', items: grep.items, omitted: [] }];
+    if (ranked.items) answers.push({ name: 'ranked', items: ranked.items, omitted: [] });
+    const used = this.#place(answers);
+    const out = answer => ({ text: this.#grouped(answer), hits: answer.items.map(it => it.hit), omitted: answer.omitted });
+    const { items: _g, ...grepHead } = grep;
+    const { items: _r, filtered_forgotten, remote_forget, ...rankedHead } = ranked;
+    return { query: q,
+      grep: { ...grepHead, ...out(answers[0]) },
+      ranked: ranked.items ? { ...rankedHead, ...out(answers[1]), filtered_forgotten, ...(remote_forget ? { remote_forget } : {}) } : ranked,
+      // The entries left to read: one both answers had to omit is one entry, counted once.
+      budget: `${used}/${SEARCH_CHARS} 字 · omitted ${new Set(answers.flatMap(a => a.omitted.map(o =>
+        o.line !== undefined ? 'profile:' + o.line : o.id ?? 'ref:' + o.ref))).size}`,
+      status: this.statusLine() };
+  }
+
+  /** The line of a search item; `see` names the answer that shows the entry whole. */
+  #line(item, see) {
+    return item.profileLine !== undefined ? formatProfileLine(item.profileLine, item.entry.text)
+      : formatLine(item.entry, this.timeZone, { dateOnly: item.hit.date_only === true, see });
+  }
+
+  /** Design 3.8.1's one budget: the two answers in turn by rank (grep 1, ranked 1, grep 2, …).
+   *  What fits goes in whole; what does not is listed in that answer's `omitted` and the next
+   *  one is tried (a shorter one later may still fit). An entry the other answer already
+   *  shows whole costs only its line head with `→ 见 grep` / `→ 见 ranked`. The budget counts
+   *  the rendered lines, heads included (not the newlines between them). Returns the
+   *  characters used. */
+  #place(answers) {
+    const whole = new Map(); // entry id -> the answer showing it whole
+    let used = 0;
+    const longest = Math.max(...answers.map(a => a.items.length));
+    for (let i = 0; i < longest; i++) for (const answer of answers) {
+      const item = answer.items[i];
+      if (!item) continue;
+      const id = item.profileLine === undefined ? item.entry.id : undefined;
+      const see = id !== undefined ? whole.get(id) : undefined;
+      const line = this.#line(item, see);
+      if (used + line.length <= SEARCH_CHARS) {
+        used += line.length; item.line = line;
+        item.hit.shown = see ? 'see_' + see : 'full';
+        if (id !== undefined && !see) whole.set(id, answer.name);
+      } else {
+        item.hit.shown = 'omitted';
+        answer.omitted.push(item.profileLine !== undefined ? { id: 'profile', line: item.profileLine, length: item.entry.text.length }
+          : { ...(id !== undefined ? { id } : { ref: item.hit.ref }), at: item.entry.at, length: item.entry.text.length });
       }
-      for (const h of grep.hits) if (rankedIds.has(h.id)) h.also_in_ranked = true;
     }
-    for (const h of grep.hits) delete h.text;
-    for (const h of ranked.hits ?? []) delete h.text;
-    return { query: q, grep, ranked, status: this.statusLine() };
+    return used;
+  }
+
+  /** An answer's placed lines as text: grouped by the owner's calendar day, groups apart by a
+   *  blank line, no titles. ranked orders the groups by their best rank, grep newest day
+   *  first; the profile's lines are a group of their own after grep's days, in line order;
+   *  lines without a usable time are one group, last of the days. In a group: oldest first,
+   *  then by id. */
+  #grouped(answer) {
+    const groups = new Map();
+    answer.items.forEach((item, rank) => {
+      if (item.line === undefined) return;
+      const key = item.profileLine !== undefined ? '\u0002profile' : dayOf(item.entry.at, this.timeZone) ?? '\u0001undated';
+      if (!groups.has(key)) groups.set(key, { key, best: rank, rows: [] });
+      groups.get(key).rows.push(item);
+    });
+    const tail = key => (key === '\u0002profile' ? 2 : key === '\u0001undated' ? 1 : 0);
+    const order = answer.name === 'grep'
+      ? (a, b) => tail(a.key) - tail(b.key) || (a.key < b.key ? 1 : a.key > b.key ? -1 : 0)
+      : (a, b) => tail(a.key) - tail(b.key) || a.best - b.best;
+    const time = item => { const ms = parseAt(item.entry.at); return Number.isNaN(ms) ? -Infinity : ms; };
+    const inGroup = (a, b) => (a.profileLine !== undefined ? a.profileLine - b.profileLine
+      : time(a) - time(b) || byId(a.entry.id, b.entry.id));
+    return [...groups.values()].sort(order).map(g => g.rows.sort(inGroup).map(item => item.line).join('\n')).join('\n\n');
   }
 
   /** memory_read (design 3.5): the whole entries a search named. `profile` is the resident
@@ -791,28 +857,48 @@ export class MemoryStore {
     return { id: e.id, at: e.at, role: e.role, source: e.source, text: e.text, ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
   }
 
+  /** grep's items, newest first, at most k: `{hit, entry}` for a log line (the entry as the
+   *  log holds it) and `{hit, entry: {text}, profileLine}` for a line of the profile. */
   async #grep(query, k) {
     const source = 'grep · 字面匹配 · 本地记忆日志';
     const needle = JSON.stringify(query).slice(1, -1);
     const r = await git(this.dir, ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'],
       { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; } });
-    const hits = [];
+    const items = [];
     const lower = query.toLowerCase();
     for (const record of r.stdout.toString('utf8').split('\n')) {
       const [file, line, ...rest] = record.split('\0');
       if (!file || rest.length === 0) continue;
       const content = rest.join('\0');
-      if (file === 'profile.md') { hits.push({ id: 'profile', at: '', line: Number(line), excerpt: excerpt(content, query) }); continue; }
+      if (file === 'profile.md') {
+        items.push({ at: '', profileLine: Number(line), entry: { text: content }, hit: { id: 'profile', line: Number(line) } });
+        continue;
+      }
       let e;
       try { e = JSON.parse(content); } catch { continue; }
       if (!e?.text || !e.text.toLowerCase().includes(lower)) continue;
-      hits.push({ id: e.id, at: e.at, role: e.role, excerpt: excerpt(e.text, query), text: e.text });
+      items.push({ at: e.at, entry: e, hit: { id: e.id, at: e.at, role: e.role } });
     }
-    hits.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
-    return { source, hits: hits.slice(0, k), complete: !r.killed && (r.code === 0 || r.code === 1),
-      ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}) };
+    items.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
+    return { source, complete: !r.killed && (r.code === 0 || r.code === 1),
+      ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}),
+      items: items.slice(0, k) };
   }
 
+  /** Design 3.8.1: a local ranked hit that shares no word with the query and only meets it
+   *  in its date words is that day's record, not one close in meaning. */
+  #dateOnly(words, e) {
+    const text = new Set(documentTokens(e.text));
+    if (words.some(t => text.has(t))) return false;
+    const dates = new Set(dateTokens(e.at, this.timeZone));
+    return words.some(t => dates.has(t));
+  }
+
+  /** The ranked items, best first, or {source, error} (a remote that failed: no answer).
+   *  Local hits are read from `entries` (live entries only). A remote hit whose text is a
+   *  live local entry's - any entry, not only one grep found (a hit close in meaning rarely
+   *  holds the query's words) - is shown as that entry and carries its id, which memory_read
+   *  takes; one with no local twin is the remote's own line, without an id. */
   async #ranked(query, k) {
     const source = this.ranked.name;
     if (this.remote) await this.#replayPending().catch(() => {});
@@ -827,8 +913,34 @@ export class MemoryStore {
         hits = hits.filter(h => { const b = h.ref && this.remote.batchOf(h.ref); if (b && gone.has(b)) { filtered++; return false; } return true; });
       } else if (!this.remote.remove) remoteForget = 'unsupported';
     }
-    return { source, coverage: this.remote ? 'remote' : this.coverage,
-      hits: hits.map(h => ({ ref: h.ref, at: h.at, score: h.score, excerpt: excerpt(h.text ?? '', query), text: h.text })),
+    const items = [];
+    if (this.remote) {
+      // Identical texts: the newest entry by `at` (its turn is the one with_turn brings).
+      // One pass over the entries, only on a remote search that returned hits.
+      const localTexts = new Map();
+      if (hits.length) for (const e of this.entries.values()) {
+        const seen = localTexts.get(e.text);
+        if (!seen || e.at >= seen.at) localTexts.set(e.text, e);
+      }
+      const taken = new Set(); // a second remote hit on the same entry stays the remote's own line
+      for (const h of hits) {
+        const text = String(h.text ?? '');
+        const local = localTexts.get(text);
+        if (local && !taken.has(local.id)) {
+          taken.add(local.id);
+          items.push({ entry: local, hit: { id: local.id, ref: h.ref, at: h.at, role: local.role, score: h.score } });
+        } else items.push({ entry: { at: h.at, role: 'remote', text }, hit: { ref: h.ref, at: h.at, role: 'remote', score: h.score } });
+      }
+    } else {
+      const words = queryTokens(query);
+      for (const h of hits) {
+        const e = this.entries.get(h.ref);
+        if (!e) continue; // the index and the entries change together; never a text we cannot show
+        items.push({ entry: e, hit: { id: e.id, ref: e.id, at: e.at, role: e.role, score: h.score,
+          ...(this.#dateOnly(words, e) ? { date_only: true } : {}) } });
+      }
+    }
+    return { source, coverage: this.remote ? 'remote' : this.coverage, items,
       filtered_forgotten: filtered, ...(remoteForget ? { remote_forget: remoteForget } : {}) };
   }
 
@@ -1051,7 +1163,7 @@ export class MemoryStore {
     const both = ids.filter(id => this.entries.has(id) && this.forgotten.has(id));
     if (!both.length) return 0;
     this.#stripLogLines(both);
-    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, e.text); }
+    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, this.#docTokens(e)); }
     this.log('memory/forget-finished', { ids: both });
     return both.length;
   }

@@ -74,9 +74,11 @@ export class Bm25Index {
 
   get size() { return this.numbers.size; }
 
-  add(id, text, at = '') {
+  /** `tokens` is the document's token list as the caller built it (design 3.5: the text's
+   *  tokens plus its date words); remove takes back exactly the same list. The index never
+   *  tokenizes a document itself, so what was added is what is taken away. */
+  add(id, tokens, at = '') {
     if (this.numbers.has(id)) return;
-    const tokens = documentTokens(text);
     const tf = new Map();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     const doc = this.ids.length;
@@ -94,11 +96,11 @@ export class Bm25Index {
     this.totalLength += tokens.length;
   }
 
-  /** `text` is the removed document's text (its tokens give the counts to take back). */
-  remove(id, text) {
+  /** `tokens` is the list `add` was given for this document (its counts are taken back). */
+  remove(id, tokens) {
     const doc = this.numbers.get(id);
     if (doc === undefined) return false;
-    for (const t of new Set(documentTokens(text))) {
+    for (const t of new Set(tokens)) {
       const left = (this.df.get(t) ?? 1) - 1;
       if (left > 0) this.df.set(t, left); else this.df.delete(t);
     }

@@ -120,6 +120,16 @@ export function validateHost(host) {
   return host;
 }
 
+/** Design-steward 3.8.1: why `tz` cannot be memory.timeZone (an IANA name, checked with
+ *  Intl.DateTimeFormat), or undefined when it can; absent means UTC. A bad zone stops the
+ *  memory module only (openMemory answers this as its error), never the host. */
+export function memoryTimeZoneProblem(tz) {
+  if (tz === undefined) return undefined;
+  if (typeof tz !== 'string' || !tz) return `memory.timeZone must be an IANA time zone name, got ${JSON.stringify(tz)}`;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return undefined; }
+  catch (error) { return `memory.timeZone ${JSON.stringify(tz)} is not a time zone (${error.message})`; }
+}
+
 /** What an absent optional operation means. */
 export const optionalDefaults = Object.freeze({
   progress: () => {},                  // status reports are dropped (the runtime still logs)

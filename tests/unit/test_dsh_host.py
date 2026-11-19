@@ -588,8 +588,17 @@ async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_s
         assert state['attempts'] == 1, state
         assert state['driver_id'] == row['driver_id'] and state['project_id'] == 'alpha'
         assert 'session log is corrupt' in state['last_error'], state
-        await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
+        # `phase == 'failed'` is written by BOTH writers of this death: the runtime's
+        # monitor stamps it with `DSH exited with code 1`, and the supervisor's streak
+        # stamp can land a tick later (the loop puts the streak back over that notice,
+        # see test_the_runtime_exit_notice_does_not_hide_the_streak). Waiting on the
+        # phase therefore samples the row in between the two: on the full suite at
+        # 381c227e20 this line read 'DSH exited with code 1; see runtime.log'. Wait
+        # for the content this assertion is about, the way its sibling above does.
+        await eventually(
+            lambda: 'DSH: failed start 1 in a row: ' in (backend.get('alpha')['last_error'] or ''))
         driver_row = backend.get('alpha')
+        assert driver_row['phase'] == 'failed', driver_row
         assert driver_row['last_error'].startswith('DSH: failed start 1 in a row: '), driver_row
         reported = [line for line in capsys.readouterr().out.splitlines()
                     if 'alpha' in line and 'died' in line]

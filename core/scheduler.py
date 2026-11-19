@@ -1378,6 +1378,82 @@ def _is_transient_run_start_error(exc: BaseException) -> bool:
     return any(marker in message for marker in _TRANSIENT_RUN_START_MARKERS)
 
 
+#: How long a tick that was cancelled while its claim was still in flight waits
+#: for the worker thread to publish the claim token before it stops waiting.
+#:
+#: A bound is mandatory here: this code runs in a task that is ALREADY
+#: cancelled, so an unbounded wait is a shutdown that never finishes. It is
+#: generous because what it waits for is a synchronous SQLite claim (normally
+#: milliseconds); the only way it takes longer is the engine's global lock held
+#: by another thread across a long engine call. Giving up does not strand the
+#: claim by itself — the worker hands it back once it sees that nobody is
+#: waiting for the token any more (`_run_skillflow_tick`'s `abandoned` flag) —
+#: so this bound decides WHO performs the handback, not WHETHER it happens.
+_CLAIM_CANCEL_HANDOVER_S = 5.0
+
+#: Reachable logger for code that cannot say `logging.getLogger(...)`: several
+#: arms of `_run_skillflow_tick` do a LOCAL `import logging`, which makes
+#: `logging` a local name for that whole function.
+_scheduler_log = logging.getLogger("aitelier.scheduler")
+
+
+def _consume_future_exception(future) -> None:
+    """Take a discarded future's exception so asyncio does not log it.
+
+    A claim future the cancelled tick stopped waiting for is still owned by the
+    executor thread; when it finishes nobody reads its result. Retrieving the
+    exception here keeps asyncio from reporting "Task exception was never
+    retrieved" for a claim that was already given up on.
+    """
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except BaseException:                                        # noqa: BLE001
+        pass
+
+
+async def _wait_for_claim_handover(future, handover: dict,
+                                   budget_s: float = _CLAIM_CANCEL_HANDOVER_S):
+    """Wait, BOUNDED, for the claim token the worker thread publishes.
+
+    Called only from the `except asyncio.CancelledError` arm around the claim,
+    i.e. from a task that is already being cancelled. Awaiting there is allowed
+    — the cancellation was delivered and consumed — but a SECOND cancellation
+    can land in this very await, and it must not tear down the handback that is
+    the whole point of the arm. So a re-cancellation loses only that one
+    `asyncio.wait`, and the loop keeps waiting: no cancellation reaches the
+    worker thread, and the token it publishes is the only thing that can hand
+    this claim back.
+
+    Terminates on the token, on the worker finishing, or on the deadline —
+    whichever comes first. Never unbounded.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_s
+    while handover.get("claimed") is None and not future.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait({future}, timeout=remaining)
+        except asyncio.CancelledError:
+            # A second cancellation, in the middle of handing a claim back.
+            # The worker thread is unaffected by it and this coroutine is
+            # already unwinding, so keep the purpose and drop only this wait.
+            continue
+    token = handover.get("claimed")
+    if token is None and future.done() and not future.cancelled():
+        # The claim raised (or found nothing claimable): nothing was committed,
+        # so there is no claim to hand back. Retrieve the exception here so it
+        # is neither reported as never retrieved nor lost: the caller logs it.
+        try:
+            handover["claim_error"] = repr(future.exception())
+        except BaseException:                                    # noqa: BLE001
+            pass
+    return token
+
+
 async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
     held = _quota_hold_remaining()
@@ -1708,8 +1784,85 @@ async def _run_skillflow_tick(project_id: str, loop):
                  remaining=f"{retry_at - now:.1f}s")
         return
     _claim_retry_after.pop(retry_key, None)
+
+    # The claim runs on a WORKER THREAD (it takes the engine's global lock, so
+    # it must not sit on the loop — see the thread-affinity note above
+    # `_get_or_create_skillflow_run`). That hop is a cancellation window the
+    # handback arms further down cannot cover (iss-46fde53a9f2d4211): the engine
+    # COMMITS the claim in the thread, and this coroutine only binds the token
+    # when the hop resolves back onto the loop. A cancellation delivered at that
+    # await — `AsyncIOScheduler.shutdown` defers its own event through
+    # `call_soon_threadsafe`, so it can win the race against this tick's own
+    # resumption — unwinds this frame before the token ever existed in it. The
+    # `except asyncio.CancelledError` around `runner.execute` is never reached,
+    # so the row stays `claimed` with `release_count 0`; nothing recovers it,
+    # because the stale-claim reaper refuses a claim whose owner PROCESS is
+    # alive — and here the owner is this server. Measured 2026-11-19 in
+    # attempt-33c8aeaeb14b479ab7574a6a01dc55af: on the losing side of a
+    # 0.2-0.4 ms margin the claim was stranded for good, and a deterministic
+    # probe that parks the worker after its commit reproduced the same row.
+    #
+    # So the token is captured OUTSIDE this coroutine's frame, where no
+    # cancellation can reach it: the worker function publishes it from the
+    # THREAD, the instant the engine returns. The arm below can then hand the
+    # claim back even when this tick never held it.
+    _claim_handover: dict = {}
+
+    def _claim_in_thread():
+        token = sf.claim_next_step(run_id)
+        _claim_handover["claimed"] = token
+        # The tick stopped waiting for this token (the arm below is bounded).
+        # The claim it names is committed and belongs to nobody, so hand it back
+        # HERE: this thread is the last holder, and finishing the handback from
+        # a task that is already unwinding is exactly what cannot be relied on.
+        # A second release of the same token is a no-op in the engine — the row
+        # is no longer `claimed`, so it cannot double-count.
+        if _claim_handover.get("abandoned"):
+            from core.run_driver import release_claim_on_cancel
+            release_claim_on_cancel(sf, token)
+        return token
+
+    claim_future = asyncio.ensure_future(asyncio.to_thread(_claim_in_thread))
     try:
-        claimed = await asyncio.to_thread(sf.claim_next_step, run_id)
+        # Shielded: a cancellation delivered here must not cancel the claim's
+        # own future, because the arm below has to be able to observe it.
+        claimed = await asyncio.shield(claim_future)
+    except asyncio.CancelledError:
+        # A cancellation in the claim's own commit window. Whatever the row
+        # says, this tick will never execute the step, so a committed claim is
+        # an orphan unless it is handed back from here.
+        claimed_in_window = _claim_handover.get("claimed")
+        if claimed_in_window is None:
+            claimed_in_window = await _wait_for_claim_handover(
+                claim_future, _claim_handover)
+        if claimed_in_window is None:
+            # Nothing committed YET. Flag that nobody is waiting for the token
+            # any more and look once more: of the two orderings — this arm
+            # flags then reads, the worker publishes then checks — at least one
+            # side sees the other, so a claim that commits moments later is
+            # still handed back (by the worker) instead of being stranded.
+            _claim_handover["abandoned"] = True
+            claimed_in_window = _claim_handover.get("claimed")
+        if claimed_in_window is not None:
+            from core.run_driver import release_claim_on_cancel
+            release_claim_on_cancel(sf, claimed_in_window)
+            _scheduler_log.info(
+                "claim handed back after a cancellation in its commit window: "
+                "project=%s run=%s step=%s", project_id, run_id[:8],
+                getattr(claimed_in_window, "step_id", "?"))
+        else:
+            # Nothing was committed and the worker owns any later handback. Say
+            # so instead of swallowing the cancellation: this line is the only
+            # trace of a window that ran out of budget.
+            claim_future.add_done_callback(_consume_future_exception)
+            _scheduler_log.warning(
+                "tick cancelled while its claim was in flight; no claim token "
+                "appeared within %gs (claim=%s), so any claim this worker "
+                "commits is handed back by the worker itself: project=%s "
+                "run=%s", _CLAIM_CANCEL_HANDOVER_S,
+                _claim_handover.get("claim_error") or "still running",
+                project_id, run_id[:8])
+        raise
     except RequiredContextMissing as e:
         # TERMINAL, not retryable. claim_next_step resolves the same node's
         # context every tick, and the only thing that would ever write the

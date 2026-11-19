@@ -14,6 +14,7 @@ later by the director's ROOT-owned CPU evaluator.
 """
 
 import asyncio
+import threading
 import uuid
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -138,12 +139,21 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
             "FROM skillflow_steps WHERE step_id = 'a'").fetchall()}
 
     all_claimed = asyncio.Event()
+    parked: dict = {}
 
     async def execute(claimed):
-        # Runner entry follows the real claim; signal only after both actual
-        # rows exist and are claimed, so the stop cannot race dispatch.
-        current = rows()
-        if all(current[runs[pid]]["status"] == "claimed" for pid in pids.values()):
+        # TOKEN POSSESSION, not a row read. Entering the runner is what proves a
+        # tick came back from its claim await WITH the token. A row can read
+        # `claimed` while its tick is still parked at that await — the claim is
+        # committed on the worker thread of the `to_thread` hop — and a stop
+        # delivered there cancels the tick before it ever holds the token. The
+        # gate this replaced read the ROWS, so it proved both claims had been
+        # COMMITTED, not that both ticks had returned from their claim, and its
+        # "so the stop cannot race dispatch" was therefore false. The window
+        # itself is covered deterministically by
+        # test_a_cancel_delivered_at_the_claim_await_hands_the_claim_back.
+        parked[asyncio.current_task()] = claimed
+        if len(parked) == len(pids):
             all_claimed.set()
         await asyncio.Event().wait()          # an agent step that never ends
     _wire_real_tick(monkeypatch, sf, runs, execute)
@@ -159,6 +169,9 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
         alice_task = sc._detached_ticks.get(pids["alice"])
         bob_task = sc._detached_ticks.get(pids["bob"])
         assert alice_task is not None and bob_task is not None, sc._detached_ticks
+        assert {alice_task, bob_task} <= set(parked), (
+            "the task holding a claim token is not the task this row stops: "
+            f"parked={list(parked)}")
 
         sc.stop_scheduler(OWNER)              # stop ONLY Alice
         done, pending = await asyncio.wait([alice_task], timeout=5)
@@ -203,3 +216,149 @@ async def test_stopping_one_owner_scheduler_leaves_the_other_untouched(
             if s.running:
                 s.shutdown(wait=False)
         await asyncio.sleep(0.1)
+
+
+def _row(sf, run_id):
+    """The one step row of `run_id` as a dict (None when there is no row)."""
+    with sf._lock:
+        found = sf._conn.execute(
+            "SELECT id, status, retry_count, release_count, version "
+            "FROM skillflow_steps WHERE run_id = ?", (run_id,)).fetchone()
+    return None if found is None else dict(found)
+
+
+async def test_a_cancel_delivered_at_the_claim_await_hands_the_claim_back(
+        env, monkeypatch, tmp_path):
+    """A cancellation that lands on the claim's own await must hand the claim back.
+
+    The deterministic counterpart of the pair row's 1-in-10 race. The claim is
+    committed by the WORKER THREAD of `asyncio.to_thread(sf.claim_next_step,
+    run_id)`, and the tick only binds the token once that hop resolves back onto
+    the loop. A scheduler shutdown can cancel the tick in between
+    (`AsyncIOScheduler.shutdown` defers its own event through
+    `call_soon_threadsafe`, so it can beat the tick's resumption), and the
+    CancelledError is then delivered at that await — OUTSIDE the `try:` around
+    `runner.execute` whose `except asyncio.CancelledError` calls
+    `release_claim_on_cancel`. Before the fix (iss-46fde53a9f2d4211) the tick
+    died there and the row stayed `claimed` / `release_count 0` for good: the
+    reaper refuses a claim whose owner process is alive, and the owner is this
+    server.
+
+    This row does not sample that race, it enters the window by construction:
+    the claim worker is parked AFTER the commit, the cancellation is delivered
+    while it is still parked, and the unpark is queued on the loop BEHIND the
+    tick's own cancellation callback — so the order (cancel delivered first,
+    worker returns second) is fixed by the loop's FIFO ready queue, not by
+    timing. What it then asserts is the product fact: `pending`,
+    `release_count 1`, `retry_count 0`, and `release_claim` called on exactly
+    the row the worker committed.
+    """
+    sf = _real_sf(tmp_path)
+    sf.register_graph(_work_graph())
+    pid = f"alice-{uuid.uuid4().hex[:6]}"
+    env.owners[pid] = OWNER
+    run_id = sf.get_or_create_run("demo_owner_work_t", pid, {})
+    sf.start_run(run_id)
+    env.active.append(pid)
+
+    released = []
+    engine_release = sf.release_claim
+
+    def release_spy(token, reason):
+        # Delegate to the real engine: what this row asserts is the ROW it
+        # produces, plus which token it was produced from.
+        result = engine_release(token, reason)
+        released.append((getattr(token, "step_instance_id", None), reason,
+                         result))
+        return result
+    monkeypatch.setattr(sf, "release_claim", release_spy, raising=False)
+
+    reached_runner = []
+
+    async def execute(claimed):
+        # Reaching the runner means the tick resumed with its token, so the
+        # cancellation did NOT land in the claim's commit window — this row
+        # would then be witnessing the ordinary execute-block handback instead.
+        # Recorded rather than raised: a raise inside a detached tick is only
+        # logged, so the row asserts on this afterwards.
+        reached_runner.append(claimed)
+        await asyncio.Event().wait()          # an agent step that never ends
+    _wire_real_tick(monkeypatch, sf, {pid: run_id}, execute)
+
+    loop = asyncio.get_running_loop()
+    committed = asyncio.Event()       # set from the worker thread, loop-side wait
+    let_go = threading.Event()        # the only thing that unparks the worker
+    worker: dict = {}
+    engine_claim = sf.claim_next_step
+
+    def claim_then_park(rid):
+        worker["thread"] = threading.get_ident()
+        result = engine_claim(rid)
+        worker["committed"] = True
+        loop.call_soon_threadsafe(committed.set)
+        # The window: the row is already `claimed`, and this tick has not
+        # resumed with the token. Parked on a threading.Event, not a sleep, so
+        # the test decides when — and how — the window closes.
+        if not let_go.wait(timeout=_RELEASE_TIMEOUT_S * 2):
+            raise AssertionError("the test never released the claim worker")
+        worker["returned"] = True
+        return result
+    monkeypatch.setattr(sf, "claim_next_step", claim_then_park, raising=False)
+
+    task = None
+    try:
+        started = sc._dispatch_detached_ticks([{"project_id": pid}], loop,
+                                             owner_email=OWNER)
+        assert len(started) == 1, started
+        task = sc._detached_ticks[pid]
+
+        await asyncio.wait_for(committed.wait(), timeout=5.0)
+        at_commit = _row(sf, run_id)
+        assert at_commit is not None, "the claim committed no step row"
+        assert at_commit["status"] == "claimed", at_commit
+        assert worker.get("thread") != threading.get_ident(), (
+            "the claim did not cross a thread hop, so this row tests nothing")
+        assert not worker.get("returned"), (
+            "the worker already returned the token to the tick; the "
+            "cancellation would land after the window")
+
+        task.cancel()
+        # Queued on the same loop, i.e. FIFO AFTER the wakeup `task.cancel()`
+        # just enqueued: the tick is cancelled first (that is the window), the
+        # worker is let go second. Deterministic, not a race.
+        loop.call_soon(let_go.set)
+
+        done, pending = await asyncio.wait([task], timeout=_RELEASE_TIMEOUT_S)
+        assert done and task.cancelled(), (
+            f"the cancelled tick did not finish: done={done} pending={pending}")
+        assert not reached_runner, (
+            "the cancelled tick reached the runner, so the cancellation did "
+            "not land in the claim's commit window and this row is not "
+            "witnessing it")
+
+        after = await _awaited(
+            lambda: _row(sf, run_id),
+            lambda row: row["status"] == "pending" and row["release_count"] == 1)
+        assert after["status"] == "pending", (
+            "a cancellation delivered at the claim await stranded the claim "
+            f"(waited {_RELEASE_TIMEOUT_S:g}s): {after}")
+        assert after["retry_count"] == 0, (
+            f"retry budget charged for a cancellation: {after}")
+        assert after["release_count"] == 1, (
+            f"not released via release_claim: {after}")
+        assert released, (
+            "release_claim was never called for the claim committed in the "
+            f"cancelled tick's window: {after}")
+        for instance, reason, _result in released:
+            assert instance == at_commit["id"], (
+                f"release_claim was called on another row ({at_commit['id']} "
+                f"committed): {released}")
+            assert "cancel" in reason.lower(), (
+                f"released for a reason that is not a cancellation: {reason!r}")
+    finally:
+        let_go.set()                  # never leave the claim worker parked
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.wait([task], timeout=_RELEASE_TIMEOUT_S)
+

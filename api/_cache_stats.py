@@ -134,11 +134,16 @@ def compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]:
 # gets nothing cached at all — exactly the behaviour before this file had a
 # sidecar — because "I cannot say what this came from" must not persist.
 #
-# **Nothing is frozen that can still move.** `completed` is the one status
-# skillflow refuses to reactivate (`reactivate_run` raises for it), so a
-# completed run's numbers are final and its row is served forever. Every other
-# status — including `failed`, because api/project_routers' retry path calls
-# `reactivate_run` — keeps a bounded freshness window
+# **Nothing is frozen that can still move.** skillflow's terminal run statuses
+# are `completed` AND `failed` (`SkillFlow.TERMINAL_RUN_STATUSES`), and a
+# terminal run cannot move by itself: `stop_run` refuses it, `start_run` only
+# moves a pending run, and `complete_run` marks it. So a row for either status
+# is served forever with no trace read. `failed` is terminal, not permanent —
+# `SkillFlow.reactivate_run` is the one method that reopens it — so this file
+# and `SkillflowHost.reactivate_run` are two halves of one rule: that seam
+# calls `discard_run_cache_stats` AFTER the engine has committed the move, so a
+# reactivated run is recomputed from its traces on the next build. Every other
+# status (`running`, `paused`, `pending`) keeps a bounded freshness window
 # (`AITELIER_CACHE_STATS_FRESHNESS_SECONDS`, default 300 s), so a live run's
 # numbers still move. The window is read from the row's stored `frozen` flag:
 # deciding freshness per read would cost one run status lookup per row, and the
@@ -166,9 +171,11 @@ def compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]:
 # arm that populated this file) would keep opening their trace database on every
 # read, forever, for an answer that cannot have changed.
 
-# The one status skillflow will not move a run out of (`reactivate_run` refuses
-# a completed run). Everything else keeps a bounded window — see the rules above.
-_FROZEN_STATUSES = frozenset({"completed"})
+# The statuses skillflow treats as terminal. A run in one of them cannot move
+# by itself; `failed` is reopened only by `reactivate_run`, whose host seam
+# drops the row (see `discard_run_cache_stats`). Everything else keeps a
+# bounded window — see the rules above.
+_FROZEN_STATUSES = frozenset({"completed", "failed"})
 
 # How long a NON-frozen row may be served before its trace database is read
 # again. Bounded on purpose: a live run's token counts have to move. 300 s is
@@ -262,7 +269,7 @@ def _engine_run(engine, run_id: str):
 
 
 def _status_is_frozen(run) -> bool:
-    """Whether a run row's status is one skillflow will not move a run out of."""
+    """Whether a run row's status is terminal for skillflow (cannot move alone)."""
     if run is None:
         return False
     try:
@@ -432,6 +439,55 @@ def _store_rows(conn, root: str, now: float,
     return len(payloads)
 
 
+def discard_run_cache_stats(run_id: str, *, source_root: Optional[str] = None,
+                            engine=None) -> int:
+    """Drop the derived row for ``run_id``; returns how many rows were deleted.
+
+    The write side of the freeze rule. A row is served with NO trace read while
+    its run's status is terminal (``_FROZEN_STATUSES``), so whoever moves a run
+    OUT of a terminal status must drop that row — otherwise the run is served
+    its pre-move numbers forever. ``SkillflowHost.reactivate_run`` is that seam
+    (every reactivation path in this tree goes through it) and calls this AFTER
+    the engine has committed the move: a refused reactivation (``completed``
+    raises in the engine) leaves the run, and therefore its row, where it was.
+
+    Best effort by contract — derived data must never fail a caller. A missing,
+    corrupt or unwritable sidecar returns 0; the next batch then finds no row
+    and computes the run from its traces, which is the answer we wanted anyway.
+    """
+    try:
+        path = _sidecar_path()
+        if not path.exists():
+            return 0
+        root = source_root if source_root is not None else trace_root(
+            engine if engine is not None else _loaded_engine())
+        if not root:
+            return 0
+        conn, _path = _open_sidecar()
+        if conn is None:
+            return 0
+        try:
+            cursor = conn.execute(
+                "DELETE FROM run_cache_stats WHERE trace_root = ? AND run_id = ?",
+                (root, str(run_id)))
+            conn.commit()
+            deleted = cursor.rowcount
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        if deleted:
+            logger.debug("cache-stats sidecar: dropped %d row(s) for run %s "
+                         "under %s", deleted, run_id, root)
+        return deleted
+    except Exception as exc:  # noqa: BLE001 - derived data must not raise
+        logger.warning("cache-stats sidecar: could not drop the derived row for "
+                       "run %s (%s); it will be recomputed once its window "
+                       "elapses", run_id, exc)
+        return 0
+
+
 def compute_cache_stats_batch(
     run_ids: List[str],
     *,
@@ -443,11 +499,11 @@ def compute_cache_stats_batch(
     With per-project trace DBs, a single cross-database query is no longer
     possible: each run's numbers come from ``<trace root>/<project>/trace.db``.
     The answer is DERIVED data, so it is persisted in a sidecar SQLite file under
-    the data root and served from there; only run ids that are missing, or older
-    than their freshness window, are computed inline through
-    ``compute_cache_stats_per_step``. When every requested id has a usable row,
-    no trace database is opened at all (the module header states the contract,
-    and why each rule is load-bearing).
+    the data root and served from there; only run ids that are missing, or
+    non-terminal and older than their freshness window, are computed inline
+    through ``compute_cache_stats_per_step``. When every requested id has a
+    usable row, no trace database is opened at all (the module header states the
+    contract, and why each rule is load-bearing).
 
     Run IDs with no token_usage traces are absent from the returned dict (callers
     treat missing keys as zero/no-data) — but they ARE persisted, as an empty

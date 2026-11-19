@@ -180,7 +180,17 @@ class AItelierSkillFlow(SkillFlow):
         from core.coding_workspace import fence_control
         fence_control(run_id, "reactivation")
         self._guard_state_recovery(run_id)
-        return super().reactivate_run(run_id, *args, **kwargs)
+        result = super().reactivate_run(run_id, *args, **kwargs)
+        # A failed run is terminal, so api/_cache_stats.py stores its derived
+        # row `frozen` and serves it with NO trace read. This method is the one
+        # engine entry that moves a run out of that terminal status (the retry
+        # route, meta rescue_failed and DBManager.retry_project all arrive
+        # here), so the row has to go — after the move committed, never before:
+        # a refused reactivation (a completed run raises) leaves the run where
+        # it was and its numbers still final. Best effort; never raises.
+        from api._cache_stats import discard_run_cache_stats
+        discard_run_cache_stats(run_id, engine=self)
+        return result
 
     def re_run(self, run_id: str, *args, **kwargs):
         from core.coding_workspace import fence_control

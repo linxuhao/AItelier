@@ -5,7 +5,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -358,6 +358,85 @@ test('iss-e4eb: the same words in a surviving entry are not a finding; the purge
   assert.deepEqual((await store.search('same words')).grep.hits.map(h => h.id), ['t-b-0']);
   await store.close();
 });
+
+// ---- iss-74e7c675: the journal rows a purge writes, named one by one (equality on the row
+// itself, never "some phase in a set"), and the rows a kill inside the build -> verify ->
+// rename window leaves for the next boot to decide from.
+
+/** The phase of the journal's last row (or, with `fromEnd`, of the row that many back). */
+const phaseSeen = (root, fromEnd = 1) => journalOf(root).at(-fromEnd)?.phase;
+
+test('purge: the journal names forget_done, building, verified, renamed_old and rechecked on the row itself, in order', async () => {
+  const { root, store } = await seeded();
+  // Step 1's vector filter is the only hook between `forget_done` and `building`, and it is
+  // called only when there is a vector file: write one, so the row written after step 1 is
+  // observed where it is the last row rather than inferred from the next one.
+  const v = Buffer.alloc(1024, 7).toString('base64');
+  writeFileSync(join(root, USER + '.vectors.jsonl'), '{"model":"bge-m3-q8_0","dims":1024,"quant":"int8","input_chars":1000}\n'
+    + ['t-keep-0', 't-gone-0'].map(id => JSON.stringify({ id, v }) + '\n').join(''), { mode: 0o600 });
+  const seen = {};
+  store.faults = {
+    // the identity write: the filter's own lines go out unchanged, so the purge runs on
+    vectorFilterWrite: (line, i) => { if (i === 0) seen.forget_done = phaseSeen(root); return line; },
+    beforeBuild: () => { seen.building = phaseSeen(root); },
+    afterVerify: () => { seen.verified = phaseSeen(root); },
+    betweenRenames: () => { seen.renamed_old = phaseSeen(root); },
+    afterSwap: () => { seen.renamed_new = phaseSeen(root); },
+    beforeDelete: () => { seen.deleting_old = phaseSeen(root); seen.rechecked = phaseSeen(root, 2); },
+  };
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, true, JSON.stringify(r));
+  assert.equal(seen.forget_done, 'forget_done', 'the row written once step 1 is committed');
+  assert.equal(seen.building, 'building', 'the row written before the build runs');
+  assert.equal(seen.verified, 'verified', 'the row written once step 3 passed');
+  assert.equal(seen.renamed_old, 'renamed_old', 'the row written between the two renames');
+  assert.equal(seen.renamed_new, 'renamed_new', 'the row written once the swap is complete');
+  assert.equal(seen.deleting_old, 'deleting_old', 'the row written before the old copy is deleted');
+  // `rechecked` has no hook of its own (it is written and the delete journalled in the same
+  // breath), so it is named where it sits: the row before `deleting_old`.
+  assert.equal(seen.rechecked, 'rechecked', 'the row written once step 5 passed');
+  // The same names as one sequence, so a phase the hooks happen not to sit next to is still
+  // pinned: every row this purge wrote, exactly, in order.
+  assert.deepEqual(journalOf(root).map(row => row.phase),
+    ['forgetting', 'forget_done', 'building', 'verified', 'renamed_old', 'renamed_new', 'rechecked', 'deleting_old', 'done']);
+  assert.equal(journalOf(root).at(-1).outcome, 'completed');
+  await store.close();
+});
+
+// A SIGKILL inside building -> verified -> renamed_old: the rows the purge had written are what
+// the next boot decides from and names in its own row, and none of them is rewritten or lost.
+for (const [killAt, leftPhases, layout, phase] of [
+  ['beforeBuild', ['forgetting', 'forget_done', 'building'], 'repo/no-old/no-build', 'building'],
+  ['afterVerify', ['forgetting', 'forget_done', 'building', 'verified'], 'repo/no-old/build', 'verified'],
+  ['betweenRenames', ['forgetting', 'forget_done', 'building', 'verified', 'renamed_old'], 'no-repo/old/build', 'renamed_old'],
+]) {
+  test(`a SIGKILL at ${killAt}, inside building -> verified -> renamed_old: the rows it left name ${phase} and the next boot rolls back from them`, async () => {
+    const root = crashAt(killAt); // a real purge, killed at that point
+    const left = journalOf(root);
+    assert.deepEqual(left.map(row => row.phase), leftPhases, 'every row the purge had written, exactly');
+    assert.equal(left.at(-1).phase, phase, 'the row the purge died on');
+    const purgeId = left.at(-1).purge_id;
+    const store = await open(root);
+    const rows = journalOf(root);
+    assert.deepEqual(rows.slice(0, leftPhases.length).map(row => row.phase), leftPhases, 'recovery adds rows, never rewrites or drops one');
+    assert.ok(rows.slice(0, leftPhases.length).every(row => row.purge_id === purgeId), 'and they are all the same purge');
+    const done = rows.at(-1);
+    assert.equal(done.phase, 'done');
+    assert.equal(done.purge_id, purgeId);
+    assert.equal(done.outcome, 'rolled_back', 'nothing was swapped in, so the old repository is the one in place');
+    assert.equal(done.recovered_from, phase, 'the boot names the row it decided from');
+    assert.equal(done.layout, layout, 'and the layout it saw');
+    if (phase !== 'building') {
+      const decision = rows.find(row => row.phase === 'rolling_back');
+      assert.equal(decision.from_layout, layout, 'the rollback is journalled before its first rename');
+    }
+    assert.match(store.statusLine().notices?.[0] ?? '', /已回退/);
+    assert.equal(count(root, 't-keep-0'), 1, 'the surviving entry is there');
+    assert.ok(history(root).includes('4242'), 'the repository in place still holds the entry');
+    assert.deepEqual(leftovers(root), []);
+    await store.close();
+  });
+}
 
 test('f7: an interrupted purge\'s notice survives restarts and rides in the snapshot until acknowledged', async () => {
   const root = newRoot();

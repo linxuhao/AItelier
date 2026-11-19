@@ -604,6 +604,28 @@ for (const [name, write] of [
   });
 }
 
+test('10: the two-sided check names arm (a): the temporary file still holds a dropped id; the vector file is unchanged and the purge stops', async () => {
+  const fake = await server();
+  const { root, store } = await purgeSeed(fake.url);
+  assert.ok(fileIds(root).includes('t-gone-0'), 'the row the filter is told to drop is in the file');
+  const before = readFileSync(vfile(root));
+  // A write that removes nothing (the identity) and leaves the purged row it should have
+  // dropped in the temporary file: the file it writes is exactly the two-sided check's arm
+  // (a), "a dropped row is left", which (b)/(c)/(d) can only see second-hand. (b) counts the
+  // line, but only (a) says the id itself survived.
+  const stale = row('t-gone-0', hashVector('gone', DIMS));
+  store.faults = { vectorFilterWrite: (line, i) => (i === 0 ? `${line}\n${stale}` : line) };
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, false, JSON.stringify(r));
+  assert.match(r.reason, /two-sided check failed/);
+  assert.match(r.reason, /\(a\) 1 dropped rows left/, r.reason);
+  assert.deepEqual(readFileSync(vfile(root)), before, 'the vector file is byte-unchanged');
+  assert.equal(journalOf(root).at(-1).outcome, 'rolled_back');
+  assert.deepEqual(readdirSync(root).filter(n => n.includes('.filter-')), []);
+  assert.ok(gitIn(repo(root), 'log', '-p', '--all').stdout.toString().includes('PURGE-ME'), 'nothing was purged');
+  await store.close();
+});
+
 test('10: a purged row written back between step 1 and step 5 - the old repository comes back, done{rolled_back}, the owner is told', async () => {
   const fake = await server();
   const { root, store } = await purgeSeed(fake.url);

@@ -39,10 +39,17 @@ declares the `channels` capability). Design: step 19, §7.2.
 2. Bot token scopes: `im:history`, `chat:write`, `im:write`; subscribe to the bot event
    `message.im`; in App Home allow users to send messages to the app. Install it to the
    workspace (bot token starts `xoxb-`).
-3. Put the tokens, one per file, in `~/.aitelier-secrets/slack-app-token` and
-   `~/.aitelier-secrets/slack-bot-token` (mode 0600). They are read, never logged. With
-   either missing the channel registers as disconnected and does nothing.
-4. Run one instance per app: Slack spreads Socket Mode events over all of an app's open
+3. Put the tokens, one per file, in `$HOME/.aitelier-secrets/slack-app-token` and
+   `$HOME/.aitelier-secrets/slack-bot-token` (mode 0600). They are read, never logged.
+   The directory is HOME-relative and fixed: no env var moves it
+   (`AITELIER_SECRETS_DIR` does not), for this plugin or for the host that decides to
+   load it. With either missing the channel registers as disconnected and does nothing.
+4. Restart the steward. The steward's profile loads this plugin only when both files
+   exist, and that is checked when the profile is written, at the steward's start:
+   tokens added to a running steward load nothing. Until the restart the dashboard's
+   Channels tab shows no status for Slack at all (or, if it ran before, its last report);
+   after it, `connected` or why not.
+5. Run one instance per app: Slack spreads Socket Mode events over all of an app's open
    connections, so a second process would receive part of the owner's messages.
 
 The Slack SDK (`@slack/socket-mode` 3.1.1, `@slack/web-api` 8.3.0, pinned exactly) is a

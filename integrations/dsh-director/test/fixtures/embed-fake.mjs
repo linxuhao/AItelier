@@ -5,6 +5,7 @@
  *    vectors   Map text -> number[] (an exact text's vector, before anything else)
  *    concepts  [needle, seed][]: a text containing `needle` gets the vector of `seed`
  *    delayMs   answer late;  hang: accept and never answer;  status: answer with that HTTP status
+ *    hangIf    a predicate over the input: true accepts and never answers (that input only)
  *    tooLongIf: a predicate over the input: true gets llama.cpp's 400 "too large"
  *    dims      answer with this many dimensions (a wrong-dims server)
  *  `requests` records every request ({input, model}). Not a test: tests import it. */
@@ -35,7 +36,7 @@ export function axis(dims, ...axes) {
 }
 
 export async function fakeEmbedServer({ dims = 1024 } = {}) {
-  const knobs = { vectors: new Map(), concepts: [], delayMs: 0, hang: false, status: 0, tooLongIf: () => false, dims: undefined };
+  const knobs = { vectors: new Map(), concepts: [], delayMs: 0, hang: false, status: 0, tooLongIf: () => false, hangIf: () => false, dims: undefined };
   const requests = [];
   const sockets = new Set();
   const vectorOf = (text, n) => {
@@ -51,7 +52,7 @@ export async function fakeEmbedServer({ dims = 1024 } = {}) {
       let parsed = {};
       try { parsed = JSON.parse(body); } catch {}
       requests.push({ url: req.url, input: parsed.input, model: parsed.model });
-      if (knobs.hang) return; // the socket stays open, never answered
+      if (knobs.hang || (typeof parsed.input === 'string' && knobs.hangIf(parsed.input))) return; // the socket stays open, never answered
       if (knobs.delayMs) await new Promise(resolve => setTimeout(resolve, knobs.delayMs));
       res.setHeader('content-type', 'application/json');
       if (req.url !== '/v1/embeddings' || typeof parsed.input !== 'string') { res.writeHead(404); res.end('{}'); return; }

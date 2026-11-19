@@ -23,6 +23,8 @@ const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memvec-'));
 const repo = root => join(root, USER);
 const vfile = root => join(root, USER + '.vectors.jsonl');
 const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir, ...args], { cwd: dir, env: gitEnv(dir), maxBuffer: 1 << 28 });
+/** Root ignores file modes: the tests that make a file unwritable with chmod cannot run as root. */
+const AS_ROOT = { skip: process.getuid?.() === 0 && 'running as root: chmod 0400 does not stop root from writing' };
 const TUNING = { backoffMinMs: 20, backoffMaxMs: 100, workerTimeoutMs: 3000 };
 const servers = [];
 after(async () => { for (const s of servers) await s.close(); });
@@ -152,21 +154,24 @@ test('6: each channel brings max(5·top_k, 50) candidates (top_k 1, 10, 20)', as
   await store.close();
 });
 
-test('6: equal fused scores put the newer entry first (not the lower id)', async () => {
-  const fake = await server();
-  const now = clock();
-  const root = newRoot();
-  const store = await open(root, fake.url, { now: now.tick });
-  fake.knobs.vectors.set('kiwi', axis(DIMS, 0));
-  fake.knobs.vectors.set('kiwi fruit', axis(DIMS, 0));       // vector rank 1
-  fake.knobs.vectors.set('kiwi kiwi', axis(DIMS, 0, 1));     // vector rank 2
-  await store.recordTurn('x', [{ role: 'owner', text: 'kiwi kiwi' }]);   // older, BM25 rank 1
-  await store.recordTurn('y', [{ role: 'owner', text: 'kiwi fruit' }]);  // newer, BM25 rank 2
-  await ready(store);
-  const r = await store.search('kiwi', 2);
-  assert.equal(r.ranked.hits[0].score, r.ranked.hits[1].score);
-  assert.deepEqual(r.ranked.hits.map(h => h.id), ['t-y-0', 't-x-0']);
-  await store.close();
+test('6: equal fused scores put the newer entry first (not the lower id, nor the higher)', async () => {
+  // Once with the newer entry holding the higher id, once the lower: only "newer first" passes both.
+  for (const [older, newer] of [['x', 'y'], ['y', 'x']]) {
+    const fake = await server();
+    const now = clock();
+    const root = newRoot();
+    const store = await open(root, fake.url, { now: now.tick });
+    fake.knobs.vectors.set('kiwi', axis(DIMS, 0));
+    fake.knobs.vectors.set('kiwi fruit', axis(DIMS, 0));       // vector rank 1
+    fake.knobs.vectors.set('kiwi kiwi', axis(DIMS, 0, 1));     // vector rank 2
+    await store.recordTurn(older, [{ role: 'owner', text: 'kiwi kiwi' }]);   // older, BM25 rank 1
+    await store.recordTurn(newer, [{ role: 'owner', text: 'kiwi fruit' }]);  // newer, BM25 rank 2
+    await ready(store);
+    const r = await store.search('kiwi', 2);
+    assert.equal(r.ranked.hits[0].score, r.ranked.hits[1].score);
+    assert.deepEqual(r.ranked.hits.map(h => h.id), [`t-${newer}-0`, `t-${older}-0`]);
+    await store.close();
+  }
 });
 
 // ---------------------------------------------------------------- 5. forget and restore
@@ -307,7 +312,7 @@ test('8: after a restart the backfill completes and vector is ok', async () => {
   await store.close();
 });
 
-test('8: an unwritable vector file - forget succeeds and logs; the store still opens; once writable, the next load removes the row', async () => {
+test('8: an unwritable vector file - forget succeeds and logs; the store still opens; once writable, the next load removes the row', AS_ROOT, async () => {
   const fake = await server();
   const root = newRoot();
   const events = [];
@@ -477,7 +482,7 @@ test('10: purged ids all forgotten before (no forget, no commit) - the step 1 fi
   await store.close();
 });
 
-test('10: step 1 cannot filter (unwritable file) - aborted before the build, repository bytes unchanged, done{rolled_back}; no "interrupted" next boot', async () => {
+test('10: step 1 cannot filter (unwritable file) - aborted before the build, repository bytes unchanged, done{rolled_back}; no "interrupted" next boot', AS_ROOT, async () => {
   for (const alreadyForgotten of [true, false]) {
     const fake = await server();
     const { root, store } = await purgeSeed(fake.url);
@@ -607,7 +612,7 @@ test('10: a purged row written back between step 1 and step 5 - the old reposito
   await store.close();
 });
 
-test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory still opens and the owner is told', async () => {
+test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory still opens and the owner is told', AS_ROOT, async () => {
   const root = newRoot();
   const fixture = new URL('./fixtures/memory-crash.mjs', import.meta.url).pathname;
   // Killed inside step 1, before its vector filter: the purged id is still in the file.
@@ -627,4 +632,142 @@ test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory stil
   await next.vector.whenLoaded();
   assert.ok(!fileIds(root).includes('t-gone-0'), 'the load reconciled it away');
   await next.close();
+});
+
+// ---------------------------------------------------------------- review of r27's build
+
+test('10: a torn line mid-file and no row for the purged id - step 1 still rewrites the file without it, so step 5 passes', async () => {
+  const fake = await server();
+  const { root, store } = await purgeSeed(fake.url);
+  await store.forget(['t-gone-0'], { reason: 'earlier', by: 'owner' }); // its row leaves the file
+  appendFileSync(vfile(root), '{"id":"t-torn-0","v":"AAAA');           // a crash inside an append
+  await store.recordTurn('later', [{ role: 'owner', text: 'after the crash' }]);
+  await ready(store); // the next append starts with a newline: the torn line stays mid-file
+  assert.equal((await scanVectorFile(vfile(root))).bad, 1);
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, true, JSON.stringify(r));
+  assert.equal((await scanVectorFile(vfile(root))).bad, 0);
+  assert.deepEqual(fileIds(root).sort(), ['t-keep-0', 't-later-0', 't-old-0']);
+  await store.close();
+});
+
+test('10: a filter killed mid-way left its temporary file - the next purge removes it with the purged row in it', async () => {
+  const fake = await server();
+  const { root, store } = await purgeSeed(fake.url);
+  writeFileSync(vfile(root) + '.filter-999999', headerLine(MODEL) + '\n' + row('t-gone-0', hashVector('gone', DIMS)) + '\n', { mode: 0o600 });
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, true, JSON.stringify(r));
+  assert.deepEqual(readdirSync(root).filter(n => n.includes('.filter-')), []);
+  assert.ok(!fileIds(root).includes('t-gone-0'));
+  await store.close();
+});
+
+const downNotices = store => (store.statusLine().notices ?? []).filter(n => n.startsWith('本地向量检索自'));
+
+test('8: an acknowledged vector-down notice is not added again in the same outage; a failure after recovery is a new one', async () => {
+  const fake = await server();
+  fake.knobs.status = 500;
+  const now = clock();
+  const root = newRoot();
+  const store = await open(root, fake.url, { now });
+  await store.recordTurn('a', [{ role: 'owner', text: 'lantern festival' }]);
+  await store.search('lantern');
+  now.advance(11 * 60000);
+  await store.search('lantern');
+  assert.equal(downNotices(store).length, 1);
+  store.acknowledgeNotices();
+  await store.search('lantern');
+  now.advance(11 * 60000);
+  await store.search('lantern');
+  assert.deepEqual(downNotices(store), [], 'the same outage, acknowledged: not again');
+  fake.knobs.status = 0;
+  await ready(store);
+  await store.search('lantern');
+  fake.knobs.status = 500;
+  await store.search('lantern');
+  now.advance(11 * 60000);
+  await store.search('lantern');
+  assert.equal(downNotices(store).length, 1, 'a failure after recovery is a new outage');
+  await store.close();
+});
+
+test('8: healthy again with a backlog left - the notice stays until the backlog is 0', async () => {
+  const fake = await server();
+  fake.knobs.status = 500;
+  const now = clock();
+  const root = newRoot();
+  const store = await open(root, fake.url, { now });
+  await store.recordTurn('a', [{ role: 'owner', text: 'lantern festival' }]);
+  await store.search('lantern');
+  now.advance(11 * 60000);
+  await store.search('lantern');
+  assert.equal(downNotices(store).length, 1);
+  const entryRequests = () => fake.requests.filter(r => r.input === 'lantern festival').length;
+  const before = entryRequests();
+  fake.knobs.hangIf = input => input === 'lantern festival'; // the worker's embedding of the entry hangs
+  fake.knobs.status = 0;
+  await until(() => entryRequests() > before, 'the worker asks again');
+  const r = await store.search('lantern');
+  assert.equal(r.ranked.source, 'bm25+向量 · 本地索引 · bge-m3-q8_0', 'the query itself was answered');
+  assert.equal(r.ranked.vector, 'backlog 0/1');
+  assert.equal(downNotices(store).length, 1, 'healthy is not enough: the backlog is not 0');
+  fake.knobs.hangIf = () => false;
+  await until(() => downNotices(store).length === 0, 'the notice cleared once the backlog is 0');
+  assert.equal(store.statusLine().vector, 'ok');
+  await store.close();
+});
+
+test('8: a vector-down notice an earlier process left goes once the server answers - no backlog, no search needed', async () => {
+  const fake = await server();
+  const root = newRoot();
+  let store = await open(root, fake.url);
+  await store.recordTurn('a', [{ role: 'owner', text: 'lantern festival' }]);
+  await ready(store);
+  await store.close();
+  const since = '2026-11-19T10:00:00.000Z';
+  appendFileSync(join(root, USER + '.notices.jsonl'), JSON.stringify({ at: since, kind: 'vector-down', since,
+    text: `本地向量检索自 ${since} 不可用（${fake.url} · ${MODEL} · ECONNREFUSED），排序检索只用 BM25，可能漏掉意思相近的记录；未嵌入 0 条` }) + '\n');
+  store = await open(root, fake.url);
+  assert.equal(downNotices(store).length, 1);
+  await until(() => downNotices(store).length === 0, 'the old notice cleared', 5000);
+  assert.equal(store.statusLine().vector, 'ok');
+  await store.close();
+});
+
+test('3.8.2: the worker embeds what has no vector newest first, whatever order the log holds them in', async () => {
+  // The second case writes the entries out of time order (the clock jumps back and forth).
+  for (const offsets of [[1, 2, 3, 4], [3, 1, 4, 2]]) {
+    const root = newRoot();
+    const base = Date.parse('2026-11-19T10:00:00.000Z');
+    let i = 0;
+    const now = () => new Date(base + (offsets[Math.min(i, offsets.length - 1)] * 60000)).toISOString();
+    let store = await open(root, undefined, { now });
+    for (const name of ['one', 'two', 'three', 'four']) { await store.recordTurn(name, [{ role: 'owner', text: 'order ' + name }]); i++; }
+    await store.close();
+    const fake = await server();
+    store = await open(root, fake.url);
+    await ready(store);
+    const names = ['one', 'two', 'three', 'four'];
+    const expected = names.map((n, j) => [n, offsets[j]]).sort((a, b) => b[1] - a[1]).map(([n]) => 'order ' + n);
+    assert.deepEqual(fake.requests.map(r => r.input).filter(t => t.startsWith('order ')), expected, String(offsets));
+    await store.close();
+  }
+});
+
+test('3.3: the vectors in memory grow by fixed blocks, never by copying; a forgotten row is reused', async () => {
+  const fake = await server();
+  const root = newRoot();
+  const store = await open(root, fake.url);
+  for (let j = 0; j < 3; j++) await store.recordTurn('g' + j, [{ role: 'owner', text: 'grow ' + j }]);
+  await ready(store);
+  const mem = store.vector.mem;
+  const block = mem.blocks[0];
+  assert.equal(mem.blocks.length, 1);
+  await store.forget(['t-g1-0'], { reason: 'test', by: 'owner' });
+  const rows = mem.ids.length;
+  await store.recordTurn('g3', [{ role: 'owner', text: 'grow 3' }]);
+  await ready(store);
+  assert.equal(mem.ids.length, rows, 'the forgotten row was reused');
+  assert.equal(mem.blocks[0], block, 'never reallocated');
+  await store.close();
 });

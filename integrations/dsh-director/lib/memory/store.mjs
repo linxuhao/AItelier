@@ -811,7 +811,6 @@ export class MemoryStore {
     const out = answer => ({ text: this.#grouped(answer), hits: answer.items.map(it => it.hit), omitted: answer.omitted });
     const { items: _g, ...grepHead } = grep;
     const { items: _r, filtered_forgotten, remote_forget, ...rankedHead } = ranked;
-    if (this.vector && ranked.items) rankedHead.vector = this.vector.statusText();
     return { query: q,
       grep: { ...grepHead, ...out(answers[0]) },
       ranked: ranked.items ? { ...rankedHead, ...out(answers[1]), filtered_forgotten, ...(remote_forget ? { remote_forget } : {}) } : ranked,
@@ -977,9 +976,12 @@ export class MemoryStore {
   async #fused(query, k) {
     const C = candidates(k);
     const vector = await this.vector.rank(query, C);
+    // ranked.vector is read here, when the source is decided: the worker may change the
+    // channel's state while grep still runs, and the two fields must describe one moment.
+    const status = this.vector.statusText();
     const bm = this.index.search(query, C);
     if (!vector) {
-      return { source: 'bm25 · 本地索引 · 向量不可用',
+      return { source: 'bm25 · 本地索引 · 向量不可用', status,
         hits: bm.slice(0, k).map(h => ({ text: this.entries.get(h.id)?.text ?? '', score: Math.round(h.score * 100) / 100, at: h.at, ref: h.id })) };
     }
     this.faults?.onFusion?.({ C, bm25: bm.length, vector: vector.length });
@@ -989,7 +991,7 @@ export class MemoryStore {
     const at = id => this.entries.get(id)?.at ?? '';
     const fused = [...score].filter(([id]) => this.entries.has(id))
       .sort(([a, x], [b, y]) => y - x || (at(b) > at(a) ? 1 : at(b) < at(a) ? -1 : 0) || byId(a, b)).slice(0, k);
-    return { source: this.vector.source,
+    return { source: this.vector.source, status,
       hits: fused.map(([id, s]) => ({ text: this.entries.get(id).text, score: Math.round(s * 1e4) / 1e4, at: at(id), ref: id })) };
   }
 
@@ -1001,8 +1003,8 @@ export class MemoryStore {
   async #ranked(query, k) {
     let source = this.ranked.name;
     if (this.remote) await this.#replayPending().catch(() => {});
-    let hits;
-    if (this.vector) ({ source, hits } = await this.#fused(query, k));
+    let hits, vector;
+    if (this.vector) ({ source, hits, status: vector } = await this.#fused(query, k));
     else {
       try { hits = await this.ranked.search(query, k); }
       catch (error) { return { source, error: String(error?.message ?? error).slice(0, 500) }; }
@@ -1042,7 +1044,7 @@ export class MemoryStore {
           ...(this.#dateOnly(words, e) ? { date_only: true } : {}) } });
       }
     }
-    return { source, coverage: this.remote ? 'remote' : this.coverage, items,
+    return { source, coverage: this.remote ? 'remote' : this.coverage, ...(vector !== undefined ? { vector } : {}), items,
       filtered_forgotten: filtered, ...(remoteForget ? { remote_forget: remoteForget } : {}) };
   }
 

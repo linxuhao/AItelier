@@ -5,7 +5,7 @@
  *  The embedding server is a local llama.cpp `llama-server --embedding` (OpenAI-compatible
  *  POST <url>/v1/embeddings, L2-normalised); this module only ever talks to the loopback url
  *  the config allows (memoryVectorProblem). Vectors are int8 (x127, rounded), kept in memory
- *  as one Int8Array and on disk in `<root>/<userId>.vectors.jsonl` beside the repository:
+ *  in fixed blocks of Int8Array and on disk in `<root>/<userId>.vectors.jsonl` beside the repository:
  *    {"model":"bge-m3-q8_0","dims":1024,"quant":"int8","input_chars":1000}   the header
  *    {"id":"t-…","v":"<base64 of dims int8 bytes>"}                         one line per entry
  *  The file is derived data: appended without fsync, filtered (never rewritten from memory)
@@ -16,9 +16,9 @@
  *  newest first, one request at a time, after the load and its reconciliation are done.
  *  Logs carry ids, counts and reasons, never memory text. */
 import { closeSync, constants, createReadStream, existsSync, openSync, readSync, statSync, writeSync, chmodSync } from 'node:fs';
-import { access, open as openFile, rename, unlink } from 'node:fs/promises';
+import { access, open as openFile, readdir, rename, unlink } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { VECTOR_MODELS } from '../host.mjs';
 
 /** Only the first code points of an entry (and of a query) are embedded: bge-m3 is a
@@ -31,6 +31,8 @@ export const RRF_K = 60;
 export const candidates = k => Math.max(5 * k, 50);
 export const DEFAULT_TIMEOUT_MS = 5000;
 const YIELD_ROWS = 10000;
+/** Rows per block of the vectors in memory (4 MB at 1024 dims). */
+const BLOCK_ROWS = 4096;
 const DOWN_NOTICE_MS = 10 * 60 * 1000;
 const SKIP = Symbol('skip');
 
@@ -107,13 +109,18 @@ export async function scanVectorFile(file, ids = new Set()) {
  *  the original's, byte for byte; (d) every line parses and holds `dims` bytes. A file whose
  *  first line is not a header is deleted whole (derived: the next load embeds everything
  *  again). A file we may not write is refused (EACCES) when it has rows to lose, though a
- *  rename would replace it.
+ *  rename would replace it. A file with a torn line is rewritten even when no id is dropped
+ *  (the torn line goes), so a purge's step 5, which wants every line whole, can pass.
+ *  First, the temporary files a filter killed mid-way left (SIGKILL, power loss: its
+ *  `finally` never ran) are removed: they hold rows, a purged id's among them. Every caller
+ *  holds the write lock and one process holds the store, so none of them is in use.
  *  `write(line, i)` is a test hook over each line written (i = 0 for the header).
  *  Returns {exists: false} | {exists: true, deleted: true} | {exists: true, headerLine, rows, removed}. */
 export async function filterVectorFile(file, drop, { write } = {}) {
+  await removeStaleFilterFiles(file);
   if (!existsSync(file)) return { exists: false };
   const tmp = `${file}.filter-${process.pid}`;
-  let first, header, fh, valid = 0, removed = 0, n = 0, chunk = '';
+  let first, header, fh, valid = 0, removed = 0, bad = 0, n = 0, chunk = '';
   const out = async (line, force = false) => {
     if (line !== null) chunk += line + '\n';
     if (fh && (force || chunk.length > 1 << 20)) { await fh.write(chunk); chunk = ''; }
@@ -130,7 +137,7 @@ export async function filterVectorFile(file, drop, { write } = {}) {
       }
       if (!line) continue;
       const row = parseRow(line, header.dims);
-      if (!row) continue;
+      if (!row) { bad++; continue; }
       valid++;
       if (drop.has(row.id)) { removed++; continue; }
       await out(emit(line, valid));
@@ -142,7 +149,7 @@ export async function filterVectorFile(file, drop, { write } = {}) {
     }
     await out(null, true);
     await fh.sync(); await fh.close(); fh = undefined;
-    if (!removed && !write) { await unlink(tmp); return { exists: true, headerLine: first, rows: valid, removed: 0 }; }
+    if (!removed && !bad && !write) { await unlink(tmp); return { exists: true, headerLine: first, rows: valid, removed: 0 }; }
     await access(file, constants.W_OK);
     const after = await scanVectorFile(tmp, drop);
     const problems = [];
@@ -161,27 +168,41 @@ export async function filterVectorFile(file, drop, { write } = {}) {
   }
 }
 
-/** The vectors in memory: one growing Int8Array, row i's id at ids[i] (undefined once
- *  dropped), and id -> row. The file's line numbers have nothing to do with the rows. */
+async function removeStaleFilterFiles(file) {
+  const dir = dirname(file), prefix = basename(file) + '.filter-';
+  let names;
+  try { names = await readdir(dir); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  const stale = names.filter(name => name.startsWith(prefix));
+  for (const name of stale) await unlink(join(dir, name));
+  if (stale.length) await fsyncDirOf(file);
+}
+
+/** The vectors in memory: blocks of BLOCK_ROWS rows, one Int8Array each, so growing adds a
+ *  block and never copies (a doubling array went from 104 to 208 MB, past the 120 MB budget,
+ *  and its copy blocked the loop for 65 ms); a forgotten row is reused by the next new id.
+ *  Row i's id at ids[i] (undefined while free), and id -> row. The file's line numbers have
+ *  nothing to do with the rows. */
 class Vectors {
-  /** `rows`: the capacity to start with (a load sizes it from the file, so a 100k-row file
-   *  is one allocation, not a series of doublings each copying the last). */
-  constructor(dims, rows = 1024) { this.dims = dims; this.data = new Int8Array(dims * Math.max(1, rows)); this.ids = []; this.rows = new Map(); }
+  constructor(dims) { this.dims = dims; this.blocks = []; this.ids = []; this.rows = new Map(); this.free = []; }
   get size() { return this.rows.size; }
   has(id) { return this.rows.has(id); }
   set(id, v) {
     let row = this.rows.get(id);
     if (row === undefined) {
-      row = this.ids.length;
-      if ((row + 1) * this.dims > this.data.length) { const grown = new Int8Array(this.data.length * 2); grown.set(this.data); this.data = grown; }
-      this.ids.push(id); this.rows.set(id, row);
+      if (this.free.length) row = this.free.pop();
+      else {
+        row = this.ids.length;
+        this.ids.push(undefined);
+        if (row % BLOCK_ROWS === 0) this.blocks.push(new Int8Array(BLOCK_ROWS * this.dims));
+      }
+      this.ids[row] = id; this.rows.set(id, row);
     }
-    this.data.set(v, row * this.dims);
+    this.blocks[(row / BLOCK_ROWS) | 0].set(v, (row % BLOCK_ROWS) * this.dims);
   }
   delete(id) {
     const row = this.rows.get(id);
     if (row === undefined) return false;
-    this.ids[row] = undefined; this.rows.delete(id);
+    this.ids[row] = undefined; this.rows.delete(id); this.free.push(row);
     return true;
   }
 }
@@ -248,8 +269,6 @@ export class VectorChannel {
   async #load(gen) {
     if (this.store.faults()?.vectorLoadPause) await this.store.faults().vectorLoadPause();
     if (gen !== this.gen) return;
-    // At most this many rows fit the file: each line is at least {"id":"x","v":"<base64>"}.
-    try { this.mem = new Vectors(this.dims, Math.ceil(statSync(this.file).size / (4 * Math.ceil(this.dims / 3) + 18))); } catch {}
     const mem = this.mem;
     const entries = this.store.entries();
     const extras = new Set();
@@ -345,9 +364,14 @@ export class VectorChannel {
     const entries = this.store.entries();
     const wanted = id => entries.has(id) && !this.mem.has(id) && !this.skipped.has(id);
     while (this.queue.length) { const id = this.queue.shift(); if (wanted(id)) return id; }
-    // The list is empty: compute it once from the entries (newest first).
-    this.queue = [...entries.values()].filter(e => wanted(e.id))
-      .sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0)).map(e => e.id);
+    // The list is empty: compute it once from the entries (newest first). They come in log
+    // order, which is time order unless a restore or a clock step broke it; reversed, that is
+    // newest first, and only an out-of-order list pays for a sort (100k: 25 ms at once).
+    const list = [];
+    let ordered = true;
+    for (const e of entries.values()) if (wanted(e.id)) { if (list.length && list[list.length - 1].at > e.at) ordered = false; list.push(e); }
+    if (ordered) list.reverse(); else list.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
+    this.queue = list.map(e => e.id);
     return this.queue.shift();
   }
 
@@ -357,14 +381,16 @@ export class VectorChannel {
       if (!this.loaded) { await this.#sleep(); continue; }
       const gen = this.gen;
       const id = this.#next();
-      if (id === undefined) { this.#healthy(); await this.#sleep(); continue; }
-      const entry = this.store.entries().get(id);
+      if (id === undefined && this.answered) { this.#healthy(); await this.#sleep(); continue; }
+      // Nothing to embed and no answer seen in this process: one probe, so health is seen and
+      // not assumed - a vector-down notice an earlier process left goes once the server answers.
+      const entry = id === undefined ? undefined : this.store.entries().get(id);
       let v;
-      try { v = await this.#embedEntry(entry); }
+      try { v = entry ? await this.#embedEntry(entry) : await this.#embed(this.model.query + 'health', this.workerTimeoutMs, true); }
       catch (error) {
         if (this.closed) return;
         if (gen === this.gen) {
-          this.queue.unshift(id);
+          if (id !== undefined) this.queue.unshift(id);
           if (error.code !== 'ABORTED') {
             this.#failed(error);
             await this.#sleep(this.backoff);
@@ -376,6 +402,7 @@ export class VectorChannel {
       if (this.closed) return;
       this.backoff = this.backoffMin;
       this.#succeeded();
+      if (!entry) continue;
       if (v === SKIP) {
         this.skipped.add(id);
         this.store.log('memory/vector-skipped', { id, length: entry.text.length });
@@ -473,7 +500,7 @@ export class VectorChannel {
     for (let row = 0; row < mem.ids.length; row++) {
       const id = mem.ids[row];
       if (id !== undefined && entries.has(id)) {
-        const data = mem.data, base = row * dims;
+        const data = mem.blocks[(row / BLOCK_ROWS) | 0], base = (row % BLOCK_ROWS) * dims;
         let score = 0;
         for (let i = 0; i < dims; i++) score += data[base + i] * q[i];
         const item = { id, score };
@@ -500,10 +527,13 @@ export class VectorChannel {
       this.outage = { since: this.down.since };
       this.store.log('memory/vector-down', { since: this.down.since, url: this.url, model: this.modelName, code });
     }
-    // A failure lasting 10 minutes (past Docker's restart backoff) is the owner's to know, once.
-    if (Date.parse(this.store.now()) - Date.parse(this.down.since) >= DOWN_NOTICE_MS)
+    // A failure lasting 10 minutes (past Docker's restart backoff) is the owner's to know, once
+    // per outage: an owner who acknowledged it is not told again until the next outage.
+    if (!this.outage.noticed && Date.parse(this.store.now()) - Date.parse(this.down.since) >= DOWN_NOTICE_MS) {
+      this.outage.noticed = true;
       this.store.notice('vector-down', `本地向量检索自 ${this.down.since} 不可用（${this.url} · ${this.modelName} · ${code}），`
         + `排序检索只用 BM25，可能漏掉意思相近的记录；未嵌入 ${this.#backlog().left} 条`, { since: this.down.since });
+    }
   }
 
   #succeeded() {

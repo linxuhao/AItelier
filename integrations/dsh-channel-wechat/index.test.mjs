@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as plugin from './index.mjs';
-import { startWechatChannel, MAX_EVENT_AGE_MS } from './index.mjs';
+import { startWechatChannel } from './index.mjs';
 import { createBridge } from '../wechat-bridge/bridge.mjs';
 
 const TOKEN = 'plugin-test-token';
@@ -129,17 +129,21 @@ test('bridge messages reach ownerChannels.inbound with the channel fields, and t
   } finally { await channel.stop(); await bridge.close(); }
 });
 
-test('messages from well before this start are not replayed; recent ones are', async () => {
+// Ten minutes was the old cutoff (review races_f4): nothing is dropped for its age now.
+const LONG_AGO = 15 * 60_000;
+
+test('after an outage the bridge\'s old messages are all passed on, in order: the host takes each ref once and dates an approval itself', async () => {
   const bridge = await fakeBridge();
   const channels = fakeChannels();
-  const old = new Date(Date.now() - MAX_EVENT_AGE_MS - 60_000).toISOString();
-  const recent = new Date(Date.now() - 60_000).toISOString();
-  bridge.events.push(event(1, { at: old }), event(2, { at: recent }));
+  const old = new Date(Date.now() - LONG_AGO).toISOString();
+  const recent = new Date(Date.now() - 12_000).toISOString();
+  bridge.events.push(event(1, { at: old, text: 'an ordinary question' }), event(2, { at: old, text: '同意 proposal p-1' }),
+    event(3, { at: recent }));
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
   try {
-    await until(() => channels.received.length === 1);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    assert.deepEqual(channels.received.map(m => m.messageRef), ['m2']);
+    await until(() => channels.received.length === 3);
+    assert.deepEqual(channels.received.map(m => [m.messageRef, m.at]), [['m1', old], ['m2', old], ['m3', recent]],
+      'each with the time the owner wrote it, for the host to judge');
   } finally { await channel.stop(); await bridge.close(); }
 });
 
@@ -248,40 +252,22 @@ test('a refusal other than `unavailable` is final: not retried', async () => {
   } finally { await channel.stop(); await bridge.close(); }
 });
 
-test('a held message is given up once it is too old, and the next one goes on', async () => {
+test('a held message is never given up for its age: it goes on when the host is back, however long that took', async () => {
   const bridge = await fakeBridge();
-  let offset = 0;
-  const channels = fakeChannels({ answer: m => {
-    if (m.messageRef !== 'm1') return { accepted: true };
-    offset = MAX_EVENT_AGE_MS + 1000; // the host stays down past the limit
-    return { accepted: false, reason: 'unavailable' };
-  } });
+  let down = true;
+  const channels = fakeChannels({ answer: () => (down ? { accepted: false, reason: 'unavailable' } : { accepted: true }) });
   const warnings = [];
-  bridge.events.push(event(1), event(2, { at: new Date(Date.now() + MAX_EVENT_AGE_MS).toISOString() }));
+  // Written long ago and held while the host is down: still delivered, and the next after it.
+  bridge.events.push(event(1, { at: new Date(Date.now() - LONG_AGO).toISOString() }), event(2));
   const channel = startWechatChannel({ ownerChannels: channels, logger: { warn: line => warnings.push(line) },
-    config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10, now: () => Date.now() + offset });
+    config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10, maxRetryMs: 20 });
   try {
+    await until(() => channels.received.length >= 4);
+    assert.ok(channels.received.every(m => m.messageRef === 'm1'), 'm1 held, nothing overtakes it');
+    down = false;
     await until(() => channels.received.some(m => m.messageRef === 'm2'));
-    assert.deepEqual(channels.received.map(m => m.messageRef), ['m1', 'm2']);
-    assert.ok(warnings.some(line => line.includes('m1 not passed on')));
-  } finally { await channel.stop(); await bridge.close(); }
-});
-
-test('an old message from a bridge that logged in again is not passed on, however recently this plugin started', async () => {
-  const bridge = await fakeBridge();
-  const channels = fakeChannels();
-  let offset = 0;
-  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
-    waitSeconds: 1, now: () => Date.now() + offset });
-  try {
-    await until(() => bridge.requests.some(r => r.path === '/events'));
-    // 20 min later the bridge rescans and neo delivers what was written 5 min before this plugin started.
-    offset = 20 * 60_000;
-    bridge.events.push(event(1, { at: new Date(Date.now() - 5 * 60_000).toISOString(), text: '同意 proposal p-1' }),
-      event(2, { at: new Date(Date.now() + offset).toISOString() }));
-    await until(() => channels.received.length === 1);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    assert.deepEqual(channels.received.map(m => m.messageRef), ['m2']);
+    assert.deepEqual([...new Set(channels.received.map(m => m.messageRef))], ['m1', 'm2']);
+    assert.ok(warnings.every(line => line.includes('not delivered')), 'no message is reported dropped');
   } finally { await channel.stop(); await bridge.close(); }
 });
 

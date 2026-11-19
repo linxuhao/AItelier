@@ -80,10 +80,24 @@ the process forget — and only a caller that is about to serve a different worl
 (tests swapping the database under these keys) wants `reset()`. A method named
 `clear()` that keeps its value is a footgun worth the sentence.
 
-Deliberately not a general-purpose cache: no eviction policy beyond the TTL and
-the generation, no size bound beyond `_MAX_KEYS` (which drops everything), no
-per-entity invalidation hooks. It holds one entry per distinct query and those
-are few. Reach for something real before using it for anything else.
+**A key this process did not choose is not a reason to lose your own value.**
+The keys are the caller's (`cached(key, ...)` takes whatever it is handed), so
+both tables need a bound and they are enforced DIFFERENTLY on purpose. The lock
+table resets wholesale (`_MAX_KEYS`): a lock is an in-flight flag, it carries no
+data, and recreating one costs nothing. The store is evicted ONE ENTRY AT A
+TIME (`_MAX_ENTRIES`): it holds the answers, and its bound must never be met by
+emptying it. Those two used to be one bound whose crossing did
+`_locks.clear(); _store.clear(); _generation += 1`, so a single caller minting
+512 distinct keys destroyed every OTHER key's value, made the next read of each
+one a cold inline rebuild, and discarded whatever rebuild was in flight
+(measured: 512 distinct keys -> the fresh entry gone, `builds_after_mints=1`,
+`read_after_mints=50.1ms` against 0.0ms; see
+tests/unit/test_read_cache_key_cap_20261119.py).
+
+Deliberately not a general-purpose cache: no eviction policy beyond the TTL, the
+generation and that one-at-a-time store bound, no per-entity invalidation hooks.
+It holds one entry per distinct query and those are few. Reach for something real
+before using it for anything else.
 """
 from __future__ import annotations
 
@@ -117,13 +131,36 @@ logger = logging.getLogger(__name__)
 # three rather than by two. That is a refactor, not a constant.
 DEFAULT_TTL = 10.0
 
-# Both dicts are keyed on values an ANONYMOUS caller picks: `/api/runs` takes
-# free-form `config_name` and `status` query params, so `?config_name=zzz1`
-# mints a fresh entry in each. `_store` at least turns over by TTL; `_locks` had
-# no eviction at all and `clear()` never touched it, so ~180 bytes per distinct
-# key accumulated forever on a hostname whose stated problem is that the callers
-# are strangers. A cap is the honest fix: the keys are not ours to bound.
-_MAX_KEYS = 512
+# The two tables are keyed on whatever the caller passes, so neither is ours to
+# bound by convention — a cap is the honest fix, and each table gets the kind of
+# cap its contents can afford.
+#
+# The history matters for the number. `/api/runs` used to key on free-form
+# `config_name` / `status` query params, so `?config_name=zzz1` minted a fresh
+# key; that amplifier is gone at the caller (api/run_routers.py:209-228 keys on
+# the identity and a boolean — a string an attacker types can no longer reach
+# the key), but this module must not depend on every future caller being that
+# careful, and the cap it grew for that hazard was the second bug: crossing it
+# dropped `_store` too, so a caller minting 512 keys made every OTHER key's next
+# read a cold inline rebuild — ~1.35s of per-project enrichment on the request
+# thread for the dashboard keys (`("projects", owner)`, `("repos", None)`,
+# `("runs", owner, include_all)`).
+#
+# So: 1024 locks, and 1024 stored entries. The former `_MAX_KEYS` of 512 WAS the
+# wipe threshold, which means any bound at 512 would have to evict exactly the
+# entries a several-hundred-key burst was minted alongside — the issue measures
+# bursts of 512 and 600. 1024 sits above them with room, so a few hundred
+# distinct keys now evict NOTHING AT ALL; the flood has to reach four figures
+# before anybody else's entry is displaced, and then one at a time.
+#
+# `_MAX_ENTRIES` is declared separately because the store is the table that
+# costs memory (a value is a whole dashboard payload) and it may never be the
+# larger of the two: `len(_store) <= _MAX_KEYS` is an inequality pinned outside
+# this file (tests/unit/test_public_read_hardening.py), and keeping the two equal
+# is what keeps that true. Lower the store bound freely; raising it above
+# `_MAX_KEYS` is the edit that breaks that claim.
+_MAX_KEYS = 1024
+_MAX_ENTRIES = 1024
 
 # key -> (stored_at monotonic, value, the generation it was built in). The third
 # element is what makes `clear()` cheap: it invalidates every entry at once by
@@ -134,27 +171,35 @@ _store: dict[Hashable, tuple[float, Any, int]] = {}
 _locks: dict[Hashable, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
-# Bumped by everything that INVALIDATES the store (`clear()`, and the key-cap
-# reset, which really does drop it). A background rebuild records the generation
-# it started in and will not publish into a later one — see `_publish` and the
-# docstring. There is deliberately no per-key structure for this: the lock table
-# is already bounded, and a second table keyed on caller-supplied values would
-# be an unbounded one.
+# Bumped by everything that INVALIDATES the store (`clear()` after a write, and
+# `reset()` when a caller needs the process to forget). A background rebuild
+# records the generation it started in and will not publish into a later one —
+# see `_publish` and the docstring. The lock table's reset deliberately does NOT
+# bump it: it no longer drops `_store`, so there is nothing to refuse, and moving
+# the generation there would discard a rebuild that is still perfectly valid
+# (which is exactly what it used to do). There is deliberately no per-key
+# structure for this: the lock table is already bounded, and a second table keyed
+# on caller-supplied values would be an unbounded one.
 _generation = 0
 
 
 def _lock_for(key: Hashable) -> threading.Lock:
-    global _generation
     with _locks_guard:
         lock = _locks.get(key)
         if lock is None:
             if len(_locks) >= _MAX_KEYS:
-                # Drop everything rather than pretend to be an LRU. These are
-                # 10-second entries; losing them costs one recomputation, and a
-                # wrong eviction policy here would be more code than the cache.
+                # Reset the LOCK table only, and only that. A lock is an
+                # in-flight flag: it carries no data, recreating one costs
+                # nothing, and the worst a reset can do is let a second rebuild
+                # start for a key whose first one is still running (the price
+                # `clear()` already pays — see its docstring).
+                #
+                # What it must never do again is what it used to do here:
+                # `_store.clear()` plus a generation bump. That made one
+                # caller's 512 distinct keys every other key's problem — the
+                # dashboard's own entries became cold inline rebuilds, and any
+                # rebuild in flight was thrown away.
                 _locks.clear()
-                _store.clear()
-                _generation += 1
             lock = _locks[key] = threading.Lock()
         return lock
 
@@ -165,7 +210,39 @@ def _publish(key: Hashable, value: Any, generation: int) -> bool:
         if generation != _generation:
             return False
         _store[key] = (time.monotonic(), value, generation)
+        _evict_over_bound()
         return True
+
+
+def _evict_over_bound() -> None:
+    """Bring `_store` back within `_MAX_ENTRIES`, one entry at a time.
+
+    Caller holds `_locks_guard`. Never the whole table: this exists because a
+    caller minting distinct keys is normal traffic here (see the constants
+    above), and the defect it replaces met the same pressure by dropping
+    everything. A flood bigger than the bound still displaces entries — that is
+    what a bound means — but it costs the displaced keys one rebuild each
+    instead of costing EVERY key a cold inline rebuild at once.
+
+    The victim is the entry worth least, in this order:
+
+    1. an entry from an OLDER generation — a write has already invalidated it,
+       so its value is going to be rebuilt on the next read anyway; keeping it
+       over a current-generation entry buys nothing;
+    2. otherwise the oldest `stored_at` — plain FIFO over the store's own clock,
+       not an LRU, because this cache keeps no per-read bookkeeping and a fresh
+       hit has to stay a single dict lookup.
+
+    Which means, stated plainly so nobody has to discover it: the entries a
+    flood of more than `_MAX_ENTRIES` distinct keys displaces are the ones that
+    have been sitting there longest, i.e. a genuinely polled key that has not
+    been rebuilt since the flood started. It pays one rebuild; it does not lose
+    the store, and a burst of hundreds of keys pays nothing at all.
+    """
+    while len(_store) > _MAX_ENTRIES:
+        victim = min(_store,
+                     key=lambda k: (_store[k][2] == _generation, _store[k][0]))
+        del _store[victim]
 
 
 def _rebuild(key: Hashable, build: Callable[[], Any], lock: threading.Lock,

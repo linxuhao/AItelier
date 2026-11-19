@@ -641,6 +641,33 @@ test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory stil
   await next.close();
 });
 
+test('10: a filter that fails during an ordinary forget keeps the derived row and tells the owner; the next boot removes it and takes the notice back', async () => {
+  const fake = await server();
+  const root = newRoot();
+  let store = await open(root, fake.url);
+  await store.recordTurn('a', [{ role: 'owner', text: 'the zebra note FORGET-ME' }]);
+  await ready(store);
+  assert.deepEqual(fileIds(root), ['t-a-0']);
+  const unblock = blockFilter(root);
+  const r = await store.forget(['t-a-0'], { reason: 'owner asked', by: 'owner' });
+  assert.deepEqual(r.forgotten, ['t-a-0'], 'the forget itself still succeeds');
+  assert.ok(fileIds(root).includes('t-a-0'), 'the derived row is still in the file');
+  const log = () => readdirSync(join(repo(root), 'log')).filter(n => n.endsWith('.jsonl'))
+    .map(n => readFileSync(join(repo(root), 'log', n), 'utf8')).join('');
+  assert.ok(!log().includes('FORGET-ME'), 'and the text is out of the log, so no search can return it');
+  const notices = store.statusLine().notices ?? [];
+  assert.ok(notices.some(n => /^向量文件里仍有已彻底删除的编号 t-a-0，原因 .*；下次载入会再去掉$/.test(n)), JSON.stringify(notices));
+  await store.close();
+  unblock();
+  store = await open(root, fake.url);
+  await store.vector.whenLoaded();
+  await ready(store);
+  assert.ok(!fileIds(root).includes('t-a-0'), 'the boot removed the derived row');
+  assert.ok(!(store.statusLine().notices ?? []).some(n => n.startsWith('向量文件里仍有已彻底删除的编号')),
+    JSON.stringify(store.statusLine().notices));
+  await store.close();
+});
+
 // ---------------------------------------------------------------- review of r27's build
 
 test('10: a torn line mid-file and no row for the purged id - step 1 still rewrites the file without it, so step 5 passes', async () => {

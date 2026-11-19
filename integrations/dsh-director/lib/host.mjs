@@ -120,6 +120,44 @@ export function validateHost(host) {
   return host;
 }
 
+/** Design-steward 3.8.1: why `tz` cannot be memory.timeZone (an IANA name, checked with
+ *  Intl.DateTimeFormat), or undefined when it can; absent means UTC. A bad zone stops the
+ *  memory module only (openMemory answers this as its error), never the host. */
+export function memoryTimeZoneProblem(tz) {
+  if (tz === undefined) return undefined;
+  if (typeof tz !== 'string' || !tz) return `memory.timeZone must be an IANA time zone name, got ${JSON.stringify(tz)}`;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return undefined; }
+  catch (error) { return `memory.timeZone ${JSON.stringify(tz)} is not a time zone (${error.message})`; }
+}
+
+/** Design-steward 3.8.2: the two local embedding models memory.vector may name - their
+ *  dimensions, and the prefixes a model wants in front of a query and of a stored entry. */
+export const VECTOR_MODELS = Object.freeze({
+  'bge-m3-q8_0': Object.freeze({ dims: 1024, query: '', passage: '' }),
+  'multilingual-e5-small-q8_0': Object.freeze({ dims: 384, query: 'query: ', passage: 'passage: ' }),
+});
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/** Design-steward 3.8.2: why `memory.vector` cannot be used, or undefined when it can (or is
+ *  absent: off). The url is loopback only, so the plugin's requests never leave the machine;
+ *  the model is one of VECTOR_MODELS; it excludes memory.remote. Like the time zone, a bad
+ *  vector stops the memory module only (openMemory answers this as its error). */
+export function memoryVectorProblem(memory) {
+  const v = memory?.vector;
+  if (v === undefined) return undefined;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return 'memory.vector must be an object with url and model';
+  if (memory.remote !== undefined) return 'memory.remote and memory.vector are exclusive';
+  let url;
+  try { url = new URL(v.url); } catch { url = undefined; }
+  if (!url || url.protocol !== 'http:' || !LOOPBACK.has(url.hostname) || url.username || url.password || url.search || url.hash)
+    return `memory.vector.url must be http://127.0.0.1, http://localhost or http://[::1] (with a port), got ${JSON.stringify(v.url)}`;
+  if (typeof v.model !== 'string' || !Object.hasOwn(VECTOR_MODELS, v.model))
+    return `memory.vector.model must be one of ${Object.keys(VECTOR_MODELS).join(', ')}, got ${JSON.stringify(v.model)}`;
+  if (v.timeoutMs !== undefined && !(Number.isSafeInteger(v.timeoutMs) && v.timeoutMs > 0))
+    return 'memory.vector.timeoutMs must be a positive integer of milliseconds when given';
+  return undefined;
+}
+
 /** What an absent optional operation means. */
 export const optionalDefaults = Object.freeze({
   progress: () => {},                  // status reports are dropped (the runtime still logs)

@@ -121,7 +121,13 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     const s1 = json('s1');
     assert.equal(s1.grep.source, 'grep · 字面匹配 · 本地记忆日志');
     assert.equal(s1.grep.hits[0].id, json('n1').id);
+    // Step 21: the whole entry, dated, once; the ranked answer points at grep's copy.
+    assert.equal(s1.grep.hits[0].shown, 'full');
+    assert.match(s1.grep.text, new RegExp(`^\\[\\d{4}-\\d{2}-\\d{2} 周. \\d{2}:\\d{2}\\+00:00\\] 管家（笔记） \\{${json('n1').id}\\}: NOTE_MARKER_42 the owner wants a ledger$`));
     assert.equal(s1.ranked.source, 'bm25 · 本地索引');
+    assert.deepEqual(s1.ranked.hits.map(h => [h.id, h.shown]), [[json('n1').id, 'see_grep']]);
+    assert.match(s1.ranked.text, / → 见 grep$/);
+    assert.match(s1.budget, /^\d+\/6000 字 · omitted 0$/);
     assert.equal(json('d1').dormant, true, JSON.stringify(json('d1')));
     const listed = requests.find(r => r.session === 'mem-root' && r.tools.length)?.tools ?? [];
     assert.ok(!listed.some(name => name.startsWith('memory_')), 'registered, not presented: ' + JSON.stringify(listed));
@@ -137,6 +143,7 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     await writeFile(join(root, 'inbox', 'wake2.json'), JSON.stringify({ wake: 2 }));
     await until('boot 2 never searched', () => result('s2'));
     assert.equal(json('s2').grep.hits[0].id, json('n1').id, 'the note survived the restart');
+    assert.ok(json('s2').grep.text.endsWith(': NOTE_MARKER_42 the owner wants a ledger'), 'whole, after the restart too');
     await until('boot 2 never went dormant', () => result('d2'));
     assert.equal(json('p2').updated, true, 'the version from the last snapshot was current: ' + JSON.stringify(json('p2')));
     await until('boot 2 dormancy did not compact', () => compactions() > before);

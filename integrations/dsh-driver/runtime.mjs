@@ -507,7 +507,14 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       permissionPreset: hostExecution && !steward ? 'danger-full-access' : undefined,
       // The owner's memory lives on the host, outside every container mount (design 3.3).
       ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
-        ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}) } } : {}) },
+        ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}),
+        // Step 21 (design-steward 3.8.1): the owner's time zone for search's dates and the
+        // index's date words; the host unit's drop-in sets it (Europe/Paris), default UTC.
+        ...(env.AITELIER_DSH_MEMORY_TZ ? { timeZone: env.AITELIER_DSH_MEMORY_TZ } : {}),
+        // Step 21 (design-steward 3.8.2): the local embedding server, only when its url is set
+        // (the drop-in 20-memory-vector.conf sets both); off otherwise.
+        ...(env.AITELIER_DSH_MEMORY_VECTOR_URL ? { vector: { url: env.AITELIER_DSH_MEMORY_VECTOR_URL,
+          model: env.AITELIER_DSH_MEMORY_VECTOR_MODEL } } : {}) } } : {}) },
     labels,
     // The steward's held work is an unanswered owner message, not a State claim.
     texts: steward ? stewardHostTexts(texts) : texts,

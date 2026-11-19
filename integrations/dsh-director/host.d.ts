@@ -51,9 +51,19 @@ export interface HostConfig {
    *  ~/.local/share/dsh-director/memory; keep it outside anything mounted into containers).
    *  `remote` (off by default) is an Agent Memory Leaderboard endpoint used as the ranked
    *  index instead of the built-in BM25; `amiIds` lets it trace ActiveMemoryIndex hits back to
-   *  turns. Every remote call may cost money. */
-  memory?: { userId: string; root?: string; grepTimeoutMs?: number; backupRemote?: string;
-    remote?: { url: string; name: string; tokenFile?: string; userId?: string; sessionId?: string; amiIds?: boolean } };
+   *  turns. Every remote call may cost money. `timeZone` (step 21, design-steward 3.8.1) is
+   *  the owner's IANA time zone (default UTC): memory_search's line dates, its day groups and
+   *  the date words in the BM25 index all use it; an invalid name stops the memory module
+   *  (its tools answer the error) and nothing else. Read at start-up only.
+   *  `vector` (step 21, design-steward 3.8.2; off when absent) adds a local embedding server
+   *  (llama.cpp `llama-server --embedding`) as a second ranked channel beside BM25, fused by
+   *  RRF: `url` is loopback only (http://127.0.0.1 | localhost | [::1]), `model` one of the
+   *  two the code knows, `timeoutMs` the query embedding's limit (default 5000). Vectors are
+   *  kept in `<root>/<userId>.vectors.jsonl` beside the repository (derived, never in git).
+   *  It excludes `remote`; a bad value stops the memory module only. */
+  memory?: { userId: string; root?: string; grepTimeoutMs?: number; backupRemote?: string; timeZone?: string;
+    remote?: { url: string; name: string; tokenFile?: string; userId?: string; sessionId?: string; amiIds?: boolean };
+    vector?: { url: string; model: 'bge-m3-q8_0' | 'multilingual-e5-small-q8_0'; timeoutMs?: number } };
 }
 
 /** What the director hands the host (host-scoped and director-scoped hooks, events). */

@@ -56,14 +56,18 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   assert.deepEqual(srv.searches.at(-1), { query: '记账', user_id: 'u-1', top_k: 5 });
   assert.equal(r.ranked.source, 'remote · Fixture');
   assert.deepEqual(r.ranked.hits.map(h => [h.ref, h.score, h.at]), [['r1', 0.9, '2026-11-16T22:31:00Z']]);
-  assert.equal(r.ranked.hits[0].also_in_grep, true, 'matched to the local entry by its text');
-  assert.equal(r.grep.hits[0].also_in_ranked, true);
+  assert.equal(r.grep.hits[0].shown, 'full', 'grep is placed first');
+  assert.equal(r.ranked.hits[0].shown, 'see_grep', 'matched to the local entry by its text, which grep shows whole');
+  assert.equal(r.ranked.hits[0].role, 'owner');
+  assert.match(r.ranked.text, /^\[[^\]]+\] 业主 \{t-turn-9-0\}: → 见 grep$/);
   assert.equal(r.ranked.remote_forget, 'unsupported', 'no remove, no batchOf: said on every search');
   assert.equal(r.ranked.hits[0].id, 't-turn-9-0', 'the matched local id, which memory_read takes');
   assert.equal((await store.read([r.ranked.hits[0].id])).entries[0].text, '想做记账工具');
   srv.data = () => [{ id: 'r2', content: 'User wants a ledger', score: 0.8 }];
   const loose = await store.search('ledger', 5);
   assert.equal(loose.ranked.hits[0].id, undefined, 'an extracted fact with no local twin has no id to read');
+  assert.deepEqual([loose.ranked.hits[0].ref, loose.ranked.hits[0].role, loose.ranked.hits[0].shown], ['r2', 'remote', 'full']);
+  assert.equal(loose.ranked.text, '[时间不明] 远端: User wants a ledger', 'the remote\'s own line, no id; it gave no time');
   // A hit close in meaning whose text is a local entry WITHOUT the query's words: grep cannot
   // find it, and it still gets the local id (design 3.5: text equal to a local entry).
   await store.recordTurn('t9', [{ role: 'owner', text: '先说别的' }, { role: 'owner', text: '预算表要能导出' }]);
@@ -71,7 +75,8 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   const meaning = await store.search('记账', 5);
   assert.deepEqual(meaning.grep.hits.map(h => h.id), ['t-turn-9-0'], 'grep finds only the literal match');
   assert.equal(meaning.ranked.hits[0].id, 't-t9-1');
-  assert.equal(meaning.ranked.hits[0].also_in_grep, undefined, 'not in grep, so not marked');
+  assert.equal(meaning.ranked.hits[0].shown, 'full', 'not in grep, so ranked has it whole');
+  assert.match(meaning.ranked.text, /\{t-t9-1\}: 预算表要能导出$/);
   assert.equal((await store.read([meaning.ranked.hits[0].id])).entries[0].text, '预算表要能导出');
   // Identical texts: the newest entry by time, whatever order the entries were loaded in.
   await store.recordTurn('t5', [{ role: 'owner', text: '先说别的', at: '2026-11-17T05:00:00Z' }, { role: 'owner', text: '同意', at: '2026-11-17T05:00:01Z' }]);
@@ -93,6 +98,9 @@ test('an unreachable remote: ranked carries the error verbatim, grep is complete
   const r = await store.search('ledger');
   assert.match(r.ranked.error, /search exploded/);
   assert.equal(r.ranked.hits, undefined);
+  assert.deepEqual(Object.keys(r.ranked).sort(), ['error', 'source'], 'no hits, text or omitted: there is no ranked answer');
+  assert.equal(r.grep.hits[0].shown, 'full');
+  assert.match(r.budget, /^\d+\/6000 字 · omitted 0$/);
   assert.equal(r.ranked.source, 'remote · Fixture');
   assert.deepEqual([r.grep.complete, r.grep.hits.length], [true, 1]);
   await store.close(); await srv.close();
@@ -144,7 +152,9 @@ test('AMI ids: a forgotten turn is filtered by turn even though the remote rewro
   assert.deepEqual(checks, [{ ok: true }], 'the id rule held on the first real answer');
   await store.forget(['t-bank-0'], { reason: 'owner asked', by: 'owner' });
   const after = await store.search('bank card');
-  assert.deepEqual(after.ranked.hits.map(h => h.excerpt), ['User wants an accounting tool']);
+  assert.deepEqual(after.ranked.hits.map(h => [h.ref, h.shown]), [[amiPrefix('u-1', 'idea') + '-f0', 'full']]);
+  assert.equal(after.ranked.text, '[时间不明] 远端: User wants an accounting tool');
+  assert.ok(!JSON.stringify(after).includes('bank card ending'), 'the forgotten turn\'s fact is nowhere in the answer');
   assert.equal(after.ranked.filtered_forgotten, 1);
   assert.equal(after.ranked.remote_forget, undefined, 'filtering is supported');
   assert.equal((await store.purge(['t-bank-0'])).purged, true);

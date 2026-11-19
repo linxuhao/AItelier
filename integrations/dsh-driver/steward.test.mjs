@@ -211,6 +211,16 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.equal(steward.config.rootRole, 'steward');
   assert.deepEqual(steward.config.memory, { userId: 'owner' });
+  // Step 21: the owner's time zone reaches memory.timeZone from AITELIER_DSH_MEMORY_TZ.
+  assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_TZ: 'Europe/Paris' })).config.memory,
+    { userId: 'owner', timeZone: 'Europe/Paris' });
+  assert.equal(aitelierHost(env({ AITELIER_DSH_MEMORY_TZ: 'Europe/Paris' })).config.memory, undefined, 'a director has no memory, zone or not');
+  // Step 21: the local vector channel from AITELIER_DSH_MEMORY_VECTOR_URL / _MODEL, only with a url.
+  assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_URL: 'http://127.0.0.1:18751',
+    AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
+    { userId: 'owner', vector: { url: 'http://127.0.0.1:18751', model: 'bge-m3-q8_0' } });
+  assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
+    { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'codeCheck', 'list', 'recordDelivery', 'relay', 'reportStatus', 'sourceOf']);

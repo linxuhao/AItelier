@@ -74,9 +74,11 @@ export class Bm25Index {
 
   get size() { return this.numbers.size; }
 
-  add(id, text, at = '') {
+  /** `tokens` is the document's token list as the caller built it (design 3.5: the text's
+   *  tokens plus its date words); remove takes back exactly the same list. The index never
+   *  tokenizes a document itself, so what was added is what is taken away. */
+  add(id, tokens, at = '') {
     if (this.numbers.has(id)) return;
-    const tokens = documentTokens(text);
     const tf = new Map();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     const doc = this.ids.length;
@@ -94,11 +96,11 @@ export class Bm25Index {
     this.totalLength += tokens.length;
   }
 
-  /** `text` is the removed document's text (its tokens give the counts to take back). */
-  remove(id, text) {
+  /** `tokens` is the list `add` was given for this document (its counts are taken back). */
+  remove(id, tokens) {
     const doc = this.numbers.get(id);
     if (doc === undefined) return false;
-    for (const t of new Set(documentTokens(text))) {
+    for (const t of new Set(tokens)) {
       const left = (this.df.get(t) ?? 1) - 1;
       if (left > 0) this.df.set(t, left); else this.df.delete(t);
     }
@@ -118,12 +120,17 @@ export class Bm25Index {
     this.removed = 0;
   }
 
-  /** [{id, score, at}], best first; equal scores newest first. */
+  /** [{id, score, at}], best first; equal scores newest first (then the order first scored).
+   *  A date word is in nearly every entry (design 3.8.1: 2026, 月, 日, the month), so a date
+   *  query scores almost every document: the scores go into one slot per document and only
+   *  the best topK are kept, by a bounded heap - a Map per hit and a sort of all of them
+   *  blocked the loop for 25-60 ms at 100k entries (the budget is 20 ms, design 3.8.2). */
   search(query, topK = 10) {
     const n = this.numbers.size;
-    if (!n) return [];
+    if (!n || !(topK > 0)) return [];
     const avgdl = this.totalLength / n || 1;
-    const scores = new Map();
+    const scores = new Float64Array(this.ids.length);
+    const touched = [];
     for (const t of queryTokens(query)) {
       const p = this.postings.get(t), df = this.df.get(t);
       if (!p || !df) continue;
@@ -132,12 +139,39 @@ export class Bm25Index {
         const doc = p.pairs[i * 2];
         if (this.ids[doc] === undefined) continue;
         const tf = p.pairs[i * 2 + 1], dl = this.lengths[doc];
-        scores.set(doc, (scores.get(doc) ?? 0) + idf * (tf * (this.k1 + 1)) / (tf + this.k1 * (1 - this.b + this.b * dl / avgdl)));
+        if (scores[doc] === 0) touched.push(doc); // every term adds > 0 (idf > 0, tf >= 1)
+        scores[doc] += idf * (tf * (this.k1 + 1)) / (tf + this.k1 * (1 - this.b + this.b * dl / avgdl));
       }
     }
-    return [...scores].map(([doc, score]) => ({ id: this.ids[doc], score, at: this.ats[doc] }))
-      .sort((x, y) => y.score - x.score || (y.at > x.at ? 1 : y.at < x.at ? -1 : 0))
-      .slice(0, topK);
+    // worse(a, b): positions in `touched`; a ranks after b.
+    const ats = this.ats;
+    const worse = (a, b) => {
+      const x = scores[touched[a]], y = scores[touched[b]];
+      if (x !== y) return x < y;
+      const p = ats[touched[a]], q = ats[touched[b]];
+      return p !== q ? p < q : a > b;
+    };
+    const heap = []; // the kept positions, worst at the root
+    const down = i => {
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let w = i;
+        if (l < heap.length && worse(heap[l], heap[w])) w = l;
+        if (r < heap.length && worse(heap[r], heap[w])) w = r;
+        if (w === i) return;
+        [heap[i], heap[w]] = [heap[w], heap[i]]; i = w;
+      }
+    };
+    // Last scored first: documents are numbered in log order, so that is mostly newest first,
+    // and among equal scores (a date word alone) the rest is turned away by one comparison.
+    for (let j = touched.length - 1; j >= 0; j--) {
+      if (heap.length < topK) {
+        heap.push(j);
+        for (let i = heap.length - 1; i > 0;) { const up = (i - 1) >> 1; if (!worse(heap[i], heap[up])) break; [heap[i], heap[up]] = [heap[up], heap[i]]; i = up; }
+      } else if (worse(heap[0], j)) { heap[0] = j; down(0); }
+    }
+    return heap.sort((a, b) => (worse(a, b) ? 1 : worse(b, a) ? -1 : 0))
+      .map(j => ({ id: this.ids[touched[j]], score: scores[touched[j]], at: ats[touched[j]] }));
   }
 }
 

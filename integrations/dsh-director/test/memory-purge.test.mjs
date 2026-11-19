@@ -1,7 +1,7 @@
 /** Plugin step 11 (design-steward 3.6/3.7): purge - build, verify, swap, verify, delete;
  *  writes arriving meanwhile go to the spool; a crash at any point is finished or rolled
  *  back at the next boot from the journal and the directories that exist. */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { MemoryStore } from '../lib/memory/store.mjs';
 import { profileSection } from '../lib/memory/tools.mjs';
 import { gitEnv } from '../lib/memory/git.mjs';
+import { fakeEmbedServer } from './fixtures/embed-fake.mjs';
 
 const USER = 'owner@example.com';
 const SECRET = 'PURGE-ME secret account 4242';
@@ -151,6 +152,9 @@ test('the spool takes 5000 entries during a purge and loses none; an unwritable 
 // SIGKILL at every point, with and without a write in flight; the next boot finishes or
 // rolls back from the journal and from which directories exist.
 const crashFixture = fileURLToPath(new URL('./fixtures/memory-crash.mjs', import.meta.url));
+let embed;
+const embedServer = async () => (embed ??= await fakeEmbedServer());
+after(async () => { await embed?.close(); });
 const points = { beforeBuild: 'rolled_back', afterVerify: 'rolled_back', afterRenameOld: 'rolled_back', betweenRenames: 'rolled_back',
   afterRenameNew: 'completed', afterSwap: 'completed', beforeDelete: 'completed' };
 for (const [killAt, outcome] of Object.entries(points)) for (const writeDuring of ['0', '1']) {
@@ -169,7 +173,18 @@ for (const [killAt, outcome] of Object.entries(points)) for (const writeDuring o
     assert.equal(history.includes('secret account 4242'), outcome === 'rolled_back');
     assert.equal(count(root, 't-keep-0'), 1);
     if (writeDuring === '1') assert.equal(count(root, 't-during-0'), 1, 'the spooled write lands exactly once');
+    // Step 21 (3.8.4 item 10): recovered, and again once a vector load has reconciled, the
+    // purged id is not in the vector file and every id there is a live entry.
+    const vectorIds = () => readFileSync(join(root, USER + '.vectors.jsonl'), 'utf8').split('\n').slice(1).filter(Boolean).map(l => JSON.parse(l).id);
+    const live = s => new Set(s.entries.keys());
+    assert.ok(!vectorIds().includes('t-gone-0'));
+    assert.ok(vectorIds().every(id => live(store).has(id)), vectorIds().join());
     await store.close();
+    const loaded = await open(root, { vector: { url: (await embedServer()).url, model: 'bge-m3-q8_0' }, vectorTuning: { backoffMinMs: 20 } });
+    await loaded.vector.whenLoaded();
+    assert.ok(!vectorIds().includes('t-gone-0'));
+    assert.ok(vectorIds().every(id => live(loaded).has(id)), vectorIds().join());
+    await loaded.close();
   });
 }
 
@@ -303,6 +318,9 @@ for (const [killAt, expected] of [['beforeForgetRecords', 'rolled_back'], ['befo
     assert.equal(last.phase, 'done');
     assert.equal(last.outcome, expected);
     assert.equal(count(root, 't-keep-0'), 1);
+    // Step 21: killed inside step 1, before its vector filter: the recovery filters plan.ids.
+    const vectorIds = readFileSync(join(root, USER + '.vectors.jsonl'), 'utf8').split('\n').slice(1).filter(Boolean).map(l => JSON.parse(l).id);
+    assert.deepEqual(vectorIds, ['t-keep-0']);
     // a replay of the same turn never brings the purged entry back
     await store.recordTurn('gone', [{ role: 'owner', text: SECRET }, { role: 'steward', text: 'reply stays' }]);
     await store.flush();

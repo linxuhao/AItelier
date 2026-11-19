@@ -12,8 +12,9 @@ export function gitEnv(home) {
 
 /** Run git in `dir`. Resolves {code, stdout(Buffer), stderr, killed}; never rejects for a
  *  non-zero exit. `timeoutMs` kills the child (SIGKILL) and resolves with killed: true and
- *  whatever it printed so far; `pid` is reported so a test can prove the child is gone. */
-export function git(dir, args, { input, timeoutMs = 60000, home = dir, onSpawn } = {}) {
+ *  whatever it printed so far; `pid` is reported so a test can prove the child is gone.
+ *  `onStdout(chunk)` takes the output as it comes instead (stdout is then empty). */
+export function git(dir, args, { input, timeoutMs = 60000, home = dir, onSpawn, onStdout } = {}) {
   return new Promise((resolve, reject) => {
     const full = ['-c', 'user.name=dsh-director-memory', '-c', 'user.email=noreply@localhost',
       '-c', 'safe.directory=' + dir, '-c', 'core.quotePath=false', ...args];
@@ -25,7 +26,7 @@ export function git(dir, args, { input, timeoutMs = 60000, home = dir, onSpawn }
     const out = [], err = [];
     let killed = false;
     const timer = timeoutMs > 0 ? setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeoutMs) : null;
-    child.stdout.on('data', d => out.push(d));
+    child.stdout.on('data', d => (onStdout ? onStdout(d) : out.push(d)));
     child.stderr.on('data', d => err.push(d));
     child.on('error', error => { clearTimeout(timer); reject(error); });
     child.on('close', code => {

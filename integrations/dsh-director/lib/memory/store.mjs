@@ -12,6 +12,7 @@
  *    <userId>.ranked-pending.json   remote batches whose add failed
  *    <userId>.notices.jsonl    what the owner must be told (an interrupted purge), until acknowledged
  *    <userId>.profile-pending.json  who wrote a profile change whose commit failed (its author survives)
+ *    <userId>.vectors.jsonl    the local vector channel's int8 vectors (derived, never in git; vector.mjs)
  *  The lock, spool, journal and pending file sit beside the repository, not in it, so the
  *  purge's directory swap can never move or drop them.
  *
@@ -22,12 +23,18 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync,
   rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { Bm25Index, bm25Ranked } from './bm25.mjs';
+import { Bm25Index, bm25Ranked, documentTokens, queryTokens } from './bm25.mjs';
+import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, parseAt } from './render.mjs';
+import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
+import { RRF_K, VectorChannel, candidates, filterVectorFile, scanVectorFile } from './vector.mjs';
 import { git, gitOk } from './git.mjs';
+import { due, turn } from './slices.mjs';
 import { filterBlob, filterExportStream } from './purge-filter.mjs';
 
 export const PROFILE_LIMIT = 4000;
 export const TOP_K_MAX = 20;
+/** memory_search (design 3.8.1): both answers together, rendered lines with their heads. */
+export const SEARCH_CHARS = 6000;
 /** memory_read: at most this many ids per call and this many characters of text in all. */
 export const READ_IDS_MAX = 20;
 export const READ_CHARS = 60000;
@@ -106,18 +113,92 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
-function excerpt(text, query) {
-  const at = query ? text.toLowerCase().indexOf(String(query).toLowerCase()) : -1;
-  if (at < 0) return text.length > 160 ? text.slice(0, 160) + '…' : text;
-  const start = Math.max(0, at - 60), end = Math.min(text.length, at + query.length + 60);
-  return (start ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+/** A byte stream's '\n'-terminated records, each decoded whole and handed to `take` in
+ *  order, in turns (slices.mjs; plugin step 21 perf follow-up): a common word's
+ *  `git grep` output at 100k entries is thousands of lines (23 MB for one query), and
+ *  concatenating, decoding, splitting and parsing it at once blocked the loop for 20-77 ms
+ *  (design 3.8.2: 20 ms). push(chunk) as the bytes come; end() after the last chunk takes
+ *  what is left (a last record without '\n' too), and rejects with what `take` threw. */
+export function recordReader(take) {
+  const queue = [];
+  let pending = [], offset = 0, draining, failed;
+  async function drain() {
+    await turn();
+    while (queue.length && !failed) {
+      if (due()) { await turn(); continue; }
+      const chunk = queue[0];
+      const nl = chunk.indexOf(0x0a, offset);
+      if (nl === -1) { pending.push(chunk.subarray(offset)); queue.shift(); offset = 0; continue; }
+      const piece = chunk.subarray(offset, nl);
+      const record = (pending.length ? Buffer.concat([...pending, piece]) : piece).toString('utf8');
+      pending = []; offset = nl + 1;
+      if (offset === chunk.length) { queue.shift(); offset = 0; }
+      try { take(record); } catch (error) { failed = { error }; }
+    }
+  }
+  return {
+    push: chunk => { queue.push(chunk); draining ??= drain().finally(() => { draining = undefined; }); },
+    async end() {
+      while (draining) await draining;
+      if (!failed && pending.length) {
+        const record = Buffer.concat(pending).toString('utf8');
+        pending = [];
+        try { take(record); } catch (error) { failed = { error }; }
+      }
+      if (failed) throw failed.error;
+    },
+  };
 }
+
+/** grep's items from `git grep -z -n` records, newest first, at most k: `{hit, entry}` for
+ *  a log line (the entry as the log holds it) and `{hit, entry: {text}, profileLine}` for a
+ *  line of the profile. Kept as they come: equal times in output order, which is what a
+ *  stable sort of all of them newest first gave, without holding or sorting thousands. A
+ *  line whose `at` is not a string has no such order, so then all of them are sorted as
+ *  before. */
+export function grepMatches(query, k) {
+  const lower = query.toLowerCase();
+  const top = [], all = [];
+  let odd = false;
+  return {
+    take(record) {
+      const [file, line, ...rest] = record.split('\0');
+      if (!file || rest.length === 0) return;
+      const content = rest.join('\0');
+      let item;
+      if (file === 'profile.md') item = { at: '', profileLine: Number(line), entry: { text: content }, hit: { id: 'profile', line: Number(line) } };
+      else {
+        let e;
+        try { e = JSON.parse(content); } catch { return; }
+        if (!e?.text || !e.text.toLowerCase().includes(lower)) return;
+        item = { at: e.at, entry: e, hit: { id: e.id, at: e.at, role: e.role } };
+      }
+      all.push(item);
+      if (typeof item.at !== 'string') odd = true;
+      if (odd) return;
+      let i = top.length;
+      while (i > 0 && item.at > top[i - 1].at) i--;
+      if (i >= k) return;
+      top.splice(i, 0, item);
+      if (top.length > k) top.pop();
+    },
+    items: () => (odd ? all.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0)).slice(0, k) : top),
+  };
+}
+
+/** Entry ids in number order (`t-9-…` before `t-10-…`), as memory_read orders a turn. */
+const byId = (a = '', b = '') => a.localeCompare(b, 'en', { numeric: true });
 
 export class MemoryStore {
   /** @param {object} o
    *  root, userId; ranked: a remote RankedIndex (absent: the built-in BM25);
    *  logger(event, fields); now(): ISO time; grepTimeoutMs (5000); syncMonths (12);
-   *  backupRemote: a git remote URL pushed after each commit (failures only degrade). */
+   *  backupRemote: a git remote URL pushed after each commit (failures only degrade);
+   *  timeZone: the owner's IANA zone (UTC) - search's line dates and day groups, and the
+   *  date words in the index (design 3.8.1); read once here, so a process never mixes two.
+   *  vector: {url, model, timeoutMs} - the local vector channel fused with BM25 (design 3.8.2;
+   *  absent: off, the ranking is BM25's alone); vectorTuning: the worker's backoff and request
+   *  limit (tests). */
   static async open(o) {
     const store = new MemoryStore(o);
     await store.#boot();
@@ -125,8 +206,12 @@ export class MemoryStore {
   }
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
-    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET }) {
+    grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE,
+    vector, vectorTuning }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
+    const zoneProblem = memoryTimeZoneProblem(timeZone);
+    if (zoneProblem) throw new Error('memory: ' + zoneProblem);
+    this.timeZone = timeZone;
     this.root = root; this.userId = userId; this.log = logger; this.now = now;
     this.grepTimeoutMs = grepTimeoutMs; this.syncMonths = syncMonths; this.backupRemote = backupRemote; this.warnEntries = warnEntries;
     this.dir = join(root, userId);
@@ -136,6 +221,7 @@ export class MemoryStore {
     this.pendingFile = join(root, userId + '.ranked-pending.json');
     this.noticesFile = join(root, userId + '.notices.jsonl');
     this.profilePendingFile = join(root, userId + '.profile-pending.json');
+    this.vectorFile = join(root, userId + '.vectors.jsonl');
     this.budget = { ...BUDGET, ...budget };
     this.overBudget = new Map(); // kind -> line
     this.writeMs = [];           // the last 100 writes, fsync to commit
@@ -151,6 +237,14 @@ export class MemoryStore {
     this.queue = Promise.resolve();
     this.lockHeld = false;
     this.faults = faults; // test hooks: a crash point is a hook that throws or kills the process
+    if (vector !== undefined) {
+      const vectorProblem = memoryVectorProblem({ vector, ...(ranked ? { remote: ranked } : {}) });
+      if (vectorProblem) throw new Error('memory: ' + vectorProblem);
+      this.vector = new VectorChannel(vector, { file: this.vectorFile, tuning: vectorTuning, store: {
+        faults: () => this.faults,
+        entries: () => this.entries, locked: fn => this.#locked(fn), log: (event, fields) => this.log(event, fields),
+        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields) } });
+    }
   }
 
   /** Serialize every repository change (the in-process half of the write lock). */
@@ -170,7 +264,7 @@ export class MemoryStore {
     // A boot that recovers the same purge again (a crash loop) adds no second copy.
     if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
       appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
-    this.notices = parseLines(this.noticesFile).map(n => n.text);
+    this.#readNotices();
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
       if (leftovers.length) throw new MemoryUnavailable(`memory: ${this.dir} is missing while ${leftovers.join(', ')} exists; refusing to start an empty repository over it`);
@@ -187,6 +281,9 @@ export class MemoryStore {
     // says forgotten, so this is also the reading the disk supports.)
     const finished = this.#finishForget(this.#load(), { loaded: true });
     if (finished) await this.#commitIfDirty('recover: finished an interrupted forget at boot');
+    // Design 3.8.2: the vector file loads in the background, never inside the synchronous
+    // #load; the worker starts once it and its reconciliation are done.
+    this.vector?.startLoad();
     await this.#replaySpool();
     await this.#replayPending(true);
   }
@@ -231,6 +328,7 @@ export class MemoryStore {
   /** Release the process lock (the store is unusable afterwards); a lock that no longer
    *  names this process is someone else's and is left alone. */
   async close() {
+    this.vector?.close();
     await this.queue;
     if (!this.lockHeld) return;
     this.lockHeld = false;
@@ -240,7 +338,39 @@ export class MemoryStore {
   /** The owner has seen the notices: they leave status and the snapshot. */
   acknowledgeNotices() {
     if (existsSync(this.noticesFile)) writeDurable(this.noticesFile, '');
-    this.notices = [];
+    this.notices = []; this.noticeRows = [];
+  }
+
+  /** The owner notices file, as rows ({at, text, kind?, …}); kept in memory once read. */
+  #readNotices() {
+    this.noticeRows = parseLines(this.noticesFile);
+    this.notices = this.noticeRows.map(n => n.text);
+    return this.noticeRows;
+  }
+
+  /** Add the notice of `kind` (at most one of each kind, so a crash or a restart adds no
+   *  second; without a kind, at most one of the same text) or, with no text, take the one of
+   *  that kind out (only it). Returns the row taken out. A
+   *  notice that cannot be written is logged: it never fails what reported it. */
+  #notice(kind, text, fields = {}) {
+    try {
+      const rows = this.noticeRows ?? this.#readNotices();
+      if (text) {
+        if (rows.some(r => (kind === undefined ? r.text === text : r.kind === kind))) return undefined;
+        appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), kind, text, ...fields }) + '\n');
+        this.#readNotices();
+        return undefined;
+      }
+      const gone = rows.find(r => r.kind === kind);
+      if (!gone) return undefined;
+      const kept = rows.filter(r => r.kind !== kind);
+      writeDurable(this.noticesFile, kept.map(r => JSON.stringify(r) + '\n').join(''));
+      this.#readNotices();
+      return gone;
+    } catch (error) {
+      this.log('memory/notice-failed', { kind, reason: String(error.message).slice(0, 200) });
+      return undefined;
+    }
   }
 
   async #init(dir = this.dir) {
@@ -278,7 +408,7 @@ export class MemoryStore {
     for (const name of files) {
       const rows = parseLines(join(this.dir, 'log', name));
       for (const e of rows) this.entries.set(e.id, e);
-      if (name.slice(0, 7) >= cutoff) for (const e of rows) this.index.add(e.id, e.text, e.at);
+      if (name.slice(0, 7) >= cutoff) for (const e of rows) this.index.add(e.id, this.#docTokens(e), e.at);
       else later.push(rows);
     }
     if (this.entries.size > this.warnEntries) this.log('memory/large', { entries: this.entries.size });
@@ -297,7 +427,7 @@ export class MemoryStore {
       this.coverage = 'since ' + cutoff;
       const next = () => {
         const rows = later.shift();
-        if (rows) for (const e of rows) if (this.entries.has(e.id)) this.index.add(e.id, e.text, e.at);
+        if (rows) for (const e of rows) if (this.entries.has(e.id)) this.index.add(e.id, this.#docTokens(e), e.at);
         if (later.length) setImmediate(next); else this.coverage = 'all';
       };
       setImmediate(next);
@@ -308,6 +438,15 @@ export class MemoryStore {
     return [...this.forgotten.values()]
       .filter(r => !r.purged && r.sha256 && this.entries.has(r.id))
       .map(r => r.id);
+  }
+
+  /** The index's token list for an entry (design 3.5): its text's tokens, then the date words
+   *  of its time in the owner's zone. Every add and every remove of the index takes the list
+   *  from here, so a remove takes back exactly what the add put in (the zone is fixed for the
+   *  process). The text itself is never changed: grep, memory_read and the log never see the
+   *  date words. */
+  #docTokens(e) {
+    return [...documentTokens(e.text), ...dateTokens(e.at, this.timeZone)];
   }
 
   #cutoffMonth() {
@@ -394,6 +533,8 @@ export class MemoryStore {
       ...(this.notices.length ? { notices: this.notices } : {}),
       ...(this.pendingStuck?.length ? { ranked_pending_stuck: this.pendingStuck } : {}),
       ...(this.overBudget.size ? { over_budget: [...this.overBudget.values()] } : {}),
+      ...(this.vector ? { vector: this.vector.statusText() } : {}),
+      ...(this.vector?.skippedCount() ? { vector_skipped: this.vector.skippedCount() } : {}),
     };
   }
 
@@ -483,8 +624,11 @@ export class MemoryStore {
       byMonth.get(month(e.at)).push(e);
     }
     for (const [m, rows] of byMonth) appendDurable(join(this.dir, 'log', m + '.jsonl'), rows.map(e => JSON.stringify(e)).join('\n') + '\n');
-    for (const e of fresh) { this.entries.set(e.id, e); this.index.add(e.id, e.text, e.at); }
+    for (const e of fresh) { this.entries.set(e.id, e); this.index.add(e.id, this.#docTokens(e), e.at); }
     if (fresh.length) this.log('memory/written', { ids: fresh.map(e => e.id), lengths: fresh.map(e => e.text.length) });
+    // Design 3.8.2: never embedded on the write path - the ids go to the front of the
+    // background worker's list (turns, notes, spool replay and restore all come through here).
+    if (fresh.length) this.vector?.enqueue(fresh.map(e => e.id));
     return fresh;
   }
 
@@ -613,8 +757,14 @@ export class MemoryStore {
    *  go. That order is the point: a crash in between leaves the id in BOTH places, which the
    *  next boot finishes (`#finishForget`), while the other order leaves a window where the id
    *  is in neither and the text is gone with no record that it ever existed. Returns the
-   *  entries it dropped. */
-  async #dropFromWorkTree(ids, { reason, by }) {
+   *  entries it dropped.
+   *
+   *  Their vectors leave memory at once; the vector file on disk is filtered once per call,
+   *  best effort (design 3.8.2): the records are written and the log lines gone, there is no
+   *  way back, so a failure (ENOSPC, EACCES) is only logged and the next load's
+   *  reconciliation removes those rows. A purge filters the file itself, with its checks, and
+   *  passes filterVectors: false. */
+  async #dropFromWorkTree(ids, { reason, by }, { filterVectors = true } = {}) {
     const at = this.now();
     const rows = [];
     for (const id of ids) {
@@ -630,11 +780,23 @@ export class MemoryStore {
     for (const r of rows) {
       const e = this.entries.get(r.id);
       if (!e) continue;
-      this.entries.delete(e.id); this.index.remove(e.id, e.text);
+      this.entries.delete(e.id); this.index.remove(e.id, this.#docTokens(e));
+      this.vector?.drop(e.id);
       this.forgotten.set(e.id, { id: e.id, at, by, batch: e.batch });
       dropped.push(e);
     }
+    if (dropped.length && filterVectors) await this.#filterVectorsBestEffort(dropped.map(e => e.id));
     return dropped;
+  }
+
+  /** Filter the vector file, never failing the caller; the reason, or undefined. */
+  async #filterVectorsBestEffort(ids) {
+    try { await filterVectorFile(this.vectorFile, new Set(ids)); return undefined; }
+    catch (error) {
+      const reason = String(error?.message ?? error).slice(0, 200);
+      this.log('memory/vector-filter-failed', { ids, reason });
+      return reason;
+    }
   }
 
   /** Forget (design 3.6 level 1): out of the working tree, grep and BM25; recoverable
@@ -707,35 +869,90 @@ export class MemoryStore {
 
   // ---------------------------------------------------------------- search
 
-  /** memory_search (design 3.5): grep and the ranked index, both, each with its source. */
+  /** memory_search (design 3.5, 3.8.1): grep and the ranked index, both, each with its source.
+   *  Each answer gives its hits' whole entries as `text` - grouped by the owner's calendar
+   *  day, every line dated - and the machine-readable `hits` beside it (memory_read takes
+   *  `hits[].id`). Both answers share one budget (SEARCH_CHARS); a hit is whole or listed in
+   *  `omitted`, never cut and never dropped. */
   async search(query, topK = 10) {
     const q = String(query ?? '');
     if (!q.trim()) return { refused: 'empty_query' };
     const k = Math.max(1, Math.min(TOP_K_MAX, Number.isInteger(topK) ? topK : 10));
-    const [grep, ranked] = await Promise.all([this.#grep(q, k), this.#ranked(q, k)]);
-    const grepIds = new Set(grep.hits.map(h => h.id));
-    // A remote hit has the remote's ref. When its text is a live local entry's - any entry,
-    // not only one grep found (a hit close in meaning rarely holds the query's words) - it
-    // also gets that entry's id, which memory_read takes. One pass over the entries, only
-    // on a remote search that returned hits.
-    const localTexts = new Map();
-    // Identical texts: the newest entry by `at` (its turn is the one with_turn brings).
-    if (this.remote && ranked.hits?.length) for (const e of this.entries.values()) {
-      const seen = localTexts.get(e.text);
-      if (!seen || e.at >= seen.at) localTexts.set(e.text, e);
-    }
-    if (ranked.hits) {
-      const rankedIds = new Set();
-      for (const h of ranked.hits) {
-        const id = this.remote ? localTexts.get(h.text)?.id : h.ref;
-        if (this.remote && id) h.id = id;
-        if (id && grepIds.has(id)) { h.also_in_grep = true; rankedIds.add(id); }
+    // grep's spawn is a fork of this process, a synchronous 12-15 ms at 100k entries (it
+    // grows with the RSS): it waits for a turn of its own (slices.mjs), not after the ranked
+    // answer's start (BM25, or the query's embedding request) nor beside a scan's slice.
+    const [grep, ranked] = await Promise.all([turn().then(() => this.#grep(q, k)), this.#ranked(q, k)]);
+    const answers = [{ name: 'grep', items: grep.items, omitted: [] }];
+    if (ranked.items) answers.push({ name: 'ranked', items: ranked.items, omitted: [] });
+    const used = this.#place(answers);
+    const out = answer => ({ text: this.#grouped(answer), hits: answer.items.map(it => it.hit), omitted: answer.omitted });
+    const { items: _g, ...grepHead } = grep;
+    const { items: _r, filtered_forgotten, remote_forget, ...rankedHead } = ranked;
+    return { query: q,
+      grep: { ...grepHead, ...out(answers[0]) },
+      ranked: ranked.items ? { ...rankedHead, ...out(answers[1]), filtered_forgotten, ...(remote_forget ? { remote_forget } : {}) } : ranked,
+      // The entries left to read: one both answers had to omit is one entry, counted once.
+      budget: `${used}/${SEARCH_CHARS} 字 · omitted ${new Set(answers.flatMap(a => a.omitted.map(o =>
+        o.line !== undefined ? 'profile:' + o.line : o.id ?? 'ref:' + o.ref))).size}`,
+      status: this.statusLine() };
+  }
+
+  /** The line of a search item; `see` names the answer that shows the entry whole. */
+  #line(item, see) {
+    return item.profileLine !== undefined ? formatProfileLine(item.profileLine, item.entry.text)
+      : formatLine(item.entry, this.timeZone, { dateOnly: item.hit.date_only === true, see });
+  }
+
+  /** Design 3.8.1's one budget: the two answers in turn by rank (grep 1, ranked 1, grep 2, …).
+   *  What fits goes in whole; what does not is listed in that answer's `omitted` and the next
+   *  one is tried (a shorter one later may still fit). An entry the other answer already
+   *  shows whole costs only its line head with `→ 见 grep` / `→ 见 ranked`. The budget counts
+   *  the rendered lines, heads included (not the newlines between them). Returns the
+   *  characters used. */
+  #place(answers) {
+    const whole = new Map(); // entry id -> the answer showing it whole
+    let used = 0;
+    const longest = Math.max(...answers.map(a => a.items.length));
+    for (let i = 0; i < longest; i++) for (const answer of answers) {
+      const item = answer.items[i];
+      if (!item) continue;
+      const id = item.profileLine === undefined ? item.entry.id : undefined;
+      const see = id !== undefined ? whole.get(id) : undefined;
+      const line = this.#line(item, see);
+      if (used + line.length <= SEARCH_CHARS) {
+        used += line.length; item.line = line;
+        item.hit.shown = see ? 'see_' + see : 'full';
+        if (id !== undefined && !see) whole.set(id, answer.name);
+      } else {
+        item.hit.shown = 'omitted';
+        answer.omitted.push(item.profileLine !== undefined ? { id: 'profile', line: item.profileLine, length: item.entry.text.length }
+          : { ...(id !== undefined ? { id } : { ref: item.hit.ref }), at: item.entry.at, length: item.entry.text.length });
       }
-      for (const h of grep.hits) if (rankedIds.has(h.id)) h.also_in_ranked = true;
     }
-    for (const h of grep.hits) delete h.text;
-    for (const h of ranked.hits ?? []) delete h.text;
-    return { query: q, grep, ranked, status: this.statusLine() };
+    return used;
+  }
+
+  /** An answer's placed lines as text: grouped by the owner's calendar day, groups apart by a
+   *  blank line, no titles. ranked orders the groups by their best rank, grep newest day
+   *  first; the profile's lines are a group of their own after grep's days, in line order;
+   *  lines without a usable time are one group, last of the days. In a group: oldest first,
+   *  then by id. */
+  #grouped(answer) {
+    const groups = new Map();
+    answer.items.forEach((item, rank) => {
+      if (item.line === undefined) return;
+      const key = item.profileLine !== undefined ? '\u0002profile' : dayOf(item.entry.at, this.timeZone) ?? '\u0001undated';
+      if (!groups.has(key)) groups.set(key, { key, best: rank, rows: [] });
+      groups.get(key).rows.push(item);
+    });
+    const tail = key => (key === '\u0002profile' ? 2 : key === '\u0001undated' ? 1 : 0);
+    const order = answer.name === 'grep'
+      ? (a, b) => tail(a.key) - tail(b.key) || (a.key < b.key ? 1 : a.key > b.key ? -1 : 0)
+      : (a, b) => tail(a.key) - tail(b.key) || a.best - b.best;
+    const time = item => { const ms = parseAt(item.entry.at); return Number.isNaN(ms) ? -Infinity : ms; };
+    const inGroup = (a, b) => (a.profileLine !== undefined ? a.profileLine - b.profileLine
+      : time(a) - time(b) || byId(a.entry.id, b.entry.id));
+    return [...groups.values()].sort(order).map(g => g.rows.sort(inGroup).map(item => item.line).join('\n')).join('\n\n');
   }
 
   /** memory_read (design 3.5): the whole entries a search named. `profile` is the resident
@@ -791,34 +1008,71 @@ export class MemoryStore {
     return { id: e.id, at: e.at, role: e.role, source: e.source, text: e.text, ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
   }
 
+  /** grep's items, newest first, at most k: `{hit, entry}` for a log line (the entry as the
+   *  log holds it) and `{hit, entry: {text}, profileLine}` for a line of the profile. */
   async #grep(query, k) {
     const source = 'grep · 字面匹配 · 本地记忆日志';
     const needle = JSON.stringify(query).slice(1, -1);
+    const matches = grepMatches(query, k);
+    const reader = recordReader(matches.take);
     const r = await git(this.dir, ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'],
-      { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; } });
-    const hits = [];
-    const lower = query.toLowerCase();
-    for (const record of r.stdout.toString('utf8').split('\n')) {
-      const [file, line, ...rest] = record.split('\0');
-      if (!file || rest.length === 0) continue;
-      const content = rest.join('\0');
-      if (file === 'profile.md') { hits.push({ id: 'profile', at: '', line: Number(line), excerpt: excerpt(content, query) }); continue; }
-      let e;
-      try { e = JSON.parse(content); } catch { continue; }
-      if (!e?.text || !e.text.toLowerCase().includes(lower)) continue;
-      hits.push({ id: e.id, at: e.at, role: e.role, excerpt: excerpt(e.text, query), text: e.text });
-    }
-    hits.sort((a, b) => (b.at > a.at ? 1 : b.at < a.at ? -1 : 0));
-    return { source, hits: hits.slice(0, k), complete: !r.killed && (r.code === 0 || r.code === 1),
-      ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}) };
+      { timeoutMs: this.grepTimeoutMs, onSpawn: pid => { this.lastGrepPid = pid; }, onStdout: reader.push });
+    await reader.end();
+    return { source, complete: !r.killed && (r.code === 0 || r.code === 1),
+      ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}),
+      items: matches.items() };
   }
 
+  /** Design 3.8.1: a local ranked hit that shares no word with the query and only meets it
+   *  in its date words is that day's record, not one close in meaning. */
+  #dateOnly(words, e) {
+    const text = new Set(documentTokens(e.text));
+    if (words.some(t => text.has(t))) return false;
+    const dates = new Set(dateTokens(e.at, this.timeZone));
+    return words.some(t => dates.has(t));
+  }
+
+  /** Design 3.8.1/3.8.2 with the vector channel on: BM25's and the vectors' first
+   *  C = max(5·top_k, 50) candidates fused by RRF (k = 60, equal weights, ranks from 1;
+   *  equal scores newest first, then by id), the first top_k kept. Vectors only from what is
+   *  loaded and embedded so far (ranked.vector says how far). A query that cannot be embedded
+   *  makes this search BM25's alone, and the source says so. */
+  async #fused(query, k) {
+    const C = candidates(k);
+    const vector = await this.vector.rank(query, C);
+    // ranked.vector is read here, when the source is decided: the worker may change the
+    // channel's state while grep still runs, and the two fields must describe one moment.
+    const status = this.vector.statusText();
+    const bm = this.index.search(query, C);
+    if (!vector) {
+      return { source: 'bm25 · 本地索引 · 向量不可用', status,
+        hits: bm.slice(0, k).map(h => ({ text: this.entries.get(h.id)?.text ?? '', score: Math.round(h.score * 100) / 100, at: h.at, ref: h.id })) };
+    }
+    this.faults?.onFusion?.({ C, bm25: bm.length, vector: vector.length });
+    const score = new Map();
+    bm.forEach((h, i) => score.set(h.id, (score.get(h.id) ?? 0) + 1 / (RRF_K + i + 1)));
+    vector.forEach((id, i) => score.set(id, (score.get(id) ?? 0) + 1 / (RRF_K + i + 1)));
+    const at = id => this.entries.get(id)?.at ?? '';
+    const fused = [...score].filter(([id]) => this.entries.has(id))
+      .sort(([a, x], [b, y]) => y - x || (at(b) > at(a) ? 1 : at(b) < at(a) ? -1 : 0) || byId(a, b)).slice(0, k);
+    return { source: this.vector.source, status,
+      hits: fused.map(([id, s]) => ({ text: this.entries.get(id).text, score: Math.round(s * 1e4) / 1e4, at: at(id), ref: id })) };
+  }
+
+  /** The ranked items, best first, or {source, error} (a remote that failed: no answer).
+   *  Local hits are read from `entries` (live entries only). A remote hit whose text is a
+   *  live local entry's - any entry, not only one grep found (a hit close in meaning rarely
+   *  holds the query's words) - is shown as that entry and carries its id, which memory_read
+   *  takes; one with no local twin is the remote's own line, without an id. */
   async #ranked(query, k) {
-    const source = this.ranked.name;
+    let source = this.ranked.name;
     if (this.remote) await this.#replayPending().catch(() => {});
-    let hits;
-    try { hits = await this.ranked.search(query, k); }
-    catch (error) { return { source, error: String(error?.message ?? error).slice(0, 500) }; }
+    let hits, vector;
+    if (this.vector) ({ source, hits, status: vector } = await this.#fused(query, k));
+    else {
+      try { hits = await this.ranked.search(query, k); }
+      catch (error) { return { source, error: String(error?.message ?? error).slice(0, 500) }; }
+    }
     let filtered = 0;
     let remoteForget;
     if (this.remote) {
@@ -827,8 +1081,34 @@ export class MemoryStore {
         hits = hits.filter(h => { const b = h.ref && this.remote.batchOf(h.ref); if (b && gone.has(b)) { filtered++; return false; } return true; });
       } else if (!this.remote.remove) remoteForget = 'unsupported';
     }
-    return { source, coverage: this.remote ? 'remote' : this.coverage,
-      hits: hits.map(h => ({ ref: h.ref, at: h.at, score: h.score, excerpt: excerpt(h.text ?? '', query), text: h.text })),
+    const items = [];
+    if (this.remote) {
+      // Identical texts: the newest entry by `at` (its turn is the one with_turn brings).
+      // One pass over the entries, only on a remote search that returned hits.
+      const localTexts = new Map();
+      if (hits.length) for (const e of this.entries.values()) {
+        const seen = localTexts.get(e.text);
+        if (!seen || e.at >= seen.at) localTexts.set(e.text, e);
+      }
+      const taken = new Set(); // a second remote hit on the same entry stays the remote's own line
+      for (const h of hits) {
+        const text = String(h.text ?? '');
+        const local = localTexts.get(text);
+        if (local && !taken.has(local.id)) {
+          taken.add(local.id);
+          items.push({ entry: local, hit: { id: local.id, ref: h.ref, at: h.at, role: local.role, score: h.score } });
+        } else items.push({ entry: { at: h.at, role: 'remote', text }, hit: { ref: h.ref, at: h.at, role: 'remote', score: h.score } });
+      }
+    } else {
+      const words = queryTokens(query);
+      for (const h of hits) {
+        const e = this.entries.get(h.ref);
+        if (!e) continue; // the index and the entries change together; never a text we cannot show
+        items.push({ entry: e, hit: { id: e.id, ref: e.id, at: e.at, role: e.role, score: h.score,
+          ...(this.#dateOnly(words, e) ? { date_only: true } : {}) } });
+      }
+    }
+    return { source, coverage: this.remote ? 'remote' : this.coverage, ...(vector !== undefined ? { vector } : {}), items,
       filtered_forgotten: filtered, ...(remoteForget ? { remote_forget: remoteForget } : {}) };
   }
 
@@ -886,14 +1166,30 @@ export class MemoryStore {
           // Journalled before the first destructive edit: a crash inside step 1 has to be
           // recognisable at the next boot, and step 1 IS a forget, the remote included.
           this.#journal({ ...plan, phase: 'forgetting' });
-          const dropped = await this.#dropFromWorkTree(live, { reason: 'purge', by });
+          const dropped = await this.#dropFromWorkTree(live, { reason: 'purge', by }, { filterVectors: false });
           if (dropped.length && this.remote?.remove) {
             try { await this.remote.remove(dropped.map(e => e.id)); }
             catch (error) { this.log('memory/remote-forget-failed', { ids: dropped.map(e => e.id), reason: String(error.message).slice(0, 200) }); }
           }
         }
-        if (!await this.#commitIfDirty(`forget ${ids.join(',')} (${by}, before purge)`)) return { refused: 'commit_failing', status: this.statusLine() };
+        if (!await this.#commitIfDirty(`forget ${ids.join(',')} (${by}, before purge)`)) {
+          // After `forgetting` the journal must end: a row left there would read as an
+          // interrupted purge at the next boot. Before it, nothing was journalled at all.
+          if (live.length) this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason: 'commit_failing' });
+          return { refused: 'commit_failing', status: this.statusLine() };
+        }
         this.#journal({ ...plan, phase: 'forget_done' });
+        // Step 1, vectors (design 3.8.2): whenever the file exists - vectors on or off now, the
+        // ids live or forgotten before - every purged id leaves it, with the two-sided check.
+        // The only place a vector file may stop a purge: only a purge promises "gone for good".
+        let vectors;
+        try { vectors = await filterVectorFile(this.vectorFile, new Set(ids), { write: this.faults?.vectorFilterWrite }); }
+        catch (error) {
+          const reason = 'vector filter failed: ' + String(error?.message ?? error).slice(0, 300);
+          this.log('memory/vector-filter-failed', { ids, reason });
+          this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason });
+          return { purged: false, reason: reason + '; nothing was purged (the entries stay forgotten)' };
+        }
         // 2. build
         this.#journal({ ...plan, phase: 'building' });
         if (this.faults?.beforeBuild) await this.faults.beforeBuild();
@@ -917,12 +1213,15 @@ export class MemoryStore {
         if (this.faults?.afterRenameNew) await this.faults.afterRenameNew();
         this.#journal({ ...plan, phase: 'renamed_new' });
         if (this.faults?.afterSwap) await this.faults.afterSwap();
-        // 5. verify again, at the final path
+        // 5. verify again, at the final path; then the vector file once more, before the last
+        // recoverable copy goes (a row written back since step 1 is caught here).
         const again = await this.verifyPurged(this.dir, plan.pre_purge_dir, new Set(ids));
+        if (!again.length) { const problem = await this.#vectorsStillPurged(vectors, new Set(ids)); if (problem) again.push(problem); }
         if (again.length) {
           await this.#rollbackSwap(plan, { reason: again.join('; ') });
           this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason: again.join('; ').slice(0, 500) });
           this.#load();
+          this.vector?.startLoad();
           return { purged: false, reason: 'the re-check after the swap failed; the old repository is back', failures: again };
         }
         this.#journal({ ...plan, phase: 'rechecked' });
@@ -932,6 +1231,7 @@ export class MemoryStore {
         rmSync(plan.pre_purge_dir, { recursive: true, force: true }); fsyncDir(this.root);
         this.#journal({ ...plan, phase: 'done', outcome: 'completed' });
         this.#load();
+        this.vector?.startLoad();
         this.log('memory/purged', { ids });
         return { purged: true, ids, not_reached: this.#notReached(ids), status: this.statusLine() };
       });
@@ -941,6 +1241,21 @@ export class MemoryStore {
     }
     if (result && 'status' in result) result.status = this.statusLine();
     return result;
+  }
+
+  /** Step 5's vector check (design 3.8.2): the file is as step 1 left it - same header line,
+   *  no purged id, every line whole, as many rows (the lock was held, the worker could not
+   *  append); a file absent then is absent now. A failure's description, or undefined. */
+  async #vectorsStillPurged(step1, ids) {
+    const now = await scanVectorFile(this.vectorFile, ids);
+    if (!step1.exists || step1.deleted) return now.exists ? 'vector file: it exists again after step 1 removed or never had it' : undefined;
+    if (!now.exists) return 'vector file: gone since step 1';
+    const problems = [];
+    if (now.hits) problems.push(`${now.hits} purged rows are back`);
+    if (now.headerLine !== step1.headerLine) problems.push('the header line changed');
+    if (now.bad) problems.push(`${now.bad} lines do not parse`);
+    if (now.rows !== step1.rows) problems.push(`${now.rows} rows, ${step1.rows} after step 1`);
+    return problems.length ? 'vector file: ' + problems.join('; ') : undefined;
   }
 
   #notReached(ids) {
@@ -1051,7 +1366,9 @@ export class MemoryStore {
     const both = ids.filter(id => this.entries.has(id) && this.forgotten.has(id));
     if (!both.length) return 0;
     this.#stripLogLines(both);
-    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, e.text); }
+    // The vector file is not touched here (this runs at boot, before it loads): the load's
+    // reconciliation takes these rows out.
+    for (const id of both) { const e = this.entries.get(id); this.entries.delete(id); this.index.remove(id, this.#docTokens(e)); this.vector?.drop(id); }
     this.log('memory/forget-finished', { ids: both });
     return both.length;
   }
@@ -1114,6 +1431,12 @@ export class MemoryStore {
       // delete finished). The layout cannot say which; the last phase can.
       outcome = PRE_SWAP_PHASES.has(last.phase) ? 'rolled_back' : 'completed';
     }
+    // Design 3.8.2: the purged ids leave the vector file whatever the outcome (they are
+    // forgotten either way); keyed by plan.ids, since a finished forget left `entries`
+    // already. Idempotent; a failure never stops the boot - the owner is told, and this
+    // boot's load reconciles again.
+    const vectorProblem = await this.#filterVectorsBestEffort(plan.ids ?? []);
+    if (vectorProblem) this.#notice(undefined, `向量文件里仍有已彻底删除的编号 ${(plan.ids ?? []).join(', ')}，原因 ${vectorProblem}；下次载入会再去掉`);
     const finished = this.#finishForget(plan.ids ?? []);
     this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,
       ...(finished ? { forget_finished: finished } : {}) });

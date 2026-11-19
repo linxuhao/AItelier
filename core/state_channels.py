@@ -303,6 +303,8 @@ class StateChannels:
         channel says the message was written; it dates an approval phrase - an approval
         without it is refused approval_undated - and is not part of the request's
         identity (a redelivery may stamp it anew)."""
+        # A direct caller's guard: over the command boundary the model's Literal refuses
+        # another channel first (a field error, which the host answers invalid_request).
         if channel not in CHANNELS:
             raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
         try:
@@ -573,7 +575,7 @@ class StateChannels:
             replay = self.steward._replay(conn, "report_channel_status", request_key, request_hash)
             if replay is not None:
                 return replay
-            if channel not in CHANNELS:
+            if channel not in CHANNELS:  # a direct caller's guard, as in relay_owner_message
                 raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
             if detail is not None and len(detail) > STATUS_DETAIL_MAX:
                 raise StateGraphError(f"detail_too_long: {len(detail)} characters; at most {STATUS_DETAIL_MAX}")

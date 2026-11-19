@@ -501,6 +501,24 @@ def test_the_body_is_bounded_at_4_kib_of_utf8(world, caplog, body, accepted):
     assert f"bytes={len(body.encode())}" in line and body[:20] not in line
 
 
+def test_invalid_channel_is_the_services_own_guard_behind_the_commands_field_check(world):
+    """U-e: the command models type `channel` as Literal['slack', 'wechat'], so over the
+    command boundary another channel is a field error (a codeless 422, which the host
+    answers as invalid_request) before the service runs; `invalid_channel` is the
+    service's guard for a direct caller. Both are pinned here."""
+    bind(world)
+    with pytest.raises(StateGraphError) as caught:
+        relay(world, "hello", "ts-1", channel="irc")
+    assert "'field': 'channel'" in str(caught.value) and not str(caught.value).startswith("invalid_channel")
+    with pytest.raises(StateGraphError) as caught:
+        report(world, "s1", channel="irc", connected=True)
+    assert "'field': 'channel'" in str(caught.value)
+    channels = world.steward.channels
+    refused(lambda: channels.relay_owner_message(HOME, "k1", "irc", SLACK_USER, "ts-2", "hello"), "invalid_channel")
+    refused(lambda: channels.report_channel_status(HOME, "k2", "irc", True), "invalid_channel")
+    assert conversation(world) == []
+
+
 def test_an_empty_body_is_refused(world):
     bind(world)
     refused(lambda: relay(world, " \n　", "ts"), "empty_body")

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { apply, inject, isOwnerDm, loadSlack, name, readTokens, reconnectDelay, slackChannel, splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
+import { apply, HELD_PER_SENDER, inject, isOwnerDm, loadSlack, name, readTokens, reconnectDelay, slackChannel, splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
 
 const quiet = { info() {}, warn() {} };
 
@@ -50,6 +50,13 @@ const dm = (over = {}) => ({ type: 'message', channel_type: 'im', channel: 'D-U1
   ts: '1763481600.000200', client_msg_id: 'c-1', ...over });
 const deliver = async (socket, env) => { socket.emit('slack_event', env); await new Promise(r => setImmediate(r)); };
 const tick = (ms = 0) => new Promise(r => setTimeout(r, ms));
+const until = async (check, ms = 3000) => {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error('timed out waiting');
+    await tick(5);
+  }
+};
 
 test('a direct message to the bot reaches ownerChannels.inbound with the channel, sender, ref, text and time', async () => {
   const { socket, ownerChannels } = await started();
@@ -107,13 +114,92 @@ test('the envelope is acked before the service is asked, so a slow answer does n
 test('the envelope is acked even when the service throws, and the text is not logged', async () => {
   const warnings = [];
   const ownerChannels = { inbound: async () => { throw new Error('backend down'); } };
-  const { socket } = await started(ownerChannels, { log: { info() {}, warn: line => warnings.push(line) } });
+  const { channel, socket } = await started(ownerChannels, { log: { info() {}, warn: line => warnings.push(line) } });
   const env = envelope(dm({ text: 'secret words' }));
   await deliver(socket, env);
   assert.deepEqual(env.acks, [true]);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /U1 \(12 chars\).*backend down/);
   assert.doesNotMatch(warnings[0], /secret/);
+  await channel.stop();
+});
+
+// What the real service (dsh-director channels.inbound) answers when the host or the
+// backend cannot be reached: it never rejects.
+const unavailableFor = count => registry(() => (count-- > 0 ? { accepted: false, reason: 'unavailable' } : { accepted: true }));
+
+test('an inbound the host answers unavailable is held and retried, under the same ref, until it is taken', async () => {
+  const warnings = [];
+  const { channel, socket, ownerChannels } = await started(unavailableFor(2),
+    { log: { info() {}, warn: line => warnings.push(line) }, retryMs: 5 });
+  const env = envelope(dm({ text: '同意 proposal p-1' }));
+  socket.emit('slack_event', env);
+  await until(() => ownerChannels.calls.length === 3);
+  await tick(30);
+  assert.deepEqual(ownerChannels.calls.map(m => m.messageRef), ['c-1', 'c-1', 'c-1'], 'held, not dropped, and taken once');
+  assert.deepEqual(ownerChannels.calls[2], ownerChannels.calls[0], 'every attempt is the same message');
+  assert.deepEqual(env.acks, [true], 'acked once, first');
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.every(line => /not delivered \(attempt [12]\): unavailable; retrying/.test(line) && !line.includes('同意')),
+    'the text is never logged');
+  await channel.stop();
+});
+
+test('an inbound that throws is retried the same way; a refusal other than unavailable is final', async () => {
+  let failures = 2;
+  const refusals = { 'c-2': 'channel_sender_not_bound', 'c-3': 'invalid_request' };
+  const ownerChannels = registry(message => {
+    if (message.messageRef === 'c-1' && failures-- > 0) throw new Error('host down');
+    return refusals[message.messageRef] ? { accepted: false, reason: refusals[message.messageRef] } : { accepted: true };
+  });
+  const { channel, socket } = await started(ownerChannels, { retryMs: 5 });
+  for (const ref of ['c-1', 'c-2', 'c-3']) socket.emit('slack_event', envelope(dm({ client_msg_id: ref })));
+  await until(() => ownerChannels.calls.length === 5);
+  await tick(30);
+  assert.deepEqual(ownerChannels.calls.map(m => m.messageRef), ['c-1', 'c-1', 'c-1', 'c-2', 'c-3']);
+  await channel.stop();
+});
+
+test("a held message is not overtaken by its sender's next one; another sender is not held up by it", async () => {
+  let held = 3;
+  const ownerChannels = registry(message =>
+    message.messageRef === 'c-1' && held-- > 0 ? { accepted: false, reason: 'unavailable' } : { accepted: true });
+  const { channel, socket } = await started(ownerChannels, { retryMs: 10 });
+  socket.emit('slack_event', envelope(dm({ client_msg_id: 'c-1' })));
+  socket.emit('slack_event', envelope(dm({ client_msg_id: 'c-2' })));
+  socket.emit('slack_event', envelope(dm({ client_msg_id: 'x-1', user: 'U2' })));
+  await until(() => ownerChannels.calls.some(m => m.messageRef === 'c-2'));
+  const order = ownerChannels.calls.map(m => m.messageRef);
+  assert.deepEqual(order.filter(ref => ref.startsWith('c-')), ['c-1', 'c-1', 'c-1', 'c-1', 'c-2'], 'U1 in order');
+  assert.ok(order.indexOf('x-1') < order.lastIndexOf('c-1'), "U2's message went on while U1's was held");
+  await channel.stop();
+});
+
+test('stop ends the holding: a message the host never takes is not retried after it', async () => {
+  const { channel, ownerChannels } = await started(unavailableFor(Infinity), { retryMs: 5 });
+  const delivered = channel.onEnvelope(envelope(dm()));
+  await until(() => ownerChannels.calls.length >= 2);
+  await channel.stop();
+  await delivered;
+  const seen = ownerChannels.calls.length;
+  await tick(30);
+  assert.equal(ownerChannels.calls.length, seen);
+});
+
+test(`at most ${HELD_PER_SENDER} messages of one sender are held; past that one is logged by length and not held`, async () => {
+  const warnings = [];
+  const ownerChannels = { calls: [], inbound: message => (ownerChannels.calls.push(message), new Promise(() => {})) }; // never answers
+  const { channel, socket } = await started(ownerChannels, { log: { info() {}, warn: line => warnings.push(line) } });
+  for (let i = 0; i <= HELD_PER_SENDER; i++) socket.emit('slack_event', envelope(dm({ client_msg_id: 'c-' + i, text: 'secret' })));
+  await tick(10);
+  assert.equal(ownerChannels.calls.length, 1, 'one at a time per sender');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /U1 \(6 chars\) not held/);
+  assert.doesNotMatch(warnings[0], /secret/);
+  socket.emit('slack_event', envelope(dm({ user: 'U2', client_msg_id: 'x-1' })));
+  await tick(10);
+  assert.equal(ownerChannels.calls.at(-1).senderRef, 'U2', 'another sender still goes on');
+  await channel.stop();
 });
 
 test('send posts to the DM of the account the service names, whatever wrote what before', async () => {

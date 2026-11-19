@@ -11,6 +11,14 @@ declares the `channels` capability). Design: step 19, §7.2.
   messageRef: <client_msg_id or ts>, text, at})`. Every Socket Mode envelope is
   acknowledged, whatever it is. Whether the sender is the bound owner is the service's
   decision, not this plugin's.
+- Slack never redelivers an acknowledged envelope, so the plugin keeps the message: while
+  the service answers `unavailable` (the host or the backend cannot be reached) or
+  throws, the message is held and handed in again under the same `messageRef` (which the
+  host takes once), 5 s doubling to at most 60 s between attempts, until it is accepted
+  or refused or the plugin stops. Each sender's messages stay in order (a held one is not
+  overtaken by the next); other senders are not held up. At most 100 messages per sender
+  are held; past that a message is logged by sender and length and not held. A held
+  message lives in memory only: a restart of the steward while the host is down loses it.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500

@@ -26,6 +26,20 @@ export const SLACK_TEXT_LIMIT = 3500;
 // reconnect is off (it leaves a rejected promise nobody handles when Slack refuses the
 // token, which would end the steward's process); this plugin reconnects instead.
 export const reconnectDelay = attempt => Math.min(5 * 60_000, 1000 * 2 ** attempt);
+// ownerChannels.inbound answers `unavailable` (or throws) when the host or the backend
+// cannot be reached: the message is held and retried, not dropped (as dsh-channel-wechat).
+const RETRY_REASONS = new Set(['unavailable']);
+// Messages one sender may have waiting while the host is unavailable.
+export const HELD_PER_SENDER = 100;
+
+// A pause that ends early when the channel stops; it never keeps the process alive.
+const sleep = (ms, signal) => new Promise(resolve => {
+  if (signal.aborted) return resolve();
+  const timer = setTimeout(done, ms);
+  timer.unref?.();
+  function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+  signal.addEventListener('abort', done, { once: true });
+});
 
 /** The two tokens, or the reason there are none. Only the reason is ever printed. */
 export function readTokens(dir) {
@@ -66,12 +80,56 @@ export function splitText(text, limit = SLACK_TEXT_LIMIT) {
 
 /** The channel itself, with the Slack clients passed in (fakes in tests). */
 export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClient, WebClient, logLevel, log, unavailable,
-  backoff = reconnectDelay }) {
+  backoff = reconnectDelay, retryMs = 5000, maxRetryMs = 60_000 }) {
   const configured = !unavailable && appToken && botToken && SocketModeClient && WebClient;
   let state = { connected: false, detail: configured ? 'connecting' : (unavailable ?? 'not configured') };
   let socket, web, stopped = false;
   let connecting, retryTimer, failures = 0;
   const dms = new Map(); // user -> DM channel id
+  const stopping = new AbortController();
+  const lanes = new Map(); // user -> { run: the delivery of their latest message, held: messages waiting }
+
+  /** Passes one message on. An acknowledged envelope is never redelivered by Slack, so
+   *  this is the message's only copy: while the host answers `unavailable` (or throws) it
+   *  is held and retried with a growing pause, under the same message ref, which the host
+   *  takes once. It ends when the host has answered for good (accepted or refused) or
+   *  the channel stops. */
+  async function deliver(message) {
+    let pause = retryMs;
+    for (let attempt = 1; !stopping.signal.aborted; attempt++) {
+      let reason;
+      try {
+        const result = await ownerChannels.inbound(message);
+        if (result?.accepted || !RETRY_REASONS.has(result?.reason)) return;
+        reason = result.reason;
+      } catch (error) {
+        reason = error?.message ?? error;
+      }
+      // Never the text: what a stranger sent is not logged (design 7.2 B3).
+      log.warn(`slack: inbound from ${message.senderRef} (${message.text.length} chars) not delivered (attempt ${attempt}): `
+        + `${String(reason).slice(0, 200)}; retrying`);
+      await sleep(pause, stopping.signal);
+      pause = Math.min(pause * 2, maxRetryMs);
+    }
+  }
+
+  // Each sender's messages go on in the order they arrived: a held one is not overtaken
+  // by the next. Other senders are not held up by it. A sender with HELD_PER_SENDER
+  // messages already waiting (the host down, a stranger flooding) gets no more held.
+  function enqueue(message) {
+    const lane = lanes.get(message.senderRef) ?? { run: Promise.resolve(), held: 0 };
+    if (lane.held >= HELD_PER_SENDER) {
+      log.warn(`slack: inbound from ${message.senderRef} (${message.text.length} chars) not held: `
+        + `${HELD_PER_SENDER} messages from this sender are already waiting`);
+      return lane.run;
+    }
+    lane.held++;
+    lane.run = lane.run.then(() => deliver(message)).finally(() => {
+      if (--lane.held === 0 && lanes.get(message.senderRef) === lane) lanes.delete(message.senderRef);
+    });
+    lanes.set(message.senderRef, lane);
+    return lane.run;
+  }
 
   async function onEnvelope({ ack, type, body }) {
     // Every envelope is acknowledged, first: Slack redelivers an unacknowledged one after
@@ -81,13 +139,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     if (!isOwnerDm(event)) return;
     const messageRef = event.client_msg_id || event.ts;
     const at = Number.isFinite(Number(event.ts)) ? new Date(Number(event.ts) * 1000).toISOString() : undefined;
-    try {
-      await ownerChannels.inbound({ channel: 'slack', senderRef: event.user, messageRef,
-        text: unescapeSlack(event.text), at });
-    } catch (error) {
-      // Never the text: what a stranger sent is not logged (design 7.2 B3).
-      log.warn(`slack: inbound from ${event.user} (${event.text.length} chars) failed: ${error?.message ?? error}`);
-    }
+    return enqueue({ channel: 'slack', senderRef: event.user, messageRef, text: unescapeSlack(event.text), at });
   }
 
   // One connection attempt at a time; every failure, now or after a drop, is caught here
@@ -156,6 +208,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   const stop = async () => {
     if (stopped) return;
     stopped = true;
+    stopping.abort();
     clearTimeout(retryTimer);
     retryTimer = undefined;
     state = { connected: false, detail: 'disconnected' };

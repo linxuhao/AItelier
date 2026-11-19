@@ -75,9 +75,11 @@ const within = (promise, ms, what) => {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 };
 /** Bounds: a channel's send, the wait for the host, and binding attempts per channel and
- *  minute (each costs a binding read, a bind write and a line through the owner's bot). */
+ *  minute (each costs a binding read, a bind write and a line through the owner's bot).
+ *  A delivery record is tried recordAttempts times, recordRetryMs doubling between tries
+ *  (1+2+4+8+16 s: a backend restart). */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
-  statusDetail: 300 });
+  statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -235,6 +237,19 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // the order it receives them.
   let queue = Promise.resolve();
   const mirroring = new Set();
+  // The delivery row is what keeps a message from being sent again after a restart
+  // (sourceOf), so a record that fails is tried again, a bounded number of times, as the
+  // same request (the host takes it once). A refusal is the host's answer: not retried.
+  const record = async delivery => {
+    for (let attempt = 1; ; attempt++) {
+      try { return await host.recordDelivery(delivery); }
+      catch (failure) {
+        if (attempt >= limits.recordAttempts) throw failure;
+        log('channel_record_retry', { channel: delivery.channel, message_id: delivery.messageId, attempt, error: short(failure) });
+        await new Promise(resolve => setTimeout(resolve, limits.recordRetryMs * 2 ** (attempt - 1)));
+      }
+    }
+  };
   const mirror = async (messageId, body, replyTo) => {
     await hostReady();
     // Once per message, also across a restart: a delivery row means it was sent (or failed) before.
@@ -262,8 +277,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       try { ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref; }
       catch (failure) { error = short(failure); }
     }
-    // Recorded once, success or failure; a failed send is never retried.
-    const recorded = await host.recordDelivery({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) })
+    // Recorded once, success or failure (the record retried, a failed send never).
+    const recorded = await record({ messageId, channel, ...(text(ref) ? { channelMessageRef: ref } : {}), ...(error ? { error } : {}) })
       .catch(failure => log('channel_record_failed', { channel, message_id: messageId, error: short(failure) }));
     if (recorded?.refused) log('channel_record_refused', { channel, message_id: messageId, reason: String(recorded.refused) });
     if (error) log('channel_send_failed', { channel, message_id: messageId, error });

@@ -367,18 +367,55 @@ test('once per message within a process: a delivery that could not be recorded i
   const fake = fakeHost(), logs = [];
   fake.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
   fake.host.recordDelivery = async delivery => { fake.calls.push(['recordDelivery', delivery]); throw new Error('backend down'); };
-  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]) });
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    limits: { ...CHANNEL_LIMITS, recordRetryMs: 1 } });
   channels.ready();
   const slack = fakeChannel('slack');
   channels.service.register(slack.channel);
   assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: true, channel: 'slack' });
   assert.deepEqual(await channels.ownerMessageSent('m-out', 'answer', 'm-in'), { mirrored: false, reason: 'already_mirrored' });
   assert.equal(slack.sent.length, 1);
+  assert.equal(only(fake.calls, 'recordDelivery').length, CHANNEL_LIMITS.recordAttempts, 'the record is tried a bounded number of times');
+  assert.equal(logs.filter(([event]) => event === 'channel_record_retry').length, CHANNEL_LIMITS.recordAttempts - 1);
   assert.deepEqual(logs.filter(([event]) => event === 'channel_record_failed').map(([, f]) => f.message_id), ['m-out']);
   // A delivery the host refuses to record is logged by its code.
   fake.host.recordDelivery = async () => ({ refused: 'delivery_recorded' });
   await channels.ownerMessageSent('m-out-2', 'answer', 'm-in');
   assert.deepEqual(logs.filter(([event]) => event === 'channel_record_refused').map(([, f]) => [f.message_id, f.reason]), [['m-out-2', 'delivery_recorded']]);
+});
+
+test('a record that fails after a successful send is tried again, so a restart replaying the same message sends nothing', async () => {
+  const fake = fakeHost({ defaultChannel: 'slack' }), logs = [];
+  const recordOnce = fake.host.recordDelivery;
+  let failures = 2;
+  // The backend is briefly down (a 502, a restart) when the delivery is recorded.
+  fake.host.recordDelivery = async delivery => {
+    if (failures-- > 0) { fake.calls.push(['recordDelivery', delivery]); throw new Error('HTTP 502'); }
+    return recordOnce(delivery);
+  };
+  const limits = { ...CHANNEL_LIMITS, recordRetryMs: 1 };
+  const first = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), limits });
+  first.ready();
+  const slack = fakeChannel('slack');
+  first.service.register(slack.channel);
+  assert.deepEqual(await first.ownerMessageSent('m-out', 'Your build finished'), { mirrored: true, channel: 'slack' });
+  assert.deepEqual(only(fake.calls, 'recordDelivery'), Array(3).fill({ messageId: 'm-out', channel: 'slack', channelMessageRef: 'slack-ref-1' }),
+    'the same delivery each time');
+  assert.equal(logs.filter(([event]) => event === 'channel_record_failed').length, 0);
+  first.stop();
+  // A restart: the in-memory guard is gone; the same State message id is mirrored again
+  // (a replayed ask_owner / send_user_message answers the same id).
+  const second = createOwnerChannels({ host: fake.host, log: () => {}, limits });
+  second.ready();
+  const again = fakeChannel('slack');
+  second.service.register(again.channel);
+  assert.deepEqual(await second.ownerMessageSent('m-out', 'Your build finished'), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(slack.sent.length + again.sent.length, 1, 'the owner got it once');
+  // A refusal is the host's answer: not retried.
+  fake.host.recordDelivery = async delivery => { fake.calls.push(['recordDelivery', delivery]); return { refused: 'unknown_message' }; };
+  const before = only(fake.calls, 'recordDelivery').length;
+  await second.ownerMessageSent('m-out-2', 'next');
+  assert.equal(only(fake.calls, 'recordDelivery').length, before + 1);
 });
 
 test('a send that never answers is given up after the bound: recorded as failed, and the next message is mirrored', async () => {

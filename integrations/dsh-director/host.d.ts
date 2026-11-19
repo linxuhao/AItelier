@@ -90,9 +90,14 @@ export interface DirectorApi {
    *  The director sends the same text on the owner's chat channel: a reply goes to the
    *  channel the answered message came from, an unprompted message to the default channel
    *  when one is set and bound, a reply to a dashboard message nowhere. Each message is
-   *  sent at most once (also across a restart, through channels.sourceOf) and recorded
-   *  with channels.recordDelivery, a failed send included, never retried. Never rejects;
-   *  without channels it resolves {mirrored: false}. */
+   *  sent once and recorded with channels.recordDelivery, a failed send included; a send
+   *  is never retried. The delivery row is what keeps a message from being sent again
+   *  after a restart (channels.sourceOf), so a record that fails is retried a bounded
+   *  number of times (CHANNEL_LIMITS: 6 tries over about 30 s) as the same request, which
+   *  the host must take once; a refusal is not retried. A record that fails every try is
+   *  logged (channel_record_failed): within the process the message is still not sent
+   *  again, but after a restart a replay of the same message id would send it a second
+   *  time. Never rejects; without channels it resolves {mirrored: false}. */
   ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;

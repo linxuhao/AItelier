@@ -13,7 +13,7 @@ import { chmodSync, copyFileSync, createWriteStream, statSync, writeFileSync } f
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { promisify } from 'node:util';
-import { MODEL, STORE, URL_, USER, VECTOR, loadavg, now, r1, rng, save, scratchRoot, summary, textOf, waitVectorOk } from './common.mjs';
+import { MODEL, STORE, URL_, USER, VECTOR, loadavg, now, r1, rng, save, scratchRoot, sleep, summary, textOf, waitVectorOk } from './common.mjs';
 
 const execFile = promisify(execFileCb);
 const { MemoryStore } = await import(STORE);
@@ -78,11 +78,17 @@ const report = { item: '12-scale', n: N, started: now(), loadavg_start: loadavg(
 // ---------------------------------------------------------------- in this process: loads, searches, forget
 const h = monitorEventLoopDelay({ resolution: 1 });
 const ms = ns => r1(ns / 1e6);
+// The histogram sees a block only at its next 1 ms tick: one at the very start of fn (before
+// the first tick) or at its very end (fn resolves in that task) was missed, so the monitor
+// runs 20 ms before and after (step 21 perf follow-up; a 15 ms busy block at either end read
+// as 1.1 ms without this).
 async function watched(fn) {
   h.reset(); h.enable();
+  await sleep(20);
   const t = performance.now();
   const value = await fn();
   const took = performance.now() - t;
+  await sleep(20);
   h.disable();
   return { value, ms: r1(took), loop_max_ms: ms(h.max), loop_p99_ms: ms(h.percentile(99)) };
 }

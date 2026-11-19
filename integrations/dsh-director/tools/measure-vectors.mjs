@@ -21,13 +21,19 @@ const fake = await fakeEmbedServer();
 const result = { rows: ROWS };
 const ms = ns => Math.round(ns / 1e5) / 10;
 
+// The histogram sees a block only at its next 1 ms tick: one at the very start or the very
+// end of fn was missed, so the monitor runs 20 ms before and after.
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function measured(name, fn) {
   const h = monitorEventLoopDelay({ resolution: 1 });
   h.enable();
+  await pause(20);
   const started = performance.now();
   const value = await fn();
+  const wall = performance.now() - started;
+  await pause(20);
   h.disable();
-  result[name] = { wall_ms: Math.round(performance.now() - started), loop_delay_max_ms: ms(h.max), loop_delay_p99_ms: ms(h.percentile(99)) };
+  result[name] = { wall_ms: Math.round(wall), loop_delay_max_ms: ms(h.max), loop_delay_p99_ms: ms(h.percentile(99)) };
   return value;
 }
 

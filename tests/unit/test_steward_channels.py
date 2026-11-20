@@ -606,6 +606,32 @@ def test_a_bound_owner_message_lands_like_a_dashboard_message_with_its_source(wo
     assert execute(world.steward, "message_sources", {"message_ids": [out["message_id"]]})["sources"]
 
 
+def _wake(world):
+    import asyncio
+    return asyncio.run(execute(world.steward, "wait_for_state_change", {
+        "project_id": HOME, "include_driver_inbox": True, "timeout_seconds": 0}))
+
+
+def test_the_steward_is_woken_with_each_owner_messages_channel_and_a_dashboard_message_has_none(world):
+    """The owner's Slack '测试' (2026-11-20) reached the steward with no word of Slack: the
+    source sat in the side table and no read on the way to the model selected it."""
+    bind(world)
+    bind(world, channel="wechat", sender="wxid-owner", key="bind-2")
+    slack = relay(world, "from slack", "slack-ts-1")
+    wechat = relay(world, "from wechat", "wx-1", channel="wechat", sender="wxid-owner")
+    dashboard = execute(world.owner, "send_user_conversation_message",
+                        {"request_key": "d1", "project_id": HOME, "body": "from the dashboard"}, allow_write=True)
+    for rows in (execute(world.steward, "list_driver_messages", {})["messages"], _wake(world)["driver_inbox"]):
+        by_id = {row["message_id"]: row for row in rows}
+        assert list(by_id) == [slack["message_id"], wechat["message_id"], dashboard["message_id"]]
+        assert by_id[slack["message_id"]]["source_channel"] == "slack"
+        assert by_id[wechat["message_id"]]["source_channel"] == "wechat"
+        assert "source_channel" not in by_id[dashboard["message_id"]], "no source row = dashboard, no key"
+        # Only the channel's name, never the account or the platform's message ref.
+        assert set(by_id[slack["message_id"]]) - set(by_id[dashboard["message_id"]]) == {"source_channel"}
+        assert SLACK_USER not in json.dumps(rows) and "slack-ts-1" not in json.dumps(rows)
+
+
 @pytest.mark.parametrize("code_channel", ["slack", "wechat"])
 def test_a_live_code_sent_from_the_bound_account_is_refused_retired_and_never_written(world, tmp_path, caplog,
                                                                                       code_channel):

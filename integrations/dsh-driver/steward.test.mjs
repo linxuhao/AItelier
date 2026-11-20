@@ -523,6 +523,14 @@ test('the private inbox reader: a letter longer than the injected excerpt comes 
   assert.deepEqual(answer.limits, INBOX_LIMITS, 'the same INBOX_LIMITS as the project inbox reader');
 });
 
+test('the private inbox reader names the chat channel an owner message came from, and nothing for a dashboard one', async () => {
+  const state = privateDeliveries([privateRow(1, { sender_driver_id: null, source_channel: 'slack' }),
+    privateRow(2, { sender_driver_id: null, source_channel: 'wechat' }), privateRow(3, { sender_driver_id: null })]);
+  const answer = await stewardPrivateInboxTool(state.request).execute({}, toolCall);
+  assert.deepEqual(answer.items.map(item => item.source_channel), ['slack', 'wechat', undefined]);
+  assert.equal('source_channel' in answer.items[2], false, 'a dashboard message carries no source key');
+});
+
 test('the private inbox reader is the steward\'s own box: a letter addressed to another driver is not in the page, one query, no write', async () => {
   const state = privateDeliveries([privateRow(1),
     privateRow(2, { target_driver_id: 'drv-plat', delivery_id: 'dlv-other', message_id: 'm-other', sender_driver_id: 'drv-x' }),

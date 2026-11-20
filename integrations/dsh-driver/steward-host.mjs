@@ -95,6 +95,8 @@ function privateInboxItem(row) {
     created_at: row?.created_at ?? null,
     status: row?.status ?? null,
     version: row?.version ?? null,
+    // An owner message relayed from Slack or WeChat names its channel; a dashboard one has no key.
+    ...(row?.source_channel ? { source_channel: row.source_channel } : {}),
     ...wholeBody(row?.body),
   };
 }

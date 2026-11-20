@@ -46,6 +46,11 @@ TEST_INTENTIONAL_REPEATS = [
     ("tests/integration/test_state_graph_entrypoints.py", 'assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)', 1),
     ("tests/integration/test_tool_operation_owner_recovery.py", 'sf.reconcile_active_operations(run_id, trigger="retryable_trace")', 1),
     ("tests/unit/test_ai_router.py", 'litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),', 1),
+    # Two projections of the SAME store on ONE connection (the State-only
+    # release plan, judged twice): the second call must not mistake the first
+    # call's own empty stand-in for a projected copy. The repeat is the
+    # re-poll, not a splice.
+    ("tests/unit/test_bundle_store_release_requires_a_record.py", 'assert release_plan(conn)["rows"] == 2', 1),
     ("tests/unit/test_claim_precondition_bounded.py", 'await scheduler._run_skillflow_tick("p1", None)', 1),
     ("tests/unit/test_cli_client.py", 'client.approve_checkpoint("project", observed)', 1),
     ("tests/unit/test_debugctl_await_auth_headers.py", '"http://localhost:4444/api/events/stream",', 2),
@@ -128,7 +133,7 @@ def test_named_test_repeats_are_pinned_and_current():
     # The length is pinned as well: a silently DROPPED entry is invisible to the
     # equality above (its site would simply stop being a repeat), so the list's
     # size is written down here too.
-    assert len(TEST_INTENTIONAL_REPEATS) == 23
+    assert len(TEST_INTENTIONAL_REPEATS) == 24
 
 
 

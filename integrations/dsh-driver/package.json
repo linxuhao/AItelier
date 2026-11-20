@@ -9,5 +9,9 @@
     "@deepseek-ai/dsh": "0.2.1-rc.5",
     "@slack/socket-mode": "3.1.1",
     "@slack/web-api": "8.3.0"
+  },
+  "overrides": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/core": "2.3.1"
   }
 }

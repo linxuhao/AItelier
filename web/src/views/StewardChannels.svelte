@@ -16,8 +16,11 @@
   // The WeChat card asks for a new login QR on demand ("新二维码", design 7.2): the
   // steward's host runs the request and the bridge draws a QR, which then arrives like
   // any other status; while the request is pending the list is re-read on the short
-  // cadence. The answer of the newest request is shown for QR_FEEDBACK_MS.
-  const QR_FEEDBACK_MS = 10 * 60_000;
+  // cadence. The answer of the newest request is shown for QR_FEEDBACK_MS; "on its way"
+  // only for QR_ON_ITS_WAY_MS after the bridge took the request (its 30 s QR wait and a
+  // status report): a QR that came and went, or an attempt that failed at once, leaves the
+  // status line alone to say why there is no QR.
+  const QR_FEEDBACK_MS = 10 * 60_000, QR_ON_ITS_WAY_MS = 60_000;
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
   const BIND_POLL_MS = 5000, OFFLINE_POLL_MS = 15000;
   let rows = $state<OwnerChannel[]>([]), defaultChannel = $state<OwnerChannelName | null>(null);
@@ -65,8 +68,11 @@
     const q = r.login_request;
     if (!q || r.status?.connected || now - Date.parse(q.requested_at) > QR_FEEDBACK_MS) return '';
     if (q.status === 'pending') return t('steward.chanQrPending');
-    if (q.status === 'expired') return t('steward.chanQrExpired');
-    if (q.result?.requested) return r.qr_svg ? '' : t('steward.chanQrRequested');
+    // A QR on screen speaks for itself (also when the host ran the request but could not
+    // write its answer back, which then reads as expired).
+    if (q.status === 'expired') return r.qr_svg ? '' : t('steward.chanQrExpired');
+    if (q.result?.requested) return !r.qr_svg && q.completed_at && now - Date.parse(q.completed_at) < QR_ON_ITS_WAY_MS
+      ? t('steward.chanQrRequested') : '';
     const refused = q.result?.refused ?? '';
     if (refused === 'rate_limited') return t('steward.chanQrRefused.rate_limited')
       .replace('{minutes}', String(Math.max(1, Math.ceil((retryUntil(q) - now) / 60_000))));

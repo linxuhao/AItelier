@@ -149,6 +149,34 @@ describe('a new WeChat login QR', () => {
     }
   });
 
+  it('"on its way" lasts only until the QR could have come: a QR that expired or an attempt that failed leaves the status line alone', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:30Z'));
+    const done = qrRequest({status: 'done', completed_at: '2026-11-18T12:00:03Z', result: {requested: true}});
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(done, {status: {connected: false, detail: 'QR requested'}}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(feedback(view.container)).toBe('The QR is on its way: it shows up here in a few seconds.'));
+    // A minute after the bridge took it no QR is on screen: it failed at once, or came and
+    // expired. The detail line says which; "on its way" would be false.
+    for (const detail of ['no QR (login_failed) - request one on the dashboard', 'no QR (qr_expired) - request one on the dashboard']) {
+      api.listOwnerChannels.mockResolvedValue(withQrRequest(done, {status: {connected: false, detail}}));
+      await vi.advanceTimersByTimeAsync(40_000);
+      await waitFor(() => expect(card(view.container, 'wechat').textContent).toContain(detail));
+      expect(feedback(view.container)).toBeUndefined();
+      expect(newQr(view.container)!.disabled).toBe(false);
+    }
+  });
+
+  it('a request that reads as expired while a QR is on screen says nothing (the host ran it but could not write back)', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:03:00Z'));
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(qrRequest({status: 'expired'}),
+      {qr_svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>'}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr] img')).not.toBeNull());
+    expect(feedback(view.container)).toBeUndefined();
+  });
+
   it('rate_limited says how many minutes to wait and keeps the button off until then', async () => {
     vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
     vi.setSystemTime(new Date('2026-11-18T12:01:00Z'));

@@ -16,6 +16,10 @@ const BODY = 'SECRET_BODY_TEXT 请帮我看看';
 // A channel time a minute ago: a decision line is never sent more than an hour after the owner
 // wrote (CHANNEL_LIMITS.lineMaxAgeMs), so a test about a line that IS sent dates its message now.
 const RECENT = new Date(Date.now() - 60000).toISOString();
+// The time of a message that must still get the receipt (CHANNEL_LIMITS.receiptMaxAgeMs, five
+// minutes): taken when the test runs, not when this file loads - plugin-boundary.test.mjs
+// imports it after minutes of other suites.
+const NOW = () => new Date().toISOString();
 // The owed store's default path comes from the environment ($DSH_CHANNEL_OWED_FILE). A test
 // must never write where a running director writes, and two tests must never share one store:
 // without this the ambient environment decides what the suite reads and writes.
@@ -51,11 +55,12 @@ function fakeHost({ bindings = { slack: 'U-OWNER' }, defaultChannel = null } = {
   return { host, calls, sources, bindings };
 }
 
-/** A fake channel plugin: what it was asked to send. */
+/** A fake channel plugin: what it was asked to send. `fail` may be changed after it registers. */
 function fakeChannel(name, { fail } = {}) {
   const sent = [];
-  return { sent, channel: { name, status: () => ({ connected: true }),
-    async send(text, options) { sent.push({ text, options }); if (fail) throw new Error(fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  const fake = { sent, fail, channel: { name, status: () => ({ connected: true }),
+    async send(text, options) { sent.push({ text, options }); if (fake.fail) throw new Error(fake.fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  return fake;
 }
 
 /** A fresh owed store per setup (the file mode is what a restart reads); pass `owedFile` to
@@ -101,14 +106,15 @@ test('nothing reaches the host before it is ready: a message handed in early wai
   assert.equal(only(fake.calls, 'relay').length, 1);
 });
 
-test('an ordinary message from the bound owner is relayed with its fields, and nothing is answered', async () => {
+test('an ordinary message from the bound owner is relayed with its fields, and answered with the receipt only', async () => {
   const s = setup();
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' }), { accepted: true });
   // The channel's own time goes along (the host dates an approval phrase by it); none, none.
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }), { accepted: true });
   assert.deepEqual(only(s.calls, 'relay'), [{ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' },
     { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }]);
-  assert.equal(s.slack.sent.length, 0);
+  // The first, dated days ago, is no longer news (receiptMaxAgeMs): the undated second gets the receipt.
+  assert.deepEqual(s.slack.sent, [{ text: channelReplies.received, options: { replyToRef: 'ts-2', to: 'U-OWNER' } }]);
 });
 
 test('six digits from an unbound sender bind it, and that sender is told in one line that never echoes the code', async () => {
@@ -572,6 +578,8 @@ test('an approval whose run failed is answered as failed, never as done', () => 
 test('binding attempts are bounded per channel and minute: past the bound, six digits are relayed like any message, and nobody is answered', async () => {
   const s = setup({ bindings: {} });
   s.host.bindResult = { refused: 'invalid_code' };
+  // The real host refuses a sender that is not bound (host.d.ts relay).
+  s.host.next = { refused: 'channel_sender_not_bound' };
   for (let i = 0; i < CHANNEL_LIMITS.bindPerMinute + 3; i++)
     await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'b-' + i, text: String(100000 + i) });
   assert.equal(only(s.calls, 'bind').length, CHANNEL_LIMITS.bindPerMinute);
@@ -1403,12 +1411,13 @@ const outage = s => {
 };
 
 for (const [label, text, next, line] of [
-  ['an ordinary message', 'please look at the wuxia build', undefined, null],
+  // Delivered once, so it gets the receipt once, and nothing else.
+  ['an ordinary message', 'please look at the wuxia build', undefined, /^已收到，正在处理…$/],
   ['an approval', '同意 proposal p-1', { message_id: 'm', duplicate: false, approval: EXECUTED }, /^proposal p-1: approved and done/]]) {
   test(`${label} the plugin holds through a backend outage is never answered "send it again", and is delivered once`, async () => {
     const s = setup();
     outage(s);
-    const message = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text, at: RECENT };
+    const message = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text, at: NOW() };
     assert.deepEqual(await s.inbound(message), { accepted: false, reason: 'unavailable' });
     await s.channels.pollOwed();                                  // an owed tick during the outage
     assert.deepEqual(await s.inbound(message), { accepted: false, reason: 'unavailable' });  // the plugin's held retry
@@ -1419,8 +1428,8 @@ for (const [label, text, next, line] of [
     await s.channels.pollOwed();
     const lines = s.slack.sent.map(sent => sent.text);
     assert.ok(!lines.some(sent => SEND_AGAIN.test(sent)), `a delivered message was answered "send it again": ${JSON.stringify(lines)}`);
-    assert.equal(lines.length, line ? 1 : 0, JSON.stringify(lines));
-    if (line) assert.match(lines[0], line);
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.match(lines[0], line);
     s.channels.stop();
   });
 }
@@ -1553,4 +1562,168 @@ test('a recorded delivery leaves the in-process guard: a second call is answered
   assert.equal(only(s.calls, 'sourceOf').length, asked + 1, 'asked the host, not a set that only grows');
   assert.equal(s.slack.sent.length, 1);
   s.channels.stop();
+});
+
+// The receipt (replies.received): the code's own line that a NEW owner message reached the
+// steward, sent at once, before the steward's answer.
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const RECEIPT = channelReplies.received;
+
+test('receipt: a fresh relay is answered once with the fixed line, on its channel, to the bound account, and nothing reaches the host', async () => {
+  assert.equal(RECEIPT, '已收到，正在处理…');
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-owner' } });
+  assert.deepEqual(await s.inbound({ channel: 'wechat', senderRef: 'wx-owner', messageRef: 'w-1', text: BODY, at: NOW() }), { accepted: true });
+  await tick();
+  assert.deepEqual(s.wechat.sent, [{ text: RECEIPT, options: { replyToRef: 'w-1', to: 'wx-owner' } }]);
+  assert.equal(s.slack.sent.length, 0, 'only on the channel the message came from');
+  // Not a steward message: the host is asked exactly what it was asked before the receipt
+  // existed (the text check and the relay), and no delivery is recorded for it.
+  assert.deepEqual(s.calls.map(([name]) => name), ['codeCheck', 'relay']);
+  assert.deepEqual(owed(s.owedFile), [], 'and nothing is owed');
+  assert.ok(s.logs.some(([event, fields]) => event === 'channel_receipt_sent' && fields.channel === 'wechat'));
+  // The steward's real answer to that message still goes out, mirrored as before.
+  s.sources.set('m-in', { direction: 'in', channel: 'wechat', sender_ref: 'wx-owner', channel_message_ref: 'w-1' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'wechat' });
+  assert.deepEqual(s.wechat.sent.map(line => line.text), [RECEIPT, 'the answer']);
+  assert.equal(only(s.calls, 'recordDelivery').length, 1, 'only the answer is a delivery');
+  s.channels.stop();
+});
+
+test('receipt: none for a duplicate, a binding code, a stranger, a decision, a decision still running, or a refusal', async () => {
+  const quiet = async (options, next, message, what) => {
+    const s = setup(options);
+    s.host.next = next;
+    await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: NOW(), ...message });
+    await tick();
+    assert.ok(!s.slack.sent.some(line => line.text === RECEIPT), `${what}: ${JSON.stringify(s.slack.sent)}`);
+    s.channels.stop();
+    return s;
+  };
+  await quiet(undefined, { message_id: 'm-in', duplicate: true, approval: null }, {}, 'a redelivery');
+  await quiet(undefined, { message_id: null, duplicate: true, approval: null }, { text: '123456' }, 'the owner\'s code replayed');
+  const bound = await quiet({ bindings: {} }, undefined, { senderRef: 'U-NEW', text: '123456' }, 'a binding code');
+  assert.match(bound.slack.sent[0].text, /^Bound/);
+  await quiet(undefined, { refused: 'channel_sender_not_bound' }, { senderRef: 'U-STRANGER' }, 'a stranger');
+  const decided = await quiet(undefined, { message_id: 'm', duplicate: false, approval: EXECUTED }, { text: '同意 proposal p-1' }, 'a decision');
+  assert.deepEqual(decided.slack.sent.map(line => line.text), [channelReplies.approval(EXECUTED)], 'its own line, at once');
+  await quiet(undefined, { duplicate: true, approval: null, approval_pending: true }, {}, 'a decision still running');
+  for (const refused of ['body_too_long', 'code_sent_to_bound_account', 'rate_limited'])
+    await quiet(undefined, { refused }, {}, refused);
+});
+
+test('receipt: at most one per channel within receiptMs, each channel its own window, and again after it', async t => {
+  // The clock is the test's: how long the three relays take on a loaded host decides nothing.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-owner' } });
+  for (const ref of ['ts-1', 'ts-2', 'ts-3'])
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }), { accepted: true });
+  await s.inbound({ channel: 'wechat', senderRef: 'wx-owner', messageRef: 'w-1', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1'], 'a burst gets one');
+  assert.deepEqual(s.wechat.sent.map(line => line.options.replyToRef), ['w-1']);
+  assert.equal(s.logs.filter(([event]) => event === 'channel_receipt_skipped').length, 2);
+  t.mock.timers.tick(CHANNEL_LIMITS.receiptMs - 1);
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-3b', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1'], 'still inside the window');
+  t.mock.timers.tick(1);
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-4', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1', 'ts-4']);
+  assert.equal(only(s.calls, 'relay').length, 6, 'every message was relayed');
+  s.channels.stop();
+});
+
+test('receipt: the steward\'s reply sent on a channel ends its window; a failed reply or a receipt does not', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup();
+  const receipts = () => s.slack.sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async ref => { await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1' });
+  await owner('ts-1');
+  await owner('ts-2');
+  assert.deepEqual(receipts(), ['ts-1'], 'a receipt starts the window, it does not end it');
+  // The reply fails to go out: the owner has heard nothing new, the window stands.
+  s.slack.fail = 'socket closed';
+  assert.deepEqual(await s.channels.ownerMessageSent('m-fail', 'lost answer', 'm-in'), { mirrored: false, reason: 'send_failed', channel: 'slack' });
+  s.slack.fail = undefined;
+  await owner('ts-3');
+  assert.deepEqual(receipts(), ['ts-1'], 'a failed reply starts nothing');
+  // The reply goes out: the owner's next message, still well inside receiptMs, is news again.
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('ts-4');
+  await owner('ts-5');
+  assert.deepEqual(receipts(), ['ts-1', 'ts-4'], 'the reply starts the window again: ts-4 gets one, ts-5 is inside it');
+  s.channels.stop();
+});
+
+test('receipt: a reply sent on one channel restarts only that channel\'s window', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-OWNER' } });
+  const got = ch => s[ch].sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async (channel, senderRef, ref) => { await s.inbound({ channel, senderRef, messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 's-1' });
+  await owner('slack', 'U-OWNER', 's-1');
+  await owner('wechat', 'wx-OWNER', 'w-1');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1'], ['w-1']]);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('slack', 'U-OWNER', 's-2');
+  await owner('wechat', 'wx-OWNER', 'w-2');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1', 's-2'], ['w-1']], 'the Slack reply leaves the WeChat window standing');
+  s.channels.stop();
+});
+
+test('receipt: none when it would no longer be news, or when the channel is not registered - both logged', async () => {
+  const s = setup();
+  const late = new Date(Date.now() - CHANNEL_LIMITS.receiptMaxAgeMs - 1000).toISOString();
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: late }), { accepted: true });
+  await tick();
+  assert.equal(s.slack.sent.length, 0, 'a message relayed long after it was written');
+  assert.ok(s.logs.some(([event, fields]) => event === 'channel_receipt_skipped' && fields.reason === 'late'));
+  // The window was not spent by it: the next fresh message still gets its receipt.
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY, at: new Date().toISOString() });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-2']);
+  s.channels.stop();
+  const fake = fakeHost(), logs = [];
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), owedFile: undefined });
+  channels.ready();
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY }), { accepted: true });
+  assert.ok(logs.some(([event, fields]) => event === 'channel_receipt_skipped' && fields.reason === 'not_registered'));
+  channels.stop();
+});
+
+test('receipt: a send that fails is logged and dropped - no retry, nothing owed, the message still accepted', async () => {
+  const fake = fakeHost(), logs = [];
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), owedFile: file });
+  channels.ready();
+  const slack = fakeChannel('slack', { fail: 'socket closed' });
+  channels.service.register(slack.channel);
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY }), { accepted: true });
+  await tick();
+  assert.equal(slack.sent.length, 1);
+  assert.deepEqual(logs.filter(([event]) => event === 'channel_receipt_failed'), [['channel_receipt_failed', { channel: 'slack', error: 'socket closed' }]]);
+  assert.ok(!logs.some(([event]) => event === 'channel_answer_failed'), 'not the answer path, which retries');
+  assert.deepEqual(owed(file), []);
+  await channels.pollOwed();
+  await new Promise(resolve => setTimeout(resolve, CHANNEL_LIMITS.answerRetryMs + 50));
+  assert.equal(slack.sent.length, 1, 'never tried again');
+  channels.stop();
+});
+
+test('receipt: a send that never answers holds up neither the message nor the next one', async () => {
+  const fake = fakeHost();
+  const channels = createOwnerChannels({ host: fake.host, owedFile: undefined });
+  channels.ready();
+  const sent = [];
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }), send: text => { sent.push(text); return new Promise(() => {}); } });
+  const answered = await Promise.race([
+    Promise.all(['ts-1', 'ts-2'].map(ref => channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }))),
+    new Promise(resolve => setTimeout(() => resolve('held up'), 200).unref())]);
+  assert.deepEqual(answered, [{ accepted: true }, { accepted: true }]);
+  assert.deepEqual(sent, [RECEIPT]);
+  channels.stop();
 });

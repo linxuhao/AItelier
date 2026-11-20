@@ -134,14 +134,19 @@ def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_
     assert "mcp-aitelier" not in _inserted_ids(steward_patch)
     assert _inserted_ids(steward_patch)[:2] == ["dsh-director", "aitelier-driver"]
     assert "mcp-aitelier" in _inserted_ids(director_patch)
-    # Apart from the State MCP entry and the compaction policy, the two profiles are the same.
+    # Apart from the State MCP entry, the local MCP services and the compaction
+    # policy, the two profiles are the same. The steward gets none of the local
+    # services: its role presents no tool of theirs, and the pwmcp entry pointed
+    # it at the SHARED browser, where its own `initialize` evicted a director.
     compaction = {p["id"]: p for p in steward_patch if p.get("id")}["compaction-basic"]["config"]
     assert compaction["modelPolicies"][0] == {"provider": "aitelier", "model": "steward-route",
                                               "thresholdRatio": 0.4, "retainTokens": 3}
     strip = lambda patches: [p for p in patches if p.get("id") != "compaction-basic" and "insert" not in p]
     assert strip(steward_patch) == strip(director_patch)
+    extras = {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp", "mcp-pwmcp"}
     assert ([e for e in next(p for p in steward_patch if "insert" in p)["insert"]]
-            == [e for e in next(p for p in director_patch if "insert" in p)["insert"] if e["id"] != "mcp-aitelier"])
+            == [e for e in next(p for p in director_patch if "insert" in p)["insert"]
+                if e["id"] not in extras])
 
 
 def test_steward_profile_loads_a_chat_channel_plugin_only_when_its_secrets_exist(runtime, roles_file, monkeypatch, tmp_path):

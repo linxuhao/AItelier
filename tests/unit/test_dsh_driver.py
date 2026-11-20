@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.driver_presence import presence_for
 from core.drivers import DriverRegistry
 from core.dsh_driver import DshDrivers, SERVED_BY_SEEN_LIMIT
 from core.state_database import StateDatabase
@@ -1751,3 +1752,79 @@ async def test_a_recovery_start_cannot_re_enable_a_row_a_stop_disabled_since_the
     finally:
         await host.close()
         await backend.close()
+
+
+def _declared_rows(db, driver_id):
+    """The offline declarations the presence TABLE actually holds for a driver.
+
+    Read straight out of `driver_presence_declarations` (the table is created
+    lazily on the first declaration, so its absence is itself "no declaration").
+    The point of the tests below is what is stored, never that `declare` ran.
+    """
+    with db.get_connection() as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='driver_presence_declarations'").fetchone():
+            return []
+        return conn.execute("SELECT driver_id,status,reason,expected_return "
+                            "FROM driver_presence_declarations WHERE driver_id=?",
+                            (driver_id,)).fetchall()
+
+
+async def test_a_restart_stop_kills_the_process_but_leaves_no_offline_declaration(runtime):
+    """`stop(preserve_enabled=True)` is a RESTART, so it must not declare offline.
+
+    The panel restart path and `close()` for an enabled driver stop the process
+    only to bring it straight back (`preserve_enabled=bool(row["enabled"])`).
+    An offline declaration is cleared solely by an `online` declaration - the
+    director-only State MCP tool `declare_driver_presence` - so the steward of
+    aitelier-home (no State MCP at all) could never clear the row a restart left
+    behind and would read as offline while running. Witness: the process is
+    killed AND the presence table holds no declaration for that driver.
+    """
+    driver = await runtime.start("alpha", actor="fixture")
+    driver_id = driver["driver_id"]
+    proc = runtime.processes["alpha"]
+    try:
+        await runtime.stop("alpha", preserve_enabled=True)
+        assert proc.returncode is not None, "a restart stop must still kill the runtime process"
+        assert _declared_rows(runtime.db, driver_id) == [], (
+            "a restart stop wrote an offline declaration nothing on this driver can clear")
+        presence = presence_for(runtime.db, driver_id)
+        assert presence["declared"] is False and presence["basis"] != "declared"
+        assert presence["reason"] is None
+        # A restart leaves the row enabled so the caller can start it again.
+        assert runtime.get("alpha")["enabled"] == 1
+    finally:
+        await runtime.close()
+
+
+async def test_an_owner_stop_writes_exactly_one_driver_stopped_declaration(runtime):
+    """An owner stop (`preserve_enabled=False`) still declares offline, exactly once.
+
+    The driver really is gone, its owner must not be taken for present, and the
+    row keeps the stop's own enabled/phase stamps.
+    """
+    driver = await runtime.start("alpha", actor="fixture")
+    driver_id = driver["driver_id"]
+    proc = runtime.processes["alpha"]
+    try:
+        await runtime.stop("alpha")
+        assert proc.returncode is not None
+        rows = _declared_rows(runtime.db, driver_id)
+        assert [(r["driver_id"], r["status"], r["reason"], r["expected_return"]) for r in rows] == [
+            (driver_id, "offline", "Driver stopped", None)]
+        presence = presence_for(runtime.db, driver_id)
+        assert presence["declared"] is True
+        assert presence["status"] == "offline" and presence["basis"] == "declared"
+        assert presence["reason"] == "Driver stopped"
+        assert presence["since"] is not None
+        with runtime.db.get_connection() as conn:
+            audit = conn.execute("SELECT actor,payload_json FROM driver_audit "
+                                 "WHERE driver_id=? AND operation='presence'",
+                                 (driver_id,)).fetchall()
+        assert len(audit) == 1, [dict(a) for a in audit]
+        assert audit[0]["actor"] == "driver:" + driver_id
+        row = runtime.get("alpha")
+        assert row["enabled"] == 0 and row["phase"] == "stopped"
+    finally:
+        await runtime.close()

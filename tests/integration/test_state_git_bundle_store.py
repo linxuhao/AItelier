@@ -82,6 +82,17 @@ def tamper(conn, sql, args=()):
     conn.execute(sql, args)
 
 
+def flip_last_byte(payload):
+    """Store damage whose written byte is derived from the byte it read.
+
+    A Git bundle's last byte is the tail of its SHA-1 trailer, so a damage that
+    writes a literal byte there (or truncates and appends a constant) leaves
+    roughly one run in 256 unchanged: the row is undamaged, the read correctly
+    succeeds, and the witness is vacuous. Flipping the low bit of the stored
+    byte can never equal the input for any non-empty payload."""
+    return payload[:-1] + bytes([payload[-1] ^ 0x01])
+
+
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
@@ -349,8 +360,12 @@ def test_materialize_refuses_store_damage_before_destination_mutation(tmp_path, 
             tamper(raw, "UPDATE state_git_bundle_store SET payload=CAST(substr(payload,1,length(payload)-3) "
                         "|| x'000000' AS BLOB) WHERE bundle_sha256=?", (delta,))
         elif damage == "keyframe-payload":
-            tamper(raw, "UPDATE state_git_bundle_store SET payload=CAST(substr(payload,1,length(payload)-1) "
-                        "|| x'00' AS BLOB) WHERE bundle_sha256=?", (keyframe,))
+            stored = bytes(raw.execute("SELECT payload FROM state_git_bundle_store "
+                                       "WHERE bundle_sha256=?", (keyframe,)).fetchone()[0])
+            tamper(raw, "UPDATE state_git_bundle_store SET payload=? WHERE bundle_sha256=?",
+                   (flip_last_byte(stored), keyframe))
+            assert raw.execute("SELECT typeof(payload) FROM state_git_bundle_store WHERE "
+                               "bundle_sha256=?", (keyframe,)).fetchone()[0] == "blob"
         elif damage == "payload-text":
             # Damage that also changes the storage class (past the schema CHECK)
             # is refused like any other damage, not raised as a decoding error.
@@ -375,6 +390,23 @@ def test_materialize_refuses_store_damage_before_destination_mutation(tmp_path, 
     assert subprocess.check_output(["git", "-C", str(dest), "for-each-ref"]) == b""
     # Metadata stays truthful and unchanged: custody is derived from the row only.
     assert custody_metadata(_artifact(db, second))["custody"] == "state_db_fullpack"
+
+
+def test_keyframe_payload_damage_never_equals_the_stored_bytes():
+    """The keyframe witness is damaged by flipping the stored byte, not by a literal.
+
+    Deterministic: it executes the helper the witness uses. A real bundle ends in
+    the tail of its SHA-1 trailer, so a literal x'00' tail write was a no-op
+    whenever the trailer already ended in 0x00 (about one run in 256) and
+    materialize then legitimately succeeded. Both ends of the byte range must
+    yield damage that differs from its input and from the other's.
+    """
+    stored = [b"PACK\x00\x00\x02\x00" + bytes([tail]) for tail in (0x00, 0xFF)]
+    damaged = [flip_last_byte(payload) for payload in stored]
+    assert all(change != original for original, change in zip(stored, damaged))
+    assert all(change[:-1] == original[:-1] for original, change in zip(stored, damaged))
+    assert [change[-1] for change in damaged] == [0x01, 0xFE]
+    assert damaged[0] != damaged[1]
 
 
 # ------------------------------------------------------------ the migration tool

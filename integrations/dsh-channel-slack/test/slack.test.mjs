@@ -473,7 +473,10 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
   assert.doesNotMatch(raw, /request_url|https?:|xapp-|xoxb-|xoxp-/);
   // Every Web API method the plugin calls, and the bot scope Slack requires for it.
   const methodScopes = { 'conversations.open': 'im:write', 'chat.postMessage': 'chat:write' };
-  const source = readFileSync(new URL('index.mjs', here), 'utf8');
+  // Comments stripped first, so both scans below measure code: a comment that mentions the
+  // web client must not count as a use of it (index.mjs carries no // or /* inside a string).
+  const source = readFileSync(new URL('index.mjs', here), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   const called = [...new Set([...source.matchAll(/\bweb\.(\w+)\.(\w+)\(/g)].map(([, group, method]) => `${group}.${method}`))];
   assert.deepEqual(called.sort(), Object.keys(methodScopes).sort(), 'a Web API call was added or removed: update methodScopes and the manifest');
   // ...and the client is used no other way (web.apiCall, web?.x.y(, a destructured

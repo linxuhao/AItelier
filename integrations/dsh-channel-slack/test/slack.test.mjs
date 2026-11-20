@@ -476,6 +476,10 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
   const source = readFileSync(new URL('index.mjs', here), 'utf8');
   const called = [...new Set([...source.matchAll(/\bweb\.(\w+)\.(\w+)\(/g)].map(([, group, method]) => `${group}.${method}`))];
   assert.deepEqual(called.sort(), Object.keys(methodScopes).sort(), 'a Web API call was added or removed: update methodScopes and the manifest');
+  // ...and the client is used no other way (web.apiCall, web?.x.y(, a destructured
+  // method): past its declaration and construction, every `web` is such a call.
+  assert.deepEqual([...source.matchAll(/\bweb\b(?!\.\w+\.\w+\(| = new WebClient\(|-api)/g)].length, 1,
+    'the Web API client is used other than as web.<group>.<method>(: update methodScopes and this check');
   // The one event the plugin takes (isOwnerDm: a message in an im) and its scope.
   const eventScopes = { 'message.im': 'im:history' };
   assert.deepEqual(manifest.settings.event_subscriptions.bot_events, Object.keys(eventScopes));
@@ -488,8 +492,8 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
   assert.equal(manifest.features.app_home.messages_tab_enabled, true);
   assert.equal(manifest.features.app_home.messages_tab_read_only_enabled, false);
   assert.equal(typeof manifest.features.bot_user.display_name, 'string');
-  // No Agents & AI Apps features: with them a DM arrives in an assistant thread, which
-  // isOwnerDm does not take.
+  // No Agents & AI Apps features: the plugin does not use them, and with them Slack shows
+  // the DM as threads while the plugin replies at the top of the DM.
   assert.equal(manifest.features.assistant_view, undefined);
   assert.equal(manifest.features.agent_view, undefined);
   assert.doesNotMatch(raw, /assistant|agent_/);

@@ -69,15 +69,18 @@ holds no token and no URL.
 3. **Install.** **Install App → Install to Workspace → Allow**. Copy the **Bot User OAuth
    Token** (starts `xoxb-`).
 
-Then save the two tokens. Paste each one at its prompt: `read -rs` does not echo it, so
-it never reaches the screen, the shell history or a chat:
+Then save the two tokens, in **bash** (on macOS, whose shell is zsh, type `bash` first:
+zsh's `read -p` means something else, and plain `sh` has no `read -s`). Paste each token
+at its prompt: `read -s` does not echo it, so it never reaches the screen, the shell
+history or a chat. A value that is empty or lacks the expected prefix is not written:
 
-```sh
+```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-( umask 077
-  read -rsp 'xapp- token: ' t && printf '%s\n' "$t" > ~/.aitelier-secrets/slack-app-token; echo
-  read -rsp 'xoxb- token: ' t && printf '%s\n' "$t" > ~/.aitelier-secrets/slack-bot-token; echo )
-chmod 600 ~/.aitelier-secrets/slack-app-token ~/.aitelier-secrets/slack-bot-token
+save_token() { local t; read -rsp "$1 token: " t; echo
+  case "$t" in "$1"?*) ;; *) echo "not saved: not an $1 token"; return 1 ;; esac
+  ( umask 077; printf '%s\n' "$t" > ~/.aitelier-secrets/"$2" ) && chmod 600 ~/.aitelier-secrets/"$2"; }
+save_token xapp- slack-app-token
+save_token xoxb- slack-bot-token
 ```
 
 Then **restart the steward** (see below), open the app in Slack (**Apps → AItelier
@@ -95,14 +98,19 @@ messages tab" ticked; do not turn on **Agents & AI Apps**. Install it to the wor
 ### Fixing an existing app
 
 An app made from a template (Slack's bolt starter agent, for instance) can carry an
-Event Subscriptions Request URL (an ngrok address) and the **Agents & AI Apps** feature;
-with the latter a DM to the bot arrives in an assistant thread, which this plugin does not
-take, so nothing reaches the steward. Open the app's **App Manifest** page, replace the
-whole manifest with `slack-app-manifest.json` (JSON tab), and **Save Changes**: that
-turns Socket Mode on and removes the Request URL, the assistant settings and any scope or
-event the plugin does not use. If Slack then asks to reinstall the app, do so; if the Bot
-User OAuth Token shown afterwards differs from the saved one, save it again as above. The
-app-level token is kept.
+Event Subscriptions Request URL (an ngrok address) with Socket Mode off, so Slack sends
+the DM events to that address instead of the socket and nothing reaches the steward. It
+can also carry the **Agents & AI Apps** feature, which this plugin does not use: Slack
+then shows the DM as threads, while the plugin replies at the top of the DM, not in the
+thread the person wrote in. Open the app's **App Manifest** page, replace the whole
+manifest with `slack-app-manifest.json` (JSON tab), and **Save Changes**: a saved
+manifest replaces the app's whole configuration, so that turns Socket Mode on and
+removes the Request URL, the AI feature and any scope or event the plugin does not use.
+It also renames the app and its bot to "AItelier Steward" (edit `name` and
+`display_name` before pasting to keep yours). If Slack then asks to reinstall the app, do
+so; if the Bot User OAuth Token shown afterwards differs from the saved one, save only it
+again: run the `save_token` definition above, then `save_token xoxb- slack-bot-token`.
+The app-level token is kept. Then restart the steward.
 
 ### Where the tokens live, and the restart
 

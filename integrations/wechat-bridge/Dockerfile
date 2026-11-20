@@ -14,13 +14,16 @@ FROM python:3.12-slim AS build
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 WORKDIR /opt/wechat-bridge
-COPY package.json package-lock.json ./
+# --chmod: the image must not depend on the checkout's file modes. A checkout whose files
+# are 0600 (this host's) would otherwise be copied in root-owned 0600, and uid 1000 could
+# not read main.mjs (EACCES at start). The files are read-only for everyone instead.
+COPY --chmod=0444 package.json package-lock.json ./
 RUN node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev --ignore-scripts --no-audit --no-fund
 # The addon's libraries resolve here, and the newest glibc symbol it asks for.
 RUN ldd --version | head -n 1 \
     && ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \
     && ! ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node | grep -q 'not found'
-COPY bridge.mjs main.mjs qr-svg.mjs ./
+COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs ./
 # puppet-neo declares node >= 26; this is node 24. Load both packages, open (then close)
 # a native session the way the puppet does, twice, then start and stop a Wechaty bot with
 # the puppet twice in this one process, with no network: proves the addon loads and runs

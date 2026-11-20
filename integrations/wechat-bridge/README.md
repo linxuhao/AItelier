@@ -34,7 +34,11 @@ Dockerfile uses) on `python:3.12-slim` (Debian trixie, glibc 2.41; puppet-neo ne
 glibc ≥ 2.38, bookworm has 2.36). npm exists only in the build stage, which runs
 `npm ci --omit=dev --ignore-scripts` from the committed `package-lock.json` (exact
 pins); the final image has node, the app and its `node_modules`, no npm and no
-compilers, and runs as uid 1000 (`bridge`).
+compilers, and runs as uid 1000 (`bridge`). The app's files are copied in with `COPY --chmod=0444`, so
+the image does not depend on the checkout's file modes: built from a checkout whose files
+are 0600 (this host's), a plain `COPY` made them root-owned 0600 and uid 1000 could not
+read `main.mjs` (EACCES at start). Checked 2026-11-20: the same 0600 copy built with the
+old Dockerfile exits with EACCES, with this one it listens.
 
 `--ignore-scripts` is enough. puppet-neo has no install scripts: its native addon
 (`native/<platform>/neo.node`, all four platforms, ~45 MB unpacked) comes inside its npm

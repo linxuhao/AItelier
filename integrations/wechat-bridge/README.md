@@ -73,8 +73,9 @@ The steward's profile loads the channel plugin only when the token file exists, 
 when the profile is written, at the steward's start: a token added to a running steward
 loads nothing until the steward is restarted. Until then the dashboard's Channels tab
 shows no status for WeChat at all (no QR to scan either; if it ran before, its last
-report); after the restart it shows the bridge's state (`scan needed` with the QR,
-`connected`, or why not).
+report); after the restart it shows the bridge's state (`no QR (<reason>) - request one
+on the dashboard`, `QR requested`, `scan needed` with the QR, `QR scanned - confirm on the
+phone`, `connected`, or why not).
 
 `run.sh` starts the container (nothing runs it for you):
 

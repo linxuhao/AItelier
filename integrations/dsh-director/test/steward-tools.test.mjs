@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../lib/portfolio.mjs';
 import { PROPOSAL_KINDS, registerProposalTools } from '../lib/proposals.mjs';
+import { registerChannelTools } from '../lib/channel-tools.mjs';
+import { readFileSync } from 'node:fs';
 
 const collect = (register, options) => {
   const tools = new Map();
@@ -93,4 +95,30 @@ test('proposals: propose passes kind, payload, reason (and supersedes); an unkno
     ['propose', { kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r' }],
     ['propose', { kind: 'stop_driver', payload: { project_id: 'w' }, reason: 'r2', supersedes: 'p-1' }],
     ['withdraw', { id: 'p-1', reason: 'gone' }]]);
+});
+
+test('request_wechat_qr asks the WeChat channel for a login and answers only {requested} or {refused, retry_after_s}: never a QR', async () => {
+  const asked = [];
+  let answer;
+  const tools = collect(registerChannelTools, { login: async channel => { asked.push(channel); return answer; } });
+  assert.deepEqual([...tools.keys()], ['request_wechat_qr']);
+  const tool = tools.get('request_wechat_qr');
+  assert.deepEqual(tool.parameters, {});
+  answer = { requested: true, qr: 'https://login.weixin.qq.com/l/SECRET', qrSvg: '<svg/>', qr_svg: '<svg/>' };
+  assert.deepEqual(await tool.execute({}, exec), { requested: true });
+  answer = { refused: 'rate_limited', retry_after_s: 75, qr: 'SECRET' };
+  assert.deepEqual(await tool.execute({}, exec), { refused: 'rate_limited', retry_after_s: 75 });
+  answer = { refused: 'qr_waiting', qr_svg: '<svg/>' };
+  assert.deepEqual(await tool.execute({}, exec), { refused: 'qr_waiting' });
+  answer = undefined;
+  assert.deepEqual(await tool.execute({}, exec), { refused: 'refused' });
+  assert.deepEqual(asked, ['wechat', 'wechat', 'wechat', 'wechat']);
+  // The model is told where the QR is (the dashboard) and that it never goes over chat.
+  assert.match(tool.description, /ONLY on the dashboard's Channels tab/);
+  assert.match(tool.description, /never send, describe or promise a QR over chat/);
+  // The steward is presented it (roles.json), and its prompt says the same.
+  const roles = JSON.parse(readFileSync(new URL('../roles.json', import.meta.url), 'utf8'));
+  assert.ok(roles.steward.presented.includes('request_wechat_qr'));
+  assert.ok(!roles.director.presented.includes('request_wechat_qr') && !roles.worker.presented.includes('request_wechat_qr'));
+  assert.match(readFileSync(new URL('../steward.md', import.meta.url), 'utf8'), /request_wechat_qr[\s\S]*only on the dashboard's Channels tab/);
 });

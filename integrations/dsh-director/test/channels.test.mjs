@@ -501,6 +501,7 @@ test('the plugin-facing service is exactly {register, inbound}; the director-sid
   assert.equal(typeof channels.pollStatus, 'function');
   assert.equal(typeof channels.pollOwed, 'function');
   assert.equal(typeof channels.stop, 'function');
+  assert.equal(typeof channels.login, 'function', 'a new login is the director\'s to ask, not a plugin\'s');
 });
 
 test('a rate_limited answer is kept and asked again - by the channel and, after a restart, from the owed store', async () => {
@@ -1553,4 +1554,48 @@ test('a recorded delivery leaves the in-process guard: a second call is answered
   assert.equal(only(s.calls, 'sourceOf').length, asked + 1, 'asked the host, not a set that only grows');
   assert.equal(s.slack.sent.length, 1);
   s.channels.stop();
+});
+
+test('login: a channel may register an optional login; the handle asks it and passes only {requested} or {refused, retry_after_s}', async () => {
+  const { channels, reports, wechat, logs } = statusSetup({ limits: { fastStatusMs: 20, fastStatusForMs: 200 } });
+  channels.ready();
+  try {
+    assert.throws(() => channels.service.register({ name: 'slack', status: () => ({}), async send() {}, login: 'yes' }),
+      /login, when given, must be a function/);
+    assert.deepEqual(await channels.login('wechat'), { refused: 'not_registered' });
+    const plain = channels.service.register({ name: 'slack', status: () => ({ connected: true }), async send() { return {}; } });
+    assert.deepEqual(await channels.login('slack'), { refused: 'not_supported' }, 'a channel without login');
+    plain();
+    let answer = { requested: true, qr: 'https://login.weixin.qq.com/l/SECRET', qrSvg: '<svg/>' };
+    const asked = [];
+    channels.service.register({ name: 'wechat', status: () => wechat.now, async send() { return {}; },
+      async login() { asked.push('login'); return answer; } });
+    assert.deepEqual(await channels.login('wechat'), { requested: true }, 'nothing but `requested` leaves');
+    // Accepted: the status is reported quickly for a while, so the QR shows up in seconds.
+    wechat.now = { connected: false, detail: 'scan needed', qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"/>' };
+    const until = Date.now() + 2000;
+    while (!reports.some(r => r.qrSvg) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(reports.some(r => r.qrSvg), 'reported by the fast poll, long before statusMs');
+    answer = { refused: 'rate_limited', retry_after_s: 90, qr: 'SECRET' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 90 });
+    answer = { refused: 'qr_waiting' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'qr_waiting' });
+    answer = undefined;
+    assert.deepEqual(await channels.login('wechat'), { refused: 'refused' });
+    assert.equal(asked.length, 4);
+    assert.ok(!JSON.stringify(logs).includes('SECRET') && !JSON.stringify(logs).includes('<svg'));
+  } finally { channels.stop(); }
+});
+
+test('login: a channel login that throws or never answers is refused as unavailable, never thrown', async () => {
+  const { channels } = statusSetup({ limits: { sendMs: 50 } });
+  channels.ready();
+  try {
+    let behave = 'throw';
+    channels.service.register({ name: 'wechat', status: () => ({ connected: false }), async send() { return {}; },
+      login: () => behave === 'throw' ? Promise.reject(new Error('boom')) : new Promise(() => {}) });
+    assert.deepEqual(await channels.login('wechat'), { refused: 'unavailable' });
+    behave = 'hang';
+    assert.deepEqual(await channels.login('wechat'), { refused: 'unavailable' });
+  } finally { channels.stop(); }
 });

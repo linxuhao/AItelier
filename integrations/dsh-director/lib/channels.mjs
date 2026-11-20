@@ -119,7 +119,7 @@ const within = (promise, ms, what) => {
  *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000 });
+  lineMaxAgeMs: 3600000, fastStatusMs: 5000, fastStatusForMs: 180000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -390,8 +390,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (!channel || !CHANNEL_NAMES.includes(channel.name)) throw new Error(`ownerChannels.register: name must be one of ${CHANNEL_NAMES.join(', ')}`);
       if (typeof channel.send !== 'function' || typeof channel.status !== 'function')
         throw new Error('ownerChannels.register: send and status must be functions');
+      if (channel.login !== undefined && typeof channel.login !== 'function')
+        throw new Error('ownerChannels.register: login, when given, must be a function');
       if (registered.has(channel.name)) throw new Error(`ownerChannels.register: ${channel.name} is already registered`);
-      const entry = { send: channel.send, status: channel.status };
+      const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}) };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
       void reportStatus(channel.name, statusOf(entry));
@@ -761,8 +763,44 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return run;
   };
 
+  // After an accepted login the status is reported every fastStatusMs for fastStatusForMs,
+  // so the new QR reaches the dashboard in seconds rather than at the next statusMs poll.
+  let fastTimer, fastUntil = 0;
+  const pollFast = () => {
+    if (typeof host.reportStatus !== 'function') return;
+    fastUntil = Date.now() + limits.fastStatusForMs;
+    if (fastTimer) return;
+    fastTimer = setInterval(() => {
+      if (Date.now() >= fastUntil) { clearInterval(fastTimer); fastTimer = undefined; return; }
+      void pollStatus();
+    }, limits.fastStatusMs);
+    fastTimer.unref?.();
+  };
+  /** A new login (the WeChat QR) on `channel`, for the owner's dashboard button and the
+   *  steward's tool: {requested: true} or {refused, retry_after_s?}. Only these fields
+   *  leave here - whatever else a channel answers (never a QR) is dropped. Never throws. */
+  const login = async channel => {
+    const entry = registered.get(channel);
+    if (!entry) return { refused: 'not_registered' };
+    if (!entry.login) return { refused: 'not_supported' };
+    let answer;
+    try { answer = await within(Promise.resolve(entry.login()), limits.sendMs, 'channel login timed out'); }
+    catch (error) { log('channel_login_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
+    if (answer?.requested === true) {
+      log('channel_login_requested', { channel });
+      pollFast();
+      void pollStatus();
+      return { requested: true };
+    }
+    const retry = Number(answer?.retry_after_s);
+    const refused = { refused: text(answer?.refused) ? answer.refused.slice(0, 40) : 'refused',
+      ...(Number.isInteger(retry) && retry > 0 ? { retry_after_s: retry } : {}) };
+    log('channel_login_refused', { channel, reason: refused.refused });
+    return refused;
+  };
+
   return {
-    service, ownerMessageSent,
+    service, ownerMessageSent, login,
     ready() {
       ready();
       if (!statusTimer && typeof host.reportStatus === 'function') {
@@ -781,6 +819,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     pollOwed: drainOwed,
     stop: () => {
       clearInterval(statusTimer); statusTimer = undefined;
+      clearInterval(fastTimer); fastTimer = undefined;
       clearInterval(owedTimer); owedTimer = undefined;
       stopping.abort();
     },

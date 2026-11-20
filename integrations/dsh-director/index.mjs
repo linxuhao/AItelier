@@ -32,6 +32,7 @@ import { openMemory, profileSection, registerMemoryTools } from './lib/memory/to
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { createOwnerChannels } from './lib/channels.mjs';
+import { registerChannelTools } from './lib/channel-tools.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -299,6 +300,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     memory: memory?.store,
     ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
+    ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
     isDisposed: () => disposed };
@@ -581,6 +583,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (host.portfolio || host.handoff) registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio: host.portfolio, handoff: host.handoff });
     // Plugin step 13: proposals the owner decides on.
     if (host.proposals) registerProposalTools(scope, { defineTool, jsonOutput, proposals: host.proposals });
+    // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
+    if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
   };
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;

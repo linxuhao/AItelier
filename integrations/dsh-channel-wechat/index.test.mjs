@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as plugin from './index.mjs';
-import { startWechatChannel } from './index.mjs';
+import { startWechatChannel, statusFromBridge } from './index.mjs';
 import { createBridge } from '../wechat-bridge/bridge.mjs';
 
 const TOKEN = 'plugin-test-token';
@@ -41,7 +41,7 @@ function fakeChannels({ accept = () => true, fail = 0, unavailable = 0, answer }
 
 /** A bridge stand-in: events are pushed by the test; every request is recorded. */
 async function fakeBridge({ status = { logged_in: true, since: 'x' }, hangEvents = false } = {}) {
-  const bridge = { events: [], requests: [], sent: [], status, sendAnswer: [200, { ref: null }] };
+  const bridge = { events: [], requests: [], sent: [], status, sendAnswer: [200, { ref: null }], loginAnswer: [202, { phase: 'starting' }] };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://x');
     bridge.requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams),
@@ -62,6 +62,7 @@ async function fakeBridge({ status = { logged_in: true, since: 'x' }, hangEvents
       bridge.sent.push(JSON.parse(raw));
       return reply(...bridge.sendAnswer);
     }
+    if (url.pathname === '/login' && request.method === 'POST') return reply(...bridge.loginAnswer);
     return reply(404, { error: 'not_found' });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -166,6 +167,74 @@ test('status: connected when logged in, the drawn QR (never its payload) when a 
     await until(() => channels.registered.status().detail === 'bridge unreachable');
     assert.equal(channels.registered.status().connected, false);
   } finally { await channel.stop(); }
+});
+
+test('status follows the bridge\'s phase: idle with its reason, starting, the QR while waiting, scanned', () => {
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+  assert.deepEqual(statusFromBridge({ phase: 'idle', idle_reason: 'qr_expired', logged_in: false }),
+    { connected: false, detail: 'no QR (qr_expired) - request one on the dashboard' });
+  assert.deepEqual(statusFromBridge({ phase: 'starting', logged_in: false }), { connected: false, detail: 'QR requested' });
+  assert.deepEqual(statusFromBridge({ phase: 'waiting_qr', logged_in: false, qr: 'https://login.weixin.qq.com/l/x', qr_svg: SVG }),
+    { connected: false, detail: 'scan needed', qrSvg: SVG }, 'the drawing, never the payload');
+  assert.deepEqual(statusFromBridge({ phase: 'scanned', logged_in: false }), { connected: false, detail: 'QR scanned - confirm on the phone' });
+  assert.deepEqual(statusFromBridge({ phase: 'logged_in', logged_in: true }), { connected: true });
+  // A bridge from before the on-demand QR has no phase: read as it always was.
+  assert.deepEqual(statusFromBridge({ logged_in: false, qr_svg: SVG }), { connected: false, detail: 'scan needed', qrSvg: SVG });
+  assert.deepEqual(statusFromBridge({ logged_in: false }), { connected: false, detail: 'scan needed' });
+});
+
+test('login asks the bridge for a QR, answers without it, and reads the status quickly for a while', async () => {
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
+  const bridge = await fakeBridge({ status: { phase: 'idle', idle_reason: 'boot', logged_in: false, since: 'x' } });
+  const channels = fakeChannels();
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url },
+    waitSeconds: 1, statusEveryMs: 60_000, fastEveryMs: 20, fastForMs: 400 });
+  try {
+    await until(() => channels.registered.status().detail?.startsWith('no QR'));
+    bridge.status = { phase: 'starting', logged_in: false, since: 'x' };
+    assert.deepEqual(await channels.registered.login(), { requested: true });
+    assert.equal(bridge.requests.filter(r => r.path === '/login').length, 1);
+    assert.equal(bridge.requests.find(r => r.path === '/login').method, 'POST');
+    assert.equal(channels.registered.status().detail, 'QR requested', 'read right after the request');
+    bridge.status = { phase: 'waiting_qr', logged_in: false, qr: 'https://login.weixin.qq.com/l/SECRET', qr_svg: SVG, since: 'x' };
+    await until(() => channels.registered.status().qrSvg === SVG, 1000);
+    // The fast reads end after fastForMs.
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const reads = bridge.requests.filter(r => r.path === '/status').length;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(bridge.requests.filter(r => r.path === '/status').length, reads, 'no fast reads after the window');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('login passes the bridge\'s refusals on, and names an old bridge, a wrong token, an unreachable bridge and a missing token', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels();
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    for (const refused of ['already_logged_in', 'qr_waiting', 'login_starting', 'login_disabled']) {
+      bridge.loginAnswer = [409, { refused }];
+      assert.deepEqual(await channels.registered.login(), { refused });
+    }
+    bridge.loginAnswer = [429, { refused: 'rate_limited', retry_after_s: 95 }];
+    assert.deepEqual(await channels.registered.login(), { refused: 'rate_limited', retry_after_s: 95 });
+    bridge.loginAnswer = [404, { error: 'not_found' }];
+    assert.deepEqual(await channels.registered.login(), { refused: 'not_supported' });
+  } finally { await channel.stop(); }
+  const wrong = join(dir, 'wrong-login');
+  writeFileSync(wrong, 'nope');
+  const refused = fakeChannels();
+  const other = startWechatChannel({ ownerChannels: refused, logger: quiet, config: { tokenFile: wrong, url: bridge.url }, waitSeconds: 1 });
+  try { assert.deepEqual(await refused.registered.login(), { refused: 'bridge_refused_token' }); }
+  finally { await other.stop(); }
+  await bridge.close();
+  const down = fakeChannels();
+  const gone = startWechatChannel({ ownerChannels: down, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 30 });
+  try { assert.deepEqual(await down.registered.login(), { refused: 'bridge_unreachable' }); }
+  finally { await gone.stop(); }
+  const none = fakeChannels();
+  const unconfigured = startWechatChannel({ ownerChannels: none, logger: quiet, config: { tokenFile: join(dir, 'absent'), url: bridge.url } });
+  try { assert.deepEqual(await none.registered.login(), { refused: 'not_configured' }); }
+  finally { await unconfigured.stop(); }
 });
 
 test('a wrong token shows as refused, not as a scan', async () => {
@@ -333,13 +402,21 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
   const types = { Message: { Text: 7 }, Contact: { Official: 2 }, ScanStatus: { Waiting: 2 } };
   const bot = new EventEmitter();
   const said = [];
+  bot.start = async () => {};
+  bot.stop = async () => {};
   bot.Contact = { find: async ({ id }) => ({ id, say: async text => { said.push({ id, text }); } }) };
-  const bridge = createBridge({ bot, types, token: TOKEN });
+  const SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+  const bridge = createBridge({ bot, types, token: TOKEN, renderQr: () => SVG });
   const address = await bridge.listen(0);
   const channels = fakeChannels();
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet,
     config: { tokenFile, url: `http://${address.address}:${address.port}` }, waitSeconds: 2, statusEveryMs: 20 });
   try {
+    await until(() => channels.registered.status().detail === 'no QR (boot) - request one on the dashboard');
+    assert.deepEqual(await channels.registered.login(), { requested: true });
+    bot.emit('scan', 'https://login.weixin.qq.com/l/SECRET', 2);
+    await until(() => channels.registered.status().qrSvg === SVG);
+    assert.deepEqual(await channels.registered.login(), { refused: 'qr_waiting' });
     bot.emit('login', { id: 'wxid_bot' });
     await until(() => channels.registered.status().connected);
     bot.emit('message', { id: 'w1', self: () => false, room: () => undefined, type: () => 7, text: () => '你好',

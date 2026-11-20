@@ -1,10 +1,12 @@
 /** dsh-channel-wechat: the owner's WeChat as a channel of the `ownerChannels` service
  *  (dsh-director). The WeChat login itself lives in the wechat-bridge process
  *  (integrations/wechat-bridge), which survives restarts of this one; this plugin
- *  only long-polls its /events into ownerChannels.inbound, sends through its /send
- *  and reports its /status (while a scan is needed: detail 'scan needed' and the login
+ *  only long-polls its /events into ownerChannels.inbound, sends through its /send,
+ *  reports its /status (while a scan is needed: detail 'scan needed' and the login
  *  QR as the bridge drew it, `qrSvg`, which the host shows the owner on the dashboard;
- *  the QR is a login token and is never logged, nor put into the detail).
+ *  the QR is a login token and is never logged, nor put into the detail) and asks the
+ *  bridge for a new login QR through its POST /login (`login()`, for the dashboard's
+ *  button and the steward's tool; the answer never carries the QR).
  *
  *  Config (all optional): `url` of the bridge (default http://127.0.0.1:<port>, port
  *  from WECHAT_BRIDGE_PORT or DEFAULT_BRIDGE_PORT: the host port run.sh publishes the
@@ -49,9 +51,25 @@ const sleep = (ms, signal) => new Promise(resolve => {
 
 /** Registers the channel and starts polling; returns `{ stop, polled }` (`polled`
  *  settles when the poll loop has ended). Timings are parameters for the tests. */
+/** The bridge's /status as this channel's status. A bridge without `phase` (before the
+ *  on-demand QR) is read as before: not logged in is 'scan needed'. */
+export function statusFromBridge(body) {
+  if (body.logged_in) return { connected: true };
+  const qrSvg = typeof body.qr_svg === 'string' && body.qr_svg ? { qrSvg: body.qr_svg } : {};
+  switch (body.phase) {
+    case 'starting': return { connected: false, detail: 'QR requested' };
+    case 'scanned': return { connected: false, detail: 'QR scanned - confirm on the phone' };
+    case 'idle': return { connected: false,
+      detail: `no QR (${String(body.idle_reason ?? 'idle').slice(0, 40)}) - request one on the dashboard` };
+    default: return { connected: false, detail: 'scan needed', ...qrSvg };
+  }
+}
+
+/** `fastEveryMs`/`fastForMs`: after an accepted login() the status is read this often for
+ *  this long, so the new QR reaches the dashboard in seconds, not at the next 30 s read. */
 export function startWechatChannel({ ownerChannels, logger = console, config = {}, fetch = globalThis.fetch,
   waitSeconds = 25, retryMs = 5000, maxRetryMs = 60_000, pollGraceMs = 10_000,
-  statusEveryMs = 30_000 }) {
+  statusEveryMs = 30_000, fastEveryMs = 5000, fastForMs = 180_000 }) {
   const url = String(config.url ?? defaultUrl()).replace(/\/+$/, '');
   const token = readToken(config.tokenFile ?? defaultTokenFile());
   const stopping = new AbortController();
@@ -60,15 +78,14 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     const response = await fetch(url + path, { method, signal, headers: { authorization: `Bearer ${token}`,
       ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw Object.assign(new Error(`bridge refused: ${payload.error ?? response.status}`), { code: payload.error, status: response.status });
+    if (!response.ok) throw Object.assign(new Error(`bridge refused: ${payload.error ?? payload.refused ?? response.status}`),
+      { code: payload.error, status: response.status, payload });
     return payload;
   };
 
   async function refreshStatus() {
     try {
-      const body = await call('/status');
-      status = body.logged_in ? { connected: true }
-        : { connected: false, detail: 'scan needed', ...(typeof body.qr_svg === 'string' && body.qr_svg ? { qrSvg: body.qr_svg } : {}) };
+      status = statusFromBridge(await call('/status'));
     } catch (error) {
       if (stopping.signal.aborted) return;
       status = { connected: false, detail: error.status === 401 ? 'bridge refused the token' : 'bridge unreachable' };
@@ -136,9 +153,38 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       return ref ? { ref } : {};
     },
     status: () => status,
+    /** A new login QR from the bridge: {requested: true} or {refused, retry_after_s?}
+     *  (the bridge's own refusals, not_configured, not_supported for a bridge without
+     *  POST /login, bridge_refused_token, bridge_unreachable). Never the QR; never throws. */
+    async login() {
+      if (!token) return { refused: 'not_configured' };
+      try {
+        await call('/login', { method: 'POST' });
+      } catch (error) {
+        if (error.status === 404) return { refused: 'not_supported' };
+        if (error.status === 401) return { refused: 'bridge_refused_token' };
+        if (error.status === 409 || error.status === 429) {
+          const retry = Number(error.payload?.retry_after_s);
+          return { refused: String(error.payload?.refused ?? 'refused').slice(0, 40),
+            ...(Number.isInteger(retry) && retry > 0 ? { retry_after_s: retry } : {}) };
+        }
+        logger.warn('wechat: asking the bridge for a login QR failed: ' + String(error?.message ?? error).slice(0, 200));
+        return { refused: 'bridge_unreachable' };
+      }
+      fastUntil = Date.now() + fastForMs;
+      if (!fastTimer) {
+        fastTimer = setInterval(() => {
+          if (Date.now() >= fastUntil) { clearInterval(fastTimer); fastTimer = undefined; return; }
+          void refreshStatus();
+        }, fastEveryMs);
+        fastTimer.unref?.();
+      }
+      await refreshStatus();
+      return { requested: true };
+    },
   });
 
-  let timer;
+  let timer, fastTimer, fastUntil = 0;
   let polled = Promise.resolve();
   if (token) {
     void refreshStatus();
@@ -151,6 +197,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     async stop() {
       stopping.abort();
       clearInterval(timer);
+      clearInterval(fastTimer);
       unregister?.();
       await polled;
     },

@@ -258,8 +258,9 @@ function coded(code, message, extra = {}) {
 
 /** The channel. `store` gives it what it shares with the store: entries() (the live entries
  *  Map), locked(fn) (the write lock), log(event, fields), now() (ISO),
- *  notice(kind, text | undefined, fields) to add or clear the owner notice of a kind, and
- *  faults() (the store's test hooks). */
+ *  notice(kind, text | undefined, fields) to add or clear the owner notice of a kind,
+ *  faults() (the store's test hooks), and the reconciliation's filter: filterVectors(ids)
+ *  (best effort, with the store's pending set), filterFailed(ids, error), pendingForget(). */
 export class VectorChannel {
   constructor({ url, model, timeoutMs = DEFAULT_TIMEOUT_MS }, { file, store, tuning = {} }) {
     this.url = url.replace(/\/+$/, '');
@@ -360,16 +361,19 @@ export class VectorChannel {
       await this.store.locked(async () => {
         if (gen !== this.gen) return;
         try { if (existsSync(this.file)) { await unlink(this.file); await fsyncDirOf(this.file); } }
-        catch (error) { fileOk = false; this.store.log('memory/vector-filter-failed', { reason: String(error.message).slice(0, 200) }); }
+        catch (error) { fileOk = false; this.store.filterFailed([...extras], error); }
         this.store.log('memory/vector-rebuild', { reason: rebuild });
+        // The file is gone: the rows a failed filter left (the store's pending set) went with it.
+        if (fileOk) await this.store.filterVectors([]);
       });
       mem.rows.clear(); mem.ids.length = 0;
-    } else if (extras.size) {
-      // 2. Ids no longer in `entries`: out of the file on disk (a failure only waits for the next load).
+    } else if (extras.size || this.store.pendingForget()) {
+      // 2. Ids no longer in `entries`: out of the file on disk, through the store, which adds the
+      // ids a failed filter left pending and, on a failure, keeps these pending with them -
+      // visible and retried like a forget's (design 3.8.2, r30); never fails the load.
       await this.store.locked(async () => {
         if (gen !== this.gen) return;
-        try { await filterVectorFile(this.file, extras); }
-        catch (error) { this.store.log('memory/vector-filter-failed', { ids: [...extras].slice(0, 50), count: extras.size, reason: String(error.message).slice(0, 200) }); }
+        await this.store.filterVectors([...extras]);
       });
     }
     if (gen !== this.gen) return;

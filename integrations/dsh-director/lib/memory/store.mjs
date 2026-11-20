@@ -49,12 +49,16 @@ const month = at => String(at).slice(0, 7);
 /** The purge phases before the directory swap: a journal that ends in one of them describes
  *  a repository nothing was swapped into yet, whatever the layout says afterwards. */
 const PRE_SWAP_PHASES = new Set(['forgetting', 'forget_done', 'building', 'verified', 'rolling_back']);
-/** The owner's notice for derived vector rows a failed filter could not remove (design 3.8.2):
- *  the words a recovery at boot raises, with a kind, so a later filter that does remove them can
- *  take the notice back instead of leaving a second name for the same state on file. */
+/** The owner's notice for derived vector rows a failed filter could not remove (design 3.8.2,
+ *  r30): one row of this kind per round, rewritten in place as the ids change, taken back when
+ *  a filter finally removes them. Forget, the load's reconciliation and a purge (or its recovery
+ *  at boot) all use these words. */
 const VECTOR_PENDING = 'vector-pending-forget';
-const vectorPendingText = (ids, reason) =>
-  `向量文件里仍有已彻底删除的编号 ${ids.join(', ')}，原因 ${reason}；下次载入会再去掉`;
+const NOTICE_IDS_SHOWN = 50;
+const vectorPendingText = (since, ids, file, code) =>
+  `本地向量文件自 ${since} 去不掉 ${ids.length} 条已忘掉（或已彻底删除）条目的向量行（${file} · ${code}）；`
+  + '原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；文件恢复可写后会自动去掉。编号：'
+  + ids.slice(0, NOTICE_IDS_SHOWN).join(', ') + (ids.length > NOTICE_IDS_SHOWN ? ' …' : '');
 
 export class MemoryUnavailable extends Error {
   constructor(message) { super(message); this.name = 'MemoryUnavailable'; }
@@ -230,6 +234,12 @@ export class MemoryStore {
     this.noticesFile = join(root, userId + '.notices.jsonl');
     this.profilePendingFile = join(root, userId + '.profile-pending.json');
     this.vectorFile = join(root, userId + '.vectors.jsonl');
+    // Design 3.8.2 (r30): ids whose derived rows a failed filter left in the vector file, and
+    // the round they belong to ({since, code, message, noticed, backoff, nextAt}). Kept in this
+    // process: the owner acknowledging the notice clears the notice, not the rows to remove.
+    this.vectorPending = new Set();
+    this.vectorRound = undefined;
+    this.vectorBackoff = { min: vectorTuning?.backoffMinMs ?? 5000, max: vectorTuning?.backoffMaxMs ?? 300000 };
     this.budget = { ...BUDGET, ...budget };
     this.overBudget = new Map(); // kind -> line
     this.writeMs = [];           // the last 100 writes, fsync to commit
@@ -254,7 +264,11 @@ export class MemoryStore {
       this.vector = new VectorChannel(vector, { file: this.vectorFile, tuning: vectorTuning, store: {
         faults: () => this.faults,
         entries: () => this.entries, locked: fn => this.#locked(fn), log: (event, fields) => this.log(event, fields),
-        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields) } });
+        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields),
+        // the reconciliation's step 2 filters through the store, so its failures join the
+        // same pending set, notice and status key as a forget's (design 3.8.2, r30)
+        pendingForget: () => this.vectorPending.size, filterVectors: ids => this.#filterVectorsBestEffort(ids),
+        filterFailed: (ids, error) => this.#vectorForgetFailed(ids, error) } });
     }
   }
 
@@ -276,10 +290,12 @@ export class MemoryStore {
     if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
       appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
     this.#readNotices();
-    // design 3.8.2: a filter that failed during a run left its rows in the vector file and its
-    // notice for the owner (the same words a recovery here raises), so this boot is where it is
-    // made good - before the load, so the load's own reconciliation finds nothing left to do.
-    if (this.#vectorPending().size) await this.#filterVectorsBestEffort([]);
+    // design 3.8.2 (r30): a filter that failed in an earlier process left its rows in the
+    // vector file and their ids on its notice; they are this process's pending set from here
+    // (an acknowledged notice names none: the load's reconciliation removes those), retried now,
+    // before the load, so the load's own reconciliation finds nothing left to do.
+    this.#seedVectorPending();
+    if (this.vectorPending.size) await this.#filterVectorsBestEffort([]);
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
       if (leftovers.length) throw new MemoryUnavailable(`memory: ${this.dir} is missing while ${leftovers.join(', ')} exists; refusing to start an empty repository over it`);
@@ -556,6 +572,8 @@ export class MemoryStore {
       ...(this.pendingStuck?.length ? { ranked_pending_stuck: this.pendingStuck } : {}),
       ...(this.overBudget.size ? { over_budget: [...this.overBudget.values()] } : {}),
       ...(this.vector ? { vector: this.vector.statusText() } : {}),
+      ...(this.vectorRound ? { vector_forget: `rows left since ${this.vectorRound.since}: ${this.vectorPending.size} forgotten ids`
+        + ` · ${this.vectorFile} · ${this.vectorRound.code} · ${this.vectorRound.message}` } : {}),
       ...(this.vector?.skippedCount() ? { vector_skipped: this.vector.skippedCount() } : {}),
     };
   }
@@ -632,6 +650,7 @@ export class MemoryStore {
     // The commit runs after the caller has its answer (it never delays a reply).
     if (fresh.length) {
       this.#locked(() => this.#commit(message).then(() => this.#recordWriteMs(performance.now() - started)));
+      this.#retryVectorForget();
       this.#remoteAdd(fresh);
     }
     return result;
@@ -783,10 +802,10 @@ export class MemoryStore {
    *
    *  Their vectors leave memory at once; the vector file on disk is filtered once per call,
    *  best effort (design 3.8.2): the records are written and the log lines gone, there is no
-   *  way back, so a failure (ENOSPC, EACCES) never fails the forget - it is logged and put on
-   *  the owner's notices (the words a recovery at boot raises) as a row still awaiting removal,
-   *  until a filter that does reach the file removes it, here or at the next boot. A purge
-   *  filters the file itself, with its checks, and passes filterVectors: false. */
+   *  way back, so a failure (ENOSPC, EACCES) never fails the forget - it is logged, its ids
+   *  join the pending set (status.vector_forget and the owner's notice) and are retried until a
+   *  filter does reach the file (#filterVectorsBestEffort). A purge filters the file itself,
+   *  with its checks, and passes filterVectors: false. */
   async #dropFromWorkTree(ids, { reason, by }, { filterVectors = true } = {}) {
     const at = this.now();
     const rows = [];
@@ -812,54 +831,101 @@ export class MemoryStore {
     return dropped;
   }
 
-  /** The derived rows a failed filter left in the vector file, id -> reason, taken from the
-   *  owner's notice: in memory once read, and the same row the next process reads. */
-  #vectorPending() {
-    const rows = this.noticeRows ?? this.#readNotices();
-    const pending = new Map();
-    for (const row of rows) {
-      if (row.kind !== VECTOR_PENDING || !Array.isArray(row.ids)) continue;
-      for (const id of row.ids) pending.set(id, row.reason ?? 'unknown');
+  /** The pending ids an earlier process left on its notice (design 3.8.2, r30): only at boot.
+   *  The notice is what survives a restart; within a process the set is the authority. */
+  #seedVectorPending() {
+    const row = (this.noticeRows ?? this.#readNotices()).find(r => r.kind === VECTOR_PENDING);
+    if (!row || !Array.isArray(row.ids) || !row.ids.length) return;
+    for (const id of row.ids) if (typeof id === 'string') this.vectorPending.add(id);
+    const since = row.since ?? row.at ?? this.now();
+    if (this.vectorRound) { if (since < this.vectorRound.since) this.vectorRound.since = since; this.vectorRound.noticed = true; return; }
+    this.vectorRound = { since, code: row.code ?? 'ERROR', message: String(row.message ?? row.reason ?? '').slice(0, 200),
+      noticed: true, backoff: this.vectorBackoff.min, nextAt: 0 };
+  }
+
+  /** A filter could not remove `ids` (and whatever was pending): they are pending, the round's
+   *  reason is this failure's, its next retry after a write is backed off (5 s doubling to
+   *  5 min, as the worker), and the owner's notice says so - added once per round, rewritten
+   *  in place as the ids change, not added back once acknowledged. Never throws. */
+  #vectorForgetFailed(ids, error) {
+    const code = String(error?.code ?? 'ERROR');
+    const message = String(error?.message ?? error).slice(0, 200);
+    const list = [...ids];
+    this.log('memory/vector-filter-failed', { ids: list.slice(0, 50), ...(list.length > 50 ? { count: list.length } : {}), reason: message });
+    for (const id of list) this.vectorPending.add(id);
+    if (!this.vectorPending.size) return;
+    const at = Date.parse(this.now());
+    const round = this.vectorRound;
+    if (round) round.backoff = Math.min(round.backoff * 2, this.vectorBackoff.max);
+    else this.vectorRound = { since: this.now(), noticed: false, backoff: this.vectorBackoff.min };
+    Object.assign(this.vectorRound, { code, message, nextAt: at + this.vectorRound.backoff });
+    this.#vectorPendingNotice();
+  }
+
+  /** A filter removed every id in `dropped` from the file (or there is no file): those leave
+   *  the pending set; once it is empty the round is over - its notice goes (only that kind),
+   *  status.vector_forget with it, and vector-forget-cleared is logged. */
+  #vectorForgetDone(dropped) {
+    const cleared = [...this.vectorPending].filter(id => dropped.has(id));
+    for (const id of cleared) this.vectorPending.delete(id);
+    if (this.vectorPending.size) { this.#vectorPendingNotice(); return; }
+    const round = this.vectorRound;
+    this.vectorRound = undefined;
+    if (round || (this.noticeRows ?? []).some(r => r.kind === VECTOR_PENDING)) this.#notice(VECTOR_PENDING);
+    if (round) this.log('memory/vector-forget-cleared', { ids: cleared.slice(0, 50), ...(cleared.length > 50 ? { count: cleared.length } : {}),
+      since: round.since, until: this.now() });
+  }
+
+  /** The round's notice: added once (an acknowledged one is not added back in the same round),
+   *  rewritten in place when its text moves on. A notice that cannot be written is logged. */
+  #vectorPendingNotice() {
+    const round = this.vectorRound;
+    const ids = [...this.vectorPending].sort(byId);
+    const text = vectorPendingText(round.since, ids, this.vectorFile, round.code);
+    const fields = { since: round.since, code: round.code, message: round.message, ids };
+    try {
+      const rows = this.noticeRows ?? this.#readNotices();
+      const i = rows.findIndex(r => r.kind === VECTOR_PENDING);
+      if (i < 0) {
+        if (round.noticed) return;
+        round.noticed = true;
+        this.#notice(VECTOR_PENDING, text, fields);
+        return;
+      }
+      round.noticed = true;
+      if (rows[i].text === text && JSON.stringify(rows[i].ids) === JSON.stringify(ids)) return;
+      const next = rows.map((r, j) => (j === i ? { ...r, text, ...fields } : r));
+      writeDurable(this.noticesFile, next.map(r => JSON.stringify(r) + '\n').join(''));
+      this.#readNotices();
+    } catch (error) {
+      this.log('memory/notice-failed', { kind: VECTOR_PENDING, reason: String(error.message).slice(0, 200) });
     }
-    return pending;
   }
 
-  /** Put the pending rows on the owner's notices (one row, the recovery's own words), or take
-   *  it back when none is left. Text that has not changed is left alone, so a boot that retries
-   *  and fails again adds no second row. */
-  #vectorPendingNotice(pending) {
-    const rows = this.noticeRows ?? this.#readNotices();
-    const before = rows.find(r => r.kind === VECTOR_PENDING);
-    if (!pending.size) { if (before) this.#notice(VECTOR_PENDING); return; }
-    const ids = [...pending.keys()].sort();
-    const reason = [...new Set(pending.values())].join('; ');
-    const text = vectorPendingText(ids, reason);
-    if (before?.text === text) return;
-    this.#notice(VECTOR_PENDING); // the ids are the notice's text: it moves on with them
-    this.#notice(VECTOR_PENDING, text, { ids, reason });
-  }
-
-  /** Filter the vector file, never failing the caller; the reason, or undefined. A failure is
-   *  the notice a recovery at boot raises, not only a log line: the row is still in the file, so
-   *  a forgotten text is still derived and stored, and the surface that says so after a restart
-   *  says so during the run too. A success takes the notice back for the rows it dropped; the
-   *  rows an earlier failure left are dropped with them, so a later filter finishes what the
-   *  failed one could not. */
+  /** Filter the vector file, never failing the caller; the reason, or undefined. Every filter
+   *  takes the whole pending set with the ids it was asked for (design 3.8.2, r30), so a later
+   *  forget, a write's retry, a load's reconciliation or the next boot finishes what a failed
+   *  one could not. The caller holds the write lock (or is the boot). */
   async #filterVectorsBestEffort(ids) {
-    const pending = this.#vectorPending();
-    const drop = new Set([...ids, ...pending.keys()]);
-    let reason;
+    const drop = new Set([...ids, ...this.vectorPending]);
+    if (!drop.size) return undefined;
     try { await filterVectorFile(this.vectorFile, drop); }
     catch (error) {
-      reason = String(error?.message ?? error).slice(0, 200);
-      this.log('memory/vector-filter-failed', { ids, reason });
-      for (const id of ids) pending.set(id, reason);
-      this.#vectorPendingNotice(pending);
-      return reason;
+      this.#vectorForgetFailed(drop, error);
+      return String(error?.message ?? error).slice(0, 200);
     }
-    for (const id of drop) pending.delete(id); // gone from the file: nothing left to tell
-    this.#vectorPendingNotice(pending);
+    this.#vectorForgetDone(drop);
     return undefined;
+  }
+
+  /** After a write (design 3.8.2, r30, retry (2)): with rows still pending and the round's
+   *  backoff run out, one more filter, queued behind the write's commit - never on the reply
+   *  path. Done with vectors off too: an old file left beside still holds the rows. */
+  #retryVectorForget() {
+    const round = this.vectorRound;
+    if (!round || Date.parse(this.now()) < round.nextAt) return;
+    round.nextAt = Infinity; // one retry in flight; its outcome sets the next one (or ends the round)
+    this.#locked(() => this.#filterVectorsBestEffort([])).catch(() => {});
   }
 
   /** Forget (design 3.6 level 1): out of the working tree, grep and BM25; recoverable
@@ -1260,14 +1326,18 @@ export class MemoryStore {
         // Step 1, vectors (design 3.8.2): whenever the file exists - vectors on or off now, the
         // ids live or forgotten before - every purged id leaves it, with the two-sided check.
         // The only place a vector file may stop a purge: only a purge promises "gone for good".
+        // The rows a failed best-effort filter left go with them (r30: every filter takes the
+        // pending set); a failure here leaves the purged ids pending too - they stay forgotten.
         let vectors;
-        try { vectors = await filterVectorFile(this.vectorFile, new Set(ids), { write: this.faults?.vectorFilterWrite }); }
+        const vectorDrop = new Set([...ids, ...this.vectorPending]);
+        try { vectors = await filterVectorFile(this.vectorFile, vectorDrop, { write: this.faults?.vectorFilterWrite }); }
         catch (error) {
           const reason = 'vector filter failed: ' + String(error?.message ?? error).slice(0, 300);
-          this.log('memory/vector-filter-failed', { ids, reason });
+          this.#vectorForgetFailed(vectorDrop, error);
           this.#journal({ ...plan, phase: 'done', outcome: 'rolled_back', reason });
           return { purged: false, reason: reason + '; nothing was purged (the entries stay forgotten)' };
         }
+        this.#vectorForgetDone(vectorDrop);
         // 2. build
         this.#journal({ ...plan, phase: 'building' });
         if (this.faults?.beforeBuild) await this.faults.beforeBuild();
@@ -1511,8 +1581,8 @@ export class MemoryStore {
     }
     // Design 3.8.2: the purged ids leave the vector file whatever the outcome (they are
     // forgotten either way); keyed by plan.ids, since a finished forget left `entries`
-    // already. Idempotent; a failure never stops the boot - the owner is told, and this
-    // boot's load reconciles again.
+    // already. Idempotent; a failure never stops the boot - the ids are pending (the owner's
+    // notice and status.vector_forget), and this boot's load reconciles again.
     await this.#filterVectorsBestEffort(plan.ids ?? []);
     const finished = this.#finishForget(plan.ids ?? []);
     this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,

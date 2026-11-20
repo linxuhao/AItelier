@@ -652,7 +652,9 @@ test('10: the boot\'s recovery filters plan.ids; when it cannot, the memory stil
   const store = await open(root);
   assert.equal(journalOf(root).at(-1).phase, 'done');
   const notices = store.statusLine().notices ?? [];
-  assert.ok(notices.some(n => /^向量文件里仍有已彻底删除的编号 t-gone-0，原因 .*；下次载入会再去掉$/.test(n)), JSON.stringify(notices));
+  assert.ok(notices.some(n => n.startsWith('本地向量文件自 ') && n.includes('去不掉 1 条已忘掉（或已彻底删除）条目的向量行')
+    && n.endsWith('编号：t-gone-0')), JSON.stringify(notices));
+  assert.match(store.statusLine().vector_forget ?? '', /^rows left since .*: 1 forgotten ids · /);
   assert.ok(notices.some(n => /^上次彻底删除/.test(n)), 'the interruption notice as before');
   await store.close();
   unblock();
@@ -678,15 +680,144 @@ test('10: a filter that fails during an ordinary forget keeps the derived row an
     .map(n => readFileSync(join(repo(root), 'log', n), 'utf8')).join('');
   assert.ok(!log().includes('FORGET-ME'), 'and the text is out of the log, so no search can return it');
   const notices = store.statusLine().notices ?? [];
-  assert.ok(notices.some(n => /^向量文件里仍有已彻底删除的编号 t-a-0，原因 .*；下次载入会再去掉$/.test(n)), JSON.stringify(notices));
+  assert.ok(notices.some(n => n.startsWith('本地向量文件自 ') && n.endsWith('编号：t-a-0')), JSON.stringify(notices));
   await store.close();
   unblock();
   store = await open(root, fake.url);
   await store.vector.whenLoaded();
   await ready(store);
   assert.ok(!fileIds(root).includes('t-a-0'), 'the boot removed the derived row');
-  assert.ok(!(store.statusLine().notices ?? []).some(n => n.startsWith('向量文件里仍有已彻底删除的编号')),
+  assert.ok(!(store.statusLine().notices ?? []).some(n => n.startsWith('本地向量文件自 ')),
     JSON.stringify(store.statusLine().notices));
+  assert.equal(store.statusLine().vector_forget, undefined);
+  await store.close();
+});
+
+// ---- iss-bcf85c9ba9874e2d (design 3.8.2 r30, 3.8.4 item 8): a filter that fails on the forget
+// path is visible (status.vector_forget, one owner notice), retried (next forget, after a write
+// once the backoff ran out, every load's reconciliation) and cleared once the file is clean.
+
+/** The failure code blockFilter produces: chmod 0400 is refused by the W_OK check; as root, the
+ *  directory among the temporary-file names cannot be unlinked. */
+const BLOCKED_CODE = process.getuid?.() === 0 ? /^(EISDIR|EPERM)$/ : /^EACCES$/;
+const pendingRows = root => (existsSync(join(root, USER + '.notices.jsonl'))
+  ? readFileSync(join(root, USER + '.notices.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [])
+  .filter(r => r.kind === 'vector-pending-forget');
+const pendingText = (since, ids, root, code) => `本地向量文件自 ${since} 去不掉 ${ids.length} 条已忘掉（或已彻底删除）条目的向量行`
+  + `（${vfile(root)} · ${code}）；原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；文件恢复可写后会自动去掉。编号：${ids.join(', ')}`;
+
+test('8 (r30): a forget the vector file refuses - visible on status and one notice, rewritten in place, not added back once acknowledged; cleared after a write without a reload', async () => {
+  const fake = await server();
+  const now = clock();
+  const root = newRoot();
+  const events = [];
+  const store = await open(root, fake.url, { now, logger: (event, fields) => events.push([event, fields]) });
+  await store.recordTurn('a', [{ role: 'owner', text: 'pelican harbour ONE' }]);
+  await store.recordTurn('b', [{ role: 'owner', text: 'pelican harbour TWO' }]);
+  await store.recordTurn('c', [{ role: 'owner', text: 'pelican harbour THREE' }]);
+  await store.recordTurn('k', [{ role: 'owner', text: 'pelican harbour KEEP' }]);
+  await ready(store);
+  const since = now();
+  const unblock = blockFilter(root);
+
+  const r = await store.forget(['t-a-0'], { reason: 'owner asked', by: 'owner' });
+  assert.deepEqual(r.forgotten, ['t-a-0'], 'the forget itself succeeds');
+  const status = store.statusLine();
+  assert.equal(status.vector, 'ok', 'the vector channel itself is not degraded by this');
+  const m = /^rows left since (\S+): 1 forgotten ids · (.+) · (\S+) · (.+)$/.exec(status.vector_forget ?? '');
+  assert.ok(m, JSON.stringify(status));
+  assert.equal(m[1], since); assert.equal(m[2], vfile(root)); assert.match(m[3], BLOCKED_CODE);
+  assert.deepEqual(r.status.vector_forget, status.vector_forget, 'the forget answer carries the same status');
+  const code = m[3];
+  assert.ok(!store.vector.mem.has('t-a-0'), 'gone from memory');
+  assert.ok(fileIds(root).includes('t-a-0'), 'the derived row is still on disk');
+  const s1 = await store.search('pelican harbour');
+  assert.ok(![...s1.grep.hits, ...s1.ranked.hits].some(h => h.id === 't-a-0'), 'never in a result');
+  assert.deepEqual(s1.status.vector_forget, status.vector_forget, 'the search status is the same');
+  let rows = pendingRows(root);
+  assert.equal(rows.length, 1, 'exactly one notice row');
+  assert.equal(rows[0].text, pendingText(since, ['t-a-0'], root, code));
+  assert.deepEqual(rows[0].ids, ['t-a-0']);
+  assert.deepEqual(store.statusLine().notices, [rows[0].text]);
+  const section = await profileSection({ store });
+  assert.equal(section.split('本地向量文件自').length - 1, 1, 'once in the snapshot');
+  const firstAt = rows[0].at;
+
+  now.advance(1000);
+  await store.forget(['t-b-0'], { reason: 'owner asked', by: 'owner' });
+  rows = pendingRows(root);
+  assert.equal(rows.length, 1, 'the same row, rewritten - not a second one');
+  assert.equal(rows[0].at, firstAt, 'in place');
+  assert.equal(rows[0].text, pendingText(since, ['t-a-0', 't-b-0'], root, code), 'two ids, the round\'s since');
+  assert.match(store.statusLine().vector_forget, /^rows left since \S+: 2 forgotten ids · /);
+
+  store.acknowledgeNotices();
+  await store.forget(['t-c-0'], { reason: 'owner asked', by: 'owner' });
+  assert.deepEqual(pendingRows(root), [], 'acknowledged: not added back in the same round');
+  assert.equal(store.statusLine().notices, undefined);
+  assert.match(store.statusLine().vector_forget, /^rows left since \S+: 3 forgotten ids · /, 'status still says so');
+
+  unblock();
+  // A write before the backoff ran out does not retry (the fake clock has not moved).
+  await store.recordTurn('d', [{ role: 'owner', text: 'pelican harbour LATER' }]);
+  await store.flush();
+  assert.ok(['t-a-0', 't-b-0', 't-c-0'].every(id => fileIds(root).includes(id)), 'not yet: backed off');
+  assert.ok(store.statusLine().vector_forget);
+  // Once it has, the next write removes them - no reload, no restart, no forget.
+  now.advance(10 * 60000);
+  await store.recordTurn('e', [{ role: 'owner', text: 'pelican harbour LAST' }]);
+  await store.flush();
+  assert.ok(!['t-a-0', 't-b-0', 't-c-0'].some(id => fileIds(root).includes(id)), JSON.stringify(fileIds(root)));
+  assert.ok(fileIds(root).includes('t-k-0'), 'the kept row stays');
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  const cleared = events.filter(([e]) => e === 'memory/vector-forget-cleared');
+  assert.equal(cleared.length, 1);
+  assert.deepEqual(cleared[0][1].ids.sort(), ['t-a-0', 't-b-0', 't-c-0']);
+  assert.equal(cleared[0][1].since, since);
+  assert.ok(!JSON.stringify(events).includes('pelican'), 'no text in the logs');
+  await store.close();
+});
+
+test('8 (r30): the notice is cleared by the next forget too, and an acknowledged round is still retried', async () => {
+  const fake = await server();
+  const root = newRoot();
+  const store = await open(root, fake.url);
+  await store.recordTurn('a', [{ role: 'owner', text: 'heron one' }]);
+  await store.recordTurn('b', [{ role: 'owner', text: 'heron two' }]);
+  await store.recordTurn('k', [{ role: 'owner', text: 'heron keep' }]);
+  await ready(store);
+  const unblock = blockFilter(root);
+  await store.forget(['t-a-0'], { reason: 'asked', by: 'owner' });
+  assert.equal(pendingRows(root).length, 1);
+  store.acknowledgeNotices();
+  unblock();
+  await store.forget(['t-b-0'], { reason: 'asked', by: 'owner' });
+  assert.deepEqual(fileIds(root), ['t-k-0'], 'the acknowledged pending row went with the next forget');
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  await store.close();
+});
+
+test('8 (r30): a reconciliation that cannot filter joins the same pending set and notice; acknowledged and restarted, the next load removes the rows', async () => {
+  const { fake, root } = await seededFile();
+  appendFileSync(vfile(root), row('t-ghost-0', hashVector('ghost', DIMS)) + '\n');
+  const unblock = blockFilter(root);
+  let store = await open(root, fake.url);
+  await store.vector.whenLoaded();
+  assert.match(store.statusLine().vector_forget ?? '', /^rows left since \S+: 1 forgotten ids · /, JSON.stringify(store.statusLine()));
+  let rows = pendingRows(root);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].ids, ['t-ghost-0']);
+  assert.ok(rows[0].text.endsWith('编号：t-ghost-0'));
+  store.acknowledgeNotices();
+  await store.close();
+  unblock();
+  store = await open(root, fake.url);
+  await store.vector.whenLoaded();
+  assert.deepEqual(fileIds(root).sort(), ['t-a-0', 't-b-0']);
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
   await store.close();
 });
 

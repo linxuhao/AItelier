@@ -536,6 +536,14 @@ test('the private inbox reader: a letter longer than the injected excerpt comes 
   assert.deepEqual(answer.limits, INBOX_LIMITS, 'the same INBOX_LIMITS as the project inbox reader');
 });
 
+test('the private inbox reader names the chat channel an owner message came from, and nothing for a dashboard one', async () => {
+  const state = privateDeliveries([privateRow(1, { sender_driver_id: null, source_channel: 'slack' }),
+    privateRow(2, { sender_driver_id: null, source_channel: 'wechat' }), privateRow(3, { sender_driver_id: null })]);
+  const answer = await stewardPrivateInboxTool(state.request).execute({}, toolCall);
+  assert.deepEqual(answer.items.map(item => item.source_channel), ['slack', 'wechat', undefined]);
+  assert.equal('source_channel' in answer.items[2], false, 'a dashboard message carries no source key');
+});
+
 test('the private inbox reader is the steward\'s own box: a letter addressed to another driver is not in the page, one query, no write', async () => {
   const state = privateDeliveries([privateRow(1),
     privateRow(2, { target_driver_id: 'drv-plat', delivery_id: 'dlv-other', message_id: 'm-other', sender_driver_id: 'drv-x' }),
@@ -1130,6 +1138,33 @@ test('step 17 layer 2: open threads from data - the unanswered owner messages an
   threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir, now: Date.now() + 8 * 24 * 3600e3 });
   assert.deepEqual(threads.handoffs_last_7_days, []);
   void now;
+});
+
+test('open threads name the chat channel each unanswered owner message came from, and nothing for a dashboard one', async () => {
+  const conversation = [owner('o1', '2026-11-20T12:48:00Z', '测试'), owner('o2', '2026-11-20T12:49:00Z', 'from wechat'),
+    owner('o3', '2026-11-20T12:50:00Z', 'from the dashboard')];
+  const asked = [];
+  let sourcesFail = false;
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/message_sources')) {
+      asked.push(body.message_ids);
+      if (sourcesFail) throw new Error('state down');
+      return { result: { sources: { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1' },
+        o2: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1' } } } };
+    }
+    throw new Error('unexpected ' + path);
+  };
+  const { openThreads } = await import('./steward-host.mjs');
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  let threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.deepEqual(asked, [['o1', 'o2', 'o3']], 'one sources read for the whole list');
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => m.source_channel), ['slack', 'wechat', undefined]);
+  assert.equal('source_channel' in threads.unanswered_owner_messages[2], false, 'a dashboard message carries no source key');
+  assert.doesNotMatch(JSON.stringify(threads), /U0OWNER|ts-1|wxid|wx-1/, 'only the channel name, never the account or message ref');
+  sourcesFail = true;
+  threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => m.message_id), ['o1', 'o2', 'o3'], 'a failed sources read keeps the list');
 });
 
 test('review 340 (a): every tool the adapter adds to the steward\'s presented list is one runtime.mjs registers', () => {

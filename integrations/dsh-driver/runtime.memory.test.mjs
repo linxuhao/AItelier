@@ -107,6 +107,10 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
     const launch = boot => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
+        // Tagged like a launched driver (AItelier sets AITELIER_DSH_SESSION the same way): the
+        // memory store's resident grep helper inherits this tag, and idle_dormant must still
+        // not count that helper as a background job the model started (2026-11-20).
+        DSH_DIRECTOR_SESSION: 'mem-root',
         DSH_HOME: join(directory, 'home'), MEM_TEST_DSH_ENTRY: entry, MEM_TEST_BOOT: boot, MEM_TEST_URL: `http://127.0.0.1:${server.address().port}` } });
       child.stdout.on('data', chunk => output += chunk); child.stderr.on('data', chunk => output += chunk);
       return child;

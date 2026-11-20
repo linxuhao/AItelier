@@ -5,23 +5,32 @@
  *  1  the helper runs the direct spawn's command - same argv, cwd, environment and umask
  *     wrapper - so what matches is unchanged: a profile.md line, a -F literal, -i's case, -I's
  *     binary skip, -z/-n's fields, --untracked's files; and the fork is the helper's, not this
- *     process's.
+ *     process's. On a seeded random corpus (ASCII, non-ASCII, mixed case, regex metacharacters)
+ *     the helper's git output is the direct spawn's byte for byte (1d).
  *  2  the grep timeout is the request's: complete: false with the partial hits and the same
  *     reason, the helper survives it and serves the next search.
  *  3  a helper that cannot start, dies mid-request or never answers falls back to the direct
- *     spawn, logged as memory/grep-spawn-fallback; no search fails and no answer changes.
- *  4  close() takes the helper with it, and a store whose process simply exits leaves no orphan.
+ *     spawn, logged as memory/grep-spawn-fallback; no search fails and no answer changes. A
+ *     replaced helper's late exit is its own and does not take down its successor (3b).
+ *     A helper that dies while its git runs takes that git with it (3c), and one that keeps
+ *     failing is restarted once, then only after a backoff, doubling to a cap (3d).
+ *  4  close() takes the helper with it, and a store whose process simply exits, or is SIGKILLed
+ *     mid-grep, leaves no orphan: neither the helper nor its git child (4b).
  *  5  an idle helper sleeps: it uses no CPU between searches and still answers afterwards.
+ *  6  close() during a search forks nothing more; 7  a direct spawn that cannot start answers
+ *     an incomplete grep, never a thrown search; 8  the helper gets PATH alone, not the host's
+ *     environment (git gets the spec's own either way).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, mkdtempSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore } from '../lib/memory/store.mjs';
 import { git, gitEnv } from '../lib/memory/git.mjs';
+import { GrepHelper } from '../lib/memory/grep-helper.mjs';
 
 const USER = 'owner@example.com';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memgrep-'));
@@ -33,6 +42,7 @@ const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir,
 // mid-request; 'silent' holds the request and answers nothing.
 const FAULTY = fileURLToPath(new URL('./fixtures/grep-helper-faulty.mjs', import.meta.url));
 const FALLBACK = 'memory/grep-spawn-fallback';
+const CHILD = fileURLToPath(new URL('../lib/memory/grep-child.mjs', import.meta.url));
 
 /** grep's hits the way the direct spawn gives them: the argv is written out here, not taken from
  *  the code under test, so a flag the helper dropped shows up as a different answer. */
@@ -245,15 +255,21 @@ test('4: close() takes the helper with it, and a store whose process just exits 
   // stdin's EOF, so nothing outlives the store either way.
   const script = `import { MemoryStore } from ${JSON.stringify(new URL('../lib/memory/store.mjs', import.meta.url).href)};
     const store = await MemoryStore.open({ root: ${JSON.stringify(newRoot())}, userId: ${JSON.stringify(USER)} });
-    console.log(store.grepHelper.pid);
+    const pid = store.grepHelper.pid;
+    let state = 'gone';
+    try { const stat = (await import('node:fs')).readFileSync('/proc/' + pid + '/stat', 'utf8'); state = stat.slice(stat.lastIndexOf(')') + 2)[0]; } catch {}
+    console.log(pid, state);
     process.exit(0);`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
   let printed = '';
   child.stdout.on('data', chunk => { printed += chunk; });
   await new Promise(resolve => child.on('exit', resolve));
-  const helper = Number(printed.trim());
+  const [pidText, state] = printed.trim().split(' ');
+  const helper = Number(pidText);
   assert.ok(Number.isInteger(helper) && helper > 0, printed);
-  assert.equal(running(helper), true, 'it was running while the store was open');
+  // Read by the store's process itself, before it exits: from here the helper may already be
+  // leaving on stdin's EOF, so a look from this side would race it.
+  assert.ok(state && state !== 'Z' && state !== 'gone', 'it was running while the store was open: ' + printed);
   const end = Date.now() + 3000;
   while (running(helper) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(running(helper), false, 'no orphan: the helper leaves when the store\'s process does');
@@ -276,5 +292,270 @@ test('5: an idle helper sleeps: no CPU between searches, and it still answers', 
   assert.deepEqual(again.grep.hits.map(h => h.id), ['t-t1-0']);
   assert.equal(store.grepHelper.pid, pid);
   assert.deepEqual(events.filter(([event]) => event === FALLBACK), []);
+  await store.close();
+});
+
+/** A seeded generator (mulberry32), so a failing corpus can be rebuilt from the seed it names. */
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test('1d: on a random corpus - ASCII, non-ASCII, mixed case, regex metacharacters - the helper\'s grep is the direct spawn\'s, byte for byte', async () => {
+  const seed = Number(process.env.GREP_HELPER_SEED ?? Date.now() % 1e9);
+  const random = rng(seed);
+  const pick = list => list[Math.floor(random() * list.length)];
+  const words = ['needle', 'Needle', 'NEEDLE', 'ship', 'Friday', 'straße', 'STRASSE', 'École', 'école', 'ÉCOLE', 'naïve',
+    'Ωmega', 'ωmega', 'Россия', 'россия', '记账', '完成', '日记', '🙂', 'a.b*c', '[x]', '(y|z)', 'q?', '$100', '^start',
+    'back\\slash', '"quoted"', 'tab\there', 'x', 'İstanbul', 'ǅemal', 'ﬁle'];
+  const root = newRoot();
+  const events = [];
+  const store = await open(root, { logger: (event, fields) => events.push([event, fields]) });
+  const texts = [];
+  for (let t = 0; t < 12; t++) {
+    const turn = Array.from({ length: 1 + Math.floor(random() * 6) }, () => {
+      const text = Array.from({ length: 1 + Math.floor(random() * 8) }, () => pick(words)).join(pick([' ', '', '-', '\n']));
+      texts.push(text);
+      return { role: pick(['owner', 'steward']), text };
+    });
+    await store.recordTurn('r' + t, turn);
+  }
+  const p = await store.profile();
+  await store.updateProfile(Array.from({ length: 6 }, () => '- ' + pick(words) + ' ' + pick(words)).join('\n'), p.version, 'test', 'owner');
+  await store.flush();
+  // A log file git reads as binary (-I skips it; without -I git prints "Binary file … matches")
+  // and one git does not track (--untracked searches it), both holding words of the corpus.
+  const line = (id, at, text) => JSON.stringify({ id, at, role: 'owner', text }) + '\n';
+  writeFileSync(join(repo(root), 'log', '2026-12.jsonl'), Buffer.concat([
+    Buffer.from(line('t-bin-0', '2026-12-01T00:00:00Z', words.join(' '))), Buffer.from([0x00, 0x01, 0x00])]));
+  writeFileSync(join(repo(root), 'log', '2099-01.jsonl'), line('t-2099-0', '2099-01-01T00:00:00Z', words.join(' ')));
+  // Queries: pieces of what was written (by code point), their case flipped at random, and
+  // strings that are not there at all.
+  const flip = s => [...s].map(c => (random() < 0.5 ? c.toUpperCase() : c.toLowerCase())).join('');
+  const queries = ['needle', 'ÉCOLE', 'Ωmega', '记账', 'a.b*c', '"quoted"', 'back\\slash', 'not-in-the-corpus-Ж'];
+  texts.push(words.join(' '));
+  for (let i = 0; i < 40; i++) {
+    const chars = [...pick(texts)];
+    const from = Math.floor(random() * chars.length);
+    const piece = chars.slice(from, from + 1 + Math.floor(random() * 10)).join('').trim();
+    if (piece) queries.push(random() < 0.5 ? flip(piece) : piece);
+  }
+  const dir = repo(root);
+  for (const query of queries) {
+    const needle = JSON.stringify(query).slice(1, -1);
+    const args = ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'];
+    const viaHelper = await store.grepHelper.grep(dir, args, { timeoutMs: 5000 });
+    const viaSpawn = await git(dir, args, { timeoutMs: 5000 });
+    const label = `seed ${seed}, query ${JSON.stringify(query)}`;
+    assert.equal(viaHelper.fallback, undefined, label);
+    assert.equal(viaHelper.code, viaSpawn.code, label);
+    assert.ok(viaHelper.stdout.equals(viaSpawn.stdout), `the same bytes: ${label}`);
+    assert.equal(viaHelper.killed, false, label);
+    const k = 1 + Math.floor(random() * 20);
+    const r = await store.search(query, k);
+    assert.equal(r.grep.complete, true, label);
+    assert.deepEqual(hitsOf(r), reference(dir, query, k), `the search's hits: ${label}`);
+  }
+  // The corpus did exercise both answers: some queries matched and some did not.
+  const codes = new Set();
+  for (const query of queries.slice(0, 8)) codes.add((await git(dir, ['grep', '-F', '-i', '-q', '-e', JSON.stringify(query).slice(1, -1), '--', 'log', 'profile.md'])).code);
+  assert.deepEqual([...codes].sort(), [0, 1], `seed ${seed}`);
+  assert.deepEqual(events.filter(([event]) => event === FALLBACK), [], `seed ${seed}`);
+  await store.close();
+});
+
+test('3b: a replaced helper\'s late exit does not take down the helper that replaced it', async () => {
+  const root = newRoot();
+  const store = await open(root);
+  await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+  const dir = store.dir;
+  await store.close();
+  const events = [];
+  const helper = new GrepHelper({ log: (event, fields) => events.push([event, fields]), script: FAULTY, args: ['silent'], answerGraceMs: 100 });
+  helper.start();
+  const wedged = helper.pid;
+  const args = ['grep', '-F', '-i', '-n', '-z', '-e', 'needle', '--', 'log'];
+  const first = await helper.grep(dir, args, { timeoutMs: 50 });
+  assert.match(first.fallback, /helper-no-answer/);
+  // Asked again at once - before the SIGKILLed helper's exit has been heard - a fresh, working
+  // helper is started. The old one's exit, heard after that, belongs to the old one.
+  helper.script = CHILD;
+  helper.args = [];
+  const second = await helper.grep(dir, args, { timeoutMs: 5000 });
+  assert.equal(second.fallback, undefined, JSON.stringify(second));
+  assert.equal(second.code, 0);
+  assert.match(second.stdout.toString('utf8'), /needle here/);
+  assert.notEqual(helper.pid, wedged);
+  assert.equal(running(helper.pid), true, 'the new helper is still there');
+  assert.equal(events.filter(([event]) => event === FALLBACK).length, 1, JSON.stringify(events));
+  await helper.close();
+});
+
+test('4b: a store\'s process SIGKILLed mid-grep leaves no orphan: the helper and its git child are gone', async () => {
+  const root = newRoot();
+  const fifo = join(root, 'patterns.fifo');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  // git grep -f <fifo> blocks in open() until a writer comes: a grep that is still running when
+  // its store's process is killed, with no grandchild of its own to confuse the count.
+  const script = `import { MemoryStore } from ${JSON.stringify(new URL('../lib/memory/store.mjs', import.meta.url).href)};
+    const store = await MemoryStore.open({ root: ${JSON.stringify(root)}, userId: ${JSON.stringify(USER)} });
+    await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+    store.grepHelper.grep(store.dir, ['grep', '-f', ${JSON.stringify(fifo)}, '--', 'log'], { timeoutMs: 600000,
+      onSpawn: pid => console.log(JSON.stringify({ helper: store.grepHelper.pid, git: pid })) });
+    setInterval(() => {}, 1000);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise(resolve => child.on('exit', (code, signal) => resolve(signal)));
+  let printed = '';
+  const pids = await new Promise((resolve, reject) => {
+    child.stdout.on('data', chunk => {
+      printed += chunk;
+      if (printed.includes('\n')) resolve(JSON.parse(printed.split('\n')[0]));
+    });
+    child.on('exit', () => reject(new Error('the store process exited first: ' + printed)));
+  });
+  try {
+    assert.ok(Number.isInteger(pids.helper) && Number.isInteger(pids.git), printed);
+    assert.equal(parentOf(pids.git), pids.helper, 'the grep is the helper\'s child');
+    assert.equal(parentOf(pids.helper), child.pid, 'the helper is the store process\'s child');
+    assert.equal(running(pids.git), true, 'the grep is running');
+    child.kill('SIGKILL');
+    assert.equal(await exited, 'SIGKILL');
+    const end = Date.now() + 3000;
+    while ((running(pids.helper) || running(pids.git)) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(running(pids.helper), false, 'no orphan: the helper left with its store\'s process');
+    assert.equal(running(pids.git), false, 'and took its running git child with it');
+  } finally {
+    // A grep left blocked by a failure above is released: a writer's open and close is its EOF.
+    try { closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)); } catch { /* no reader left: as it should be */ }
+  }
+});
+
+/** A grep that stays running: git grep -f <fifo> blocks in open() until a writer comes. Returns
+ *  the fifo and its release (a writer's open and close is its EOF). */
+function blockingFifo(root) {
+  const fifo = join(root, 'patterns.fifo');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  return { fifo, release: () => { try { closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)); } catch { /* no reader left */ } } };
+}
+
+test('3c: a helper that dies while its git runs takes that git with it - nothing is left running unbounded', async () => {
+  const root = newRoot();
+  const { fifo, release } = blockingFifo(root);
+  const events = [];
+  const store = await open(root, { logger: (event, fields) => events.push([event, fields]) });
+  await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+  try {
+    let gitPid;
+    const pending = store.grepHelper.grep(store.dir, ['grep', '-f', fifo, '--', 'log'], { timeoutMs: 600000, onSpawn: pid => { gitPid = pid; } });
+    while (!gitPid) await new Promise(resolve => setTimeout(resolve, 10));
+    const helper = store.grepHelper.pid;
+    assert.equal(parentOf(gitPid), helper);
+    process.kill(helper, 'SIGKILL'); // a crash, an OOM kill - or #fail's own kill of a wedged helper
+    assert.match((await pending).fallback, /helper-died \(SIGKILL\)/);
+    const end = Date.now() + 2000;
+    while (running(gitPid) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(running(gitPid), false, 'the git the dead helper was running is gone too');
+    // and the store goes on: the next search starts a fresh helper
+    const r = await store.search('needle');
+    assert.equal(r.grep.complete, true);
+    assert.notEqual(store.grepHelper.pid, helper);
+  } finally { release(); await store.close(); }
+});
+
+test('3d: a helper that keeps failing is not restarted for every search - one restart, then a backoff (doubling to its cap); an answer resets it', async () => {
+  const root = newRoot();
+  const store = await open(root);
+  await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+  const dir = store.dir;
+  await store.close();
+  // A helper that starts and dies at once; each start leaves one line, so the forks are counted.
+  const starts = join(root, 'starts');
+  const dying = join(root, 'dying.mjs');
+  writeFileSync(dying, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(starts)}, 'x'); process.exit(3);\n`);
+  const forks = () => { try { return readFileSync(starts, 'utf8').length; } catch { return 0; } };
+  let ms = Date.parse('2026-11-20T00:00:00Z');
+  const events = [];
+  const helper = new GrepHelper({ log: (event, fields) => events.push([event, fields]), script: dying,
+    restartBackoffMs: { min: 1000, max: 3000 }, now: () => ms });
+  const args = ['grep', '-F', '-i', '-n', '-z', '-e', 'needle', '--', 'log'];
+  const ask = () => helper.grep(dir, args, { timeoutMs: 5000 });
+  helper.start(); // the boot's start
+  const until = async what => { const end = Date.now() + 5000; while (!what()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(r => setTimeout(r, 10)); } };
+  await until(() => events.some(([e]) => e === 'memory/grep-helper-down'));
+  assert.equal(forks(), 1);
+  // The first search after a failure restarts it once (a fault is restarted after, design r29) ...
+  // (died, or gone: whether its exit or the EPIPE of the request's write is heard first)
+  assert.match((await ask()).fallback, /helper-(died \(exit code 3\)|gone)/);
+  assert.equal(forks(), 2);
+  const backoffs = () => events.filter(([e]) => e === 'memory/grep-helper-backoff').map(([, f]) => f.retry_in_ms);
+  assert.deepEqual(backoffs(), [1000]);
+  // ... and then not again until the backoff runs out: each search pays the direct fork only.
+  for (let i = 0; i < 3; i++) assert.match((await ask()).fallback, /^helper-backoff until 2026-11-20T00:00:01\.000Z: helper-(died|gone)/);
+  assert.equal(forks(), 2);
+  for (const [wait, next] of [[1000, 2000], [2000, 3000], [3000, 3000]]) {
+    ms += wait - 1;
+    assert.match((await ask()).fallback, /^helper-backoff/);
+    ms += 1;
+    assert.match((await ask()).fallback, /helper-(died|gone)/);
+    assert.equal(backoffs().at(-1), next, 'doubling, capped');
+  }
+  assert.equal(forks(), 5);
+  assert.equal(events.filter(([e]) => e === FALLBACK).length, 1 + 3 + 3 * 2, 'every query that fell back is logged');
+  // A helper that works again answers once its backoff runs out, and that resets the count:
+  // a later single failure is restarted at once.
+  helper.script = CHILD;
+  ms += 3000;
+  const served = await ask();
+  assert.equal(served.code, 0, JSON.stringify(served));
+  process.kill(helper.pid, 'SIGKILL');
+  await until(() => events.filter(([e]) => e === 'memory/grep-helper-down').length === 2);
+  assert.equal((await ask()).code, 0, 'restarted at once: one failure after an answer is a first one');
+  await helper.close();
+});
+
+test('6: close() while a search waits on the helper forks nothing more - the grep answers incomplete, "closed"', async () => {
+  const root = newRoot();
+  const events = [];
+  const store = await open(root, { logger: (event, fields) => events.push([event, fields]), grepTimeoutMs: 60000,
+    grepHelper: { script: FAULTY, args: ['silent'], answerGraceMs: 60000 } });
+  await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+  const searching = store.search('needle');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await store.close();
+  const r = await searching;
+  assert.equal(r.grep.complete, false);
+  assert.match(r.grep.reason, /closed/);
+  assert.equal(store.lastGrepPid, undefined, 'no direct spawn after close');
+  assert.deepEqual(events.filter(([event]) => event === FALLBACK), []);
+});
+
+test('7: a direct spawn that cannot even start answers an incomplete grep with its reason - the search never throws', async () => {
+  const root = newRoot();
+  const store = await open(root, { grepHelper: { command: '/nonexistent/definitely-not-node' } });
+  await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+  const aside = store.dir + '.aside';
+  renameSync(store.dir, aside); // the window a purge's renames leave: no working directory to spawn in
+  try {
+    const r = await store.search('needle');
+    assert.equal(r.grep.complete, false);
+    assert.match(r.grep.reason, /ENOENT/);
+  } finally { renameSync(aside, store.dir); }
+  await store.close();
+});
+
+test('8: the helper\'s own environment is PATH alone - the host\'s NODE_OPTIONS and the like do not reach it', async () => {
+  const root = newRoot();
+  const store = await open(root);
+  const environ = readFileSync(`/proc/${store.grepHelper.pid}/environ`, 'utf8').split('\0').filter(Boolean);
+  // PATH, plus the two variables the runtime itself adds for its own helper (merged with
+  // grep-child-leak): the idle window grep-child.mjs reads, and core.mjs's internal marker.
+  // Nothing of the host's environment beyond PATH.
+  assert.deepEqual(environ.map(v => v.split('=')[0]).sort(), ['DSH_GREP_CHILD_IDLE_MS', 'DSH_INTERNAL_HELPER', 'PATH']);
   await store.close();
 });

@@ -20,7 +20,7 @@
  *     "the child ignores EOF" is refuted by measurement, not by reading the source;
  *  4  the runtime marks the processes it starts for its own machinery (core.mjs's INTERNAL_ENV),
  *     and the dormancy gate counts only jobs the agent itself started: with a real helper and a
- *     real shell-style job both carrying the driver session tag, `backgroundProcesses` reports
+ *     real shell-style job carrying the driver session tag, `backgroundProcesses` reports
  *     the job alone and `dormancyRefusal` names only it.
  *
  *  Everything is observed in /proc and over real pipes: no fixture stands in for the helper, and
@@ -224,9 +224,11 @@ test('4: an internal helper is not a background job - dormancy is refused only b
     assert.ok(background.includes(job.pid), 'the job the agent started is reported, so the filter is not hiding everything');
     // This is the verdict the issue measured: a live helper, and idle_dormant refused over it.
     assert.equal(background.includes(helper), false, 'the runtime\'s own helper is not a job; counting it refused dormancy for as long as it lived');
-    // The two environment facts behind it: the helper carries the driver's session tag (which is
-    // why the old gate read it as a job) and the runtime's marker (which is how the gate can tell).
-    assert.ok(helperEnv.includes(SESSION_ENV + '=' + session), 'the helper inherits the driver session tag');
+    // The environment fact behind it: the helper carries the runtime's marker (which is how the
+    // gate can tell). Its session tag is no longer asserted: since s21-followups the helper's
+    // environment is PATH alone by default (grep-helper.mjs), so it no longer inherits the driver
+    // session tag - the old gate's reason to read it as a job is gone at the source, and the
+    // marker remains the second, independent guard measured here.
     assert.ok(helperEnv.includes(INTERNAL), `the helper carries ${INTERNAL}`);
 
     // The case that used to refuse for as long as the driver lived: a live helper, no job.

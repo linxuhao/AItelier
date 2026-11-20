@@ -460,3 +460,43 @@ test('the pinned Slack SDK resolves from the DSH runtime install and has what th
   assert.equal(typeof web.conversations.open, 'function');
   assert.equal(typeof web.chat.postMessage, 'function');
 });
+
+test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mode, plain DMs, the scopes of every call', () => {
+  const here = new URL('..', import.meta.url);
+  const raw = readFileSync(new URL('slack-app-manifest.json', here), 'utf8');
+  const manifest = JSON.parse(raw);
+  // Socket Mode, so no public endpoint: no Request URL anywhere (a URL left over from a
+  // template would send events to it instead of the socket), and no token in the file.
+  assert.equal(manifest.settings.socket_mode_enabled, true);
+  assert.equal(manifest.settings.token_rotation_enabled, false);
+  assert.equal(manifest.settings.org_deploy_enabled, false);
+  assert.doesNotMatch(raw, /request_url|https?:|xapp-|xoxb-|xoxp-/);
+  // Every Web API method the plugin calls, and the bot scope Slack requires for it.
+  const methodScopes = { 'conversations.open': 'im:write', 'chat.postMessage': 'chat:write' };
+  const source = readFileSync(new URL('index.mjs', here), 'utf8');
+  const called = [...new Set([...source.matchAll(/\bweb\.(\w+)\.(\w+)\(/g)].map(([, group, method]) => `${group}.${method}`))];
+  assert.deepEqual(called.sort(), Object.keys(methodScopes).sort(), 'a Web API call was added or removed: update methodScopes and the manifest');
+  // ...and the client is used no other way (web.apiCall, web?.x.y(, a destructured
+  // method): past its declaration and construction, every `web` is such a call.
+  assert.deepEqual([...source.matchAll(/\bweb\b(?!\.\w+\.\w+\(| = new WebClient\(|-api)/g)].length, 1,
+    'the Web API client is used other than as web.<group>.<method>(: update methodScopes and this check');
+  // The one event the plugin takes (isOwnerDm: a message in an im) and its scope.
+  const eventScopes = { 'message.im': 'im:history' };
+  assert.deepEqual(manifest.settings.event_subscriptions.bot_events, Object.keys(eventScopes));
+  assert.ok(isOwnerDm({ type: 'message', channel_type: 'im', user: 'U1', text: 'x' }));
+  // Exactly the scopes those need: none missing, none extra.
+  const needed = [...new Set([...Object.values(methodScopes), ...Object.values(eventScopes)])].sort();
+  assert.deepEqual([...manifest.oauth_config.scopes.bot].sort(), needed);
+  assert.equal(manifest.oauth_config.scopes.user, undefined);
+  // People can write to the bot from its Messages tab.
+  assert.equal(manifest.features.app_home.messages_tab_enabled, true);
+  assert.equal(manifest.features.app_home.messages_tab_read_only_enabled, false);
+  assert.equal(typeof manifest.features.bot_user.display_name, 'string');
+  // No Agents & AI Apps features: the plugin does not use them, and with them Slack shows
+  // the DM as threads while the plugin replies at the top of the DM.
+  assert.equal(manifest.features.assistant_view, undefined);
+  assert.equal(manifest.features.agent_view, undefined);
+  assert.doesNotMatch(raw, /assistant|agent_/);
+  assert.ok(manifest.display_information.name.length <= 35);
+  assert.ok(manifest.display_information.description.length <= 140);
+});

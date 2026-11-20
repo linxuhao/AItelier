@@ -55,7 +55,17 @@ redelivery then answers the decision (`decided_on_replay`) instead of nothing. A
 whose decision needs the driver runtime is parked for that redelivery, unless the
 message's own decision already ran - reading that needs no runtime.
 
-All five tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
+The owner can ask for a new WeChat login QR on the dashboard (`request_login`, owner
+session only; design-steward 7.2 "按需二维码"): one pending row in
+`state_owner_channel_login_requests` and a State event `owner_channel_login_requested` on
+the steward's project. The steward's host runs it in code (never a model turn): it reads
+the pending requests (`list_owner_channel_login_requests`, steward only), asks the WeChat
+bridge for a QR and writes the answer back (`complete_owner_channel_login_request`). The
+QR itself travels only the status path above; a request, its event and its result never
+carry it. A request nobody ran within LOGIN_REQUEST_TTL reads as `expired` and is no
+longer listed, so a host that comes back later never asks for a QR on an old request.
+
+All six tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
 
@@ -115,6 +125,14 @@ CREATE TABLE IF NOT EXISTS state_owner_channel_status (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
  connected INTEGER NOT NULL CHECK(connected IN (0,1)),
  detail TEXT, qr_svg TEXT, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS state_owner_channel_login_requests (
+ request_id TEXT PRIMARY KEY,
+ channel TEXT NOT NULL CHECK(channel IN ('wechat')),
+ requested_at TEXT NOT NULL, requested_by TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','done')),
+ result_json TEXT, completed_at TEXT);
+CREATE INDEX IF NOT EXISTS state_owner_channel_login_requests_channel
+ ON state_owner_channel_login_requests(channel,requested_at);
 """
 
 BODY_MAX_BYTES = 4096
@@ -159,6 +177,13 @@ _QR_SHAPES = frozenset({"g", "path", "rect"})
 _QR_ATTRIBUTES = frozenset({"viewBox", "width", "height", "d", "fill", "stroke", "stroke-width",
                             "shape-rendering", "x", "y"})
 _QR_VALUE = re.compile(r"[A-Za-z0-9#., -]*")
+# The owner's requests for a new login QR (request_login): only WeChat logs in by QR.
+# A pending request older than LOGIN_REQUEST_TTL is `expired` - not run any more; each
+# channel keeps its newest LOGIN_REQUESTS_KEPT rows.
+LOGIN_CHANNELS = ("wechat",)
+LOGIN_REQUEST_TTL = timedelta(minutes=2)
+LOGIN_REQUESTS_KEPT = 20
+_LOGIN_REFUSAL = re.compile(r"[a-z_]{1,40}")
 # _own_decision: the proposal is executing under this very message's decision.
 _RUNNING = object()
 # The State files whose pending relay records this process has already settled at a
@@ -934,6 +959,88 @@ class StateChannels:
                                         {"recorded": True, "channel": channel, "connected": bool(connected),
                                          "at": stamp})
 
+    # ---------------------------------------------------------------- new login QR (owner -> host)
+    @staticmethod
+    def _login_view(row, moment):
+        status = row["status"]
+        if status == "pending" and datetime.fromisoformat(row["requested_at"]) + LOGIN_REQUEST_TTL <= moment:
+            status = "expired"
+        return {"request_id": row["request_id"], "channel": row["channel"], "status": status,
+                "requested_at": row["requested_at"], "completed_at": row["completed_at"],
+                "result": json.loads(row["result_json"]) if row["result_json"] else None}
+
+    def request_login(self, channel):
+        """The owner asks for a new login QR on `channel`: one pending request the steward's
+        host runs (the dashboard's button). A pending request of the channel that has not
+        expired is answered again instead of a second one."""
+        self.steward._owner()
+        if channel not in LOGIN_CHANNELS:
+            raise StateGraphError(f"invalid_channel: a login QR exists only for {', '.join(LOGIN_CHANNELS)}")
+        moment, home = _now(), steward_project()
+        with self.store.transaction(write=True) as conn:
+            for row in conn.execute("SELECT * FROM state_owner_channel_login_requests WHERE channel=? AND status='pending' "
+                                    "ORDER BY requested_at DESC", (channel,)).fetchall():
+                view = self._login_view(row, moment)
+                if view["status"] == "pending":
+                    return view
+            request_id = "qrreq-" + secrets.token_hex(10)
+            conn.execute("INSERT INTO state_owner_channel_login_requests(request_id,channel,requested_at,requested_by,"
+                         "status) VALUES(?,?,?,?,'pending')", (request_id, channel, moment.isoformat(), self.actor))
+            conn.execute("DELETE FROM state_owner_channel_login_requests WHERE channel=? AND request_id NOT IN "
+                         "(SELECT request_id FROM state_owner_channel_login_requests WHERE channel=? "
+                         "ORDER BY requested_at DESC, request_id DESC LIMIT ?)", (channel, channel, LOGIN_REQUESTS_KEPT))
+            # The steward's runtime wakes on this event and runs the request in code.
+            if conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (home,)).fetchone():
+                self.store._event(conn, home, None, "owner_channel_login_requested",
+                                  {"request_id": request_id, "channel": channel})
+            row = conn.execute("SELECT * FROM state_owner_channel_login_requests WHERE request_id=?",
+                               (request_id,)).fetchone()
+        self.steward._notify()
+        return self._login_view(row, moment)
+
+    @writer_only_read("list_owner_channel_login_requests")
+    def list_login_requests(self):
+        """The steward's host: the requests still to run (pending, not expired), oldest first."""
+        moment = _now()
+        with self.store.transaction() as conn:
+            self.steward._steward(conn)
+            rows = conn.execute("SELECT * FROM state_owner_channel_login_requests WHERE status='pending' "
+                                "ORDER BY requested_at, request_id").fetchall()
+        return {"requests": [{"request_id": r["request_id"], "channel": r["channel"], "requested_at": r["requested_at"]}
+                             for r in rows if self._login_view(r, moment)["status"] == "pending"]}
+
+    def complete_login_request(self, project_id, request_key, request_id, result):
+        """pending -> done with what the channel answered: {requested: true} or {refused,
+        retry_after_s?} and nothing else (never a QR). A request run after its TTL is still
+        completed: it did run."""
+        if not isinstance(result, dict):
+            raise StateGraphError("invalid_result: result must be {requested: true} or {refused, retry_after_s?}")
+        if result != {"requested": True}:
+            retry = result.get("retry_after_s")
+            if (set(result) - {"refused", "retry_after_s"} or not isinstance(result.get("refused"), str)
+                    or not _LOGIN_REFUSAL.fullmatch(result["refused"])
+                    or (retry is not None and (isinstance(retry, bool) or not isinstance(retry, int)
+                                               or not 0 < retry <= 86400))):
+                raise StateGraphError("invalid_result: result must be {requested: true} or {refused, retry_after_s?}")
+        request_hash = _hash([request_id, result])
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "complete_owner_channel_login_request", request_key, request_hash)
+            if replay is not None:
+                return replay
+            row = conn.execute("SELECT status FROM state_owner_channel_login_requests WHERE request_id=?",
+                               (request_id,)).fetchone()
+            if row is None:
+                raise StateNotFound("unknown_login_request")
+            if row["status"] != "pending":
+                raise StateConflict("login_request_not_pending")
+            conn.execute("UPDATE state_owner_channel_login_requests SET status='done',result_json=?,completed_at=? "
+                         "WHERE request_id=?", (canonical(result), _now().isoformat(), request_id))
+            recorded = self.steward._record(conn, "complete_owner_channel_login_request", request_key, request_hash,
+                                            {"request_id": request_id, "status": "done"})
+        self.steward._notify()
+        return recorded
+
     # ---------------------------------------------------------------- reads (owner or steward)
     def _reader(self, conn):
         if not self.steward.is_owner_session():
@@ -953,6 +1060,11 @@ class StateChannels:
             rows = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channels")}
             statuses = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channel_status")} \
                 if with_status else {}
+            # Each channel's newest request for a new login QR (the dashboard's feedback).
+            logins = {r["channel"]: r for r in conn.execute(
+                "SELECT * FROM state_owner_channel_login_requests AS r WHERE requested_at=(SELECT MAX(requested_at) "
+                "FROM state_owner_channel_login_requests WHERE channel=r.channel)")} if with_status else {}
+        moment = _now()
         channels, default = [], None
         for channel in CHANNELS:
             row = rows.get(channel)
@@ -968,7 +1080,8 @@ class StateChannels:
                 channels[-1].update(
                     status={"connected": bool(status["connected"]), "detail": status["detail"], "at": status["at"]}
                     if status is not None else None,
-                    qr_svg=status["qr_svg"] if status is not None else None)
+                    qr_svg=status["qr_svg"] if status is not None else None,
+                    login_request=self._login_view(logins[channel], moment) if channel in logins else None)
         return {"channels": channels, "default_channel": default}
 
     @writer_only_read("message_sources")

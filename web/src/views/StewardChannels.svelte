@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createOwnerChannelCode, listOwnerChannels, setDefaultOwnerChannel, unbindOwnerChannel,
-    type OwnerChannel, type OwnerChannelName } from '../lib/api';
+  import { createOwnerChannelCode, listOwnerChannels, requestOwnerChannelQr, setDefaultOwnerChannel, unbindOwnerChannel,
+    type OwnerChannel, type OwnerChannelLoginRequest, type OwnerChannelName } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   // The owner's chat channels (design 7.2): who is bound on Slack / WeChat, the
@@ -13,6 +13,14 @@
   // visible, the list is also re-read slowly: a WeChat login QR can first appear
   // after this page loaded (the host reports it up to about a minute late), and the
   // owner must see it without reloading.
+  // The WeChat card asks for a new login QR on demand ("新二维码", design 7.2): the
+  // steward's host runs the request and the bridge draws a QR, which then arrives like
+  // any other status; while the request is pending the list is re-read on the short
+  // cadence. The answer of the newest request is shown for QR_FEEDBACK_MS; "on its way"
+  // only for QR_ON_ITS_WAY_MS after the bridge took the request (its 30 s QR wait and a
+  // status report): a QR that came and went, or an attempt that failed at once, leaves the
+  // status line alone to say why there is no QR.
+  const QR_FEEDBACK_MS = 10 * 60_000, QR_ON_ITS_WAY_MS = 60_000;
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
   const BIND_POLL_MS = 5000, OFFLINE_POLL_MS = 15000;
   let rows = $state<OwnerChannel[]>([]), defaultChannel = $state<OwnerChannelName | null>(null);
@@ -45,6 +53,37 @@
       }
     } catch (e) { if (alive) failed(e); }
   }
+  async function newQr(channel: OwnerChannelName) {
+    if (busy) return;
+    busy = 'qr:' + channel; notice = ''; error = '';
+    try {
+      const made = await requestOwnerChannelQr(channel);
+      rows = rows.map(r => r.channel === channel ? {...r, login_request: made} : r);
+      lastLoad = Date.now();
+    } catch (e) { failed(e); }
+    finally { busy = ''; }
+  }
+  // The feedback line of a channel's newest QR request, or '' when there is none to show.
+  function qrFeedback(r: OwnerChannel): string {
+    const q = r.login_request;
+    if (!q || r.status?.connected || now - Date.parse(q.requested_at) > QR_FEEDBACK_MS) return '';
+    if (q.status === 'pending') return t('steward.chanQrPending');
+    // A QR on screen speaks for itself (also when the host ran the request but could not
+    // write its answer back, which then reads as expired).
+    if (q.status === 'expired') return r.qr_svg ? '' : t('steward.chanQrExpired');
+    if (q.result?.requested) return !r.qr_svg && q.completed_at && now - Date.parse(q.completed_at) < QR_ON_ITS_WAY_MS
+      ? t('steward.chanQrRequested') : '';
+    const refused = q.result?.refused ?? '';
+    if (refused === 'rate_limited') return t('steward.chanQrRefused.rate_limited')
+      .replace('{minutes}', String(Math.max(1, Math.ceil((retryUntil(q) - now) / 60_000))));
+    const known = t('steward.chanQrRefused.' + refused);
+    return known !== 'steward.chanQrRefused.' + refused ? known : t('steward.chanQrRefused').replace('{reason}', refused);
+  }
+  // Until when the bridge said to wait (0: no wait).
+  const retryUntil = (q: OwnerChannelLoginRequest) => q.result?.retry_after_s && q.completed_at
+    ? Date.parse(q.completed_at) + q.result.retry_after_s * 1000 : 0;
+  const qrBlocked = (r: OwnerChannel) => r.login_request?.status === 'pending'
+    || (r.login_request ? retryUntil(r.login_request) > now : false);
   async function bind(channel: OwnerChannelName) {
     if (busy) return;
     busy = channel; notice = ''; error = '';
@@ -81,7 +120,9 @@
     const s = Math.max(0, Math.ceil((expires - now) / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
-  const waiting = $derived(CHANNELS.some(c => (codes[c]?.expires ?? 0) > now) || rows.some(r => r.qr_svg));
+  const waiting = $derived(CHANNELS.some(c => (codes[c]?.expires ?? 0) > now) || rows.some(r => r.qr_svg)
+    || rows.some(r => r.login_request?.status === 'pending' || (r.login_request?.result?.requested && !r.qr_svg
+      && !r.status?.connected && now - Date.parse(r.login_request.requested_at) < 3 * 60_000)));
   const offline = $derived(CHANNELS.some(c => !row(c).status?.connected));
   onMount(() => {
     alive = true;
@@ -123,6 +164,7 @@
             <figcaption>{t('steward.chanScanQr')}</figcaption>
           </figure>
         {/if}
+        {#if qrFeedback(r)}<p class="detail" data-channel-qr-feedback role="status">{qrFeedback(r)}</p>{/if}
         <p class="account" data-channel-account>
           {#if r.bound}{t('steward.chanBoundAs')} <code>{r.sender_ref}</code>{:else}{t('steward.chanNotBound')}{/if}
         </p>
@@ -138,6 +180,10 @@
         <div class="actions">
           <button type="button" class="outline" disabled={busy === channel} onclick={() => void bind(channel)}>{t('steward.chanBind')}</button>
           {#if r.bound}<button type="button" class="outline danger" onclick={() => askUnbind(channel)}>{t('steward.chanUnbind')}</button>{/if}
+          {#if channel === 'wechat' && !r.status?.connected}
+            <button type="button" class="outline" data-channel-new-qr disabled={busy !== '' || qrBlocked(r)}
+              onclick={() => void newQr(channel)}>{t('steward.chanNewQr')}</button>
+          {/if}
         </div>
       </article>
     {/each}

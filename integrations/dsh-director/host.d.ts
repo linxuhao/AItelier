@@ -111,6 +111,12 @@ export interface DirectorApi {
    *  again, but after a restart a replay of the same message id would send it a second
    *  time. Never rejects; without channels it resolves {mirrored: false}. */
   ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
+  /** v1.2, capability `channels` (step 19, on-demand QR): ask channel `channel` for a new
+   *  login (the WeChat QR), for the owner's dashboard request the host runs in code. Answers
+   *  {requested: true} or {refused, retry_after_s?} (OwnerChannelsHandle.login), never the
+   *  QR itself, which reaches the owner only through channels.reportStatus. Never rejects;
+   *  without channels it resolves {refused: 'no_channels'}. */
+  ownerChannelLogin(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -283,6 +289,9 @@ export interface DirectorHost {
   labels?: Record<string, string>;
 }
 
+/** What a channel's login (a new WeChat QR) answers: never the QR itself. */
+export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };
+
 /** The cordis service `ownerChannels` (provided only with the host's `channels`), what a
  *  channel plugin injects. `register` returns the function that takes the channel back.
  *  `send` is given the text and where it goes: `to` is the account it is for (the bound
@@ -326,8 +335,12 @@ export interface DirectorHost {
  *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before
  *  running a director plugin against an older backend. */
 export interface OwnerChannels {
+  /** `login` (optional; the WeChat channel's): ask for a new login QR now. It answers
+   *  {requested: true} or {refused, retry_after_s?} and never the QR, which the channel
+   *  shows through `status().qrSvg` only. */
   register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
-    status(): { connected: boolean; detail?: string; qrSvg?: string } }): () => void;
+    status(): { connected: boolean; detail?: string; qrSvg?: string };
+    login?(): Promise<ChannelLoginAnswer> }): () => void;
   inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
     Promise<{ accepted: boolean; reason?: string }>;
 }
@@ -340,6 +353,13 @@ export interface OwnerChannels {
 export interface OwnerChannelsHandle {
   service: OwnerChannels;
   ownerMessageSent(messageId: string, body: string, replyTo?: string): Promise<{ mirrored: boolean; reason?: string }>;
+  /** A new login on a registered channel (its optional `login`): {requested: true} - then
+   *  the status is reported every 5 s for 3 minutes so the QR shows up quickly - or
+   *  {refused: not_registered | not_supported | unavailable | rate_limited (past
+   *  CHANNEL_LIMITS.loginPerHour/loginPerDay accepted logins: the channel is not asked) |
+   *  the channel's own code, retry_after_s?}. Only those fields are passed on; never throws. Behind the steward's
+   *  request_wechat_qr tool and DirectorApi.ownerChannelLogin. */
+  login(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
   ready(): void;
   pollStatus(): Promise<void>;
   /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */

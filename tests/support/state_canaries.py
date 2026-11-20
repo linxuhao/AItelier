@@ -219,6 +219,13 @@ def _plan():
             ("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) "
              "VALUES('wechat',0,?,?,?)"),
             (c("state_owner_channel_status"), c("state_owner_channel_status"), now)),
+        # The owner's request for a new WeChat login QR: the canary as its id, its
+        # requester and its result; dated ahead so it stays pending (listed) all test long.
+        "state_owner_channel_login_requests": (
+            ("INSERT INTO state_owner_channel_login_requests(request_id,channel,requested_at,requested_by,status,"
+             "result_json) VALUES(?,'wechat','2999-01-01T00:00:00+00:00',?,'pending',?)"),
+            (c("state_owner_channel_login_requests"), c("state_owner_channel_login_requests"),
+             '{"refused": "%s"}' % c("state_owner_channel_login_requests"))),
     }
 
 

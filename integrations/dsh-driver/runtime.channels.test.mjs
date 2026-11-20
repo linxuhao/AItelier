@@ -6,8 +6,10 @@
  *  and the steward's send_user_message replying to the relayed message (3) goes out on slack,
  *  to that message, with exactly its text, and (4) is recorded with record_channel_delivery;
  *  and (5) the plugin's status reaches report_channel_status, once, with nothing logged.
- *  A director's runtime declares no channels: the same plugin never loads there. The State
- *  here is a fake HTTP server; nothing reaches a real chat service. */
+ *  A director's runtime declares no channels: the same plugin never loads there. And (6) the
+ *  owner's request for a new WeChat login QR (owner_channel_login_requested) is run by the
+ *  runtime in code - the channel's login asked once, its answer completed - without a model
+ *  turn. The State here is a fake HTTP server; nothing reaches a real chat service. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -63,6 +65,12 @@ export function apply(ctx) {
   const off = ctx.ownerChannels.register({ name: 'slack', status: () => ({ connected: true, detail: 'FIXTURE_STATUS_DETAIL' }),
     async send(text, options) { await post('/test/channel-send', { text, options }); return { ref: 'slack-out-ts' }; } });
   ctx.on('dispose', off);
+  // A WeChat channel with a login, as dsh-channel-wechat registers it (the QR mode only).
+  if (process.env.CHANNELS_TEST_MODE === 'qr') {
+    ctx.on('dispose', ctx.ownerChannels.register({ name: 'wechat', status: () => ({ connected: false, detail: 'no QR (boot)' }),
+      async send() { return {}; },
+      async login() { await post('/test/channel-login', {}); return { requested: true, qr: 'https://login.weixin.qq.com/l/SECRET_QR' }; } }));
+  }
   void post('/test/channel-loaded', {});
   void (async () => {
     await post('/test/inbound', await ctx.ownerChannels.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: 'hello from slack' }));
@@ -77,7 +85,7 @@ async function run(t, { steward, mode = 'tool' }) {
   const here = dirname(fileURLToPath(import.meta.url));
   const directory = await mkdtemp(join(homedir(), 'dsh-channels-'));
   const project = steward ? 'aitelier-home' : 'alpha';
-  const seen = { commands: [], queries: [], sends: [], inbound: [], loaded: 0, requests: 0 };
+  const seen = { commands: [], queries: [], sends: [], inbound: [], loaded: 0, requests: 0, logins: 0, rootRequests: 0 };
   let output = '', proc, woke = false;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -88,7 +96,8 @@ async function run(t, { steward, mode = 'tool' }) {
     if (url === '/test/channel-send') { seen.sends.push(body); return send({}); }
     if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
     if (url === '/test/channel-loaded') { seen.loaded++; return send({}); }
-    if (url === '/test/request') { seen.requests++; return send({}); }
+    if (url === '/test/request') { seen.requests++; if (body.session === 'chan-root') seen.rootRequests++; return send({}); }
+    if (url === '/test/channel-login') { seen.logins++; return send({}); }
     if (url === '/api/drivers/me') return send({ driver_id: 'drv-chan' });
     if (url === '/api/state/schema') return send({ operations: {} });
     if (url.endsWith('/context')) return send({ project_id: project, driver_id: 'drv-chan', event_seq: 1, nodes: [],
@@ -98,6 +107,9 @@ async function run(t, { steward, mode = 'tool' }) {
       // One owner-message event wakes the root once; after that the subscription parks.
       if (woke) return;
       woke = true;
+      // The QR mode: the owner pressed "新二维码" - nothing for the model.
+      if (mode === 'qr') return send({ events: [{ seq: 2, event_type: 'owner_channel_login_requested',
+        payload: { request_id: 'qrreq-1', channel: 'wechat' } }], next_after: 2 });
       return send({ events: [{ seq: 2, event_type: 'user_message_created', payload: { message_id: 'm-in-1' } }], next_after: 2 });
     }
     if (url.startsWith('/api/state/commands/')) {
@@ -111,6 +123,7 @@ async function run(t, { steward, mode = 'tool' }) {
       if (name === 'complete_steward_memory_request') return send({});
       if (name === 'record_channel_delivery') return send({ message_id: body.message_id, recorded: true });
       if (name === 'report_channel_status') return send({ recorded: true, channel: body.channel, connected: body.connected, at: 't' });
+      if (name === 'complete_owner_channel_login_request') return send({ request_id: body.request_id, status: 'done' });
       return send({ detail: 'unexpected ' + name }, 422);
     }
     if (url.startsWith('/api/state/query/')) {
@@ -125,6 +138,11 @@ async function run(t, { steward, mode = 'tool' }) {
           created_at: '2026-11-18T10:01:00Z', body: 'reply', segments: [], reply_to_message_id: 'm-in-1' }] : []),
         { message_id: 'm-in-1', sender_kind: 'user', sender_driver_id: null, created_at: '2026-11-18T10:00:00Z', subject: 'hello',
           body: 'hello from slack', segments: [], reply_to_message_id: null }], next_cursor: null });
+      // One pending request, listed until it is completed (the start's sweep and the event both read it).
+      if (name === 'list_owner_channel_login_requests') {
+        const done = seen.commands.some(([n]) => n === 'complete_owner_channel_login_request');
+        return send({ result: { requests: mode === 'qr' && !done ? [{ request_id: 'qrreq-1', channel: 'wechat', requested_at: 't' }] : [] } });
+      }
       if (name === 'message_sources') return send({ sources: Object.fromEntries((body.message_ids ?? []).filter(id => id === 'm-in-1')
         .map(id => [id, { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 't', error: null }])) });
       return send({ result: {} });
@@ -266,5 +284,25 @@ test('real pinned DSH, a director: no channels capability, so ownerChannels is n
     assert.deepEqual(seen.inbound, []);
     assert.deepEqual(seen.queries.filter(([name]) => ['list_owner_channels', 'message_sources'].includes(name)), []);
     assert.deepEqual(seen.commands.filter(([name]) => name === 'report_channel_status'), []);
+  } finally { await r.close(); }
+});
+
+test('real pinned DSH, the steward: the owner\'s request for a new WeChat QR is run in code - the channel\'s login once, the answer completed, no model turn', { timeout: 120000 }, async (t) => {
+  const r = await run(t, { steward: true, mode: 'qr' });
+  if (!r) return;
+  const { seen } = r;
+  try {
+    await r.until('the channel plugin never loaded', () => seen.loaded === 1);
+    await r.until('the login request was never completed',
+      () => seen.commands.some(([n]) => n === 'complete_owner_channel_login_request'));
+    // The event itself arrives too; the request is already done, so nothing runs twice.
+    await r.until('the subscription never delivered the event', () => seen.queries.filter(([n]) => n === 'list_owner_channel_login_requests').length >= 2);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(seen.logins, 1, 'the channel was asked for a login once');
+    const completed = seen.commands.filter(([n]) => n === 'complete_owner_channel_login_request').map(([, body]) => body);
+    assert.deepEqual(completed, [{ request_key: 'channel-login:qrreq-1', request_id: 'qrreq-1', result: { requested: true } }],
+      'only {requested}: never the QR the channel answered with');
+    assert.equal(seen.rootRequests, 0, 'the request woke no model turn');
+    assert.ok(!r.output().includes('SECRET_QR') && !JSON.stringify(seen).includes('SECRET_QR'), 'the QR went somewhere');
   } finally { await r.close(); }
 });

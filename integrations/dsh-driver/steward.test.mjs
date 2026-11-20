@@ -1175,3 +1175,32 @@ test('review 340 (a): every tool the adapter adds to the steward\'s presented li
   assert.ok(added.length >= 5, JSON.stringify(added));
   assert.deepEqual(added.filter(name => !registered.has(name)), [], 'presented to the steward but never registered');
 });
+
+test('owner channel login requests (step 19): each pending request asks the channel once and completes with {requested} or a refusal code, never more', async () => {
+  const { processChannelLoginRequests, CHANNEL_LOGIN_EVENTS } = await import('./channel-login-requests.mjs');
+  assert.ok(CHANNEL_LOGIN_EVENTS.has('owner_channel_login_requested'));
+  const completed = [], asked = [];
+  const answers = [{ requested: true, qr: 'https://login.weixin.qq.com/l/SECRET', qrSvg: '<svg/>' },
+    { refused: 'rate_limited', retry_after_s: 80, qr: 'SECRET' }, { refused: 'Not A Code <svg>' }];
+  let failComplete = false;
+  const request = async (path, body) => {
+    if (path.endsWith('list_owner_channel_login_requests')) return { result: { requests: [
+      { request_id: 'q1', channel: 'wechat' }, { request_id: 'q2', channel: 'wechat' }, { request_id: 'q3', channel: 'wechat' }] } };
+    if (failComplete) throw new Error('HTTP 503');
+    completed.push(body); return { result: { status: 'done' } };
+  };
+  const login = async channel => { asked.push(channel); return answers.shift(); };
+  assert.deepEqual(await processChannelLoginRequests({ request, login }), { pending: 3, done: 3 });
+  assert.deepEqual(asked, ['wechat', 'wechat', 'wechat']);
+  assert.deepEqual(completed, [
+    { request_key: 'channel-login:q1', request_id: 'q1', result: { requested: true } },
+    { request_key: 'channel-login:q2', request_id: 'q2', result: { refused: 'rate_limited', retry_after_s: 80 } },
+    { request_key: 'channel-login:q3', request_id: 'q3', result: { refused: 'refused' } }]);
+  assert.ok(!JSON.stringify(completed).includes('SECRET') && !JSON.stringify(completed).includes('svg'));
+  // A login that throws is an `unavailable` answer; a completion that fails is logged, not thrown.
+  failComplete = true;
+  const logged = [];
+  const out = await processChannelLoginRequests({ request, login: async () => { throw new Error('boom'); }, log: line => logged.push(line) });
+  assert.deepEqual(out, { pending: 3, done: 0 });
+  assert.ok(logged.some(line => /q1: boom/.test(line)) && logged.some(line => /q1: result not written/.test(line)));
+});

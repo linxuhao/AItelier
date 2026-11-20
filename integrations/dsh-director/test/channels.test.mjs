@@ -1658,6 +1658,23 @@ test('receipt: the steward\'s reply sent on a channel ends its window; a failed 
   s.channels.stop();
 });
 
+test('receipt: a reply sent on one channel restarts only that channel\'s window', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-OWNER' } });
+  const got = ch => s[ch].sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async (channel, senderRef, ref) => { await s.inbound({ channel, senderRef, messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 's-1' });
+  await owner('slack', 'U-OWNER', 's-1');
+  await owner('wechat', 'wx-OWNER', 'w-1');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1'], ['w-1']]);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('slack', 'U-OWNER', 's-2');
+  await owner('wechat', 'wx-OWNER', 'w-2');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1', 's-2'], ['w-1']], 'the Slack reply leaves the WeChat window standing');
+  s.channels.stop();
+});
+
 test('receipt: none when it would no longer be news, or when the channel is not registered - both logged', async () => {
   const s = setup();
   const late = new Date(Date.now() - CHANNEL_LIMITS.receiptMaxAgeMs - 1000).toISOString();

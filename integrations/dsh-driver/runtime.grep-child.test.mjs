@@ -108,10 +108,14 @@ test('1: a helper exits by itself after answering (its idle window), and the nex
     assert.equal(idle.state, 'S', 'it is asleep in its wait for the next request, not busy');
     // Nothing closes its store, nothing kills its pid: it has to leave on its own, and this is
     // the assertion the issue asked for - the process is gone, read from /proc, not inferred.
-    const exitMs = await until(() => !running(pid), 15000);
-    assert.notEqual(exitMs, undefined, `the helper never left after answering (pid ${pid}); an idle helper that stays is the leak`);
-    console.log(`IDLE_EXIT pid=${pid} idle_exit_ms=${exitMs} exit_reason=${JSON.stringify(store.grepHelper.reason)}`);
+    // Wait on the exit the store records, not on `running()`: that helper calls a zombie "not at
+    // work", so polling it can return between the kernel's exit and node's dispatch of 'exit'
+    // (measured red in the full suite 2026-11-20: pid already 'Z', reason still undefined).
+    const diedMs = await until(() => store.grepHelper.reason !== undefined, 15000);
+    assert.notEqual(diedMs, undefined, `the helper never left after answering (pid ${pid}); an idle helper that stays is the leak`);
+    console.log(`IDLE_EXIT pid=${pid} idle_exit_ms=${diedMs} exit_reason=${JSON.stringify(store.grepHelper.reason)}`);
     assert.match(String(store.grepHelper.reason), /helper-died \(exit code 0\)/, 'it left by itself, exit 0 - not killed, not wedged');
+    assert.equal(procState(pid), null, 'and no /proc entry is left for it: not a live process, not a zombie');
     assert.equal(fdTarget(pid, 0), undefined, 'and its stdin is gone with it');
     // The store is not left without an answer: the next search starts a fresh helper.
     const again = await store.search('needle');

@@ -203,6 +203,19 @@ test('the steward prompt names the tools it has: both inbox readers where it exp
       assert.ok(table.steward.presented.includes(name), `steward.md names ${name}, which the steward is not presented`);
 });
 
+test('the steward prompt bounds EVERY message to the owner for a phone chat, not only the unprompted ones', () => {
+  const md = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  // Owner, 2026-11-20: "管家的回复尽量精简，微信和slack对超长信息的显示都不friendly" - a 1604-character
+  // reply with bold section titles went to WeChat. The rule is its own paragraph, not a clause
+  // of the "unasked" one, so it binds a reply as much as a report.
+  const rule = md.split('\n\n').find(part => part.startsWith('Every message to your owner'));
+  assert.ok(rule, 'steward.md has a paragraph for every message to the owner');
+  assert.ok(!rule.includes('unasked'), 'the rule is not part of the unprompted-messages paragraph');
+  for (const words of ['lead with the answer', 'at most five more short lines', '300 Chinese characters', 'no tables, no headings, no bold',
+    'The approval phrase line is never shortened'])
+    assert.ok(rule.includes(words), `the rule says: ${words}`);
+});
+
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });

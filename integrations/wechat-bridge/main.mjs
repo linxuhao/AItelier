@@ -3,19 +3,20 @@
  *  address WECHAT_BRIDGE_BIND (bridge.mjs bindHost: loopback, or 0.0.0.0 in the
  *  container). It runs in its own container (Dockerfile, run.sh).
  *
- *  A finished login, a QR nobody scanned in time or a puppet failure before a login
- *  ends the process (exit 75, superviseLogin): puppet-neo needs a fresh start for a
- *  new QR, and the container's restart policy (run.sh) decides whether and how often
- *  to start again, so an unattended bridge does not ask WeChat for a QR forever.
+ *  The puppet is not started here: the bridge starts `idle` and asks WeChat for a QR
+ *  only when POST /login asks it to (bridge.mjs). A QR nobody scanned in time, a logout
+ *  or a puppet failure before a login leave it `idle` again; the process ends only on
+ *  SIGINT/SIGTERM (0), a missing token or a refused bind address (78), or a crash.
  *
- *  WECHAT_BRIDGE_SKIP_LOGIN=1 serves the HTTP API without starting the puppet
- *  (logged_in stays false): the start check of the image, which must not log in. */
+ *  WECHAT_BRIDGE_SKIP_LOGIN=1 serves the HTTP API and refuses every POST /login
+ *  (`login_disabled`), so the puppet is never started: the start check of the image,
+ *  which must not log in. */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { WechatyBuilder, types } from 'wechaty';
 import { PuppetNeo } from 'wechaty-puppet-neo';
-import { bindHost, createBridge, superviseLogin, DEFAULT_PORT } from './bridge.mjs';
+import { bindHost, createBridge, DEFAULT_PORT } from './bridge.mjs';
 import { qrSvg } from './qr-svg.mjs';
 
 const tokenFile = join(homedir(), '.aitelier-secrets', 'wechat-bridge-token');
@@ -33,7 +34,8 @@ catch (error) { log(error.message); process.exit(78); }
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file
 // (the container's root filesystem is read-only; the login is in memory anyway).
 const bot = WechatyBuilder.build({ puppet: new PuppetNeo() });
-const bridge = createBridge({ bot, types, token, log, renderQr: qrSvg });
+const skipLogin = process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1';
+const bridge = createBridge({ bot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin });
 
 let stopping = false;
 async function stop(reason, code) {
@@ -45,11 +47,9 @@ async function stop(reason, code) {
   process.exit(code);
 }
 
-superviseLogin({ bot, types, stop, log });
 process.once('SIGINT', () => void stop('SIGINT', 0));
 process.once('SIGTERM', () => void stop('SIGTERM', 0));
 
 const address = await bridge.listen(port, host);
 log(`listening on ${address.address}:${address.port}`);
-if (process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1') log('WECHAT_BRIDGE_SKIP_LOGIN=1: the puppet is not started');
-else await bot.start();
+log(skipLogin ? 'WECHAT_BRIDGE_SKIP_LOGIN=1: the puppet is never started' : 'idle: no QR until POST /login asks for one');

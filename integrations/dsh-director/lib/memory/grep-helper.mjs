@@ -66,12 +66,16 @@ export class GrepHelper {
     }
     this.#child = child;
     this.#pid = child.pid;
-    child.on('error', error => this.#fail('helper-unavailable: ' + say(error)));
-    child.on('exit', (code, signal) => { child.exited = true; this.#fail(`helper-died (${signal ?? 'exit code ' + code})`); });
-    child.stdin.on('error', error => this.#fail('helper-gone: ' + say(error)));
-    child.stdout.on('data', chunk => this.#stdout(chunk));
-    child.stderr.on('data', chunk => { if (this.#stderr.length < 8) this.#stderr.push(chunk); });
-    child.stdio[3].on('data', chunk => this.#control(chunk));
+    // Every event is this child's own: one heard after it was replaced (a SIGKILLed helper's
+    // exit arrives a poll phase later, and the next search may have started a fresh one by
+    // then) is about a process that is already gone and must not touch its successor.
+    const own = handler => (...a) => { if (this.#child === child) handler(...a); };
+    child.on('error', own(error => this.#fail('helper-unavailable: ' + say(error))));
+    child.on('exit', (code, signal) => { child.exited = true; own(() => this.#fail(`helper-died (${signal ?? 'exit code ' + code})`))(); });
+    child.stdin.on('error', own(error => this.#fail('helper-gone: ' + say(error))));
+    child.stdout.on('data', own(chunk => this.#stdout(chunk)));
+    child.stderr.on('data', own(chunk => { if (this.#stderr.length < 8) this.#stderr.push(chunk); }));
+    child.stdio[3].on('data', own(chunk => this.#control(chunk)));
     child.stdio[3].on('error', () => {});
     this.#hold(false); // idle: see #hold - a helper awaiting a request must not pin this process
     return this;

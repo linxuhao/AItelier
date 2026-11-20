@@ -458,7 +458,10 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
         tables = sorted(row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'") if row[0].startswith("state_"))
         later = {"state_owner_channels", "state_owner_channel_codes", "state_message_sources",
-                 "state_owner_channel_status", "state_owner_channel_bind_attempts"}
+                 "state_owner_channel_status", "state_owner_channel_bind_attempts",
+                 # The Git bundle release ledger (evidence/bundle-store-release-20261120):
+                 # one append-only row per released candidate digest.
+                 "state_git_bundle_releases"}
         assert sorted(set(tables) - {"state_project_archive"} - later) == previous["tables"]
         assert access_columns(path) == previous["access_columns"]
     # the list served afterwards equals the list served before, exactly

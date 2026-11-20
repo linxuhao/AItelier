@@ -126,6 +126,16 @@ def _plan():
             "payload,created_at) VALUES(?,'raw',NULL,?,?,?)",
             (hashlib.sha256(c("state_git_bundle_store").encode()).hexdigest(),
              len(c("state_git_bundle_store")), c("state_git_bundle_store").encode(), now)),
+        # The release ledger: which candidate's bytes State stopped holding, when
+        # and by whom. Its key must be a hex digest (schema CHECK), so the canary
+        # is the ACTOR - the private fact that would tell an untrusted caller who
+        # retired a candidate of a project it cannot open.
+        "state_git_bundle_releases": (
+            "INSERT INTO state_git_bundle_releases(bundle_sha256,commit_sha,codec,base_sha256,"
+            "raw_size,payload_bytes,released_at,actor,rule,rows_before,payload_before,rows_after,"
+            "payload_after) VALUES(?,?,'raw',NULL,1,1,?,?,'no-live-consumer@1',1,1,0,0)",
+            (hashlib.sha256(c("state_git_bundle_releases").encode()).hexdigest(),
+             c("state_git_bundle_releases") + "-commit", now, c("state_git_bundle_releases"))),
         # A LIVE claim on the OPENED project's public node. Its holder and lease
         # are public there; the canary sits only in the PRIVATE columns
         # (workspace, request key) that no public read may carry.

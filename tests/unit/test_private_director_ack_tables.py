@@ -24,8 +24,11 @@ P3_PUBLIC={'state_project_enforcement'}
 # tests/unit/test_project_archive_20261118.py::test_the_anonymous_list_is_untouched_by_archiving
 # reds when the anonymous branch applies the predicate.
 ARCHIVE_PUBLIC={'state_project_archive'}
-# The retained Git bundle store holds the same private bytes as state_git_artifacts.
-BUNDLE_STORE_PRIVATE={'state_git_bundle_store'}
+# The retained Git bundle store holds the same private bytes as state_git_artifacts,
+# and the release ledger names those digests (with their commit) and says when and
+# by whom each candidate's bytes stopped being held, so it is private on the same
+# terms. W9 of evidence/bundle-store-release-20261120/report.json.
+BUNDLE_STORE_PRIVATE={'state_git_bundle_store','state_git_bundle_releases'}
 # Audited retirement of cross-project context run protection (3f817f6fe7): the
 # retirement rows name the project, reference and node a protection was lifted
 # from — the same private fields as the protections themselves — so the table is

@@ -5,8 +5,24 @@ the one authoritative normalized full pack and ``retained_ref`` is the typed
 reference ``state-db:git-bundle:sha256:<bundle_sha256>``. Historical rows keep
 their absolute report-store path untouched. Neither run cleanup nor Git GC owns
 these bytes.
-There is deliberately no release operation: attempts/observations remain
-recoverable, so State cannot yet prove that their artifacts are unreferenced.
+
+Release. Retention is the default and a RECORDED release is the only door
+(``release_bundles``, operator tool ``tools/release_bundle_store.py``). The
+policy is ``RELEASE_RULE``: these bytes have no LIVE consumer any more - an
+acceptance receipt, an in-flight attempt, an unretired protected reference, an
+open worktree base, or a base request that can still take effect. It is
+deliberately NOT "nothing names the commit": every historical identity row
+(attempt, observation, evidence, unprotected history link, event) keeps naming
+it after the bytes are gone, so a rule written that way releases nothing at
+all. Nothing is nulled or rewritten: the ``state_git_artifacts`` row keeps its
+commit, tree, digest and reference, the bytes leave the store, and one
+append-only ``state_git_bundle_releases`` row says when, by whom, under which
+rule, and how many bytes - so the ledger can subtract them and a reader can
+tell "released" from "missing". ``state_git_bundle_custody`` is the read-side
+view of that partition. The bytes are released from the LEDGER at once; the
+file only returns the space after a compaction (``PRAGMA auto_vacuum`` is 0 and
+``secure_delete`` is 0, so a released payload is not zeroed either - see the
+release record and ``tools/release_bundle_store.py``'s offline procedure).
 
 
 A producer may supply a broad bundle (for example ``--all``). The supplied bytes
@@ -32,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -203,16 +220,25 @@ def git_custody(retained_ref):
     return "unrecognized", None, None
 
 
-def custody_metadata(row):
+def custody_metadata(row, release=None):
     """Metadata-only view of a state_git_artifacts row (no bytes): the four
-    stored columns plus derived ``custody`` and ``legacy_cas_path``. A valid typed
-    reference must carry the row's own digest column."""
+    stored columns plus derived ``custody``, ``legacy_cas_path`` and
+    ``released``. A valid typed reference must carry the row's own digest column.
+
+    ``release`` is the ``state_git_bundle_releases`` row for this digest, when
+    the caller has one (``bundle_release(conn, digest)``); it is the only thing
+    that can tell a RELEASED candidate from one whose bytes are still held, and
+    it is metadata only - answering it reads no payload. Without it the custody
+    is what the row itself declares, exactly as before.
+    """
     artifact = {k: row[k] for k in ("commit_sha", "tree_sha", "bundle_sha256", "retained_ref")}
     custody, legacy_path, embedded = git_custody(artifact["retained_ref"])
     if embedded is not None and embedded != artifact["bundle_sha256"]:
         raise StateConflict("custody reference does not match bundle digest")
-    artifact["custody"] = custody
+    artifact["custody"] = "released" if release is not None else custody
     artifact["legacy_cas_path"] = legacy_path
+    artifact["released"] = None if release is None else {
+        k: release[k] for k in ("released_at", "actor", "rule")}
     return artifact
 
 
@@ -359,9 +385,16 @@ def _keyframe_bytes(entry, digest):
 
 
 def load_stored_bundle(conn, digest):
-    """The exact bytes stored under ``digest``, verified; StateConflict on any defect."""
+    """The exact bytes stored under ``digest``, verified; StateConflict on any defect.
+
+    A digest State RELEASED is not a missing one: the release record is read and
+    the refusal names it (when, who, under which rule), so a caller can never
+    mistake a deliberate retirement for corruption or a hole."""
     entry = _store_entry(conn, digest)
     if entry is None:
+        released = bundle_release(conn, digest)
+        if released is not None:
+            raise StateConflict(_released_refusal(digest, released))
         raise StateConflict("Git bundle store has no bytes for this digest")
     key, codec, base_digest, size, payload = entry
     if key != digest or not isinstance(size, int) or not 0 < size <= MAX_BUNDLE_BYTES \
@@ -474,7 +507,14 @@ def store_candidate(conn, artifact):
 
 
 def materialize_candidate(store, commit, destination):
-    """Return identity for a known external candidate; refuse missing legacy data."""
+    """Return identity for a known external candidate; refuse missing legacy data.
+
+    Four outcomes, not three: present bytes (fetched and verified into
+    ``destination``), a legacy candidate with no retained bundle ("needs
+    re-attestation"), a candidate whose bytes State RELEASED, and a candidate
+    State never held. A released commit is never reported as a missing legacy
+    bundle - that message tells the director to re-attest a candidate State
+    deliberately retired."""
     with store.transaction() as conn:
         known = conn.execute("SELECT 1 FROM state_attempts WHERE execution_kind='external' "
                              "AND artifact_kind='git-sha1' AND artifact_ref=? LIMIT 1", (commit,)).fetchone()
@@ -483,6 +523,12 @@ def materialize_candidate(store, commit, destination):
             artifact = dict(artifact)
             # A malformed reserved state-db: reference fails closed before any fallback.
             _, _, embedded = git_custody(artifact["retained_ref"])
+            # Metadata first: a released digest is answered from its release
+            # record, never by attempting a payload read it cannot satisfy.
+            released = bundle_release(conn, artifact["bundle_sha256"])
+            if released is not None:
+                raise StateConflict(f"expected Git artifact {commit}, bundle {artifact['bundle_sha256']}; "
+                                    f"actual {_released_refusal(artifact['bundle_sha256'], released)}")
             try:
                 raw = retained_bundle_bytes(conn, artifact)
             except StateConflict as exc:
@@ -502,3 +548,326 @@ def materialize_candidate(store, commit, destination):
         raise StateConflict(f"expected Git artifact {commit}; actual source repository missing")
     _validated_bundle(raw, commit, artifact["tree_sha"], destination)
     return artifact
+
+
+# --------------------------------------------------------------- release path
+#
+# The owner's ruling (2026-11-20): a retained bundle may leave the ledger when
+# THESE BYTES HAVE NO LIVE CONSUMER ANY MORE - not when nothing names the commit.
+# Every historical identity row (attempt, observation, evidence, unprotected
+# history link, event payload) keeps naming the commit after a release; a rule
+# written as "no reference anywhere" would select nothing at all. The five live
+# classes are the ones that can still ASK State for the bytes, and each is one
+# NOT EXISTS in the one deciding statement below:
+
+RELEASE_RULE = "no-live-consumer@1"
+RELEASE_TABLE = "state_git_bundle_releases"
+CUSTODY_VIEW = "state_git_bundle_custody"
+
+# THE deciding statement. Not a summary of the rule and not a parallel
+# reimplementation of the reader's tables: the release function takes its
+# digests from here and its facts from the row it selected.
+#
+# Pinned by tests/unit/test_bundle_release_rule_is_executable_sql.py: this text
+# carries the version string of the rule it implements, and that test freezes
+# the text's digest. A semantic edit must therefore edit this constant AND
+# ``RELEASE_RULE`` (a release row records the rule that decided it, so a rule
+# that changed silently would make the ledger say something false).
+RELEASE_RULE_SQL = """
+-- no-live-consumer@1: releasable only while no live consumer can still ask for these bytes
+SELECT a.commit_sha, a.bundle_sha256, a.created_at AS artifact_created_at,
+       s.codec, s.base_sha256, s.raw_size, length(s.payload) AS payload_bytes
+FROM state_git_artifacts a
+JOIN state_git_bundle_store s ON s.bundle_sha256 = a.bundle_sha256
+WHERE (? = 0 OR julianday(a.created_at) < julianday('now', ?))
+  -- 1. an acceptance receipt: accepted work is why the ledger exists
+  AND NOT EXISTS (SELECT 1 FROM state_acceptances c WHERE c.artifact_ref = a.commit_sha)
+  -- 2. a NON-TERMINAL attempt: an in-flight candidate can still be relayed
+  AND NOT EXISTS (SELECT 1 FROM state_attempts t WHERE t.artifact_ref = a.commit_sha
+                    AND t.status IN ('reserved','launching','running','paused','unknown'))
+  -- 3. a protected history link that was never retired: "this must not be lost"
+  AND NOT EXISTS (SELECT 1 FROM state_history_links h
+                    WHERE (h.artifact_ref = a.commit_sha
+                           OR (h.kind = 'commit' AND h.ref = a.commit_sha))
+                      AND h.protection = 1
+                      AND NOT EXISTS (SELECT 1 FROM state_context_run_protection_retirements r
+                                        WHERE r.project_id = h.project_id
+                                          AND r.reference_id = h.reference_id))
+  -- 4. an OPEN worktree base: a tree still exists on this commit
+  AND NOT EXISTS (SELECT 1 FROM run_isolation i
+                    WHERE i.base_sha = a.commit_sha AND i.released_at IS NULL)
+  -- 5. a base request that can still take effect. ``run_isolation_requests`` is
+  -- INSERT OR REPLACE per project and is never deleted after the worktree it
+  -- asked for is provisioned, so most rows are dead history: a request whose
+  -- project already has a worktree AT EXACTLY THIS BASE can never apply again,
+  -- and the honoured request is the strongest evidence the commit exists
+  -- elsewhere. Measured on the 2026-11-20 snapshot: 661 of 684 rows honoured,
+  -- the same 661 under either reading, so the narrower one costs nothing.
+  AND NOT EXISTS (SELECT 1 FROM run_isolation_requests q WHERE q.base_sha = a.commit_sha
+                    AND NOT EXISTS (SELECT 1 FROM run_isolation h2
+                                      WHERE h2.project_id = q.project_id
+                                        AND h2.base_sha = q.base_sha))
+ORDER BY a.bundle_sha256
+"""
+
+# The host's worktree tables (core/db_manager.py). A State-only database has
+# none, and their ABSENCE is exactly "no worktree exists, no base was requested".
+_HOST_WORKTREE_TABLES = {
+    "run_isolation": ("run_id", "project_id", "base_sha", "released_at"),
+    "run_isolation_requests": ("project_id", "base_sha"),
+}
+
+
+def _prepare_release_connection(conn) -> None:
+    """Make the one deciding statement runnable on a State-only database too.
+
+    A State-only database (``core/state_database.py``) has no ``run_isolation``
+    or ``run_isolation_requests``: they are host tables. An empty TEMP
+    stand-in of the same name is the exact truth there, and lets ONE statement
+    serve both deployments instead of a second, quietly different predicate.
+
+    A TEMP object that already shadows either name is REFUSED: it is a partial
+    copy (an untrusted connection carries only the opened projects' rows), and
+    judging the store through it would release bytes a live worktree still
+    needs.
+    """
+    for table, columns in _HOST_WORKTREE_TABLES.items():
+        empty = ", ".join(f"NULL AS {column}" for column in columns)
+        # SQLite stores a TEMP object's SQL without the TEMP and IF NOT EXISTS
+        # words, so this is the exact text an earlier call on this connection left.
+        substitute = f"CREATE VIEW {table} AS SELECT {empty} WHERE 0"
+        host = conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?",
+                            (table,)).fetchone()
+        temp = conn.execute("SELECT type,sql FROM temp.sqlite_master WHERE name=?", (table,)).fetchone()
+        if temp is not None:
+            if temp[0] != "view" or temp[1] != substitute:
+                raise StateConflict(f"refusing to judge the Git bundle store through a TEMP {table}; "
+                                    "release on a connection without a projected copy")
+            if host is None:
+                continue      # our own empty stand-in: absent really does mean absent
+            # The host table appeared after an earlier call made the stand-in;
+            # a shadowing empty view would now hide real worktree rows.
+            conn.execute(f"DROP VIEW temp.{table}")
+        if host is None:
+            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT {empty} WHERE 0")
+
+
+def bundle_release(conn, digest):
+    """The append-only release record for ``digest``, or None. Never reads a byte.
+
+    A database that predates the release ledger has no such table; that is "no
+    release was ever recorded", which is what None means here."""
+    try:
+        row = conn.execute(f"SELECT bundle_sha256,commit_sha,codec,base_sha256,raw_size,payload_bytes,"
+                           f"released_at,actor,rule FROM {RELEASE_TABLE} WHERE bundle_sha256=?",
+                           (digest,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return dict(row)
+    keys = ("bundle_sha256", "commit_sha", "codec", "base_sha256", "raw_size", "payload_bytes",
+            "released_at", "actor", "rule")
+    return dict(zip(keys, tuple(row), strict=True))
+
+
+def _released_refusal(digest, release):
+    """The ONE refusal for bytes State deliberately retired (not missing)."""
+    return (f"Git bundle {digest} was released {release['released_at']} by {release['actor']} "
+            f"under {release['rule']}; the identity row remains and a new candidate must "
+            "supply the bytes again")
+
+
+def store_totals(conn):
+    """``(rows, payload_bytes)`` over the whole store.
+
+    Deliberately the only whole-store read the release does: ``payload`` holds
+    the bytes, so this walks them (measured 39 s over 2,767 rows / 12.39 GiB on
+    the production snapshot). It is the store-wide counter the ledger carries,
+    and it is what makes "store + releases = what the store held before" a
+    checkable identity instead of a claim."""
+    row = conn.execute(f"SELECT count(*), coalesce(sum(length(payload)),0) FROM {BUNDLE_STORE}").fetchone()
+    return int(row[0]), int(row[1])
+
+
+def _nonnegative(value, name, *, allow_none=False):
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise StateConflict(f"{name} must be a non-negative integer")
+    return value
+
+
+def release_plan(conn, *, window_days=0, limit=None, max_payload_bytes=None):
+    """The digests a release under ``RELEASE_RULE`` would take, and what it pins.
+
+    The single place the decision is made: ``release_bundles`` executes THIS
+    plan (so a dry run cannot disagree with the release that follows it), and
+    the operator tool's projection is this plan's own result set.
+
+    Order is the execution order and it is load-bearing: every DELTA first, then
+    every keyframe. A delta's base is declared ``REFERENCES
+    state_git_bundle_store`` and every State connection runs ``PRAGMA
+    foreign_keys=ON``, so deleting a keyframe a delta still points at does not
+    silently strand the delta - SQLite refuses it. Deltas first makes that
+    refusal unreachable, and a keyframe whose own bytes a SURVIVING delta needs
+    is reported as ``pinned`` and not selected at all.
+    """
+    _prepare_release_connection(conn)
+    window_days = _nonnegative(window_days, "window_days")
+    limit = _nonnegative(limit, "limit", allow_none=True)
+    if max_payload_bytes is not None and _nonnegative(max_payload_bytes, "max_payload_bytes") == 0:
+        raise StateConflict("max_payload_bytes must be positive")
+    rows = [dict(row) for row in conn.execute(
+        RELEASE_RULE_SQL, (window_days, f"-{window_days} days"))]
+    edges = [(row[0], row[1]) for row in conn.execute(
+        f"SELECT base_sha256, bundle_sha256 FROM {BUNDLE_STORE} WHERE codec='zstd-prefix'")]
+    eligible = {row["bundle_sha256"] for row in rows}
+    # A keyframe whose bytes a delta outside this decision still needs stays.
+    pinned = {base for base, digest in edges if base is not None and digest not in eligible}
+    by_digest = {row["bundle_sha256"]: row for row in rows}
+    releasable = [row for row in sorted(rows, key=lambda r: (r["codec"] != "zstd-prefix",
+                                                             r["bundle_sha256"]))
+                  if row["bundle_sha256"] not in pinned]
+    selected, payload, raw_size = [], 0, 0
+    for row in releasable:
+        if limit is not None and len(selected) >= limit:
+            break
+        if selected and max_payload_bytes is not None and payload + row["payload_bytes"] > max_payload_bytes:
+            break
+        selected.append(row)
+        payload += int(row["payload_bytes"])
+        raw_size += int(row["raw_size"])
+    # A release removes the STORE's copy. A pre-migration row that still holds
+    # its own ``bundle_bytes`` would keep the candidate readable through
+    # ``retained_bundle_bytes`` while the ledger said "released", so the plan
+    # refuses instead of writing a record that is false about the bytes.
+    inline = [row["commit_sha"] for row in selected
+              if conn.execute("SELECT length(bundle_bytes) FROM state_git_artifacts "
+                              "WHERE commit_sha=?", (row["commit_sha"],)).fetchone()[0]]
+    if inline:
+        raise StateConflict(
+            f"{len(inline)} selected artifact(s) still carry their own bundle_bytes "
+            f"(first: {inline[0]}); migrate them into the store with "
+            "tools/migrate_bundle_store.py before releasing")
+    selected_digests = {row["bundle_sha256"] for row in selected}
+    # The order guarantee above, checked rather than assumed: a selected
+    # keyframe whose delta survives would be refused by the foreign key halfway
+    # through the batch.
+    stranded = {base for base, digest in edges if digest not in selected_digests and base is not None}
+    clash = sorted(digest for digest in selected_digests if digest in stranded)
+    if clash:
+        raise StateConflict(f"release plan would strand a delta under keyframe(s) {clash}")
+    return {
+        "rule": RELEASE_RULE, "window_days": window_days, "limit": limit,
+        "max_payload_bytes": max_payload_bytes,
+        "rows": len(selected), "payload_bytes": payload, "raw_size": raw_size,
+        "deltas": sum(1 for row in selected if row["codec"] == "zstd-prefix"),
+        "keyframes": sum(1 for row in selected if row["codec"] == "raw"),
+        "digests": [row["bundle_sha256"] for row in selected],
+        "selected": selected,
+        "pinned": [by_digest[digest] for digest in sorted(pinned) if digest in by_digest],
+        "eligible_rows": len(rows), "eligible_payload_bytes": sum(int(row["payload_bytes"]) for row in rows),
+        "truncated": len(selected) < len(releasable),
+    }
+
+
+def release_bundles(conn, *, actor, rule=RELEASE_RULE, window_days=0, limit=200,
+                    max_payload_bytes=MAX_BUNDLE_BYTES, dry_run=False, admin=False):
+    """Release the bundles ``release_plan`` selects, in ONE transaction.
+
+    What happens, in order, all inside the caller's (or this call's) write
+    transaction:
+
+    1. the plan is computed (``release_plan``, the one deciding statement);
+    2. the store-wide ``(rows, payload)`` counters are read;
+    3. one ``state_git_bundle_releases`` row per digest is INSERTED - before any
+       DELETE, because the narrowed ``state_git_bundle_store_no_delete`` guard
+       refuses a delete that no release row names, and because the release must
+       be recorded even if the delete never runs. Each row carries the store-wide
+       ``rows_before``/``payload_before`` of the instant just before that row left
+       and ``rows_after``/``payload_after`` of the instant just after, so the
+       records CHAIN: after(k) == before(k+1), the first ``before`` is the store
+       before the release and the last ``after`` is the store today;
+    4. the digests are DELETED in the plan's order: deltas first, keyframes last;
+    5. the counters are re-read and compared with what the ledger just claimed
+       (``rows_after``/``payload_after``). A batch that does not close is rolled
+       back whole, so "released" can never be a smaller number than the bytes
+       that actually left.
+
+    ``dry_run=True`` writes nothing and returns the plan. Writing needs the
+    ADMIN DOOR: the same ``ClaimError('admin_required')`` the rest of State uses
+    (``core.state_portfolio.retire_context_run_protection``), so no route, tool
+    or future caller can move bytes out of the ledger by accident. ``rule`` must
+    be the rule this code executes: a row claiming a different version would
+    make the ledger describe a decision that was never made.
+
+    ``actor`` is recorded and is required; there is no anonymous release.
+    """
+    if not isinstance(actor, str) or not actor.strip() or len(actor) > 200:
+        raise StateConflict("a release must name its actor")
+    if rule != RELEASE_RULE:
+        raise StateConflict(f"release records the rule it executes; this code executes {RELEASE_RULE}")
+    if not dry_run and admin is not True:
+        from core.state_claims import ClaimError
+        raise ClaimError("admin_required", "only an authenticated admin may release retained Git bundle bytes")
+    if dry_run:
+        plan = release_plan(conn, window_days=window_days, limit=limit,
+                            max_payload_bytes=max_payload_bytes)
+        return {**plan, "dry_run": True, "actor": actor,
+                "released_rows": 0, "released_payload_bytes": 0, "released_raw_size": 0,
+                "rows_before": None, "payload_before": None,
+                "rows_after": None, "payload_after": None}
+    own = not conn.in_transaction
+    if own:
+        # Selection and write in ONE write transaction: the rule is judged
+        # against the database the deletes will land in, never against a
+        # snapshot another writer has already overtaken.
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        plan = release_plan(conn, window_days=window_days, limit=limit,
+                            max_payload_bytes=max_payload_bytes)
+        if not plan["selected"]:
+            if own:
+                conn.commit()
+            return {**plan, "dry_run": False, "actor": actor,
+                    "released_rows": 0, "released_payload_bytes": 0, "released_raw_size": 0,
+                    "rows_before": None, "payload_before": None,
+                    "rows_after": None, "payload_after": None}
+        rows_before, payload_before = store_totals(conn)
+        released_at = now()
+        # Each row is one instant in the ledger: what the store held just before
+        # THAT row left, and just after. Consecutive rows therefore chain
+        # (after(k) == before(k+1)) across batches as well as inside one, and the
+        # only whole-store reads are the first ``before`` and the final ``after``.
+        current_rows, current_payload = rows_before, payload_before
+        for row in plan["selected"]:
+            payload = int(row["payload_bytes"])
+            conn.execute(
+                f"INSERT INTO {RELEASE_TABLE}(bundle_sha256,commit_sha,codec,base_sha256,raw_size,"
+                "payload_bytes,released_at,actor,rule,rows_before,payload_before,rows_after,payload_after) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["bundle_sha256"], row["commit_sha"], row["codec"], row["base_sha256"],
+                 int(row["raw_size"]), payload, released_at, actor, rule,
+                 current_rows, current_payload, current_rows - 1, current_payload - payload))
+            current_rows -= 1
+            current_payload -= payload
+        for row in plan["selected"]:
+            conn.execute(f"DELETE FROM {BUNDLE_STORE} WHERE bundle_sha256=?", (row["bundle_sha256"],))
+        rows_after, payload_after = store_totals(conn)
+        if (rows_after, payload_after) != (current_rows, current_payload):
+            raise StateConflict(
+                f"release accounting does not close: the ledger claims {(current_rows, current_payload)} "
+                f"but the store holds {(rows_after, payload_after)}")
+        if own:
+            conn.commit()
+    except BaseException:
+        if own:
+            conn.rollback()
+        raise
+    return {**plan, "dry_run": False, "actor": actor, "released_at": released_at,
+            "released_rows": plan["rows"], "released_payload_bytes": plan["payload_bytes"],
+            "released_raw_size": plan["raw_size"],
+            "rows_before": rows_before, "payload_before": payload_before,
+            "rows_after": rows_after, "payload_after": payload_after}

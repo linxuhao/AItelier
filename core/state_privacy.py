@@ -78,6 +78,14 @@ PRIVATE_STATE_TABLES = frozenset({
     # zstd deltas against them) for rows whose ``bundle_bytes`` is empty. No
     # projection: an untrusted connection cannot read any of its rows.
     "state_git_bundle_store",
+    # Which candidates' bytes State released, when, by whom and under which
+    # rule. Private for the same reason the store is: the digest IS the identity
+    # of the private bundle and the row names the commit it came from, so an
+    # untrusted read would hand out the release history of candidates in
+    # projects the caller cannot open. No projection. (The ``state_git_bundle_custody``
+    # view over these two tables is refused by the same verdict, because SQLite
+    # expands it into reads of the tables themselves.)
+    "state_git_bundle_releases",
     # Who is working on what (design/multi-driver-coop.md §4.2). The declared
     # workspace, request key and every history row (release reasons) are
     # private; a public read of an OPENED project sees only the projected

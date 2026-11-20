@@ -22,7 +22,12 @@ Rows already migrated are skipped, so an interrupted run is resumed by
 running it again; a rerun is a no-op. ``unrecognized`` rows, malformed
 references and rows whose bytes do not match their digest are never touched
 (reported, exit status 1). ``--verify`` reads every row back through the
-product reader and checks its digest.
+product reader and checks its digest. A digest the release ledger
+(``state_git_bundle_releases``) records was retired on purpose, so it is
+reported as ``released`` and not as a failure: ``released`` and "missing or
+corrupt" are different answers, and a healthy database must verify after any
+release. A row with NO release record whose bytes are gone, malformed or do not
+match its digest is still a failure (exit status 1).
 
 ``--dry-run`` opens the database read-only and encodes into a throwaway
 temporary store (seeded with the database's existing store rows) to report the
@@ -43,7 +48,8 @@ copy, not for a second full-size copy; put it on a filesystem that has room):
     3. sqlite3 DB "VACUUM INTO '/path/with/room/new.db'"
     4. Verify the copy: sqlite3 new.db "PRAGMA integrity_check; PRAGMA foreign_key_check;"
        and python tools/migrate_bundle_store.py /path/with/room/new.db --verify --dry-run
-       (every row must restore its exact digest; "to migrate" must be 0).
+       (every unreleased row must restore its exact digest, a released digest is
+       reported released; "to migrate" must be 0).
     5. Swap: mv DB DB.pre-compaction (with any DB-wal / DB-shm), move new.db to DB,
        start the server, check a candidate materializes, then remove the old file.
 """
@@ -61,8 +67,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.state_attempt_schema import EXTRA_SCHEMA, _statements  # noqa: E402
 from core.state_git_artifacts import (  # noqa: E402
-    BUNDLE_STORE, RELEASE_TABLE, git_custody, load_stored_bundle, retained_bundle_bytes,
-    store_bundle)
+    BUNDLE_STORE, RELEASE_TABLE, bundle_release, git_custody, load_stored_bundle,
+    retained_bundle_bytes, store_bundle)
 from core.state_graph import StateConflict  # noqa: E402
 
 ARTIFACTS = "state_git_artifacts"
@@ -215,7 +221,7 @@ def migrate(path, *, dry_run=False, batch_size=4, limit=None, include_legacy=Fal
         log(f"... rowid<={after}: migrated {summary['migrated']} "
             f"({summary['raw_bytes_moved']} -> {summary['stored_bytes_added']} bytes)", file=sys.stderr)
     if verify:
-        summary["verified"], summary["verify_failed"] = _verify(conn)
+        summary["verified"], summary["verify_released"], summary["verify_failed"] = _verify(conn)
     summary["to_migrate_remaining"] = sum(
         1 for r in conn.execute(f"SELECT rowid, bundle_sha256, retained_ref, length(bundle_bytes) AS n "
                                 f"FROM {ARTIFACTS}") if r["n"] and _eligible(r, include_legacy) is None)
@@ -224,8 +230,19 @@ def migrate(path, *, dry_run=False, batch_size=4, limit=None, include_legacy=Fal
 
 
 def _verify(conn):
-    """Every row restores bytes with its own digest through the product reader."""
-    ok, failed = 0, []
+    """Every row restores bytes with its own digest through the product reader.
+
+    Returns ``(ok, released, failed)``. The release ledger decides the middle
+    one: a StateConflict is classified by whether
+    ``bundle_release(conn, digest)`` names a release record - never by matching
+    the refusal's prose, and the ledger read touches no payload. A recorded
+    release means State retired those bytes on purpose, so the row is counted
+    as released and stays out of ``failed``; "released" and "missing or corrupt"
+    are different facts and a verifier that merged them failed every database
+    the release path had just cleaned up. A row with NO release record keeps
+    today's behaviour: gone, malformed or digest-mismatched bytes are a failure.
+    """
+    ok, released, failed = 0, 0, []
     conn.execute("BEGIN")
     try:
         for (rowid,) in conn.execute(f"SELECT rowid FROM {ARTIFACTS} ORDER BY rowid").fetchall():
@@ -235,6 +252,9 @@ def _verify(conn):
                 reason = None if hashlib.sha256(data).hexdigest() == row["bundle_sha256"] \
                     else "bytes do not match bundle_sha256"
             except StateConflict as exc:
+                if bundle_release(conn, row["bundle_sha256"]) is not None:
+                    released += 1
+                    continue
                 reason = str(exc)
             if reason is None:
                 ok += 1
@@ -242,7 +262,7 @@ def _verify(conn):
                 failed.append({"rowid": rowid, "commit_sha": row["commit_sha"], "reason": reason})
     finally:
         conn.execute("ROLLBACK")
-    return ok, failed
+    return ok, released, failed
 
 
 def main(argv=None):

@@ -49,23 +49,72 @@ declares the `channels` capability). Design: step 19, §7.2.
 
 ## Setup
 
-1. Create a Slack app, enable **Socket Mode**, and create an app-level token with
-   `connections:write` (starts `xapp-`).
-2. Bot token scopes: `im:history`, `chat:write`, `im:write`; subscribe to the bot event
-   `message.im`; in App Home allow users to send messages to the app. Install it to the
-   workspace (bot token starts `xoxb-`).
-3. Put the tokens, one per file, in `$HOME/.aitelier-secrets/slack-app-token` and
-   `$HOME/.aitelier-secrets/slack-bot-token` (mode 0600). They are read, never logged.
-   The directory is HOME-relative and fixed: no env var moves it
-   (`AITELIER_SECRETS_DIR` does not), for this plugin or for the host that decides to
-   load it. With either missing the channel registers as disconnected and does nothing.
-4. Restart the steward. The steward's profile loads this plugin only when both files
-   exist, and that is checked when the profile is written, at the steward's start:
-   tokens added to a running steward load nothing. Until the restart the dashboard's
-   Channels tab shows no status for Slack at all (or, if it ran before, its last report);
-   after it, `connected` or why not.
-5. Run one instance per app: Slack spreads Socket Mode events over all of an app's open
-   connections, so a second process would receive part of the owner's messages.
+One Slack app per steward, and one running steward per app: Slack spreads a Socket Mode
+app's events over all of its open connections, so a second process would receive part of
+the owner's messages.
+
+### A. From the manifest (recommended)
+
+[`slack-app-manifest.json`](slack-app-manifest.json) describes exactly the app this
+plugin needs: Socket Mode on, no Request URL, the bot scopes `chat:write`, `im:history`,
+`im:write`, the one bot event `message.im`, and a Messages tab people can write in. It
+holds no token and no URL.
+
+1. **Create the app.** At <https://api.slack.com/apps>: **Create New App → From a
+   manifest**, pick the workspace, choose the **JSON** tab, replace its content with the
+   whole of `slack-app-manifest.json`, then **Next → Create**.
+2. **App-level token.** **Basic Information → App-Level Tokens → Generate Token and
+   Scopes**: any name, scope `connections:write`, **Generate**. Copy the token (starts
+   `xapp-`).
+3. **Install.** **Install App → Install to Workspace → Allow**. Copy the **Bot User OAuth
+   Token** (starts `xoxb-`).
+
+Then save the two tokens. Paste each one at its prompt: `read -rs` does not echo it, so
+it never reaches the screen, the shell history or a chat:
+
+```sh
+mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+( umask 077
+  read -rsp 'xapp- token: ' t && printf '%s\n' "$t" > ~/.aitelier-secrets/slack-app-token; echo
+  read -rsp 'xoxb- token: ' t && printf '%s\n' "$t" > ~/.aitelier-secrets/slack-bot-token; echo )
+chmod 600 ~/.aitelier-secrets/slack-app-token ~/.aitelier-secrets/slack-bot-token
+```
+
+Then **restart the steward** (see below), open the app in Slack (**Apps → AItelier
+Steward**, Messages tab) and write to it.
+
+### B. By hand
+
+Create an app **From scratch**, then: enable **Socket Mode** and make an app-level token
+with `connections:write` (`xapp-`); bot token scopes `chat:write`, `im:history`,
+`im:write`; **Event Subscriptions** on, bot event `message.im`, no Request URL; **App
+Home → Messages Tab** on, with "Allow users to send Slash commands and messages from the
+messages tab" ticked; do not turn on **Agents & AI Apps**. Install it to the workspace
+(`xoxb-`), then save the tokens and restart as in A.
+
+### Fixing an existing app
+
+An app made from a template (Slack's bolt starter agent, for instance) can carry an
+Event Subscriptions Request URL (an ngrok address) and the **Agents & AI Apps** feature;
+with the latter a DM to the bot arrives in an assistant thread, which this plugin does not
+take, so nothing reaches the steward. Open the app's **App Manifest** page, replace the
+whole manifest with `slack-app-manifest.json` (JSON tab), and **Save Changes**: that
+turns Socket Mode on and removes the Request URL, the assistant settings and any scope or
+event the plugin does not use. If Slack then asks to reinstall the app, do so; if the Bot
+User OAuth Token shown afterwards differs from the saved one, save it again as above. The
+app-level token is kept.
+
+### Where the tokens live, and the restart
+
+- The tokens are `$HOME/.aitelier-secrets/slack-app-token` and
+  `$HOME/.aitelier-secrets/slack-bot-token`, one token per file, mode 0600. They are read,
+  never logged. The directory is HOME-relative and fixed: no env var moves it
+  (`AITELIER_SECRETS_DIR` does not), for this plugin or for the host that decides to load
+  it. With either missing the channel registers as disconnected and does nothing.
+- The steward's profile loads this plugin only when both files exist, and that is checked
+  when the profile is written, at the steward's start: tokens added to a running steward
+  load nothing. Until the restart the dashboard's Channels tab shows no status for Slack
+  at all (or, if it ran before, its last report); after it, `connected` or why not.
 
 The Slack SDK (`@slack/socket-mode` 3.1.1, `@slack/web-api` 8.3.0, pinned exactly) is a
 dependency of the DSH runtime install (`integrations/dsh-driver/package.json`), and is
@@ -132,5 +181,8 @@ These hold for every owner channel (Slack and WeChat):
 ## Tests
 
 `node --test --test-concurrency=1 test/slack.test.mjs` - fake socket and web clients, no
-network. The last test loads the real SDK from `integrations/dsh-driver/node_modules`, so
-run `npm ci` there first.
+network. Two tests load the real SDK from `integrations/dsh-driver/node_modules`, so
+run `npm ci` there first. The last test pins `slack-app-manifest.json` to the plugin:
+Socket Mode on, no Request URL and no token in it, bot scopes exactly those of every Web
+API method `index.mjs` calls plus `im:history` for its one event `message.im`, and no
+Agents & AI Apps feature.

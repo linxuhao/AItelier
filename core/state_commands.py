@@ -1268,6 +1268,13 @@ class ReportChannelStatus(Project):
     qr_svg: str | None = None
 
 
+class CompleteOwnerChannelLoginRequest(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    request_id: str = Field(min_length=1, max_length=200)
+    # {requested: true} or {refused, retry_after_s?}: checked by the service.
+    result: dict[str, Any]
+
+
 class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
@@ -1306,6 +1313,7 @@ READ_REQUESTS = {
     "list_steward_memory_requests": ListStewardMemoryRequests,
     "list_steward_schedules": ListStewardSchedules,
     "list_owner_channels": Empty, "message_sources": MessageSources,
+    "list_owner_channel_login_requests": Empty,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1385,6 +1393,8 @@ WRITER_ONLY_READS = frozenset({
     "list_steward_schedules",
     # Step 19: the owner's channel bindings and the messages' sources. Private tables.
     "list_owner_channels", "message_sources",
+    # Step 19: the owner's pending requests for a new WeChat login QR. A private table.
+    "list_owner_channel_login_requests",
 })
 
 
@@ -1450,6 +1460,7 @@ WRITE_REQUESTS = {
     "fire_steward_schedule": FireStewardSchedule,
     "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
     "record_channel_delivery": RecordChannelDelivery, "report_channel_status": ReportChannelStatus,
+    "complete_owner_channel_login_request": CompleteOwnerChannelLoginRequest,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1818,6 +1829,8 @@ def _handlers(service) -> dict:
         "report_channel_status": service.channels.report_channel_status,
         "list_owner_channels": service.channels.list_owner_channels,
         "message_sources": service.channels.message_sources,
+        "list_owner_channel_login_requests": service.channels.list_login_requests,
+        "complete_owner_channel_login_request": service.channels.complete_login_request,
     }
 
 
@@ -1902,6 +1915,9 @@ def _driver_defaults(service, action, arguments):
 # own message went. None of them approves or declines on the steward's say.
 # report_channel_status (also the host's) only replaces a channel's status row
 # (connected, a detail line, the WeChat login QR as a checked SVG) for the dashboard.
+# complete_owner_channel_login_request (also the host's, run in code) only records what
+# the WeChat bridge answered to the owner's request for a new login QR: {requested} or
+# {refused, retry_after_s?}, never the QR.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1914,7 +1930,8 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # not re-injected on every wake. Acknowledgement only; resolve stays closed.
     "acknowledge_driver_message",
     "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
-    "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status"})
+    "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status",
+    "complete_owner_channel_login_request"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

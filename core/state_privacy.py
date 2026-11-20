@@ -105,6 +105,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # Each binding attempt by its channel message (who sent it, bound or refused), so
     # a redelivered attempt is answered once. No projection.
     "state_owner_channel_bind_attempts",
+    # The owner's requests for a new WeChat login QR and what the bridge answered (never
+    # the QR itself). No projection.
+    "state_owner_channel_login_requests",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

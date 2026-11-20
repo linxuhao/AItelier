@@ -11,9 +11,10 @@ Scheduled reminders (step 16, design-steward 7.4): the owner creates, edits,
 deletes and previews them here; the list is the owner's or the steward's. The
 steward itself writes them through its State commands.
 
-Chat channels (step 19, design-steward 7.2): the owner issues a binding code, unbinds
-and picks the default channel here (owner session only); the binding list and the
-messages' sources are the owner's (the steward reads them through its State queries).
+Chat channels (step 19, design-steward 7.2): the owner issues a binding code, unbinds,
+picks the default channel and asks for a new WeChat login QR here (owner session only);
+the binding list and the messages' sources are the owner's (the steward reads them
+through its State queries).
 """
 import asyncio
 from typing import Literal
@@ -257,6 +258,20 @@ def issue_code(channel: Channel, service=Depends(get_service)):
         return service.channels.issue_code(channel)
     except StateGraphError as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@router.post("/channels/{channel}/qr", dependencies=[Depends(authz.require_writer)])
+def request_login_qr(channel: Literal["wechat"], service=Depends(get_service)):
+    """A new WeChat login QR: one pending request the steward's host runs in code (it asks
+    the bridge); the QR then appears in GET /channels like any other, never in this answer.
+    A request still pending is answered again rather than doubled. Each channel's newest
+    request (its status: pending, done with the bridge's answer, or expired when no host
+    ran it within 2 minutes) is in GET /channels as `login_request`."""
+    _owner(service)
+    try:
+        return service.channels.request_login(channel)
+    except StateGraphError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.delete("/channels/{channel}", dependencies=[Depends(authz.require_writer)])

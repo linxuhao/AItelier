@@ -983,6 +983,22 @@ function causeOf(value) {
   return (value && typeof value === 'object' && typeof value.stack === 'string') ? value.stack : value;
 }
 
+/** The failure class worth naming before the cause, or '' when the cause already
+ *  names it.
+ *
+ *  `causeOf` returns the stack, whose first line is `<name>: <message>`, and for a
+ *  generic error `failureClass` returns exactly that `<name>` - so prepending it read
+ *  `uncaught exception: Error: Error: kaboom` (iss-489d473442794c3c). The classes
+ *  `failureClass` exists to add - `HTTP 500`, `connection-level ECONNRESET
+ *  after_send=true`, `abort`, `malformed body` - are not what a stack's first line
+ *  begins with, so they are kept: those say something the cause cannot.
+ */
+function informativeClass(error) {
+  const name = failureClass(error);
+  const first = String(causeOf(error) ?? '').split('\n')[0].trim();
+  return first.startsWith(name) ? '' : name;
+}
+
 const diagnosed = new WeakSet();
 
 /**
@@ -1018,7 +1034,11 @@ const diagnosed = new WeakSet();
  *  because `exit code 1` alone cannot tell those apart, which is exactly what two
  *  resident drivers left behind on 2026-11-19 (iss-6df19ff31a3b449b). The same class
  *  is added to an uncaught failure and an unhandled rejection, whose first line
- *  (`TypeError: fetch failed`) names no status and no code either.
+ *  (`TypeError: fetch failed`) names no status and no code either. In both places it
+ *  is added only when it says something the cause's own first line does not: a
+ *  generic error's class IS that line's first token (`Error: kaboom`), so naming it
+ *  again read `uncaught exception: Error: Error: kaboom` - a line whose class is
+ *  doubled, not named (iss-489d473442794c3c).
  *
  * Installed by `apply()`, so it covers the runtime process and nothing else - and it
  * is NOT exported, because this file's export surface is pinned and neither that pin
@@ -1037,15 +1057,18 @@ function installExitDiagnosis(target = process) {
   target.on('uncaughtExceptionMonitor', (error, origin) => {
     if (!spoke) {
       const kind = origin === 'unhandledRejection' ? 'unhandled rejection' : 'uncaught exception';
-      speak(`${kind}: ${failureClass(error)}`, causeOf(error));
+      const named = informativeClass(error);
+      speak(named ? `${kind}: ${named}` : kind, causeOf(error));
     }
   });
   target.on('exit', code => {
     if (spoke || !code) return;  // a clean exit says nothing, a named death says it once
     const recorded = exitCause();
-    speak(recorded
-      ? `exit code ${code}: ${failureClass(recorded.error)} (${recorded.where})`
-      : `exit code ${code}`, recorded ? causeOf(recorded.error) : '');
+    if (!recorded) { speak(`exit code ${code}`, ''); return; }
+    const named = informativeClass(recorded.error);
+    speak(named
+      ? `exit code ${code}: ${named} (${recorded.where})`
+      : `exit code ${code} (${recorded.where})`, causeOf(recorded.error));
   });
   return true;
 }

@@ -151,6 +151,68 @@ test('the exit record names the failure class, not only the exit code', async ()
   }
 });
 
+test('a generic error names its class once, and a class its cause lacks is still named', async () => {
+  // Measured on main (iss-489d473442794c3c, deterministic in 0.53 s): the runtime's
+  // own exit line read `AItelier DSH exit: uncaught exception: Error: Error: kaboom`.
+  // The class had been prepended to a cause whose first line already begins with it,
+  // because `failureClass` falls back to the error's `name` and a stack's first line
+  // is `<name>: <message>`. Both halves are witnessed here, because the cheap repair
+  // for the first half - dropping the class from the line - makes the second silent:
+  // a status, a transport code, an abort and an undecodable body are classes the
+  // cause's first line does NOT carry, and they are the whole reason the class exists
+  // (the reading two resident drivers could not make on 2026-11-19, iss-6df19ff31a3b449b).
+  const rows = [
+    // The measured rows, byte for byte.
+    { what: 'an uncaught generic error',
+      script: 'setTimeout(() => { throw new Error(\'kaboom\'); }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: Error: kaboom' },
+    { what: 'an unhandled generic rejection',
+      script: 'Promise.reject(new Error(\'the session log is corrupt\'));',
+      want: 'AItelier DSH exit: unhandled rejection: Error: the session log is corrupt' },
+    // Any other name is the same shape: the stack's first line carries it.
+    { what: 'an uncaught error whose name is not `Error`',
+      script: 'setTimeout(() => { throw new RangeError(\'boom\'); }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: RangeError: boom' },
+    // The deliberate exit's own line is composed the same way and doubled the same way.
+    { what: 'a deliberate exit recording a generic cause',
+      script: 'recordExitCause(new Error(\'boom\'), \'events pump\'); process.exit(1);',
+      want: 'AItelier DSH exit: exit code 1 (events pump): Error: boom' },
+    // The classes that must survive: none of them is a stack line's first token, and
+    // each of the four reasons this classifier exists is here at least once.
+    { what: 'an uncaught answered 500',
+      script: 'setTimeout(() => { throw Object.assign(new Error(\'verdict\'), { status: 500 }); }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: HTTP 500: Error: verdict' },
+    { what: 'an uncaught reset socket',
+      script: 'setTimeout(() => { const error = new TypeError(\'fetch failed\');'
+        + ' const cause = new Error(\'other side closed\'); cause.code = \'ECONNRESET\';'
+        + ' error.cause = cause; throw error; }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: connection-level ECONNRESET '
+        + 'after_send=true: TypeError: fetch failed' },
+    { what: 'an uncaught cancellation',
+      script: 'setTimeout(() => { const error = new Error(\'owner cancelled the turn\');'
+        + ' error.name = \'AbortError\'; throw error; }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: abort: AbortError: owner cancelled the turn' },
+    { what: 'an uncaught undecodable body',
+      script: 'setTimeout(() => { throw new SyntaxError(\'Unexpected token < in JSON\'); }, 0);',
+      want: 'AItelier DSH exit: uncaught exception: malformed body: '
+        + 'SyntaxError: Unexpected token < in JSON' },
+  ];
+  for (const row of rows) {
+    const script = [
+      `import { apply } from ${JSON.stringify(RUNTIME)};`,
+      `import { recordExitCause } from ${JSON.stringify(EXIT_CAUSE)};`,
+      'apply({ provide() {} });',
+      row.script,
+    ].join('\n');
+    const { code, stderr } = await runChild(script);
+    assert.equal(code, 1, `${row.what}: the ending is unchanged, only its line\n${stderr}`);
+    // The exact line, not a substring: `Error: Error: kaboom` contains the right
+    // class and is exactly the defect.
+    const named = stderr.split('\n').filter(line => line.startsWith('AItelier DSH exit: '));
+    assert.deepEqual(named, [row.want], `${row.what}: one line, the class named once\n${stderr}`);
+  }
+});
+
 test('the exit class is the retry log\'s class, extended to the failures the retry refuses', () => {
   // Agreement first, so the two classifiers cannot drift: for everything the retry
   // layer retries, the exit record says exactly what the retry line says.

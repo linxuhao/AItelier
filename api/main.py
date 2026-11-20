@@ -49,6 +49,11 @@ from api.steward_routers import router as steward_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
+# The reader the State guard reaches its declaration verdict with. Imported as a
+# MODULE, not as the functions, so the /health witness calls the very objects
+# the guard calls (api/state_http imports them from here) and a test that
+# rewrites the reader rewrites both.
+from api import state_verdict
 from api.novel_routers import router as novel_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
@@ -767,6 +772,80 @@ def _health_probe_pool() -> _ThreadPoolExecutor:
         return _HEALTH_PROBE
 
 
+def _state_door_verdicts() -> dict:
+    """The verdict the request-time guard would reach for each State route.
+
+    The question this answers is the one the door asks and /health used to stay
+    silent about: `_router_guard` (api/state_http) reads a route's declaration
+    and, for the action-dispatch family, calls
+    `binding_for(route.endpoint, <the action in the URL>, route.path)` and
+    refuses the request when that binding is not `ok`. That refusal is a 403 on
+    EVERY public action, and nothing standing noticed one: on 2026-11-19 a
+    defect in the reader refused every public action over
+    `POST /api/state/query/{action}` for ~110 minutes while /health said `ok`.
+
+    So the same call is made here, per route, without a request:
+
+    * a declaration is part of the dispatch family exactly when the guard would
+      say so - kind `read` (the guard branches on the KIND before the action, so
+      the write and director families keep their own verdicts) and action
+      `None`, i.e. the action lives in the URL. Each dispatch route is judged
+      against every PUBLIC action the visibility table allows
+      (`is_public_read`, the table the guard consults), through exactly
+      `binding_for(endpoint, action, path)`. The row names the path, says
+      `ok`/`refused`, and lists the actions that were refused.
+    * a non-dispatch route is reported when `route_verdict` already says its
+      declaration contradicts its handler (`refused-declaration-mismatch`).
+      Those are refusals too, so they are named rather than averaged away.
+
+    `verdict` is `refused` when either list shows a refusal; `ok` otherwise.
+    Cheap and side-effect free: no State service, no network, no request - the
+    reader's own analysis is cached and re-checks every identity it resolved,
+    so a rewritten module is re-read instead of served stale. Nothing here is
+    cached: the rows are recomputed on every call, which is what makes this a
+    witness of the code loaded NOW. It is SYNCHRONOUS; `health_probe` is what
+    keeps it off the event loop.
+
+    The reader is the thing being watched, so its failure to ANSWER must not
+    take liveness down: an exception becomes `verdict: unknown` plus a reason
+    naming it, never a raised error.
+    """
+    from core.state_commands import READ_REQUESTS, is_public_read
+
+    try:
+        # Derived per call from the one visibility table, never frozen: an
+        # action published later is judged by this field the same day.
+        actions = sorted(action for action in READ_REQUESTS if is_public_read(action))
+        dispatch: list = []
+        mismatched: list = []
+        for path, route in sorted(state_verdict.state_route_paths(app).items()):
+            endpoint = getattr(route, "endpoint", None)
+            declaration = getattr(endpoint, state_verdict.DECLARATION_ATTR, None)
+            if (declaration is not None and declaration[0] == "read"
+                    and declaration[1] is None):
+                route_path = getattr(route, "path", "") or ""
+                refused = [action for action in actions
+                           if not state_verdict.binding_for(
+                               endpoint, action, route_path).ok]
+                dispatch.append({"path": path,
+                                 "verdict": "refused" if refused else "ok",
+                                 "refused_actions": refused})
+                continue
+            if state_verdict.route_verdict(route) == "refused-declaration-mismatch":
+                mismatched.append(path)
+    except Exception as exc:
+        return {"verdict": "unknown", "dispatch": [], "declaration_mismatch": [],
+                "reason": f"could not judge the state door: {type(exc).__name__}: {exc}"}
+    return {
+        "verdict": ("refused"
+                    if mismatched or any(row["verdict"] != "ok" for row in dispatch)
+                    else "ok"),
+        "dispatch": dispatch,
+        "declaration_mismatch": sorted(mismatched),
+        "reason": None,
+    }
+
+
 def health_check() -> dict:
     """系统探针 — the /health answer, read fresh on every call.
 
@@ -791,11 +870,32 @@ def health_check() -> dict:
     tell "the bytes on disk changed" from "the loaded code changed", and compares
     it with a digest recomputed from the commit it meant to deploy.
 
-    SYNCHRONOUS, and it BLOCKS: reading and sha256-ing the export and reading
-    /proc/self/stat are short but they are still disk and syscall work. That is
-    why the ROUTE (`health_probe`, below) never calls it on the event loop and
-    never on a shared anyio slot - it hands it to the probe pool. This function
-    keeps its name because a caller with no event loop can still ask it directly
+    `state_door` reports, per State route, the verdict the REQUEST-TIME guard
+    (`api/state_http._router_guard`) would reach for it, without sending a
+    request: the action-dispatch family (`POST /api/state/query/{action}`,
+    declared action None) is judged against every public action the visibility
+    table allows, through the SAME `binding_for(endpoint, action, path)` call
+    the guard makes, and the field names each route's path, whether it is
+    `ok`/`refused`, and which actions were refused; the non-dispatch routes
+    whose declaration contradicts their handler (`route_verdict` says
+    `refused-declaration-mismatch`) are listed beside them. The field's own
+    `verdict` is `refused` when either list shows one, so a door that refuses
+    traffic can be seen from outside while this process is otherwise healthy -
+    the 2026-11-19 outage (every public action 403 over the dispatch route for
+    ~110 minutes, /health `ok` throughout) was exactly that blind spot. It is
+    read fresh on every call and caches nothing of its own; the reader it asks
+    keeps its analysis cached but re-checks every identity it resolved, so a
+    rewritten module is re-read rather than answered from a stale verdict. It
+    touches no State service and no network, and a failure to JUDGE is declared
+    (`verdict: unknown` plus a reason naming the exception), never raised: a
+    witness that could 500 would take liveness down with the thing it watches.
+
+    SYNCHRONOUS, and it BLOCKS: reading and sha256-ing the export, reading
+    /proc/self/stat and running the State reader over the route table are short
+    but they are still disk and syscall work. That is why the ROUTE
+    (`health_probe`, below) never calls it on the event loop and never on a
+    shared anyio slot - it hands it to the probe pool. This function keeps its
+    name because a caller with no event loop can still ask it directly
     (tests/unit/test_task_log_stream_is_gated.py does). Nothing below is cached:
     the gate digest follows the file's CURRENT bytes and the uptime is THIS
     process's, so both fields still track their live sources. `source_identity`
@@ -807,6 +907,7 @@ def health_check() -> dict:
     return {"status": "ok", "engine": "DPE SOTA v3.0",
             "gate_harness": _gate_harness_identity(),
             "process": _process_age(),
+            "state_door": _state_door_verdicts(),
             "source_identity": {**_SOURCE_IDENTITY,
                                 "files": list(_SOURCE_IDENTITY["files"])}}
 

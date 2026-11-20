@@ -7,7 +7,10 @@
  *  the two and nothing more. In particular it never interprets a message - an approval
  *  phrase is matched and executed by the host, in code - and it never sends a channel
  *  anything but the steward's own message to its owner or a one-line answer to the sender
- *  about their own message (B2: a channel is a third party's server).
+ *  about their own message (B2: a channel is a third party's server). One such line is the
+ *  receipt (replies.received): when the host has just taken a NEW owner message into the
+ *  conversation, this code - never the model - tells the sender at once that it arrived,
+ *  at most once per channel and limits.receiptMs, best effort (see receipt()).
  *
  *  Answers to a sender who is not the bound owner are deliberately few: a binding attempt
  *  gets one line (bound / not bound), anything else gets nothing, so a stranger learns
@@ -46,6 +49,7 @@ const decided = ({ kind, target }) => {
  *  never an echo of what they wrote. */
 export const channelReplies = Object.freeze({
   bound: 'Bound: this account now talks to the steward. 已绑定：这个账号现在可以和管家对话。',
+  received: '已收到，正在处理…',
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
   unknowable: 'Not delivered, and it cannot be retried: please send it again. 未送达，且无法重试：请再发一次。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
@@ -119,7 +123,7 @@ const within = (promise, ms, what) => {
  *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000 });
+  lineMaxAgeMs: 3600000, receiptMs: 30000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -345,6 +349,29 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     if (!window || now - window.start >= 60000) { binds.set(channel, { start: now, count: 1 }); return true; }
     return ++window.count <= limits.bindPerMinute;
   };
+  // The receipt: when the host has just taken a NEW owner message (a relay that is no
+  // duplicate and carries no decision - a decision already gets its own line at once), the
+  // sender hears at once that it arrived, before the steward's answer, which takes a model turn.
+  // It is this code's fixed line, sent straight to the channel: nothing about it reaches the
+  // host, so it is no steward message, wakes nothing, answers nothing (the unanswered-owner
+  // check and the mirror never see it) and is not remembered. At most one per channel and
+  // receiptMs, the window spent by the attempt, so a burst gets one. Best effort: not
+  // awaited (the channel's next message is not held up by a slow send), a failure is
+  // logged and dropped - no retry, nothing owed.
+  const receipts = new Map();
+  const receipt = (channel, senderRef, messageRef) => {
+    const entry = registered.get(channel);
+    if (!entry) return;
+    const last = receipts.get(channel);
+    if (last !== undefined && Date.now() - last < limits.receiptMs) { log('channel_receipt_skipped', { channel, reason: 'window' }); return; }
+    receipts.set(channel, Date.now());
+    let sending;
+    try { sending = entry.send(replies.received, { replyToRef: messageRef, to: senderRef }); }
+    catch (error) { sending = Promise.reject(error); }
+    within(Promise.resolve(sending), limits.sendMs, 'send_timeout').then(
+      () => log('channel_receipt_sent', { channel }),
+      error => log('channel_receipt_failed', { channel, error: short(error) }));
+  };
   // The channel's current binding, or undefined when it has none.
   const binding = async (channel, signal) => {
     const listed = await host.list(signal);
@@ -563,6 +590,9 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         log('channel_relay_pending', { ...seen, message_id: result.message_id });
         return { accepted: false, reason: 'approval_pending' };
       }
+      // A new owner message the steward will now answer: the receipt (relay accepted means the
+      // host found the sender bound to this channel now).
+      if (!result?.duplicate && !result?.approval) receipt(channel, senderRef, messageRef);
       // A decision is answered once per channel message (answer() keeps that within the
       // process). A redelivery of a message whose line went out is not answered again; one
       // whose line never went out is: this process got no answer the first time, the host

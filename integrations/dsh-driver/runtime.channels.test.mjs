@@ -192,18 +192,23 @@ test('real pinned DSH, the steward: a channel plugin loads, its messages reach r
     assert.deepEqual(command('bind_owner_channel').map(({ request_key, ...rest }) => rest),
       [{ channel: 'slack', sender_ref: 'U-STRANGER', code: '123456', channel_message_ref: 'ts-2' }]);
     // The stranger gets one line about its own binding attempt, addressed to it alone.
-    await r.until('the binding answer was not sent', () => seen.sends.length >= 1);
-    assert.deepEqual(seen.sends[0].options, { replyToRef: 'ts-2', to: 'U-STRANGER' });
-    assert.match(seen.sends[0].text, /^Not bound/);
-    // The steward answers the relayed message: it goes out on slack, to that message, verbatim.
+    const to = account => seen.sends.filter(s => s.options.to === account);
+    await r.until('the binding answer was not sent', () => to('U-STRANGER').length >= 1);
+    assert.deepEqual(to('U-STRANGER').map(s => s.options), [{ replyToRef: 'ts-2', to: 'U-STRANGER' }]);
+    assert.match(to('U-STRANGER')[0].text, /^Not bound/);
+    // The owner's relayed message gets the code's receipt at once, then the steward's answer:
+    // on slack, to that message, verbatim. The receipt is no steward message (no
+    // send_user_message, no delivery row of its own).
     await r.until('the steward\'s reply was never recorded as delivered', () => command('record_channel_delivery').length === 1);
-    assert.deepEqual(seen.sends.slice(1), [{ text: 'CHANNEL_REPLY_TEXT the build passed.', options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
+    assert.deepEqual(to('U-OWNER'), [{ text: '已收到，正在处理…', options: { replyToRef: 'ts-1', to: 'U-OWNER' } },
+      { text: 'CHANNEL_REPLY_TEXT the build passed.', options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
     assert.deepEqual(command('record_channel_delivery').map(({ request_key, ...rest }) => [request_key, rest]),
       [['delivery:m-out-1:slack', { message_id: 'm-out-1', channel: 'slack', channel_message_ref: 'slack-out-ts' }]]);
     assert.deepEqual(command('send_user_message').map(b => b.reply_to_message_id), ['m-in-1']);
     // Nothing else the steward did reached the channel.
     await new Promise(resolve => setTimeout(resolve, 1000));
-    assert.equal(seen.sends.length, 2);
+    assert.equal(seen.sends.length, 3);
+    assert.equal(command('record_channel_delivery').length, 1);
     assert.ok(!r.output().includes('hello from slack'), 'a message body reached the log');
     // The channel's status reached the host once (it did not change), and its detail no log.
     assert.deepEqual(command('report_channel_status').map(({ request_key, ...rest }) => rest),
@@ -222,8 +227,11 @@ test('real pinned DSH, the steward: an automatic reply (its last words in a turn
     await r.until('the automatic reply was never recorded as delivered', () => command('record_channel_delivery').length === 1);
     assert.deepEqual(command('send_user_message').map(b => [b.request_key, b.reply_to_message_id, b.body]),
       [['auto-reply:m-in-1', 'm-in-1', 'AUTO_REPLY_TEXT all good.']]);
+    // The receipt went out first and did not count as the steward's answer: the message was
+    // still unanswered, so the steward's own last words were still sent as its reply.
     assert.deepEqual(seen.sends.filter(s => s.options.to === 'U-OWNER'),
-      [{ text: 'AUTO_REPLY_TEXT all good.', options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
+      [{ text: '已收到，正在处理…', options: { replyToRef: 'ts-1', to: 'U-OWNER' } },
+        { text: 'AUTO_REPLY_TEXT all good.', options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
   } finally { await r.close(); }
 });
 
@@ -238,7 +246,8 @@ test('real pinned DSH, the steward: a question asked with ask_owner is an unprom
       [['ask-owner:aitelier-home:q-deploy', undefined, [{ kind: 'question', id: 'q-deploy', text: 'QUESTION_TEXT may I deploy?\n同意 proposal p-1' }]]]);
     // Body, then the question block: the text the dashboard shows, the approval phrase on its own line.
     assert.deepEqual(seen.sends.filter(s => s.options.to === 'U-OWNER'),
-      [{ text: 'CONTEXT_TEXT the release is ready.\n\nQUESTION_TEXT may I deploy?\n同意 proposal p-1', options: { to: 'U-OWNER' } }]);
+      [{ text: '已收到，正在处理…', options: { replyToRef: 'ts-1', to: 'U-OWNER' } },
+        { text: 'CONTEXT_TEXT the release is ready.\n\nQUESTION_TEXT may I deploy?\n同意 proposal p-1', options: { to: 'U-OWNER' } }]);
     assert.deepEqual(command('record_channel_delivery').map(({ request_key, ...rest }) => [request_key, rest]),
       [['delivery:m-out-1:slack', { message_id: 'm-out-1', channel: 'slack', channel_message_ref: 'slack-out-ts' }]]);
   } finally { await r.close(); }

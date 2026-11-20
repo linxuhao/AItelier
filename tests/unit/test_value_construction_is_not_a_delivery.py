@@ -23,13 +23,17 @@ below (so a fix for one cannot hide behind the other):
 
 "By identity, never by name" is the whole safety argument, so the negatives pin
 the ways a NAME can lie: a local ``def``, a module global, a closure variable, a
-function-local import, a subclass of a response class, ``eval``, a private action
-passed INTO a response constructor, a helper whose own module binds
-``JSONResponse`` to something else, and a private action only a ``yield``
-carries. Each must still be refused.
+function-local import, a ``match`` capture, a subclass of a response class,
+``eval``, a private action passed INTO a response constructor, a helper whose own
+module binds ``JSONResponse`` to something else, a module that replaces its own
+``__builtins__``, a helper reached through ``functools.wraps``, a private action a
+``yield`` carries - directly or from a nested helper - and a response class the
+module rebinds AFTER the reader looked at it. Each must still be refused.
 """
 from __future__ import annotations
 
+import builtins
+import functools
 import linecache
 
 import pytest
@@ -138,11 +142,19 @@ def test_a_refusal_clause_that_builds_a_value_binds_the_dispatch(build):
     assert binding.delivered == frozenset(), binding
 
 
-def test_the_product_dispatch_route_binds_every_public_action():
-    """The real endpoint, not a generated stand-in: this is the regression."""
+def test_the_product_dispatch_route_binds_the_actions_it_serves():
+    """The real endpoint, not a generated stand-in: this is the regression.
+
+    Two of the actions below are public reads and one (``PRIVATE_ACTION``) is
+    not. All three must bind: the handler hands the path parameter itself to the
+    action call, so the route's declaration is that parameter's identity and
+    does not depend on which action the caller asked for. The private one is
+    listed because it is the body the negatives above use - not because the route
+    declares it publicly.
+    """
     endpoint = next(route.endpoint for route in state_router.routes
                     if getattr(route, "path", "") == TEMPLATE)
-    for action in ("get_graph", "get_attempt", "list_director_messages"):
+    for action in ("get_graph", "get_attempt", PRIVATE_ACTION):
         binding = binding_for(endpoint, action, TEMPLATE)
         assert binding.ok is True, (action, binding)
 
@@ -268,6 +280,145 @@ def _private_action_a_yield_carries():
          "    return [_call(service, action, arguments), _tail(service)]\n"))
 
 
+
+def _helper_name_bound_by_a_closure():
+    """The helper NAME is a closure variable; a harmless global has the same name.
+
+    The global the reader would resolve hands over nothing, but the object the
+    handler actually calls is the enclosing parameter.
+    """
+    leaky = lambda service: execute(service, PRIVATE_ACTION, {"project_id": GEN_PID})
+    ns = _namespace()
+    ns["_leaky"] = leaky
+    source = ("def _busy(exc):\n"
+              "    return {'detail': 'busy'}\n"
+              "def _make(_busy):\n"
+              "    def h_helper_closure(action: str, arguments: dict,\n"
+              "                         service=Depends(get_service)):\n"
+              "        try:\n"
+              "            return _call(service, action, arguments)\n"
+              "        except StateWriteBusy:\n"
+              "            return _busy(service)\n"
+              "    return h_helper_closure\n")
+    exec(compile(source, _register("h_helper_closure", source), "exec"), ns)
+    return ns["_make"](leaky)
+
+
+def _helper_name_rebound_locally():
+    """The helper name is rebound by an assignment in the handler itself."""
+    return _compiled(
+        "h_helper_rebound",
+        ("def _busy(exc):\n"
+         "    return {'detail': 'busy'}\n"
+         "def h_helper_rebound(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    _busy = _leaky\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return _busy(service)\n"),
+        {"_leaky": lambda service: execute(service, PRIVATE_ACTION,
+                                           {"project_id": GEN_PID})})
+
+
+def _response_class_captured_by_a_match_pattern():
+    """`case JSONResponse:` CAPTURES the name; it is not a comparison."""
+    return _compiled(
+        "h_match_capture",
+        ("def h_match_capture(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    match action:\n"
+         "        case 'busy':\n"
+         "            pass\n"
+         "        case JSONResponse:\n"
+         "            pass\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return JSONResponse(service)\n"))
+
+
+def _builtin_captured_by_a_match_sequence_pattern():
+    """The capture sits inside a sequence pattern: `case [str]:` binds `str`."""
+    return _compiled(
+        "h_match_sequence_capture",
+        ("def h_match_sequence_capture(action: str, arguments: dict,\n"
+         "                             service=Depends(get_service)):\n"
+         "    match [action]:\n"
+         "        case [str]:\n"
+         "            pass\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return str(service)\n"))
+
+
+def _module_rebinds_its_own_builtins():
+    """The module replaces `__builtins__` so `str` is a State action runner."""
+    ns = _namespace()
+    leaky = lambda service: execute(service, PRIVATE_ACTION, {"project_id": GEN_PID})
+    ns["__builtins__"] = dict(vars(builtins), str=leaky)
+    source = ("def h_builtins_override(action: str, arguments: dict,\n"
+              "                          service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy:\n"
+              "        return str(service)\n")
+    exec(compile(source, _register("h_builtins_override", source), "exec"), ns)
+    return ns["h_builtins_override"]
+
+
+def _helper_reached_through_functools_wraps():
+    """`@functools.wraps` makes the WRAPPER run while its source reads as the inner def."""
+    return _compiled(
+        "h_wraps_helper",
+        ("def _deco(fn):\n"
+         "    @functools.wraps(fn)\n"
+         "    def wrapper(*a, **k):\n"
+         f"        return execute(a[0], {PRIVATE_ACTION!r},\n"
+         f"                       {{'project_id': {GEN_PID!r}}})\n"
+         "    return wrapper\n"
+         "@_deco\n"
+         "def _busy(exc):\n"
+         "    return {'detail': 'busy'}\n"
+         "def h_wraps_helper(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return _busy(service)\n"),
+        {"functools": functools})
+
+
+def _private_action_a_nested_generator_yields():
+    """The generator yields a CALL; only the nested helper spells the action."""
+    return _compiled(
+        "h_nested_yield",
+        ("def _leaf(service):\n"
+         f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {GEN_PID!r}}})\n"
+         "def _tail(service):\n"
+         "    yield _leaf(service)\n"
+         "def h_nested_yield(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return list(_tail(service))\n"))
+
+
+def _response_class_rebound_after_the_read():
+    """A global rebound AFTER the reader looked at it must not keep a cached pass."""
+    ns = _namespace()
+    source = ("def h_rebound_class(action: str, arguments: dict,\n"
+              "                       service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy:\n"
+              "        return JSONResponse({'detail': 'busy'})\n")
+    exec(compile(source, _register("h_rebound_class", source), "exec"), ns)
+    handler = ns["h_rebound_class"]
+    assert binding_for(handler, "get_graph", TEMPLATE).ok is True
+    ns["JSONResponse"] = ns["_LeakyResponse"]
+    return handler
+
+
+
 @pytest.mark.parametrize("build", [_local_builder_class, _response_subclass,
                                    _eval_in_a_delivered_position,
                                    _private_action_inside_a_response_constructor,
@@ -276,7 +427,15 @@ def _private_action_a_yield_carries():
                                    _shadowed_builtin_in_a_closure,
                                    _shadowed_builtin_by_a_local_import,
                                    _helper_whose_own_module_shadows_the_response_class,
-                                   _private_action_a_yield_carries])
+                                   _private_action_a_yield_carries,
+                                   _helper_name_bound_by_a_closure,
+                                   _helper_name_rebound_locally,
+                                   _response_class_captured_by_a_match_pattern,
+                                   _builtin_captured_by_a_match_sequence_pattern,
+                                   _module_rebinds_its_own_builtins,
+                                   _helper_reached_through_functools_wraps,
+                                   _private_action_a_nested_generator_yields,
+                                   _response_class_rebound_after_the_read])
 def test_a_delivery_the_reader_cannot_explain_is_still_refused(build):
     binding = binding_for(build(), "get_graph", TEMPLATE)
     assert binding.ok is False, (binding,)

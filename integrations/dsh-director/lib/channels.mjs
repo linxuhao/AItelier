@@ -87,6 +87,72 @@ const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_a
  *  is still running. The message is held and asked again; it is never dropped. */
 const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
+/** A phone chat shows a long message badly (owner, 2026-11-20): the steward's message goes to
+ *  a channel cut to at most `mirrorChars` characters, followed by MORE. The cut falls in the
+ *  second half of what fits: before the last blank line (a paragraph's title is never the last
+ *  line kept), else at the last line end, else after the last sentence end (`.` only before a
+ *  space: never inside 13.6x or v1.2.3), else at the bound - stepped back before a run of
+ *  word, number or URL characters it would split (never `见 Q1` for `见 Q12`). Headings, bold
+ *  and table rules render on neither channel and are flattened on both; WeChat also loses
+ *  inline code marks. The owner's record and the dashboard keep the whole text: only the
+ *  channel copy is shaped. An approval phrase line is never cut: it loses only the code or
+ *  bold marks around it (the phrase itself has none, and a copied line must match exactly) and
+ *  stays in place, or, when the text is cut, comes after what is kept, before MORE. A text with
+ *  a line that is a binding code goes exactly as written. */
+export const MORE = '\n…（全文见面板）';
+const MORE_CHARS = Array.from(MORE).length;
+const VERBATIM = /同意 proposal |拒绝 proposal /;
+const CJK_END = /[。！？；]/;
+const LATIN_END = /[.!?;]/;
+const TOKEN = /[A-Za-z0-9_./:#?&=%-]/;
+const TABLE_RULE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+/** One line as a chat shows it well; null drops it (a table's rule row). */
+const flattenLine = (line, channel) => {
+  if (VERBATIM.test(line)) return line.replace(/`|\*\*/g, '');
+  if (TABLE_RULE.test(line)) return null;
+  let flat = line.replace(/^(\s*)#{1,6}\s+/, '$1').replace(/\*\*(.+?)\*\*/g, '$1');
+  if (channel === 'wechat') flat = flat.replace(/`([^`\n]+)`/g, '$1');
+  if (/^\s*\|.*\|\s*$/.test(flat)) flat = flat.trim().slice(1, -1).split('|').map(cell => cell.trim()).join(' · ');
+  return flat;
+};
+/** The first `budget` code points of `points`, cut at the best boundary in their second half. */
+const cutAt = (points, budget) => {
+  const head = points.slice(0, budget);
+  const half = head.length / 2;
+  let end = -1;
+  for (let i = head.length - 1; i >= half && end < 0; i--) {
+    if (head[i] !== '\n') continue;
+    let k = i - 1;
+    while (k >= 0 && (head[k] === ' ' || head[k] === '\t')) k--;
+    if (k >= 0 && head[k] === '\n') end = k;
+  }
+  if (end < 0 && head.lastIndexOf('\n') >= half) end = head.lastIndexOf('\n');
+  for (let i = head.length - 1; end < 0 && i >= half; i--) {
+    if (CJK_END.test(head[i]) || (LATIN_END.test(head[i]) && /^\s?$/.test(points[i + 1] ?? ''))) end = i + 1;
+  }
+  if (end < 0) {
+    end = head.length;
+    if (TOKEN.test(points[end] ?? '')) {
+      let start = end;
+      while (start > 0 && TOKEN.test(head[start - 1])) start--;
+      if (start >= half) end = start;
+    }
+  }
+  return head.slice(0, end).join('').trimEnd();
+};
+export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
+  if (body.split('\n').some(line => CODE.test(line.trim()))) return body;
+  if (!(max > MORE_CHARS)) max = CHANNEL_LIMITS.mirrorChars;
+  const lines = body.split('\n').map(line => flattenLine(line, channel)).filter(line => line !== null);
+  const shaped = lines.join('\n');
+  if (!shaped.trim()) return body;
+  if (Array.from(shaped).length <= max) return shaped;
+  const phrases = lines.filter(line => VERBATIM.test(line));
+  const rest = Array.from(lines.filter(line => !VERBATIM.test(line)).join('\n').trim());
+  const budget = max - MORE_CHARS - phrases.reduce((sum, line) => sum + Array.from(line).length + 1, 0);
+  const kept = budget > 0 ? cutAt(rest, budget) : '';
+  return [kept, ...phrases].filter(Boolean).join('\n') + MORE;
+}
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
 /** A message is owed while its delivery or the line its decision owes has not been
@@ -121,10 +187,11 @@ const within = (promise, ms, what) => {
  *  (1+2+4+8+16 s: a backend restart); an answer line answerAttempts times, answerRetryMs
  *  between tries; the owed store is re-asked every owedMs, at most owedMax messages; a decision
  *  line is never sent more than lineMaxAgeMs after the owner wrote it (the earlier of the
- *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
+ *  channel's time and when it was first owed here): later, the dashboard alone shows it. The
+ *  steward's message reaches a channel as at most mirrorChars characters (channelText). */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000 });
+  lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000, mirrorChars: 600 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -774,8 +841,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     let ref, error;
     if (!entry) error = 'channel_not_connected';
     else {
+      const sent = channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
+      if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
       try {
-        ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
+        ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
         receipts.delete(channel);  // the steward has answered here: the next owner message is news again
       } catch (failure) { error = short(failure); }
     }
@@ -790,7 +859,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   };
 
   /** The root wrote `body` to its owner as message `messageId` (a reply to `replyTo` when
-   *  given): send the same text where the owner is listening. Never throws. */
+   *  given): send the same text where the owner is listening - shaped for a phone chat by
+   *  channelText (a long one cut, ending in MORE). Never throws. */
   const ownerMessageSent = (messageId, body, replyTo) => {
     if (!text(messageId) || typeof body !== 'string' || !body.trim()) return Promise.resolve({ mirrored: false, reason: 'nothing_to_send' });
     const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined)).catch(error => {

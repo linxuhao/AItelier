@@ -13,8 +13,14 @@ byte-for-byte intact. No production path is resolved.
 
 The upgrade gate is on the REQUEST path: every StateService - one per MCP/REST
 request, reads included - asks ``initialize`` whether anything is pending, and
-``_current`` answers from one read transaction. Everything in that answer is a
-handful of catalog reads except the attempt foreign-key pass, so that pass -
+``_current`` answers from one read transaction. One upgrade is neither additive
+nor a rebuild: the bundle store's DELETE guard was unconditional and is now
+narrowed to "refuse unless a release row names this digest"
+(``_store_delete_guard_stale``/``_replace_store_delete_guard``), which
+``CREATE TRIGGER IF NOT EXISTS`` cannot do - and a database that kept the old
+body would refuse every release while the code believed the ledger was the
+door. Everything in that answer is a handful of catalog reads except the
+attempt foreign-key pass, so that pass -
 and only that pass - may be reused for a bounded window (iss-5de9f15b64f54027);
 ``_ForeignKeyScanMemo`` below says what identifies the file, what ends the
 window early, and within what bound corruption still reaches the loud path.
@@ -109,9 +115,40 @@ BEGIN SELECT RAISE(ABORT,'a Git bundle delta base must be a stored raw keyframe'
 CREATE TRIGGER IF NOT EXISTS state_git_bundle_store_no_update
 BEFORE UPDATE ON state_git_bundle_store
 BEGIN SELECT RAISE(ABORT,'retained Git bundle bytes are immutable'); END;
+CREATE TABLE IF NOT EXISTS state_git_bundle_releases (
+    bundle_sha256 TEXT PRIMARY KEY
+        CHECK(length(bundle_sha256)=64 AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'),
+    commit_sha TEXT NOT NULL,
+    codec TEXT NOT NULL CHECK(codec IN ('raw','zstd-prefix')),
+    base_sha256 TEXT,
+    raw_size INTEGER NOT NULL CHECK(raw_size > 0),
+    payload_bytes INTEGER NOT NULL CHECK(payload_bytes > 0),
+    released_at TEXT NOT NULL, actor TEXT NOT NULL, rule TEXT NOT NULL,
+    rows_before INTEGER NOT NULL, payload_before INTEGER NOT NULL,
+    rows_after INTEGER NOT NULL, payload_after INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS state_git_bundle_releases_commit
+ON state_git_bundle_releases(commit_sha);
+CREATE TRIGGER IF NOT EXISTS state_git_bundle_releases_no_update
+BEFORE UPDATE ON state_git_bundle_releases
+BEGIN SELECT RAISE(ABORT,'release records are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS state_git_bundle_releases_no_delete
+BEFORE DELETE ON state_git_bundle_releases
+BEGIN SELECT RAISE(ABORT,'release records are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS state_git_bundle_store_no_delete
 BEFORE DELETE ON state_git_bundle_store
-BEGIN SELECT RAISE(ABORT,'retained Git bundle bytes are retained'); END;
+WHEN NOT EXISTS (SELECT 1 FROM state_git_bundle_releases r WHERE r.bundle_sha256=OLD.bundle_sha256)
+BEGIN SELECT RAISE(ABORT,'retained Git bundle bytes are retained until released'); END;
+CREATE VIEW IF NOT EXISTS state_git_bundle_custody AS
+SELECT a.commit_sha, a.bundle_sha256, a.tree_sha,
+    CASE WHEN s.bundle_sha256 IS NOT NULL THEN 'present'
+         WHEN r.bundle_sha256 IS NOT NULL THEN 'released' ELSE 'missing' END AS custody,
+    coalesce(s.raw_size, r.raw_size) AS raw_size,
+    coalesce(length(s.payload), 0) AS payload_bytes,
+    r.released_at, r.actor, r.rule
+FROM state_git_artifacts a
+LEFT JOIN state_git_bundle_store s ON s.bundle_sha256=a.bundle_sha256
+LEFT JOIN state_git_bundle_releases r ON r.bundle_sha256=a.bundle_sha256;
 CREATE UNIQUE INDEX IF NOT EXISTS state_attempt_external_identity
 ON state_attempts(project_id,node_key,harness,external_id) WHERE execution_kind='external';
 CREATE TRIGGER IF NOT EXISTS state_attempt_executor_immutable
@@ -232,6 +269,47 @@ def _store_cap_stale(conn) -> bool:
     return found is not None and int(found.group(1)) < int(_RAW_CAP.search(EXTRA_SCHEMA).group(1))
 
 
+# The ledger a DELETE has to name first. A NAME, not a boolean: the guard's
+# staleness is decided from the deployed trigger text, which has to mention it.
+RELEASE_TABLE = 'state_git_bundle_releases'
+_RELEASE_GUARD_CREATE = re.compile(
+    r'CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+state_git_bundle_store_no_delete\b', re.I)
+
+
+def _store_delete_guard_stale(conn) -> bool:
+    """Whether the deployed bundle-store DELETE guard is not the narrowed one.
+
+    ``state_git_bundle_store_no_delete`` used to refuse EVERY delete. The
+    release path narrows it to "refuse unless a release row names this digest",
+    and ``CREATE TRIGGER IF NOT EXISTS`` cannot change an existing trigger's
+    body - ``_current`` only asks whether an object of that NAME exists, so a
+    deployed database would keep the unconditional guard while every caller
+    believed the ledger was the door. A missing trigger is stale too: the
+    ``initialize`` path then creates it from ``EXTRA_SCHEMA``, exactly as the
+    other objects are created.
+    """
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' "
+                       "AND name='state_git_bundle_store_no_delete'").fetchone()
+    return row is None or row[0] is None or RELEASE_TABLE not in row[0]
+
+
+def _replace_store_delete_guard(conn) -> None:
+    """Replace the deployed DELETE guard by the narrowed one, in the caller's transaction.
+
+    Mirrors ``_widen_store_cap``: no row is read or copied, the new body comes
+    from ``EXTRA_SCHEMA`` (so the trigger text and the tests that pin it are the
+    same text), and the whole replacement is invisible to any other connection
+    until the caller commits. Every existing row already satisfies the narrowed
+    predicate (a store with no release rows keeps refusing every delete), so the
+    upgrade cannot make a previously-refused delete succeed.
+    """
+    statement = next(s for s in _statements(EXTRA_SCHEMA) if _RELEASE_GUARD_CREATE.match(s.lstrip()))
+    conn.execute('DROP TRIGGER IF EXISTS state_git_bundle_store_no_delete')
+    conn.execute(statement)
+    if _store_delete_guard_stale(conn):
+        raise sqlite3.IntegrityError('bundle store release guard upgrade did not apply; refusing')
+
+
 def _widen_store_cap(conn) -> None:
     """Raise the stored-bundle size CHECK in place, in the caller's transaction.
 
@@ -258,7 +336,7 @@ _EXECUTOR_NEUTRAL = {'execution_kind', 'harness', 'external_id', 'reporting_acto
                      'artifact_kind', 'terminal_observation_id'}
 _LEASE_INDEX = ('CREATE INDEX IF NOT EXISTS state_attempts_lease ON state_attempts(project_id,lease_expires_at) '
                 'WHERE lease_expires_at IS NOT NULL')
-_CREATE = re.compile(r'\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER)\s+IF\s+NOT\s+EXISTS\s+(\w+)\s', re.I)
+_CREATE = re.compile(r'\s*CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER|VIEW)\s+IF\s+NOT\s+EXISTS\s+(\w+)\s', re.I)
 
 
 def _foreign_key_violation(conn, table: str) -> bool:
@@ -549,7 +627,7 @@ def _current(conn, existing_schema: str, db_path=None, identity=None) -> bool:
                 or not {'late_after_abandon', 'fence'} <= {
                     r['name'] for r in conn.execute('PRAGMA table_info(state_external_observations)')} \
                 or "'abandoned'" not in (_table_sql(conn, 'state_external_owners') or '') \
-                or _store_cap_stale(conn):
+                or _store_cap_stale(conn) or _store_delete_guard_stale(conn):
             return False
         if conn.execute("SELECT 1 FROM state_attempts a WHERE execution_kind='external' AND NOT EXISTS "
                         "(SELECT 1 FROM state_external_owners o WHERE o.attempt_id=a.attempt_id) LIMIT 1").fetchone():
@@ -635,6 +713,12 @@ def initialize(db, existing_schema: str) -> None:
                 _widen_store_cap(conn)
             for statement in _statements(EXTRA_SCHEMA):
                 conn.execute(statement)
+            if _store_delete_guard_stale(conn):
+                # A database that predates the release ledger carries the OLD
+                # unconditional guard, and CREATE TRIGGER IF NOT EXISTS above
+                # cannot replace it. Done AFTER the ledger's CREATE statements,
+                # so the guard never exists without the table it reads.
+                _replace_store_delete_guard(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO state_external_owners("
                 "attempt_id,project_id,node_key,harness,external_id,status,admitted_at,updated_at,settled_at) "

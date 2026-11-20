@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -60,12 +61,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.state_attempt_schema import EXTRA_SCHEMA, _statements  # noqa: E402
 from core.state_git_artifacts import (  # noqa: E402
-    BUNDLE_STORE, git_custody, load_stored_bundle, retained_bundle_bytes, store_bundle)
+    BUNDLE_STORE, RELEASE_TABLE, git_custody, load_stored_bundle, retained_bundle_bytes,
+    store_bundle)
 from core.state_graph import StateConflict  # noqa: E402
 
 ARTIFACTS = "state_git_artifacts"
 NO_UPDATE = "state_git_artifacts_no_update"
-STORE_DDL = [s for s in _statements(EXTRA_SCHEMA) if BUNDLE_STORE in s]
+# Only the store's OWN objects: the table, its index and its triggers. A
+# statement that merely NAMES the store (the custody view, the release ledger's
+# narrowed DELETE guard) is not part of the encoding store, and the throwaway
+# projection store below has neither the artifacts table nor the ledger.
+STORE_DDL = [s for s in _statements(EXTRA_SCHEMA)
+             if BUNDLE_STORE in s and RELEASE_TABLE not in s
+             and not re.match(r"\s*CREATE\s+VIEW", s, re.I)]
 
 
 def _has_table(conn, name):

@@ -20,13 +20,39 @@
  *  (MemoryStore#grep) then runs the direct spawn for that query, and every fallback is logged
  *  as `memory/grep-spawn-fallback`. The grep's own `timeoutMs` rides on the request: the helper
  *  kills its git child and answers killed: true, and the next request is served as usual - a
- *  slow grep never costs the helper. Between requests it sleeps in a read on stdin. `close()`
- *  ends it: no process outlives its store, and one whose process dies ends on stdin's EOF. */
+ *  slow grep never costs the helper. Between requests it sleeps in the event loop's wait on
+ *  stdin, with the idle clock below running (no CPU). `close()`
+ *  ends it: no process outlives its store, and one whose process dies ends on stdin's EOF.
+ *
+ *  Three things bound the process, because a resident helper that nothing ends is a process
+ *  that sits in the driver for as long as the driver runs (measured: 15 h, 1 tick of CPU,
+ *  22 fds, on a live driver; iss-ff86509e0aa34e3b):
+ *    1. `idleExitMs` (one minute by default, 0 = never): having answered, the helper leaves by
+ *       itself once no request has come for that long, and the next search starts a fresh one.
+ *       So its life is bounded by its last use, not by its store's, and a driver that has
+ *       stopped searching for a minute is not holding a process. It is deliberately NOT
+ *       one-shot: the helper exists to keep a burst of searches off the store's own fork
+ *       (design 3.8.2), and a whole turn's searches fall inside one window. What a later
+ *       search pays instead is that one fork of the store (its page tables, a few ms at the
+ *       store's size) - once per quiet period, not once per search.
+ *    2. `close()` ends it, and stdin's EOF ends it - so it cannot outlive its store.
+ *    3. It is spawned with the runtime's internal marker (core.mjs's INTERNAL_ENV), so the
+ *       dormancy gate does not read it as a background job the agent started and cannot
+ *       watch or kill. */
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gitSpawnSpec } from './git.mjs';
+import { internalChildEnv } from '../core.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./grep-child.mjs', import.meta.url));
+/** The environment variable this side uses to tell grep-child.mjs how long it may sit idle
+ *  before leaving; grep-child.mjs holds the same literal (it cannot import this file: it is
+ *  the child, and importing the client would run it there too). Keep the two in step - a test
+ *  drives the pair through the option below, so a drift shows up as a helper that never
+ *  leaves rather than as a silent one. */
+const IDLE_ENV = 'DSH_GREP_CHILD_IDLE_MS';
+/** The most `setTimeout` can be asked for; a longer delay fires at once, so clamp to it. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const say = error => String(error?.message ?? error);
 
 export class GrepHelper {
@@ -35,10 +61,14 @@ export class GrepHelper {
 
   /** @param {object} o log(event, fields): the store's logger; answerGraceMs (5000): how long
    *  past the request's own timeoutMs the helper may take to answer before it is treated as
-   *  wedged - the query then falls back and the helper is killed; command/script/args/env: what
-   *  to run as the helper (process.execPath and grep-child.mjs; tests hand it a broken one). */
-  constructor({ log = () => {}, answerGraceMs = 5000, command = process.execPath, script = SCRIPT, args = [], env } = {}) {
+   *  wedged - the query then falls back and the helper is killed; idleExitMs (60000): how long
+   *  the helper may sit idle after answering before it leaves on its own (0 = never), the next
+   *  search starting a fresh one; command/script/args/env: what to run as the helper
+   *  (process.execPath and grep-child.mjs; tests hand it a broken one). */
+  constructor({ log = () => {}, answerGraceMs = 5000, idleExitMs = 60 * 1000,
+    command = process.execPath, script = SCRIPT, args = [], env } = {}) {
     this.log = log; this.answerGraceMs = answerGraceMs;
+    this.idleExitMs = Number(idleExitMs) > 0 ? Math.min(MAX_TIMER_MS, Math.round(Number(idleExitMs))) : 0;
     this.command = command; this.script = script; this.args = args; this.env = env;
   }
 
@@ -59,7 +89,7 @@ export class GrepHelper {
     let child;
     try {
       child = spawn(this.command, [this.script, ...this.args], { stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
-        env: this.env ?? process.env });
+        env: internalChildEnv({ ...(this.env ?? process.env), [IDLE_ENV]: String(this.idleExitMs) }) });
     } catch (error) {
       this.#fail('helper-unavailable: ' + say(error));
       return this;

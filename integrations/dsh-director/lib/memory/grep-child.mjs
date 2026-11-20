@@ -17,13 +17,25 @@
  *  `timeoutMs` is the request's own: past it the git child is SIGKILLed and the answer says
  *  killed - this process is untouched and the next request is served as usual. Between
  *  requests it waits on stdin (one epoll wait: no timer, no loop, no CPU). stdin closing means
- *  the store's process is gone: kill a running git child and exit, so nothing is orphaned. */
+ *  the store's process is gone: kill a running git child and exit, so nothing is orphaned.
+ *
+ *  `DSH_GREP_CHILD_IDLE_MS` (grep-helper.mjs's IDLE_ENV, same literal) bounds that wait: with
+ *  a positive value, a helper that has answered and then heard no request for that long leaves
+ *  by itself, exactly as it would on stdin's EOF. Without it a resident helper lives as long as
+ *  its store does no matter how long ago it was last asked - a live driver held one for 15 h
+ *  with 1 tick of CPU (iss-ff86509e0aa34e3b). 0 (the default) keeps the unbounded wait, which
+ *  is what the test fixtures that stand in for this script want. */
 import { spawn } from 'node:child_process';
 import { writeSync } from 'node:fs';
 
 const CONTROL = 3;
+/** Must match grep-helper.mjs's IDLE_ENV: this script is a child process and cannot import
+ *  the client module (importing it would run the client here). */
+const IDLE_ENV = 'DSH_GREP_CHILD_IDLE_MS';
+const rawIdle = Number(process.env[IDLE_ENV] ?? 0);
+const IDLE_MS = Number.isFinite(rawIdle) && rawIdle > 0 ? Math.min(rawIdle, 2 ** 31 - 1) : 0;
 const queued = [];
-let running, current;
+let running, current, idleTimer;
 
 function control(frame) {
   try { writeSync(CONTROL, JSON.stringify(frame) + '\n'); } catch { /* the parent is gone: stdin's end ends us */ }
@@ -32,6 +44,14 @@ function control(frame) {
 function stop() {
   try { current?.kill('SIGKILL'); } catch { /* already gone */ }
   process.exit(0);
+}
+
+/** Nothing to do: start the clock that ends this process, so its life is bounded by its last
+ *  use rather than by its store's. Cleared the moment a request arrives (pump). */
+function armIdle() {
+  if (!IDLE_MS) return;
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(stop, IDLE_MS);
 }
 
 function run(request) {
@@ -78,7 +98,8 @@ function run(request) {
 function pump() {
   if (running) return;
   const request = queued.shift();
-  if (!request) return;
+  if (!request) { armIdle(); return; }
+  clearTimeout(idleTimer);            // a request in hand: not idle, however long it runs
   running = run(request).finally(() => { running = undefined; pump(); });
 }
 
@@ -100,3 +121,4 @@ process.stdin.on('end', stop);
 process.stdin.on('close', stop);
 process.stdin.on('error', stop);
 process.stdout.on('error', stop);
+armIdle();                            // spawned and not yet asked: the same bounded wait applies

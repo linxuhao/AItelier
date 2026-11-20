@@ -148,12 +148,31 @@ export class Continuation {
 /** The environment variable a host sets on its driver process (and so on every job
  *  the driver's shell starts) to the driver's session id, when it names none. */
 export const DEFAULT_SESSION_ENV = 'DSH_DIRECTOR_SESSION';
+/** The environment marker a runtime puts on a child it spawns for its OWN machinery (the
+ *  memory store's resident grep helper), with value {@link INTERNAL_VALUE}.
+ *
+ *  Why it must be declared: the session tag means "started from this driver's work context"
+ *  and survives reparenting, which is what `backgroundProcesses` reads - but a helper the
+ *  runtime started for itself is not work an agent started. It inherits the same session
+ *  tag, so without a marker it was reported as a job and `idle_dormant` refused with
+ *  `background_processes` for as long as the helper lived - permanently, since a resident
+ *  helper lives as long as its store - while naming a pid the agent has no tool to watch or
+ *  kill. The marker is set by the spawner (lib/memory/grep-helper.mjs, `internalChildEnv`);
+ *  nothing an agent's own shell starts carries it. */
+export const INTERNAL_ENV = 'DSH_INTERNAL_HELPER';
+export const INTERNAL_VALUE = '1';
+/** The environment for a child this runtime spawns for its own machinery: the given
+ *  environment (this process's own by default) plus the internal marker. */
+export const internalChildEnv = (env = process.env) => ({ ...env, [INTERNAL_ENV]: INTERNAL_VALUE });
+/** One process's environment as its `/proc` entry holds it, or [] when it cannot be read. */
+export function processEnviron(pid, procRoot = '/proc') {
+  try { return readFileSync(join(procRoot, String(pid), 'environ'), 'latin1').split('\0'); }
+  catch { return []; }
+}
 /** The driver session a process belongs to (its environment), or undefined. */
 export function processSession(pid, procRoot = '/proc', sessionEnv = DEFAULT_SESSION_ENV) {
-  try {
-    const entry = readFileSync(join(procRoot, String(pid), 'environ'), 'latin1').split('\0').find(e => e.startsWith(sessionEnv + '='));
-    return entry?.slice(sessionEnv.length + 1);
-  } catch { return undefined; }
+  const entry = processEnviron(pid, procRoot).find(e => e.startsWith(sessionEnv + '='));
+  return entry?.slice(sessionEnv.length + 1);
 }
 /** Whether a process exists and is not a zombie. */
 export function processAlive(pid, procRoot = '/proc') {
@@ -161,13 +180,20 @@ export function processAlive(pid, procRoot = '/proc') {
   catch { return false; }
 }
 /** Live processes other than the driver itself that carry this driver's session:
- *  jobs its shell started, detached or not (the environment survives reparenting). */
+ *  jobs its shell started, detached or not (the environment survives reparenting).
+ *  The runtime's own machinery is not a job and is left out by its marker
+ *  ({@link INTERNAL_ENV}): the agent can neither watch nor kill it, so counting it
+ *  would refuse dormancy over something that is not work. */
 export function backgroundProcesses(session, selfPid = process.pid, procRoot = '/proc', sessionEnv = DEFAULT_SESSION_ENV) {
   if (!session) return [];
   let names;
   try { names = readdirSync(procRoot); } catch { return []; }
   return names.filter(name => /^\d+$/.test(name) && Number(name) !== selfPid)
-    .map(Number).filter(pid => processSession(pid, procRoot, sessionEnv) === session && processAlive(pid, procRoot)).sort((a, b) => a - b);
+    .map(Number).filter(pid => {
+      const env = processEnviron(pid, procRoot);
+      if (env.includes(INTERNAL_ENV + '=' + INTERNAL_VALUE)) return false;
+      return env.includes(sessionEnv + '=' + session) && processAlive(pid, procRoot);
+    }).sort((a, b) => a - b);
 }
 
 /** Why watch_process must refuse, or null. Only a running job of THIS driver may be

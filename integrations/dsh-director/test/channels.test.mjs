@@ -1599,3 +1599,38 @@ test('login: a channel login that throws or never answers is refused as unavaila
     assert.deepEqual(await channels.login('wechat'), { refused: 'unavailable' });
   } finally { channels.stop(); }
 });
+
+test('login: past loginPerHour or loginPerDay accepted logins the channel is not asked, whatever a bridge restart forgot', async () => {
+  const realNow = Date.now;
+  let clock = Date.parse('2026-11-20T12:00:00Z');
+  Date.now = () => clock;
+  const { channels, logs } = statusSetup({ limits: { loginPerHour: 2, loginPerDay: 3 } });
+  try {
+    channels.ready();
+    let answer = { requested: true };
+    const asked = [];
+    channels.service.register({ name: 'wechat', status: () => ({ connected: false }), async send() { return {}; },
+      async login() { asked.push(clock); return answer; } });
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    clock += 60_000;
+    // A refusal of the channel's own is not counted.
+    answer = { refused: 'qr_waiting' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'qr_waiting' });
+    answer = { requested: true };
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    clock += 60_000;
+    // Two in the last hour: the third waits until the first is an hour old (the bridge, just
+    // restarted, would have taken it).
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 3600 - 120 });
+    assert.equal(asked.length, 3, 'the channel was not asked');
+    clock = Date.parse('2026-11-20T13:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    // Three in 24 hours: the fourth waits until the first is a day old.
+    clock = Date.parse('2026-11-20T15:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 21 * 3600 });
+    clock = Date.parse('2026-11-21T12:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    assert.equal(asked.length, 5);
+    assert.ok(logs.some(([event, fields]) => event === 'channel_login_refused' && fields.reason === 'rate_limited'));
+  } finally { Date.now = realNow; channels.stop(); }
+});

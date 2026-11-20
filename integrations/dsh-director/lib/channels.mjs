@@ -116,10 +116,13 @@ const within = (promise, ms, what) => {
  *  (1+2+4+8+16 s: a backend restart); an answer line answerAttempts times, answerRetryMs
  *  between tries; the owed store is re-asked every owedMs, at most owedMax messages; a decision
  *  line is never sent more than lineMaxAgeMs after the owner wrote it (the earlier of the
- *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
+ *  channel's time and when it was first owed here): later, the dashboard alone shows it.
+ *  A channel login (a new WeChat QR) accepted here at most loginPerHour times in any hour and
+ *  loginPerDay in any 24 hours: the WeChat bridge keeps the same bounds (with its own 2-minute
+ *  gap) in its memory, and this count, in the host's, outlives a bridge restart. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000, fastStatusMs: 5000, fastStatusForMs: 180000 });
+  lineMaxAgeMs: 3600000, fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -776,17 +779,35 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     }, limits.fastStatusMs);
     fastTimer.unref?.();
   };
+  // When each channel's logins were accepted (the last 24 hours): loginPerHour/loginPerDay.
+  const logins = new Map();
+  const loginWait = channel => {
+    const at = Date.now(), hour = 3600000, day = 24 * hour;
+    const times = (logins.get(channel) ?? []).filter(time => time > at - day);
+    logins.set(channel, times);
+    const lastHour = times.filter(time => time > at - hour), waits = [0];
+    if (lastHour.length >= limits.loginPerHour) waits.push(lastHour[lastHour.length - limits.loginPerHour] + hour - at);
+    if (times.length >= limits.loginPerDay) waits.push(times[times.length - limits.loginPerDay] + day - at);
+    return Math.max(...waits);
+  };
   /** A new login (the WeChat QR) on `channel`, for the owner's dashboard button and the
    *  steward's tool: {requested: true} or {refused, retry_after_s?}. Only these fields
-   *  leave here - whatever else a channel answers (never a QR) is dropped. Never throws. */
+   *  leave here - whatever else a channel answers (never a QR) is dropped. Past
+   *  loginPerHour/loginPerDay accepted logins the channel is not asked at all. Never throws. */
   const login = async channel => {
     const entry = registered.get(channel);
     if (!entry) return { refused: 'not_registered' };
     if (!entry.login) return { refused: 'not_supported' };
+    const wait = loginWait(channel);
+    if (wait > 0) {
+      log('channel_login_refused', { channel, reason: 'rate_limited' });
+      return { refused: 'rate_limited', retry_after_s: Math.ceil(wait / 1000) };
+    }
     let answer;
     try { answer = await within(Promise.resolve(entry.login()), limits.sendMs, 'channel login timed out'); }
     catch (error) { log('channel_login_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
     if (answer?.requested === true) {
+      logins.get(channel).push(Date.now());
       log('channel_login_requested', { channel });
       pollFast();
       void pollStatus();

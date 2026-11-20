@@ -287,6 +287,9 @@ export interface DirectorHost {
   labels?: Record<string, string>;
 }
 
+/** What a channel's login (a new WeChat QR) answers: never the QR itself. */
+export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };
+
 /** The cordis service `ownerChannels` (provided only with the host's `channels`), what a
  *  channel plugin injects. `register` returns the function that takes the channel back.
  *  `send` is given the text and where it goes: `to` is the account it is for (the bound
@@ -329,9 +332,6 @@ export interface DirectorHost {
  *  `approval_pending` is read as finished (a backend that predates that marker cannot say
  *  "still deciding", so its line is lost): accepted for the shipped pair, revisit before
  *  running a director plugin against an older backend. */
-/** What a channel's login (a new WeChat QR) answers: never the QR itself. */
-export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };
-
 export interface OwnerChannels {
   /** `login` (optional; the WeChat channel's): ask for a new login QR now. It answers
    *  {requested: true} or {refused, retry_after_s?} and never the QR, which the channel
@@ -353,8 +353,9 @@ export interface OwnerChannelsHandle {
   ownerMessageSent(messageId: string, body: string, replyTo?: string): Promise<{ mirrored: boolean; reason?: string }>;
   /** A new login on a registered channel (its optional `login`): {requested: true} - then
    *  the status is reported every 5 s for 3 minutes so the QR shows up quickly - or
-   *  {refused: not_registered | not_supported | unavailable | the channel's own code,
-   *  retry_after_s?}. Only those fields are passed on; never throws. Behind the steward's
+   *  {refused: not_registered | not_supported | unavailable | rate_limited (past
+   *  CHANNEL_LIMITS.loginPerHour/loginPerDay accepted logins: the channel is not asked) |
+   *  the channel's own code, retry_after_s?}. Only those fields are passed on; never throws. Behind the steward's
    *  request_wechat_qr tool and DirectorApi.ownerChannelLogin. */
   login(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
   ready(): void;

@@ -27,6 +27,35 @@ The rules, in full, because a rule nobody writes down is a rule that drifts:
 * The action-dispatch families (`/query/{action}`) hand `execute` the very
   parameter the route takes from its path — the value the guard has already
   judged — and are bound by that identity rather than exempted.
+* A delivery has to be EXPLAINED BY ITS SHAPE, not only by its callee's name.
+  Eight shapes were measured executing a private action while this reader
+  answered `ok=True` (iss-a555f839083d405d, iss-0d84268ff0af47ee), and each is
+  refused now, for the reason it leaks:
+  - a callee reached through an ATTRIBUTE (`helpers.leak(service)`), a SUBSCRIPT
+    (`[_leak][0](service)`) or the RESULT OF A CALL
+    (`functools.partial(LeakyResponse)(service)`): the reader never descends into
+    such a callee, so the only honest answer is that it cannot explain the
+    delivery. A call in a CONDITION is not a delivery position — its truth value
+    only picks the branch — so the product's own
+    `await result if inspect.isawaitable(result) else result` stays readable.
+  - an arbitrary OBJECT handed out, bare or through a value constructor
+    (`return _OBJ`, `return str(_OBJ)`): every value constructor can run a dunder
+    the ARGUMENT defines (`str(x)` runs `type(x).__str__`), so such a call is
+    only inert for a value this reader can attribute — a literal, a name the
+    handler itself binds, or a free name that resolves to a value whose exact
+    type cannot run code. A free name resolving to anything else is refused.
+  - a value STORED IN A LOCAL and returned later (`x = _leak(service); return x`):
+    an assignment stores a value a later `return` can hand out, so the stored
+    expression is analyzed as a delivery when the local is delivered.
+* A wrapper that only RUNS the callable it is handed is transparent, by object
+  identity, so the product's thread offload of the action call is explainable
+  rather than a hole: see `_DISPATCH_WRAPPERS`.
+* No cached read is trusted across a change it leaned on. The identities of the
+  namespaces it read are recorded — module globals, the builtins namespace, a
+  followed helper's body, and the HANDLER'S OWN BODY — so a global rebound, a
+  builtins dict mutated, a helper's `__code__` swapped or the handler's own body
+  swapped after the first read (`delivered_actions` caches by handler) forces a
+  re-read instead of serving a verdict derived from what used to be there.
 
 WHY THERE IS NO STAND-DOWN. An earlier revision let a route stand the guard
 down instead of judging it, keyed on something the route author could reach: an
@@ -52,6 +81,7 @@ import inspect
 import textwrap
 from typing import NamedTuple
 
+from anyio.to_thread import run_sync as _anyio_run_sync
 from core.state_commands import is_public_read
 from core.state_commands import execute as _execute
 from starlette.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
@@ -101,9 +131,38 @@ _VALUE_CONSTRUCTORS = (str, repr, format, bytes, bool, int, float, len,
 _RESPONSE_CONSTRUCTORS = (Response, HTMLResponse, PlainTextResponse, JSONResponse,
                           RedirectResponse)
 _INERT_CALLABLES = _VALUE_CONSTRUCTORS + _RESPONSE_CONSTRUCTORS
+
+# Wall-to-wall evidence of the sentence above, kept here because it changes what
+# "inert" may mean: `str` is only inert as a CALLEE. Its argument can still define
+# `__str__` and run a State action from it (iss-a555f839083d405d measured
+# `return str(_OBJ)` accepted while `_OBJ.__str__` read the director mailbox), so
+# a value constructor is not licensed to hide an unexplainable VALUE. The
+# delivering names below are what stops that: a literal, a name the handler binds,
+# or a free name whose exact type is one of these. Exact type, never `isinstance`:
+# a SUBCLASS of `str` may override `__str__`.
+_INERT_VALUE_TYPES = (str, bytes, int, float, bool, type(None))
+
+# Callables that only RUN the one callable they are handed and return its result,
+# and so cannot run a State action of their own. They are TRANSPARENT: a delivery
+# through one of them delivers exactly what the callable passed to it delivers,
+# which the reader walks like any other delivered value instead of refusing the
+# wrapper. Membership is by OBJECT IDENTITY, resolved through the analyzed
+# function's own globals (never by name), and the resolution is recorded in the
+# read's identities so a swap after the read invalidates the cached verdict.
+#
+# `anyio.to_thread.run_sync` is the product's own shape: `api/state_http.query`
+# runs the one dispatch through it —
+# `await to_thread.run_sync(partial(_call, service, action, arguments))`. It is
+# transparent ONLY when the callable it is handed is a recognized ACTION SITE:
+# the reader must see the action call whose result is being offloaded. Handed
+# anything else (`run_sync(_leak, service)`) the wrapper runs code this reader did
+# not read, and the delivery is refused like every other unexplained callee.
+_DISPATCH_WRAPPERS = (_anyio_run_sync,)
 # The marker a resolution uses when the "namespace" is a function whose BODY is
 # what must not change: `helper.__code__` can be swapped under the same object id.
 _CODE_GUARD = "__code__"
+# What a failed lookup returns, so "resolved to None" and "not there" differ.
+_MISSING = object()
 
 
 class Delivery(NamedTuple):
@@ -275,20 +334,76 @@ def _yielded_values(statement) -> list[ast.expr | None]:
     return found
 
 
-def _identity_holds(holder, name: str, identity: int) -> bool:
+def _identity_holds(holder, name: str, identity) -> bool:
     """Whether `holder` still resolves `name` to the object the read recorded.
 
-    Two kinds of holder, two kinds of name: a mapping (`__globals__` or a builtins
-    dict) answers with `get`, and a FUNCTION answers the marker `__code__` with
-    its body. The body case cannot be folded into the first: swapping
-    `helper.__code__` keeps the function object's id while changing what runs.
+    Three kinds of holder, two kinds of name: a mapping (`__globals__` or a
+    builtins dict) answers with `get`, a MODULE (or any other object a resolution
+    was read through) answers with `getattr`, and a FUNCTION answers the marker
+    `__code__` with its body. The body case cannot be folded into the first:
+    swapping `helper.__code__` keeps the function object's id while changing what
+    runs, and a module object's id says nothing about the attribute read off it.
+
+    An identity is normally a recorded `id()`. For the `__code__` marker it may be
+    the code OBJECT itself, which is then compared by `is`: holding the object is
+    what keeps its address from being reused by a body this reader never read. An
+    int is still accepted so an id-only record keeps its meaning.
     """
     if name == _CODE_GUARD:
-        return id(getattr(holder, "__code__", None)) == identity
+        body = getattr(holder, "__code__", None)
+        if isinstance(identity, int):
+            return id(body) == identity
+        return body is identity
+    getter = getattr(holder, "get", None)
     try:
-        return id(holder.get(name)) == identity
+        if getter is not None:
+            return id(getter(name)) == identity
+        return id(getattr(holder, name, None)) == identity
     except Exception:
         return False
+
+
+def _delivering_nodes(expression: ast.expr) -> list[ast.AST]:
+    """The nodes of `expression` whose VALUE can reach the caller.
+
+    Everything is value-carrying except three kinds of position, and each
+    exclusion is a delivery claim rather than a convenience:
+
+    * the TEST of a conditional expression — its truth value picks a branch and is
+      never handed out (the product's own
+      `return await result if inspect.isawaitable(result) else result`);
+    * the `if` clauses of a comprehension, for the same reason;
+    * a lambda's body, which runs only if somebody calls the lambda later.
+
+    A CALL is value-carrying, but its callee is not: the function object itself
+    is what runs, never what is delivered, so only the arguments and keywords are
+    descended into. That is what keeps `to_thread.run_sync(<action site>)`
+    explainable while `[_leak][0](service)` is not.
+    """
+    found: list[ast.AST] = []
+    stack: list[ast.AST] = [expression]
+    while stack:
+        node = stack.pop()
+        found.append(node)
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.IfExp):
+            stack.extend([node.body, node.orelse])
+            continue
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            stack.append(node.elt)
+            stack.extend(generator.iter for generator in node.generators)
+            continue
+        if isinstance(node, ast.DictComp):
+            stack.extend([node.key, node.value])
+            stack.extend(generator.iter for generator in node.generators)
+            continue
+        if isinstance(node, ast.Call):
+            stack.extend(node.args)
+            stack.extend(keyword.value for keyword in node.keywords)
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return found
 
 
 def _static_truth(test: ast.expr) -> bool | None:
@@ -324,6 +439,13 @@ class _Analysis:
         self.opaque = False
         self._locals: dict[str, ast.AST] = {}
         self._called: set[str] = set()
+        # The expressions a local name was ASSIGNED, and the stored expressions
+        # currently being followed. A stored value is not a discarded one: a later
+        # `return` can hand it out, so delivering the name delivers what was
+        # stored (E10, `x = _leak(service); return x`). `_flowing` is what makes a
+        # self-referential assignment (`a = b; b = a`) terminate.
+        self._assigned: dict[str, list[ast.expr]] = {}
+        self._flowing: set[int] = set()
         self._body = function.body
         self._resolver = resolver
         self._depth = depth
@@ -380,6 +502,39 @@ class _Analysis:
         # discarded-expression scan below (`x = yield v` names no action site).
         for yielded in _yielded_values(statement):
             self._delivery_of(yielded)
+        if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            # Remember what each local was STORED, without returning: an
+            # assignment is also a statement position whose action sites the scan
+            # at the bottom reads (that is how the dispatch family binds the
+            # judged path parameter: `result = await to_thread.run_sync(
+            # partial(_call, service, action, arguments))`).
+            value = getattr(statement, "value", None)
+            if value is not None:
+                targets = (statement.targets if isinstance(statement, ast.Assign)
+                           else [statement.target])
+                for target in targets:
+                    self._store(target, value)
+        # A binding that takes its value from an EXPRESSION in this body is the
+        # same claim as an assignment, so it is followed the same way: a loop
+        # element comes from the iterable, a context value from the context
+        # expression, a `match` capture from the subject. A parameter and an
+        # `except ... as` target are different: those hold a value the CALLER or
+        # the product's own machinery supplied, which `_delivered_name` explains
+        # without following.
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            self._store(statement.target, statement.iter)
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            for item in statement.items:
+                if item.optional_vars is not None:
+                    self._store(item.optional_vars, item.context_expr)
+        elif isinstance(statement, ast.Match):
+            for case in statement.cases:
+                for node in ast.walk(case.pattern):
+                    captured = (getattr(node, "name", None)
+                                or getattr(node, "rest", None))
+                    if captured and isinstance(
+                            node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+                        self._assigned.setdefault(captured, []).append(statement.subject)
         if isinstance(statement, ast.Return):
             self._delivery_of(statement.value)
             return False
@@ -445,10 +600,15 @@ class _Analysis:
     def _delivery_of(self, expression: ast.expr | None) -> None:
         if expression is None:
             return
+        # PASS 1, unchanged in reach: every call ANYWHERE in the expression,
+        # including the ones in a condition or in a discarded sub-expression. This
+        # is the ACTION SITE scan and the explanation of a BARE-NAME callee, and it
+        # is deliberately not narrowed to delivering positions - narrowing it would
+        # lose a refusal this reader already made.
         for node in ast.walk(expression):
             if not isinstance(node, ast.Call):
                 continue
-            slot = _action_slot(node, self._resolver)
+            slot = _action_slot(node, self._resolve)
             if slot is not None:
                 self.saw_action_site = True
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
@@ -470,9 +630,8 @@ class _Analysis:
             if isinstance(node.func, ast.Name) and self._follow_helper(name):
                 continue
             if not isinstance(node.func, ast.Name):
-                # A method call (`x.f(...)`) resolves on its receiver at
-                # runtime; an action reaching it through an attribute named
-                # `execute`/`_call` was already bound above by its name.
+                # A method call (`x.f(...)`) resolves on its receiver at runtime.
+                # Pass 2 decides whether its VALUE is delivered.
                 continue
             # FAIL-CLOSED. A bare-name call in a DELIVERED position that this
             # reader can neither bind to an action site, nor trace into a local
@@ -483,6 +642,143 @@ class _Analysis:
             # unresolvable delivery is a refusal, not an approval; `opaque` is
             # the observable, mutable state that records the derivation failure.
             self.opaque = True
+        # PASSES 2 and 3 walk only the positions whose value can REACH the caller
+        # (`_delivering_nodes`), because both rules are about what is handed out.
+        # The CALLABLE slot of a `partial` that is a recognized action site is a
+        # callee one step removed (`partial(_call, service, action, arguments)`):
+        # it is what runs, not a value handed out, so pass 3 must not read it as a
+        # delivered name.
+        callable_slots = {
+            id(node.args[0]) for node in ast.walk(expression)
+            if isinstance(node, ast.Call) and node.args
+            and isinstance(node.args[0], ast.Name)
+            and _action_slot(node, self._resolve) is not None}
+        for node in _delivering_nodes(expression):
+            if isinstance(node, ast.Call):
+                self._delivered_call(node)
+            elif (isinstance(node, ast.Name)
+                  and not isinstance(node.ctx, (ast.Store, ast.Del))
+                  and id(node) not in callable_slots):
+                self._delivered_name(node.id)
+
+    def _delivered_call(self, node: ast.Call) -> None:
+        """Whether a CALL in a delivering position is a delivery it can explain.
+
+        Three shapes are explainable: an action site (pass 1 recorded it), a bare
+        name (pass 1 decided - following it, tracing a local def, or refusing it),
+        and a whitelisted dispatch wrapper handed an action site. Everything else -
+        `helpers.leak(service)`, `[_leak][0](service)`,
+        `functools.partial(LeakyResponse)(service)` - runs code this reader never
+        read and hands its result over. Fail closed.
+        """
+        if _action_slot(node, self._resolve) is not None:
+            return
+        if isinstance(node.func, ast.Name):
+            return
+        if self._transparent_wrapper(node):
+            return
+        self.opaque = True
+
+    def _transparent_wrapper(self, node: ast.Call) -> bool:
+        """Whether `node` is a whitelisted wrapper handed a recognized action site.
+
+        The callee is resolved, never named: a receiver chain rooted at a name this
+        function does not bind is read through the handler's own globals, and the
+        attribute reached must BE one of `_DISPATCH_WRAPPERS` by object identity.
+        Each step is recorded with the object it was read from, so a module
+        attribute swapped after the read invalidates the cached verdict.
+
+        A wrapper without an action site in its arguments is NOT transparent: it
+        runs whatever callable it was handed, and this reader did not read that.
+        """
+        if not any(isinstance(argument, ast.Call)
+                   and _action_slot(argument, self._resolve) is not None
+                   for argument in node.args):
+            return False
+        attributes: list[str] = []
+        expression = node.func
+        while isinstance(expression, ast.Attribute):
+            attributes.append(expression.attr)
+            expression = expression.value
+        if not attributes or not isinstance(expression, ast.Name):
+            return False
+        if expression.id in self._bound or expression.id in self._closure:
+            return False
+        holder = self._resolve(expression.id)
+        target = holder
+        for attribute in reversed(attributes):
+            if target is None:
+                return False
+            try:
+                target = getattr(target, attribute)
+            except Exception:
+                return False
+            self.resolved.append((holder, attribute, id(target)))
+            holder = target
+        return any(target is wrapper for wrapper in _DISPATCH_WRAPPERS)
+
+    def _delivered_name(self, name: str) -> None:
+        """Whether a NAME in a delivering position is a value this reader can attribute.
+
+        Two answers are explainable. A name the handler BINDS - a parameter, a
+        loop/context/`match` target, or a name assigned in this body - along with,
+        for the last three, the EXPRESSION it was bound from: that is what E10
+        needs (`x = _leak(service); return x`), and it is why a stored value is not
+        a discarded one. An `except ... as` target is explained WITHOUT following:
+        it holds the exception the product's own dispatch raised. The second answer
+        is a free name resolving to a value whose exact type cannot run code.
+
+        Anything else is an object the reader cannot attribute: `return _OBJ` hands
+        the caller an object nobody in this function built, and both handing it out
+        and formatting it (`str(_OBJ)` runs `type(_OBJ).__str__`) can run the
+        private action. Fail closed.
+        """
+        if name in self._bound:
+            for value in self._assigned.get(name, ()):
+                if id(value) in self._flowing:
+                    continue
+                self._flowing.add(id(value))
+                try:
+                    self._delivery_of(value)
+                finally:
+                    self._flowing.discard(id(value))
+            return
+        if self._inert_free_name(name):
+            return
+        self.opaque = True
+
+    def _inert_free_name(self, name: str) -> bool:
+        """Whether a free name resolves to a value whose exact type cannot run code.
+
+        Resolution and recording are the same as `_is_value_constructor`'s: the
+        handler's OWN globals first, then the builtins namespace it looks through,
+        with the identity recorded so a later rebind invalidates the cached read.
+        `_MISSING` keeps "absent" apart from "resolved to None" - an unresolvable
+        name is not an inert one.
+        """
+        known = _MISSING
+        if isinstance(self._globals, dict) and name in self._globals:
+            known = self._globals[name]
+            self.resolved.append((self._globals, name, id(known)))
+        else:
+            known = self._builtins.get(name, _MISSING)
+            if known is not _MISSING:
+                self.resolved.append((self._builtins, name, id(known)))
+        return known is not _MISSING and type(known) in _INERT_VALUE_TYPES
+
+    @staticmethod
+    def _target_names(target) -> list[str]:
+        """The plain local names a binding target stores."""
+        names: list[str] = []
+        for node in ast.walk(target):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.append(node.id)
+        return names
+
+    def _store(self, target, value: ast.expr) -> None:
+        """Record that the names in `target` will hold what `value` produced."""
+        for name in self._target_names(target):
+            self._assigned.setdefault(name, []).append(value)
 
     def _is_value_constructor(self, name: str) -> bool:
         """Whether a bare name resolves to a callable that only builds a value.
@@ -544,10 +840,10 @@ class _Analysis:
             return False
         # The body that will run is `target.__code__`, and it can be swapped under
         # the same function object: the identity of the function says nothing about
-        # the code it runs now. Record the body's identity so a cached verdict
-        # cannot survive a swap.
-        self.resolved.append((target, _CODE_GUARD,
-                              id(getattr(target, "__code__", None))))
+        # the code it runs now. Record the body ITSELF, not only its address, so a
+        # cached verdict cannot survive a swap and the address cannot be reused by
+        # a body this reader never read.
+        self.resolved.append((target, _CODE_GUARD, target.__code__))
         # The helper's body resolves names where the HELPER lives, not where the
         # handler lives: a module that binds `JSONResponse` to its own class must
         # not be read through the handler's module, where the name may mean
@@ -627,7 +923,13 @@ def _read_delivery(handler) -> tuple[Delivery, tuple]:
         return Delivery(frozenset(), frozenset(), False, False, False), ()
     delivery = Delivery(frozenset(analysis.delivered), frozenset(analysis.params),
                         analysis.opaque, True, analysis.followed)
-    return delivery, tuple(analysis.resolved)
+    # The HANDLER'S OWN body is a namespace this read went through, and the cache
+    # is keyed on the handler OBJECT: `handler.__code__` can be swapped under it
+    # (E9), leaving the cached verdict describing a body that no longer runs. The
+    # code object itself is recorded (not merely its address) so it stays alive
+    # and its address cannot be reused by a body this reader never read.
+    own_body = (handler, _CODE_GUARD, getattr(handler, "__code__", None))
+    return delivery, (own_body,) + tuple(analysis.resolved)
 
 
 def delivered_actions(handler) -> Delivery:

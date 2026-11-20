@@ -26,8 +26,11 @@ Shapes the director ruled out of scope on 2026-09-23 (the connection's own
 forging a trust declaration) are run and printed with scope ``out`` and are not
 part of the pass condition.
 
-The file imports no name that only exists on this round, so it also runs on the
-base; attributes missing there are ``ABSENT``.
+The file imports no name that only exists on this round, so its SHAPES also run
+on the base; attributes missing there are ``ABSENT``. The guarded matrix is the
+one exception: it pins WHICH layer refuses (``test_behind_the_product_guard``),
+and the front door that refuses an unexplainable attribute callee is this
+round's, so that test is expected red on the base and green here.
 """
 from __future__ import annotations
 
@@ -483,16 +486,30 @@ class TestTheReviewedPathsAreRefused:
     @pytest.mark.parametrize("mode", ["fresh", "main"])
     def test_behind_the_product_guard(self, tmp_path, monkeypatch, mode):
         """Each reader is written INLINE in a dispatch-family handler (an honest
-        public ``execute`` first), the shape the product guard admits - proved
-        by ``g_control``, which must answer 200. A refusal must then be the
-        reader's own refusal, not the guard's. (Handlers that open a
-        connection inline are refused by the guard itself on this tree; the
-        unguarded matrix measures those readers.)"""
+        public ``execute`` first), and measured at BOTH layers.
+
+        ``g_control`` is the control that proves this route SHAPE is admitted at
+        all: it delivers the action the guard judged and must answer 200. The other
+        four readers hand the caller a value built by a callee the declaration
+        reader cannot explain - an attribute chain reached through
+        ``__func__``/``__closure__`` - so:
+
+        * BEHIND the guard, the FRONT DOOR refuses them, with its own message,
+          before the handler runs at all. Until an unexplainable attribute callee
+          was refused (iss-a555f839083d405d) the guard admitted these shapes and
+          this test could only see the floor refuse; a declaration that cannot
+          explain the delivery is now a refusal, so the front door is the layer
+          measured here.
+        * BELOW the guard (the same readers, no guard dependency), the FLOOR still
+          refuses the read with its own message. Pinning both is what keeps the
+          front door's refusal from being mistaken for the floor having stopped
+          judging the read."""
         C.arm(monkeypatch)
         db = C.new_database(tmp_path, f"guarded-{mode}.sqlite")
         app = C.app_for(mode, db)
         client = C.client_for(app, mode)
         results = {}
+        floor = {}
         try:
             assert C.request_is_anonymous(app, client), "the per-request service is not anonymous"
             for name, handler in sorted(GUARDED.items()):
@@ -506,6 +523,18 @@ class TestTheReviewedPathsAreRefused:
                 finally:
                     C.unmount(app, handler)
                 results[name] = (status, C.leaked_tables(text), text[:100])
+            for name, handler in sorted(GUARDED.items()):
+                if name == "g_control":
+                    continue
+                C.mount(app, f"/judged-unguarded/{name}/{{action}}", handler, guarded=False)
+                try:
+                    response = client.get(f"/judged-unguarded/{name}/get_graph")
+                    status, text = response.status_code, response.text
+                except Exception as exc:
+                    status, text = "EXC", f"{type(exc).__name__}: {exc}"
+                finally:
+                    C.unmount(app, handler)
+                floor[name] = (status, C.leaked_tables(text), text[:100])
         finally:
             C.release(app)
         for name, (status, leaked, head) in sorted(results.items()):
@@ -513,13 +542,28 @@ class TestTheReviewedPathsAreRefused:
                   f"leaked={leaked} body={head!r}")
         print(f"CROSS_PRODUCT http-guarded app={mode}: {len(GUARDED)} inline handlers x 1 product-guarded "
               f"dispatch route x GET x 1 anonymous identity x 1 opened project = {len(results)} requests")
+        for name, (status, leaked, head) in sorted(floor.items()):
+            print(f"REVIEWED http app={mode} path={name} guarded=False status={status} "
+                  f"leaked={leaked} body={head!r}")
+        print(f"CROSS_PRODUCT http-unguarded app={mode}: {len(floor)} inline handlers x 1 unguarded "
+              f"route x GET x 1 anonymous identity x 1 opened project = {len(floor)} requests")
         assert results["g_control"][0] == 200, f"the guard did not admit the control: {results['g_control']}"
+        assert results["g_control"][1] == [], results["g_control"]
         wrong = {k: v for k, v in results.items() if k != "g_control"
-                 and (v[1] or (v[0], v[2]) != (403, _REFUSAL))}
+                 and (v[1] or (v[0], v[2]) != (403, _DECLARATION_REFUSAL))}
         assert not wrong, wrong
+        assert floor, "the floor arm measured nothing"
+        wrong_floor = {k: v for k, v in floor.items()
+                       if v[1] or (v[0], v[2]) != (403, _REFUSAL)}
+        assert not wrong_floor, wrong_floor
 
 
 _REFUSAL = '{"detail":"This State DAG record is not available."}'
+# The declaration reader's refusal, verbatim (`api/state_http._guard_read_action`).
+# An action-dispatch route whose handler delivers a value built by a callee the
+# reader cannot explain never reaches the handler, so the floor below cannot be
+# what refuses it.
+_DECLARATION_REFUSAL = '{"detail":"state route declaration does not match its handler"}'
 
 
 class TestAnUnopenedNotebookIsNotAnExistenceOracle:

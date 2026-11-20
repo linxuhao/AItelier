@@ -46,6 +46,7 @@ run", not as "is the guard object somewhere in this route's tree".
 from __future__ import annotations
 
 import ast
+import builtins
 import functools
 import inspect
 import textwrap
@@ -53,6 +54,8 @@ from typing import NamedTuple
 
 from core.state_commands import is_public_read
 from core.state_commands import execute as _execute
+from starlette.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
+                                 RedirectResponse, Response)
 
 # The attribute a route's endpoint carries its declaration on.
 DECLARATION_ATTR = "_state_route"
@@ -62,6 +65,45 @@ STATE_PREFIX = "/api/state"
 # The callables a handler uses to run a State action, and the wrapper
 # `api/state_http.query` uses to hand the call to a worker thread.
 _ACTION_CALLABLES = ("execute", "_call")
+
+# Calls that BUILD A VALUE instead of delivering one. The reader walks their
+# ARGUMENTS exactly like any other expression, so an action handed to one is
+# still delivered: `return JSONResponse(execute(service, "get_driver_note", {}))`
+# is refused by the private-delivery branch, not excused here. What such a call
+# cannot do is run a State action in a body of its own - these response classes
+# format or package the value they are handed at construction time - so following
+# one found nothing, and refusing it made an ordinary
+# `except ...: return build_the_refusal(exc)` blind the whole action-dispatch
+# family: one refusal builder that wraps its body in `JSONResponse` turned
+# `POST /api/state/query/get_graph` into a 403 "state route declaration does not
+# match its handler" (iss-393c02b9ed844e04), while the same action over its own
+# GET route answered 200.
+#
+# Membership is by OBJECT IDENTITY, never by name, and only for a name the
+# analyzed function resolves in ITS OWN module globals or in the builtins THAT
+# MODULE resolves through (its `__builtins__`, which a module may replace). A
+# name the function binds itself (parameter, assignment, local import, walrus, a
+# `match` capture) or closes over is NOT inert - the reader cannot see through
+# that binding - and neither is a subclass or a same-named function of the
+# author's. The same scope rule governs which FUNCTION a helper call resolves to
+# (`_follow_helper`), for the same reason.
+#
+# The value constructors below are the ones whose only effect on an argument is
+# to read it: they can call a dunder the argument defines (`str(x)` runs
+# `type(x).__str__`), which is why what they are handed is still walked as a
+# delivery. `StreamingResponse` and `FileResponse` are deliberately absent: they
+# consume an iterator or a path at send time, so "packages what it is handed at
+# construction" is not true of them. Adding an entry here is a claim that the
+# callable cannot run a State action.
+_VALUE_CONSTRUCTORS = (str, repr, format, bytes, bool, int, float, len,
+                       list, tuple, dict, set, frozenset, sorted, min, max,
+                       abs, round)
+_RESPONSE_CONSTRUCTORS = (Response, HTMLResponse, PlainTextResponse, JSONResponse,
+                          RedirectResponse)
+_INERT_CALLABLES = _VALUE_CONSTRUCTORS + _RESPONSE_CONSTRUCTORS
+# The marker a resolution uses when the "namespace" is a function whose BODY is
+# what must not change: `helper.__code__` can be swapped under the same object id.
+_CODE_GUARD = "__code__"
 
 
 class Delivery(NamedTuple):
@@ -127,6 +169,128 @@ def _action_slot(node: ast.Call, resolver=None) -> ast.expr | None:
     return None
 
 
+def _bound_names(function) -> set[str]:
+    """Every name BOUND inside `function`, at any depth.
+
+    Parameters, assignment and walrus targets, `for`/`with`/`except` targets,
+    imports, nested `def`/`class` names, comprehension targets and the names a
+    `match` statement CAPTURES (`case JSONResponse:` and `case [str]:` bind the
+    name, they do not compare it). A name in this set is NOT whatever a module
+    global, a builtin, or a helper of the same name is - `str` may be a local
+    `def`, a function-local import, a loop variable or a capture - so the reader
+    may not explain a call to it by identity. Erring towards OVER-counting is
+    correct here: a false positive only refuses.
+    """
+    names: set[str] = set()
+    arguments = getattr(function, "args", None)
+    if arguments is not None:
+        for argument in (list(arguments.posonlyargs) + list(arguments.args)
+                         + list(arguments.kwonlyargs)
+                         + [arguments.vararg, arguments.kwarg]):
+            if argument is not None:
+                names.add(argument.arg)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name is not None:
+                names.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest is not None:
+                names.add(node.rest)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+    return names
+
+
+def _builtins_namespace(globals_map, builtins_map=None) -> dict:
+    """The builtins the analyzed function resolves an unbound name through.
+
+    At runtime a name that is not in the function's globals resolves through that
+    function's OWN `__builtins__`, which is usually the `builtins` module but may
+    be a dict the module replaced - that is the ordinary way a module rebinds
+    `str`. `builtins_map` is that namespace as read off the function object; the
+    module global is only the fallback for a function that does not carry one.
+    Answering with the process-wide `builtins` regardless would describe a lookup
+    the function never performs, and `str` would be called inert while the module
+    runs something else.
+    """
+    namespace = builtins_map
+    if not isinstance(namespace, dict):
+        namespace = (globals_map.get("__builtins__", builtins)
+                     if isinstance(globals_map, dict) else builtins)
+    if isinstance(namespace, dict):
+        return namespace
+    namespace_dict = getattr(namespace, "__dict__", None)
+    return namespace_dict if isinstance(namespace_dict, dict) else vars(builtins)
+
+
+def _function_builtins(function) -> dict | None:
+    """The builtins namespace CPython fixed into `function` when it was created.
+
+    A module that swaps its `__builtins__` and later restores it leaves every
+    function it created under the swapped namespace looking names up THERE: the
+    frame's builtins are copied into the function object at creation. Reading the
+    module global instead would describe a lookup this function never performs.
+    """
+    try:
+        namespace = getattr(function, "__builtins__", None)
+    except Exception:
+        return None
+    if isinstance(namespace, dict):
+        return namespace
+    namespace_dict = getattr(namespace, "__dict__", None)
+    return namespace_dict if isinstance(namespace_dict, dict) else None
+
+
+def _yielded_values(statement) -> list[ast.expr | None]:
+    """The value of every `yield`/`yield from` this statement runs in ITS OWN frame.
+
+    A generator hands each yielded value to whoever iterates it, so a yield is a
+    delivery position whatever shape surrounds it: `yield v`, `yield from v`,
+    `got = yield v` and `x = [yield v]` all hand `v` out. A yield inside a nested
+    `def`/`lambda`/`class` body belongs to THAT callable, which the reader follows
+    only when the handler hands control to it.
+    """
+    found: list[ast.expr | None] = []
+    stack: list[ast.AST] = [statement]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            found.append(node.value)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _identity_holds(holder, name: str, identity: int) -> bool:
+    """Whether `holder` still resolves `name` to the object the read recorded.
+
+    Two kinds of holder, two kinds of name: a mapping (`__globals__` or a builtins
+    dict) answers with `get`, and a FUNCTION answers the marker `__code__` with
+    its body. The body case cannot be folded into the first: swapping
+    `helper.__code__` keeps the function object's id while changing what runs.
+    """
+    if name == _CODE_GUARD:
+        return id(getattr(holder, "__code__", None)) == identity
+    try:
+        return id(holder.get(name)) == identity
+    except Exception:
+        return False
+
+
 def _static_truth(test: ast.expr) -> bool | None:
     """The truth value of a statically decidable test, else None."""
     if isinstance(test, ast.Constant):
@@ -148,7 +312,8 @@ class _Analysis:
     resolver cannot explain is OPAQUE — see `_delivery_of`.
     """
 
-    def __init__(self, source: str, resolver=None, depth: int = 0):
+    def __init__(self, source: str, resolver=None, depth: int = 0, closure=(),
+                 globals_map=None, builtins_map=None):
         tree = ast.parse(textwrap.dedent(source))
         function = next((node for node in tree.body
                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
@@ -163,6 +328,39 @@ class _Analysis:
         self._resolver = resolver
         self._depth = depth
         self.followed = False
+        # Anything this function BINDS or closes over shadows a module global or a
+        # builtin of the same name, so neither may be used to explain a call to it.
+        self._bound = _bound_names(function)
+        self._closure = set(closure)
+        # The globals and builtins THIS function would look a name up in, and the
+        # identities it resolved: a cached verdict is only as good as the namespaces
+        # it read, so every resolution is remembered and re-checked
+        # (`_resolve`, `_identity_holds`).
+        self._globals = globals_map if isinstance(globals_map, dict) else {}
+        self._builtins = _builtins_namespace(globals_map, builtins_map)
+        self.resolved: list[tuple[object, str, int]] = []
+        # Set when the body names an action site at all - delivered, discarded or
+        # yielded. A helper that does that hands over SOMETHING, even if no
+        # `return` carries it.
+        self.saw_action_site = False
+
+    def _resolve(self, name: str):
+        """The object this module's globals bind `name` to, or None.
+
+        The identity is recorded so `delivered_actions` can tell whether the
+        module still binds that very object: a global rebound AFTER the analysis
+        would otherwise be read through a stale verdict (`JSONResponse` swapped
+        for a class that runs a state action).
+        """
+        if self._resolver is None:
+            return None
+        try:
+            target = self._resolver(name)
+        except Exception:
+            return None
+        if isinstance(self._globals, dict) and self._globals:
+            self.resolved.append((self._globals, name, id(target)))
+        return target
 
     def run(self) -> "_Analysis":
         self._walk_block(self._body)
@@ -177,6 +375,11 @@ class _Analysis:
         return True
 
     def _walk_statement(self, statement) -> bool:
+        # Every yield this statement runs hands a value out of the handler's frame,
+        # whatever shape it is written in, and it is NOT covered by the
+        # discarded-expression scan below (`x = yield v` names no action site).
+        for yielded in _yielded_values(statement):
+            self._delivery_of(yielded)
         if isinstance(statement, ast.Return):
             self._delivery_of(statement.value)
             return False
@@ -194,9 +397,15 @@ class _Analysis:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             self._locals[statement.name] = statement
             return True
-        if isinstance(statement, (ast.For, ast.While)):
+        if isinstance(statement, (ast.For, ast.While, ast.AsyncFor)):
             self._walk_block(statement.body)
             self._walk_block(statement.orelse)
+            return True
+        if isinstance(statement, ast.Match):
+            # Every case body is reachable: the reader does not evaluate patterns,
+            # and a delivery hidden in one arm is still a delivery.
+            for case in statement.cases:
+                self._walk_block(case.body)
             return True
         if isinstance(statement, ast.Try):
             self._walk_block(statement.body)
@@ -205,8 +414,12 @@ class _Analysis:
             self._walk_block(statement.orelse)
             self._walk_block(statement.finalbody)
             return True
-        if isinstance(statement, ast.With):
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
             self._walk_block(statement.body)
+            return True
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield):
+            # Already walked as a yield position above; this arm only keeps the
+            # discarded-expression scan below from re-reading the same call.
             return True
         # Any other statement can still RUN an action (a discarded call, an
         # assignment whose value is returned later). It cannot DELIVER a body by
@@ -219,6 +432,7 @@ class _Analysis:
                 slot = _action_slot(node)
                 if slot is None:
                     continue
+                self.saw_action_site = True
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
                     continue  # discarded delivery: binds nothing
                 if isinstance(slot, ast.Name):
@@ -236,6 +450,7 @@ class _Analysis:
                 continue
             slot = _action_slot(node, self._resolver)
             if slot is not None:
+                self.saw_action_site = True
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
                     self.delivered.add(slot.value)
                 elif isinstance(slot, ast.Name):
@@ -248,6 +463,9 @@ class _Analysis:
                 if name not in self._called:
                     self._called.add(name)
                     self._walk_block(self._locals[name].body)
+                continue
+            if isinstance(node.func, ast.Name) and self._is_value_constructor(name):
+                # Builds a value; its arguments were walked above.
                 continue
             if isinstance(node.func, ast.Name) and self._follow_helper(name):
                 continue
@@ -266,6 +484,31 @@ class _Analysis:
             # the observable, mutable state that records the derivation failure.
             self.opaque = True
 
+    def _is_value_constructor(self, name: str) -> bool:
+        """Whether a bare name resolves to a callable that only builds a value.
+
+        The name is resolved the same way a followed helper is - through the
+        handler's OWN globals - and only then compared by identity with the
+        constructors above. A handler that binds the name to something else (a
+        function of its own, a subclass of a response class) resolves to a
+        different object and is NOT inert. Neither does a name this function
+        BINDS or CLOSES OVER: `str` may be a local `def`, a function-local
+        import or a walrus target, and the reader cannot see through a binding
+        it did not resolve.
+        """
+        if name in self._bound or name in self._closure:
+            return False
+        target = self._resolve(name)
+        if target is None:
+            # `str`, `len`, ... are usually builtins: they are not in a module's
+            # globals, so the resolver cannot see them. Which builtins a function
+            # actually resolves through is its own `__builtins__`, not the
+            # interpreter's - and that namespace can be a dict someone mutates
+            # after this read, so the identity is recorded like a global's.
+            target = self._builtins.get(name)
+            self.resolved.append((self._builtins, name, id(target)))
+        return any(target is inert for inert in _INERT_CALLABLES)
+
     def _follow_helper(self, name: str) -> bool:
         """Follow a module-level helper the handler delivers through.
 
@@ -277,25 +520,74 @@ class _Analysis:
         """
         if self._depth >= 3 or self._resolver is None:
             return False
+        if name in self._bound or name in self._closure:
+            # The name is bound by this function or closed over from an enclosing
+            # one, so the module global of that name is NOT what runs: a closure
+            # variable or a local rebinding can hold a function that delivers a
+            # private body while the global is a harmless refusal builder.
+            return False
         try:
-            target = self._resolver(name)
+            target = self._resolve(name)
         except Exception:
             return False
         if target is _execute or not inspect.isfunction(target):
+            return False
+        if getattr(target, "__wrapped__", None) is not None:
+            # `functools.wraps` copies `__wrapped__`, and `inspect.getsource`
+            # UNWRAPS it - so the source read here would be the inner function's
+            # while the object the handler calls is the WRAPPER, whose own body
+            # may run the action. Which body runs cannot be read off this object.
             return False
         try:
             source = inspect.getsource(target)
         except (OSError, TypeError):
             return False
+        # The body that will run is `target.__code__`, and it can be swapped under
+        # the same function object: the identity of the function says nothing about
+        # the code it runs now. Record the body's identity so a cached verdict
+        # cannot survive a swap.
+        self.resolved.append((target, _CODE_GUARD,
+                              id(getattr(target, "__code__", None))))
+        # The helper's body resolves names where the HELPER lives, not where the
+        # handler lives: a module that binds `JSONResponse` to its own class must
+        # not be read through the handler's module, where the name may mean
+        # starlette's class. Its builtins come off the function object for the
+        # same reason a module that swapped `__builtins__` cannot be read off the
+        # module's current global.
+        helper_globals = getattr(target, "__globals__", None)
+        resolver = (helper_globals.get if isinstance(helper_globals, dict)
+                    else self._resolver)
+        freevars = getattr(getattr(target, "__code__", None), "co_freevars", ())
         try:
-            sub = _Analysis(source, resolver=self._resolver,
-                            depth=self._depth + 1).run()
-        except (SyntaxError, IndentationError, ValueError, RecursionError):
+            sub = _Analysis(source, resolver=resolver, depth=self._depth + 1,
+                            closure=freevars, globals_map=helper_globals,
+                            builtins_map=_function_builtins(target)).run()
+        except Exception:
+            # FAIL-CLOSED. Any failure to finish the read - a syntax error, a
+            # namespace whose `str` someone replaced under the interpreter, a
+            # recursion limit a hostile body hits - leaves the helper UNREAD, and
+            # an unread helper is a delivery this reader cannot explain.
             return False
+        # A resolution this helper made in ITS OWN globals is checked against
+        # those globals on every cached read, not only the handler's.
+        self.resolved.extend(sub.resolved)
         # Record that this handler's action sites were reached THROUGH an
         # intermediate call: the judged parameter is not handed to the action
         # site directly, so the dispatch identity can no longer be trusted.
-        self.followed = True
+        #
+        # Only a helper that HANDS SOMETHING OVER can move that identity: a
+        # delivered action, an action parameter, an action site it names without
+        # returning it (a discarded call), a value it `yield`s - including a call
+        # it yields whose own body delivers one - a helper of its own, or a
+        # delivery it could not explain. A refusal builder called from an
+        # `except` clause hands over none of those - it formats a message and
+        # returns it - so the dispatch identity stays where it was. Counting it
+        # was the second half of iss-393c02b9ed844e04: together with that
+        # builder's own `JSONResponse(...)` body it made every public action on
+        # `POST /api/state/query/{action}` an unverifiable declaration.
+        if (sub.delivered or sub.params or sub.opaque or sub.followed
+                or sub.saw_action_site):
+            self.followed = True
         self.delivered |= sub.delivered
         self.params |= sub.params
         self.opaque = self.opaque or sub.opaque
@@ -303,20 +595,52 @@ class _Analysis:
 
 
 @functools.lru_cache(maxsize=512)
-def delivered_actions(handler) -> Delivery:
-    """The actions `handler`'s own source can deliver, or `readable=False`."""
+def _read_delivery(handler) -> tuple[Delivery, tuple]:
+    """Read the handler's source once, WITH the identities it resolved.
+
+    The identities come back beside the verdict so `delivered_actions` can notice
+    that a global, a builtins namespace or a followed helper's body changed after
+    the read; a verdict is only valid for the namespaces it was derived from.
+    """
+    if getattr(handler, "__wrapped__", None) is not None:
+        # `inspect.getsource` unwraps, so the source read here would be the inner
+        # function's while the object the route calls is the wrapper. Unread is
+        # not an approval.
+        return Delivery(frozenset(), frozenset(), True, True, False), ()
     try:
         source = inspect.getsource(handler)
     except (OSError, TypeError):
-        return Delivery(frozenset(), frozenset(), False, False, False)
+        return Delivery(frozenset(), frozenset(), False, False, False), ()
     try:
         globals_map = getattr(handler, "__globals__", None)
+        freevars = getattr(getattr(handler, "__code__", None), "co_freevars", ())
         analysis = _Analysis(source,
-                             resolver=(globals_map.get if globals_map else None)).run()
-    except (SyntaxError, IndentationError, ValueError):
-        return Delivery(frozenset(), frozenset(), False, False, False)
-    return Delivery(frozenset(analysis.delivered), frozenset(analysis.params),
-                    analysis.opaque, True, analysis.followed)
+                             resolver=(globals_map.get if globals_map else None),
+                             closure=freevars, globals_map=globals_map,
+                             builtins_map=_function_builtins(handler)).run()
+    except Exception:
+        # FAIL-CLOSED. A read that cannot finish is an UNREADABLE handler, not an
+        # approval: the guard above answers such a route with the mismatch
+        # refusal. Every exception belongs here, including the ones a replaced
+        # builtin raises inside `ast` itself (`builtins.str` swapped process-wide
+        # makes `isinstance` raise) - a crash would skip the refusal entirely.
+        return Delivery(frozenset(), frozenset(), False, False, False), ()
+    delivery = Delivery(frozenset(analysis.delivered), frozenset(analysis.params),
+                        analysis.opaque, True, analysis.followed)
+    return delivery, tuple(analysis.resolved)
+
+
+def delivered_actions(handler) -> Delivery:
+    """The actions `handler`'s own source can deliver, or `readable=False`."""
+    delivery, resolved = _read_delivery(handler)
+    if any(not _identity_holds(holder, name, identity)
+           for holder, name, identity in resolved):
+        # Something the read leaned on changed after it: a global rebound, a
+        # builtins dict mutated, or a followed helper's body swapped. The cached
+        # verdict described the old state, so re-read instead of serving it.
+        _read_delivery.cache_clear()
+        delivery, resolved = _read_delivery(handler)
+    return delivery
 
 
 def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Binding:

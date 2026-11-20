@@ -27,8 +27,17 @@ function-local import, a ``match`` capture, a subclass of a response class,
 ``eval``, a private action passed INTO a response constructor, a helper whose own
 module binds ``JSONResponse`` to something else, a module that replaces its own
 ``__builtins__``, a helper reached through ``functools.wraps``, a private action a
-``yield`` carries - directly or from a nested helper - and a response class the
-module rebinds AFTER the reader looked at it. Each must still be refused.
+``yield`` carries - directly or from a nested helper, through ``yield from``, or
+as the value of an assignment - a response class the module rebinds AFTER the
+reader looked at it, a builtins dict mutated after the read, and a followed
+helper whose ``__code__`` was swapped under the same function object.
+
+Measured boundaries (accepted, deliberately, and NOT claimed to be safe): a
+process that monkeypatches a third-party class's own method
+(``starlette.responses.JSONResponse.__init__``) after the read keeps the class
+identity the reader whitelisted, so the cached verdict survives; and the five
+callee/physical shapes listed in iss-a555f839083d405d were accepted before this
+fix too. Both are recorded there rather than silently trusted.
 """
 from __future__ import annotations
 
@@ -133,9 +142,23 @@ def _dispatch_with_refusal_builder():
          "        return _busy_response(exc)\n"))
 
 
+def _dispatch_with_a_streaming_tail():
+    """A generator that yields INERT values still binds the dispatch."""
+    return _compiled(
+        "h_stream_inert",
+        ("def _chunks(service):\n"
+         "    yield 'ok'\n"
+         "def h_stream_inert(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return list(_chunks(service))\n"))
+
+
 @pytest.mark.parametrize("build", [_dispatch_with_empty_helper,
                                    _dispatch_with_value_builder_inline,
-                                   _dispatch_with_refusal_builder])
+                                   _dispatch_with_refusal_builder,
+                                   _dispatch_with_a_streaming_tail])
 def test_a_refusal_clause_that_builds_a_value_binds_the_dispatch(build):
     binding = binding_for(build(), "get_graph", TEMPLATE)
     assert binding.ok is True, binding
@@ -419,6 +442,103 @@ def _response_class_rebound_after_the_read():
 
 
 
+def _private_action_a_yield_from_carries():
+    """`yield from` a helper that RETURNS the private action.
+
+    The statement is a `YieldFrom`, not an `Expr(Yield)`, so a reader that only
+    treats a bare yield as a delivery position misses it - while a caller that
+    iterates the generator gets the private body.
+    """
+    return _compiled(
+        "h_yield_from",
+        ("def _tail(service):\n"
+         f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {GEN_PID!r}}})\n"
+         "def _gen(service):\n"
+         "    yield from _tail(service)\n"
+         "def h_yield_from(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        return list(_gen(service))\n"))
+
+
+def _private_action_a_yield_assignment_carries():
+    """`got = yield helper(service)`: the yield is the VALUE of an assignment."""
+    return _compiled(
+        "h_yield_assignment",
+        ("def _tail(service):\n"
+         f"    return execute(service, {PRIVATE_ACTION!r}, {{'project_id': {GEN_PID!r}}})\n"
+         "def h_yield_assignment(action: str, arguments: dict,\n"
+         "                       service=Depends(get_service)):\n"
+         "    try:\n"
+         "        return _call(service, action, arguments)\n"
+         "    except StateWriteBusy:\n"
+         "        _sent = yield _tail(service)\n"
+         "        return [_sent]\n"))
+
+
+def _builtin_captured_at_creation():
+    """The function keeps the `__builtins__` it was created under, not the module's.
+
+    CPython copies the frame's builtins into the function object, so a module that
+    restores `__builtins__` afterwards still runs `str` from the leaky namespace.
+    """
+    ns = _namespace()
+    leaky = lambda service: execute(service, PRIVATE_ACTION, {"project_id": GEN_PID})
+    ns["__builtins__"] = dict(vars(builtins), str=leaky)
+    source = ("def h_captured_builtins(action: str, arguments: dict,\n"
+              "                            service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy:\n"
+              "        return str(service)\n")
+    exec(compile(source, _register("h_captured_builtins", source), "exec"), ns)
+    ns["__builtins__"] = builtins
+    return ns["h_captured_builtins"]
+
+
+def _builtins_namespace_mutated_after_the_read():
+    """The SAME builtins dict gains a leaky `str` after the reader looked at it."""
+    ns = _namespace()
+    ns["__builtins__"] = dict(vars(builtins))
+    source = ("def h_mutated_builtins(action: str, arguments: dict,\n"
+              "                           service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy:\n"
+              "        return str(service)\n")
+    exec(compile(source, _register("h_mutated_builtins", source), "exec"), ns)
+    handler = ns["h_mutated_builtins"]
+    assert binding_for(handler, "get_graph", TEMPLATE).ok is True
+    ns["__builtins__"]["str"] = lambda service: execute(service, PRIVATE_ACTION,
+                                                        {"project_id": GEN_PID})
+    return handler
+
+
+def _helper_body_swapped_after_the_read():
+    """The followed helper's `__code__` is swapped; the function object is the same."""
+    ns = _namespace()
+    source = ("def _busy(exc):\n"
+              "    return {'detail': 'busy'}\n"
+              "def h_swapped_body(action: str, arguments: dict,\n"
+              "                   service=Depends(get_service)):\n"
+              "    try:\n"
+              "        return _call(service, action, arguments)\n"
+              "    except StateWriteBusy as exc:\n"
+              "        return _busy(exc)\n")
+    exec(compile(source, _register("h_swapped_body", source), "exec"), ns)
+    handler = ns["h_swapped_body"]
+    assert binding_for(handler, "get_graph", TEMPLATE).ok is True
+    ns["_busy"].__code__ = _leaky_busy.__code__
+    return handler
+
+
+def _leaky_busy(exc):
+    """The replacement body: it runs the private action instead of formatting."""
+    return execute(None, PRIVATE_ACTION, {"project_id": GEN_PID})
+
+
+
 @pytest.mark.parametrize("build", [_local_builder_class, _response_subclass,
                                    _eval_in_a_delivered_position,
                                    _private_action_inside_a_response_constructor,
@@ -435,7 +555,12 @@ def _response_class_rebound_after_the_read():
                                    _module_rebinds_its_own_builtins,
                                    _helper_reached_through_functools_wraps,
                                    _private_action_a_nested_generator_yields,
-                                   _response_class_rebound_after_the_read])
+                                   _response_class_rebound_after_the_read,
+                                   _private_action_a_yield_from_carries,
+                                   _private_action_a_yield_assignment_carries,
+                                   _builtin_captured_at_creation,
+                                   _builtins_namespace_mutated_after_the_read,
+                                   _helper_body_swapped_after_the_read])
 def test_a_delivery_the_reader_cannot_explain_is_still_refused(build):
     binding = binding_for(build(), "get_graph", TEMPLATE)
     assert binding.ok is False, (binding,)

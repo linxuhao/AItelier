@@ -101,6 +101,9 @@ _VALUE_CONSTRUCTORS = (str, repr, format, bytes, bool, int, float, len,
 _RESPONSE_CONSTRUCTORS = (Response, HTMLResponse, PlainTextResponse, JSONResponse,
                           RedirectResponse)
 _INERT_CALLABLES = _VALUE_CONSTRUCTORS + _RESPONSE_CONSTRUCTORS
+# The marker a resolution uses when the "namespace" is a function whose BODY is
+# what must not change: `helper.__code__` can be swapped under the same object id.
+_CODE_GUARD = "__code__"
 
 
 class Delivery(NamedTuple):
@@ -210,23 +213,82 @@ def _bound_names(function) -> set[str]:
     return names
 
 
-def _builtins_namespace(globals_map) -> dict:
-    """The builtins the function's OWN module resolves an unbound name through.
+def _builtins_namespace(globals_map, builtins_map=None) -> dict:
+    """The builtins the analyzed function resolves an unbound name through.
 
-    At runtime a name that is not in the module's globals resolves through that
-    module's `__builtins__`, which is usually the `builtins` module but may be a
-    dict the module replaced - that is the ordinary way a module rebinds `str`.
+    At runtime a name that is not in the function's globals resolves through that
+    function's OWN `__builtins__`, which is usually the `builtins` module but may
+    be a dict the module replaced - that is the ordinary way a module rebinds
+    `str`. `builtins_map` is that namespace as read off the function object; the
+    module global is only the fallback for a function that does not carry one.
     Answering with the process-wide `builtins` regardless would describe a lookup
     the function never performs, and `str` would be called inert while the module
     runs something else.
     """
-    if not isinstance(globals_map, dict):
-        return vars(builtins)
-    namespace = globals_map.get("__builtins__", builtins)
+    namespace = builtins_map
+    if not isinstance(namespace, dict):
+        namespace = (globals_map.get("__builtins__", builtins)
+                     if isinstance(globals_map, dict) else builtins)
     if isinstance(namespace, dict):
         return namespace
     namespace_dict = getattr(namespace, "__dict__", None)
     return namespace_dict if isinstance(namespace_dict, dict) else vars(builtins)
+
+
+def _function_builtins(function) -> dict | None:
+    """The builtins namespace CPython fixed into `function` when it was created.
+
+    A module that swaps its `__builtins__` and later restores it leaves every
+    function it created under the swapped namespace looking names up THERE: the
+    frame's builtins are copied into the function object at creation. Reading the
+    module global instead would describe a lookup this function never performs.
+    """
+    try:
+        namespace = getattr(function, "__builtins__", None)
+    except Exception:
+        return None
+    if isinstance(namespace, dict):
+        return namespace
+    namespace_dict = getattr(namespace, "__dict__", None)
+    return namespace_dict if isinstance(namespace_dict, dict) else None
+
+
+def _yielded_values(statement) -> list[ast.expr | None]:
+    """The value of every `yield`/`yield from` this statement runs in ITS OWN frame.
+
+    A generator hands each yielded value to whoever iterates it, so a yield is a
+    delivery position whatever shape surrounds it: `yield v`, `yield from v`,
+    `got = yield v` and `x = [yield v]` all hand `v` out. A yield inside a nested
+    `def`/`lambda`/`class` body belongs to THAT callable, which the reader follows
+    only when the handler hands control to it.
+    """
+    found: list[ast.expr | None] = []
+    stack: list[ast.AST] = [statement]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            found.append(node.value)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _identity_holds(holder, name: str, identity: int) -> bool:
+    """Whether `holder` still resolves `name` to the object the read recorded.
+
+    Two kinds of holder, two kinds of name: a mapping (`__globals__` or a builtins
+    dict) answers with `get`, and a FUNCTION answers the marker `__code__` with
+    its body. The body case cannot be folded into the first: swapping
+    `helper.__code__` keeps the function object's id while changing what runs.
+    """
+    if name == _CODE_GUARD:
+        return id(getattr(holder, "__code__", None)) == identity
+    try:
+        return id(holder.get(name)) == identity
+    except Exception:
+        return False
 
 
 def _static_truth(test: ast.expr) -> bool | None:
@@ -251,7 +313,7 @@ class _Analysis:
     """
 
     def __init__(self, source: str, resolver=None, depth: int = 0, closure=(),
-                 globals_map=None):
+                 globals_map=None, builtins_map=None):
         tree = ast.parse(textwrap.dedent(source))
         function = next((node for node in tree.body
                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
@@ -271,11 +333,12 @@ class _Analysis:
         self._bound = _bound_names(function)
         self._closure = set(closure)
         # The globals and builtins THIS function would look a name up in, and the
-        # identities it resolved: a cached verdict is only as good as the globals
-        # it read, so every resolution is remembered and re-checked (`_resolve`).
+        # identities it resolved: a cached verdict is only as good as the namespaces
+        # it read, so every resolution is remembered and re-checked
+        # (`_resolve`, `_identity_holds`).
         self._globals = globals_map if isinstance(globals_map, dict) else {}
-        self._builtins = _builtins_namespace(globals_map)
-        self.resolved: list[tuple[dict, str, int]] = []
+        self._builtins = _builtins_namespace(globals_map, builtins_map)
+        self.resolved: list[tuple[object, str, int]] = []
         # Set when the body names an action site at all - delivered, discarded or
         # yielded. A helper that does that hands over SOMETHING, even if no
         # `return` carries it.
@@ -312,6 +375,11 @@ class _Analysis:
         return True
 
     def _walk_statement(self, statement) -> bool:
+        # Every yield this statement runs hands a value out of the handler's frame,
+        # whatever shape it is written in, and it is NOT covered by the
+        # discarded-expression scan below (`x = yield v` names no action site).
+        for yielded in _yielded_values(statement):
+            self._delivery_of(yielded)
         if isinstance(statement, ast.Return):
             self._delivery_of(statement.value)
             return False
@@ -350,11 +418,8 @@ class _Analysis:
             self._walk_block(statement.body)
             return True
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Yield):
-            # A generator HANDS the yielded value to whoever iterates it, so a
-            # yield is a delivery position, not a discarded expression: the value
-            # may be the body of a private action (`yield execute(...)`) or the
-            # result of a helper that delivers one (`yield _tail(service)`).
-            self._delivery_of(statement.value.value)
+            # Already walked as a yield position above; this arm only keeps the
+            # discarded-expression scan below from re-reading the same call.
             return True
         # Any other statement can still RUN an action (a discarded call, an
         # assignment whose value is returned later). It cannot DELIVER a body by
@@ -436,10 +501,12 @@ class _Analysis:
         target = self._resolve(name)
         if target is None:
             # `str`, `len`, ... are usually builtins: they are not in a module's
-            # globals, so the resolver cannot see them. Which builtins a module
+            # globals, so the resolver cannot see them. Which builtins a function
             # actually resolves through is its own `__builtins__`, not the
-            # interpreter's.
+            # interpreter's - and that namespace can be a dict someone mutates
+            # after this read, so the identity is recorded like a global's.
             target = self._builtins.get(name)
+            self.resolved.append((self._builtins, name, id(target)))
         return any(target is inert for inert in _INERT_CALLABLES)
 
     def _follow_helper(self, name: str) -> bool:
@@ -475,18 +542,31 @@ class _Analysis:
             source = inspect.getsource(target)
         except (OSError, TypeError):
             return False
+        # The body that will run is `target.__code__`, and it can be swapped under
+        # the same function object: the identity of the function says nothing about
+        # the code it runs now. Record the body's identity so a cached verdict
+        # cannot survive a swap.
+        self.resolved.append((target, _CODE_GUARD,
+                              id(getattr(target, "__code__", None))))
         # The helper's body resolves names where the HELPER lives, not where the
         # handler lives: a module that binds `JSONResponse` to its own class must
         # not be read through the handler's module, where the name may mean
-        # starlette's class.
+        # starlette's class. Its builtins come off the function object for the
+        # same reason a module that swapped `__builtins__` cannot be read off the
+        # module's current global.
         helper_globals = getattr(target, "__globals__", None)
         resolver = (helper_globals.get if isinstance(helper_globals, dict)
                     else self._resolver)
         freevars = getattr(getattr(target, "__code__", None), "co_freevars", ())
         try:
             sub = _Analysis(source, resolver=resolver, depth=self._depth + 1,
-                            closure=freevars, globals_map=helper_globals).run()
-        except (SyntaxError, IndentationError, ValueError, RecursionError):
+                            closure=freevars, globals_map=helper_globals,
+                            builtins_map=_function_builtins(target)).run()
+        except Exception:
+            # FAIL-CLOSED. Any failure to finish the read - a syntax error, a
+            # namespace whose `str` someone replaced under the interpreter, a
+            # recursion limit a hostile body hits - leaves the helper UNREAD, and
+            # an unread helper is a delivery this reader cannot explain.
             return False
         # A resolution this helper made in ITS OWN globals is checked against
         # those globals on every cached read, not only the handler's.
@@ -519,8 +599,8 @@ def _read_delivery(handler) -> tuple[Delivery, tuple]:
     """Read the handler's source once, WITH the identities it resolved.
 
     The identities come back beside the verdict so `delivered_actions` can notice
-    that a module rebound one of the names the read relied on; a verdict is only
-    valid for the globals it was derived from.
+    that a global, a builtins namespace or a followed helper's body changed after
+    the read; a verdict is only valid for the namespaces it was derived from.
     """
     if getattr(handler, "__wrapped__", None) is not None:
         # `inspect.getsource` unwraps, so the source read here would be the inner
@@ -536,8 +616,14 @@ def _read_delivery(handler) -> tuple[Delivery, tuple]:
         freevars = getattr(getattr(handler, "__code__", None), "co_freevars", ())
         analysis = _Analysis(source,
                              resolver=(globals_map.get if globals_map else None),
-                             closure=freevars, globals_map=globals_map).run()
-    except (SyntaxError, IndentationError, ValueError):
+                             closure=freevars, globals_map=globals_map,
+                             builtins_map=_function_builtins(handler)).run()
+    except Exception:
+        # FAIL-CLOSED. A read that cannot finish is an UNREADABLE handler, not an
+        # approval: the guard above answers such a route with the mismatch
+        # refusal. Every exception belongs here, including the ones a replaced
+        # builtin raises inside `ast` itself (`builtins.str` swapped process-wide
+        # makes `isinstance` raise) - a crash would skip the refusal entirely.
         return Delivery(frozenset(), frozenset(), False, False, False), ()
     delivery = Delivery(frozenset(analysis.delivered), frozenset(analysis.params),
                         analysis.opaque, True, analysis.followed)
@@ -547,11 +633,13 @@ def _read_delivery(handler) -> tuple[Delivery, tuple]:
 def delivered_actions(handler) -> Delivery:
     """The actions `handler`'s own source can deliver, or `readable=False`."""
     delivery, resolved = _read_delivery(handler)
-    for module_globals, name, identity in resolved:
-        if id(module_globals.get(name)) != identity:
-            _read_delivery.cache_clear()
-            delivery, resolved = _read_delivery(handler)
-            break
+    if any(not _identity_holds(holder, name, identity)
+           for holder, name, identity in resolved):
+        # Something the read leaned on changed after it: a global rebound, a
+        # builtins dict mutated, or a followed helper's body swapped. The cached
+        # verdict described the old state, so re-read instead of serving it.
+        _read_delivery.cache_clear()
+        delivery, resolved = _read_delivery(handler)
     return delivery
 
 

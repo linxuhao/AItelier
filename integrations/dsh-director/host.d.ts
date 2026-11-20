@@ -98,8 +98,8 @@ export interface DirectorApi {
   /** v1.2, capability `channels`: the host calls this after the root wrote message
    *  `messageId` to its owner (replying to `replyTo` when given), with the text it wrote.
    *  The director sends the same text on the owner's chat channel, shaped for a phone chat
-   *  (channelText: cut past CHANNEL_LIMITS.mirrorChars, markdown flattened for WeChat; a text
-   *  with an approval phrase or a binding code goes as written): a reply goes to the
+   *  (channelText: cut past CHANNEL_LIMITS.mirrorChars, headings, bold and tables flattened;
+   *  an approval phrase line is never cut, a text with a binding code goes as written): a reply goes to the
    *  channel the answered message came from, an unprompted message to the default channel
    *  when one is set and bound, a reply to a dashboard message nowhere. Each message is
    *  sent once and recorded with channels.recordDelivery, a failed send included; a send

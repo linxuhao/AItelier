@@ -647,7 +647,7 @@ const LONG_REPLY = ['两份都把你昨晚那两张卡答了，两位导演都�
 
 test('a long steward message reaches the channel cut at a line end, ending in MORE; the host and a replay see the whole text', async () => {
   assert.ok(LONG_REPLY.length > 1500 && LONG_REPLY.length > CHANNEL_LIMITS.mirrorChars, `${LONG_REPLY.length}`);
-  assert.equal(CHANNEL_LIMITS.mirrorChars, 1200);
+  assert.equal(CHANNEL_LIMITS.mirrorChars, 600);
   const s = setup();
   s.sources.set('m-owner', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
   assert.deepEqual(await s.channels.ownerMessageSent('m-reply', LONG_REPLY, 'm-owner'), { mirrored: true, channel: 'slack' });
@@ -655,43 +655,64 @@ test('a long steward message reaches the channel cut at a line end, ending in MO
   assert.ok(Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, `sent ${Array.from(sent).length} characters`);
   assert.ok(sent.endsWith(MORE), sent.slice(-40));
   const kept = sent.slice(0, -MORE.length);
-  // Cut at a line end: what is kept is whole lines of the original, its first line first.
-  assert.ok(LONG_REPLY.startsWith(kept + '\n'), 'cut at the end of a line');
+  // Cut at a line end: what is kept is whole lines of the (bold-flattened) original, its first line first.
+  assert.ok(LONG_REPLY.replace(/\*\*/g, '').startsWith(kept + '\n'), 'cut at the end of a line');
   assert.ok(kept.length > CHANNEL_LIMITS.mirrorChars / 2, 'the cut keeps most of what fits');
+  // The cut is logged with both lengths, never the body.
+  const [cutLog] = s.logs.filter(([event]) => event === 'channel_text_cut').map(([, fields]) => fields);
+  assert.deepEqual(cutLog, { channel: 'slack', message_id: 'm-reply', chars: Array.from(LONG_REPLY).length, sent_chars: Array.from(sent).length });
   // Delivered once, recorded once; a replay of the same message sends nothing more.
   assert.equal(only(s.calls, 'recordDelivery').length, 1);
   assert.deepEqual(await s.channels.ownerMessageSent('m-reply', LONG_REPLY, 'm-owner'), { mirrored: false, reason: 'already_mirrored' });
   assert.equal(s.slack.sent.length, 1);
 });
 
-test('channelText: a short text goes as written; a long line is cut at a sentence end; a hard cut never splits a character', () => {
-  const short = 'The answer: build 42 passed.\n**Next**: nothing.';
-  assert.equal(channelText('slack', short), short);
+test('channelText: a short text goes as written; a blank line beats a line end, so a title is never the last line kept', () => {
+  assert.equal(channelText('slack', 'The answer: build 42 passed.\nNext: nothing.'), 'The answer: build 42 passed.\nNext: nothing.');
   assert.equal(channelText('wechat', '答案：已经好了。\n明天再看。'), '答案：已经好了。\n明天再看。');
-  // One long paragraph, no line end in reach: the cut falls after the last full sentence.
+  const sections = ['结论：都好了。', '', '平台', '- ' + '一处修好的缺陷，'.repeat(5), '', '武虾传奇', '- ' + '一处上线的变化，'.repeat(5)].join('\n');
+  const cut = channelText('wechat', sections, 80);
+  assert.equal(cut, ['结论：都好了。', '', '平台', '- ' + '一处修好的缺陷，'.repeat(5)].join('\n') + MORE);
+});
+
+test('channelText: a long line is cut after a sentence end, never inside a number, version, reference or URL', () => {
   const paragraph = '这是一句完整的话。'.repeat(200);
   const cut = channelText('slack', paragraph, 100);
   assert.ok(cut.endsWith('。' + MORE), cut);
   assert.ok(Array.from(cut).length <= 100);
   assert.ok(paragraph.startsWith(cut.slice(0, -MORE.length)));
-  // No line or sentence end at all: cut at the bound, by code point (a surrogate pair stays whole).
-  const emoji = '\u{1F600}'.repeat(300);
-  const hard = channelText('slack', emoji, 100);
+  // A dot inside 13.6x or v1.2.3 ends no sentence.
+  const numbers = '提速' + '甲'.repeat(60) + '到 13.6x 版本 v1.2.3 已发布' + '乙'.repeat(60);
+  const kept = channelText('slack', numbers, 80).slice(0, -MORE.length);
+  assert.ok(!/\d\.$/.test(kept) && numbers.startsWith(kept), kept);
+  // A hard cut steps back before the word it would split: never 见 Q1 for 见 Q12, never half a URL.
+  assert.equal(channelText('slack', '甲'.repeat(86) + '见 Q12 的回答' + '乙'.repeat(40), 99), '甲'.repeat(86) + '见' + MORE);
+  assert.equal(channelText('wechat', '甲'.repeat(60) + '详见 https://docs.example.com/a/b?c=1 乙' + '乙'.repeat(40), 80), '甲'.repeat(60) + '详见' + MORE);
+  // No boundary at all: cut at the bound, by code point (a surrogate pair stays whole).
+  const hard = channelText('slack', '\u{1F600}'.repeat(300), 100);
   assert.equal(Array.from(hard).length, 100);
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(hard), 'no lone high surrogate');
+  // A bound too small to hold MORE falls back to the default.
+  assert.equal(channelText('slack', paragraph, 5), channelText('slack', paragraph));
 });
 
-test('channelText: a text with an approval phrase or a binding code goes exactly as written, however long', () => {
-  const approval = `${LONG_REPLY}\n\n同意 proposal prop-123\n拒绝 proposal prop-123`;
-  for (const channel of CHANNEL_NAMES) assert.equal(channelText(channel, approval), approval);
+test('channelText: an approval phrase line is never cut and loses only its marks; a binding code text goes as written', () => {
+  const approval = `${LONG_REPLY}\n\n\`同意 proposal prop-123\`\n**拒绝 proposal prop-123**\n结尾一句。`;
+  for (const channel of CHANNEL_NAMES) {
+    const sent = channelText(channel, approval);
+    assert.ok(Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, `${channel} ${Array.from(sent).length}`);
+    assert.ok(sent.endsWith('\n同意 proposal prop-123\n拒绝 proposal prop-123' + MORE), sent.slice(-80));
+  }
+  const short = '要启动吗？\n`同意 proposal prop-9`\n拒绝 proposal prop-9';
+  for (const channel of CHANNEL_NAMES) assert.equal(channelText(channel, short), '要启动吗？\n同意 proposal prop-9\n拒绝 proposal prop-9');
   const code = `${LONG_REPLY}\n482913\n`;
   for (const channel of CHANNEL_NAMES) assert.equal(channelText(channel, code), code);
 });
 
-test('channelText: WeChat gets markdown flattened (headings, bold, code marks, tables); Slack keeps it', () => {
+test('channelText: headings, bold and tables are flattened on both channels; only WeChat loses code marks', () => {
   const md = '## 进展\n**武虾**：`main` 已合入\n| 项目 | 状态 |\n|---|:---:|\n| 武虾 | 已上线 |';
   assert.equal(channelText('wechat', md), '进展\n武虾：main 已合入\n项目 · 状态\n武虾 · 已上线');
-  assert.equal(channelText('slack', md), md);
+  assert.equal(channelText('slack', md), '进展\n武虾：`main` 已合入\n项目 · 状态\n武虾 · 已上线');
 });
 
 test('a reply to a dashboard message stays on the dashboard; an unprompted one goes to the default channel only when set and bound', async () => {

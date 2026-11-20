@@ -220,7 +220,7 @@ def git_custody(retained_ref):
     return "unrecognized", None, None
 
 
-def custody_metadata(row, release=None):
+def custody_metadata(row, release=None, *, disclose_actor=True):
     """Metadata-only view of a state_git_artifacts row (no bytes): the four
     stored columns plus derived ``custody``, ``legacy_cas_path`` and
     ``released``. A valid typed reference must carry the row's own digest column.
@@ -230,6 +230,12 @@ def custody_metadata(row, release=None):
     that can tell a RELEASED candidate from one whose bytes are still held, and
     it is metadata only - answering it reads no payload. Without it the custody
     is what the row itself declares, exactly as before.
+
+    ``disclose_actor`` decides whether the release answers WHO retired the
+    bytes. The actor is a private fact (``core.state_privacy`` projects the
+    ledger without it), so an untrusted read answers ``released_at`` and
+    ``rule`` only - the same one dict, built here, never a second hand-rolled
+    view that could drift from this one.
     """
     artifact = {k: row[k] for k in ("commit_sha", "tree_sha", "bundle_sha256", "retained_ref")}
     custody, legacy_path, embedded = git_custody(artifact["retained_ref"])
@@ -237,8 +243,8 @@ def custody_metadata(row, release=None):
         raise StateConflict("custody reference does not match bundle digest")
     artifact["custody"] = "released" if release is not None else custody
     artifact["legacy_cas_path"] = legacy_path
-    artifact["released"] = None if release is None else {
-        k: release[k] for k in ("released_at", "actor", "rule")}
+    keys = ("released_at", "actor", "rule") if disclose_actor else ("released_at", "rule")
+    artifact["released"] = None if release is None else {k: release[k] for k in keys}
     return artifact
 
 
@@ -564,6 +570,16 @@ RELEASE_RULE = "no-live-consumer@1"
 RELEASE_TABLE = "state_git_bundle_releases"
 CUSTODY_VIEW = "state_git_bundle_custody"
 
+# The two column sets ``bundle_release`` reads. The full row is the trusted
+# reader's; ``RELEASE_PUBLIC_COLUMNS`` is the subset a public read of an OPENED
+# project's attempt may answer, and it is the same subset core.state_privacy
+# projects from this private ledger. Keeping both here - beside the table they
+# name - is what stops a reader from selecting a column the projection refuses
+# (which would silently read as "never released").
+RELEASE_COLUMNS = ("bundle_sha256", "commit_sha", "codec", "base_sha256", "raw_size",
+                   "payload_bytes", "released_at", "actor", "rule")
+RELEASE_PUBLIC_COLUMNS = ("bundle_sha256", "commit_sha", "released_at", "rule")
+
 # THE deciding statement. Not a summary of the rule and not a parallel
 # reimplementation of the reader's tables: the release function takes its
 # digests from here and its facts from the row it selected.
@@ -652,14 +668,21 @@ def _prepare_release_connection(conn) -> None:
             conn.execute(f"CREATE TEMP VIEW {table} AS SELECT {empty} WHERE 0")
 
 
-def bundle_release(conn, digest):
+def bundle_release(conn, digest, *, disclose_actor=True):
     """The append-only release record for ``digest``, or None. Never reads a byte.
 
     A database that predates the release ledger has no such table; that is "no
-    release was ever recorded", which is what None means here."""
+    release was ever recorded", which is what None means here.
+
+    ``disclose_actor=False`` reads only the columns a public read of an opened
+    project's attempt may answer (``RELEASE_PUBLIC_COLUMNS``): the ledger stays
+    private, and ``core.state_privacy`` projects exactly those columns. The
+    remaining columns - the actor, the codec and the size/counter accounting -
+    are refused on such a connection, so this is the one reader both trust
+    levels use instead of a second, quietly different query."""
+    columns = RELEASE_COLUMNS if disclose_actor else RELEASE_PUBLIC_COLUMNS
     try:
-        row = conn.execute(f"SELECT bundle_sha256,commit_sha,codec,base_sha256,raw_size,payload_bytes,"
-                           f"released_at,actor,rule FROM {RELEASE_TABLE} WHERE bundle_sha256=?",
+        row = conn.execute(f"SELECT {','.join(columns)} FROM {RELEASE_TABLE} WHERE bundle_sha256=?",
                            (digest,)).fetchone()
     except sqlite3.Error:
         return None
@@ -667,9 +690,7 @@ def bundle_release(conn, digest):
         return None
     if isinstance(row, sqlite3.Row):
         return dict(row)
-    keys = ("bundle_sha256", "commit_sha", "codec", "base_sha256", "raw_size", "payload_bytes",
-            "released_at", "actor", "rule")
-    return dict(zip(keys, tuple(row), strict=True))
+    return dict(zip(columns, tuple(row), strict=True))
 
 
 def _released_refusal(digest, release):

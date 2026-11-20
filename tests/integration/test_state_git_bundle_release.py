@@ -13,6 +13,11 @@ Criteria W3, W4, W6 and W10 of ``evidence/bundle-store-release-20261120/report.j
   the bytes, the digests and the pinned keyframes it would release - and that
   projection is what ``--apply`` then does.
 
+The reader is pinned here too (iss-aa7d3201a8b64c13): ``get_attempt`` answers a
+RELEASED candidate as released - ``released_at`` and ``rule`` to any reader of
+the opened project, the ``actor`` to a trusted one only - and a PRESENT
+candidate's ``git_artifact`` dict is unchanged, with ``released`` null.
+
 The database is a scratch one (a host DBManager file plus the real State schema),
 so the host's own ``run_isolation`` tables are the shipped ones. Artifact bytes
 are written through the product writer (``store_candidate``), so the store rows
@@ -279,21 +284,120 @@ def test_every_surviving_digest_restores_and_a_released_one_is_refused(tmp_path)
             assert "no bytes for this digest" not in str(refused.value)
             record = bundle_release(conn, digest)
             assert record["rule"] == "no-live-consumer@1" and record["payload_bytes"] > 0
-        # The reader-side custody answer is 'released' WITH the record, and the
-        # unchanged identity row still names the commit.
+        # The reader-side custody answer is 'released' WITH the record this
+        # release actually wrote (no hand-written row), and the unchanged
+        # identity row still names the commit. The known gap this replaced was
+        # the same metadata read WITHOUT the record, which answered
+        # 'state_db_fullpack' for bytes State no longer holds.
         row = dict(conn.execute("SELECT * FROM state_git_artifacts WHERE commit_sha=?",
                                 (commit4,)).fetchone())
         assert row["commit_sha"] == commit4 and row["bundle_bytes"] == b""
-        assert custody_metadata(row)["custody"] == "state_db_fullpack"
-        released_metadata = custody_metadata(row, bundle_release(conn, digest4))
+        record = bundle_release(conn, digest4)
+        released_metadata = custody_metadata(row, record)
         assert released_metadata["custody"] == "released"
-        assert released_metadata["released"]["actor"] == "fixture:release"
+        assert released_metadata["released"] == {
+            "released_at": record["released_at"], "actor": "fixture:release",
+            "rule": "no-live-consumer@1"}
+        # A digest that SURVIVED is untouched by the release: the metadata is
+        # what the row itself declares and ``released`` stays null.
+        held = dict(conn.execute("SELECT * FROM state_git_artifacts WHERE commit_sha=?",
+                                 (commit1,)).fetchone())
+        present_metadata = custody_metadata(held, bundle_release(conn, digest1))
+        assert present_metadata["custody"] == "state_db_fullpack"
+        assert present_metadata["released"] is None
         # A RELEASED commit is never reported as a missing legacy bundle.
         destination = tmp_path / "dest.git"
         with pytest.raises(StateConflict) as refused:
             materialize_candidate(service.store, commit4, str(destination))
         assert "was released" in str(refused.value)
         assert "re-attestation" not in str(refused.value)
+
+
+# The LITERAL key set of one attempt's ``git_artifact`` view: the four stored
+# columns plus the two derived ones and ``released``. Written out here rather
+# than derived from the production dict, so a key appearing or disappearing is a
+# test failure and not a silently accepted shape.
+GIT_ARTIFACT_KEYS = frozenset({"commit_sha", "tree_sha", "bundle_sha256", "retained_ref",
+                               "custody", "legacy_cas_path", "released"})
+# The release record a TRUSTED read answers: when, who, under which rule.
+RELEASED_TRUSTED_KEYS = frozenset({"released_at", "actor", "rule"})
+# The release record an UNTRUSTED (public) read of an OPENED project's attempt
+# may answer: when and under which rule - and NEVER the actor.
+RELEASED_UNTRUSTED_KEYS = frozenset({"released_at", "rule"})
+
+
+def test_get_attempt_answers_the_release_record_trusted_and_untrusted(tmp_path):
+    """The read surface must not claim State still holds bytes it released.
+
+    One attempt is ISSUED through the normal service path
+    (``start_external_attempt`` -> ``report_external_attempt``) and released
+    through the product release (``release_bundles``, so the ledger row is the
+    real one), then read back three ways: TRUSTED before the release (present),
+    TRUSTED after it, and UNTRUSTED after it - the last on an armed connection
+    over the same opened project, which is what an anonymous read gets.
+    """
+    from core.state_commands import ProjectPrivate, execute
+    from core.state_database import StateDatabase
+    from core.state_privacy import PRIVATE_STATE_TABLES
+    from tests.integration.test_state_git_artifact_durability import (
+        fixture as durable_fixture)
+
+    service, _source, _producer, db, attempt, commit, tree, _payload, _bundle = \
+        durable_fixture(tmp_path / "fx")
+    attempt_id = attempt["attempt_id"]
+    present = service.get_attempt(attempt_id)["git_artifact"]
+    # PRESENT: exactly what it is today - the same keys, the same values and
+    # ``released`` null. Nothing about answering a release changes this dict.
+    assert set(present) == GIT_ARTIFACT_KEYS
+    assert present["commit_sha"] == commit and present["tree_sha"] == tree
+    assert present["custody"] == "state_db_fullpack"
+    assert present["retained_ref"].startswith("state-db:git-bundle:sha256:")
+    assert present["retained_ref"] == "state-db:git-bundle:sha256:" + present["bundle_sha256"]
+    assert present["legacy_cas_path"] is None and present["released"] is None
+    # The project is opened, so the same attempt is readable without the
+    # private-project credential; the PRESENT answer is the same for both.
+    service.open_project("durable")
+    untrusted = StateService(StateDatabase(str(db)), actor="anyone", project_read_trusted=False)
+    assert execute(untrusted, "get_attempt", {"attempt_id": attempt_id})["git_artifact"] == present
+
+    with service.store.transaction(write=True) as conn:
+        out = release_bundles(conn, actor="fixture:release", admin=True)
+        record = bundle_release(conn, present["bundle_sha256"])
+    assert out["released_rows"] == 1 and out["rule"] == "no-live-consumer@1"
+    assert record["rule"] == "no-live-consumer@1" and record["actor"] == "fixture:release"
+
+    released = service.get_attempt(attempt_id)["git_artifact"]
+    assert set(released) == GIT_ARTIFACT_KEYS
+    assert released["custody"] == "released"
+    assert set(released["released"]) == RELEASED_TRUSTED_KEYS
+    assert released["released"] == {"released_at": record["released_at"],
+                                    "actor": "fixture:release",
+                                    "rule": "no-live-consumer@1"}
+    # The identity the release left alone is still named, and the derived
+    # custody is the ONLY thing that moved.
+    assert {k: released[k] for k in ("commit_sha", "tree_sha", "bundle_sha256",
+                                     "retained_ref", "legacy_cas_path")} == \
+        {k: present[k] for k in ("commit_sha", "tree_sha", "bundle_sha256",
+                                 "retained_ref", "legacy_cas_path")}
+
+    public = execute(untrusted, "get_attempt", {"attempt_id": attempt_id})["git_artifact"]
+    # UNTRUSTED: released, when, and under which rule - and no actor at all.
+    assert set(public) == GIT_ARTIFACT_KEYS
+    assert public["custody"] == "released"
+    assert set(public["released"]) == RELEASED_UNTRUSTED_KEYS
+    assert "actor" not in public["released"]
+    assert public["released"]["released_at"] == record["released_at"]
+    assert public["released"]["rule"] == "no-live-consumer@1"
+    # And the omission is a real boundary, not a nulled value: the ledger is
+    # still a PRIVATE table and that connection cannot read the actor column or
+    # a whole row of it.
+    assert "state_git_bundle_releases" in PRIVATE_STATE_TABLES
+    for sql in (f"SELECT * FROM {RELEASE_TABLE}",
+                f"SELECT actor FROM {RELEASE_TABLE}",
+                f"SELECT * FROM main.{RELEASE_TABLE}"):
+        with pytest.raises(ProjectPrivate):
+            with untrusted.store.transaction() as conn:
+                conn.execute(sql).fetchall()
 
 
 def _tool():

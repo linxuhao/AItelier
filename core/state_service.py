@@ -1295,13 +1295,28 @@ class StateService:
             self._components()
             return self._with_refusals({**attempt, "relay_inventory": self._relay_inventory(attempt)})
         if attempt["execution_kind"] == "external" and attempt["artifact_kind"] == "git-sha1":
+            from core import state_privacy
+            from core.state_git_artifacts import bundle_release, custody_metadata
+            # One answer for both trust levels. ``trusted`` is the declared
+            # verdict (core.state_privacy.trust_of), and it decides exactly one
+            # thing: whether the release record's ACTOR - who retired the bytes -
+            # is disclosed. ``released_at`` and ``rule`` are answered to anyone
+            # who may read the attempt, so a candidate whose bytes State
+            # deliberately released is never reported as one still held (the
+            # pre-fix answer) nor as a missing/legacy bundle. Metadata only: no
+            # payload is read, and the ledger stays private (the untrusted
+            # connection reads the projected columns through the same
+            # ``bundle_release`` call).
+            trusted = state_privacy.trust_of(self) is True
             with self.store.transaction() as conn:
                 artifact = conn.execute("SELECT commit_sha,tree_sha,bundle_sha256,retained_ref "
                     "FROM state_git_artifacts WHERE commit_sha=?", (attempt["artifact_ref"],)).fetchone()
-            from core.state_git_artifacts import custody_metadata
+                release = (bundle_release(conn, artifact["bundle_sha256"], disclose_actor=trusted)
+                           if artifact else None)
             # Derived from the already-visible columns only (no bytes); a
             # malformed reserved state-db: reference fails closed.
-            attempt["git_artifact"] = custody_metadata(artifact) if artifact else None
+            attempt["git_artifact"] = (custody_metadata(artifact, release, disclose_actor=trusted)
+                                       if artifact else None)
         return self._with_refusals(attempt)
 
     def _with_refusals(self, envelope):

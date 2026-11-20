@@ -849,7 +849,15 @@ class DshDrivers:
             self.gateways.pop(project_id, None)
             await asyncio.to_thread(self.update, project_id, phase="stopped", subagents_json="[]")
             from core.driver_presence import declare
-            if self.registry:
+            # A stop with `preserve_enabled` is a RESTART, not an owner stop: the
+            # panel restart path and `close()` for an enabled driver kill the
+            # process only to bring it straight back. The offline declaration is
+            # cleared solely by an `online` declaration, i.e. the director-only
+            # State MCP tool `declare_driver_presence`, which a driver without
+            # State MCP (the aitelier-home steward) never reaches - so writing it
+            # here would leave that driver reading as offline for good while it
+            # keeps running. Only `preserve_enabled=False` declares offline.
+            if self.registry and not preserve_enabled:
                 declare(self.db, row["driver_id"], "offline", "Driver stopped", None,
                         actor="driver:" + row["driver_id"])
             return self.public(self.get(project_id))

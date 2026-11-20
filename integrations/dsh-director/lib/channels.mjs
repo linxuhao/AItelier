@@ -10,7 +10,8 @@
  *  about their own message (B2: a channel is a third party's server). One such line is the
  *  receipt (replies.received): when the host has just taken a NEW owner message into the
  *  conversation, this code - never the model - tells the sender at once that it arrived,
- *  at most once per channel and limits.receiptMs, best effort (see receipt()).
+ *  at most once per channel and limits.receiptMs - a window the steward's own reply sent on
+ *  that channel ends - best effort (see receipt()).
  *
  *  Answers to a sender who is not the bound owner are deliberately few: a binding attempt
  *  gets one line (bound / not bound), anything else gets nothing, so a stranger learns
@@ -357,7 +358,9 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // host, so it is no steward message, wakes nothing, answers nothing (the unanswered-owner
   // check and the mirror never see it) and is not remembered. At most one per channel and
   // receiptMs, the window spent by the attempt, so a burst gets one (the window is this
-  // process's memory: a restart inside it may let one more through). Only while it is news:
+  // process's memory: a restart inside it may let one more through). The steward's reply
+  // going out on the channel (mirror(), a send that succeeded) ends its window: the owner's
+  // next message there is news again and gets its receipt. Only while it is news:
   // a message relayed more than receiptMaxAgeMs after the owner wrote (held through an
   // outage, drained from the owed store) gets none. Best effort: not
   // awaited (the channel's next message is not held up by a slow send), a failure is
@@ -771,8 +774,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     let ref, error;
     if (!entry) error = 'channel_not_connected';
     else {
-      try { ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref; }
-      catch (failure) { error = short(failure); }
+      try {
+        ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
+        receipts.delete(channel);  // the steward has answered here: the next owner message is news again
+      } catch (failure) { error = short(failure); }
     }
     // Recorded once, success or failure (the record retried, a failed send never).
     let recorded, failed = false;

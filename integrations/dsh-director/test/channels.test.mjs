@@ -55,11 +55,12 @@ function fakeHost({ bindings = { slack: 'U-OWNER' }, defaultChannel = null } = {
   return { host, calls, sources, bindings };
 }
 
-/** A fake channel plugin: what it was asked to send. */
+/** A fake channel plugin: what it was asked to send. `fail` may be changed after it registers. */
 function fakeChannel(name, { fail } = {}) {
   const sent = [];
-  return { sent, channel: { name, status: () => ({ connected: true }),
-    async send(text, options) { sent.push({ text, options }); if (fail) throw new Error(fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  const fake = { sent, fail, channel: { name, status: () => ({ connected: true }),
+    async send(text, options) { sent.push({ text, options }); if (fake.fail) throw new Error(fake.fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  return fake;
 }
 
 /** A fresh owed store per setup (the file mode is what a restart reads); pass `owedFile` to
@@ -1630,6 +1631,30 @@ test('receipt: at most one per channel within receiptMs, each channel its own wi
   await tick();
   assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1', 'ts-4']);
   assert.equal(only(s.calls, 'relay').length, 6, 'every message was relayed');
+  s.channels.stop();
+});
+
+test('receipt: the steward\'s reply sent on a channel ends its window; a failed reply or a receipt does not', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup();
+  const receipts = () => s.slack.sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async ref => { await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1' });
+  await owner('ts-1');
+  await owner('ts-2');
+  assert.deepEqual(receipts(), ['ts-1'], 'a receipt starts the window, it does not end it');
+  // The reply fails to go out: the owner has heard nothing new, the window stands.
+  s.slack.fail = 'socket closed';
+  assert.deepEqual(await s.channels.ownerMessageSent('m-fail', 'lost answer', 'm-in'), { mirrored: false, reason: 'send_failed', channel: 'slack' });
+  s.slack.fail = undefined;
+  await owner('ts-3');
+  assert.deepEqual(receipts(), ['ts-1'], 'a failed reply starts nothing');
+  // The reply goes out: the owner's next message, still well inside receiptMs, is news again.
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('ts-4');
+  await owner('ts-5');
+  assert.deepEqual(receipts(), ['ts-1', 'ts-4'], 'the reply starts the window again: ts-4 gets one, ts-5 is inside it');
   s.channels.stop();
 });
 

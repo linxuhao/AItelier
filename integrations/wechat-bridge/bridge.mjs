@@ -9,13 +9,15 @@
  *  the steward's tool, design §7.2 "按需二维码"), one at a time. A QR that expires or is
  *  cancelled, a logout and a puppet failure before a login stop the puppet and leave the
  *  bridge `idle` - the process stays up and asks WeChat for nothing until the next
- *  request. puppet-neo starts a fresh session and QR on each start of a stopped puppet
- *  (its logout doc: "stop and start it again to log in with a new QR code").
+ *  request. Each request builds a fresh bot (`makeBot`: a new Wechaty with a new
+ *  puppet-neo, so a new session and QR) and an attempt that ends stops its own bot; no
+ *  puppet state is shared between attempts, so a slow stop of an old one never touches
+ *  the next, and whatever an old bot still emits is ignored.
  *
  *  This file is the HTTP layer, the event filter and the login's phases, with no
- *  dependency of its own: `bot` is a Wechaty instance (or a fake with the same events,
- *  start/stop and Contact.find) and `types` is Wechaty's `types`, both handed in by
- *  main.mjs, so the tests never load the real puppet. `renderQr` (qr-svg.mjs, also
+ *  dependency of its own: `makeBot()` returns a Wechaty instance (or a fake with the same
+ *  events, start/stop and Contact.find) and `types` is Wechaty's `types`, both handed in
+ *  by main.mjs, so the tests never load the real puppet. `renderQr` (qr-svg.mjs, also
  *  handed in) draws the login QR as an SVG for the dashboard. */
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -33,12 +35,16 @@ export const MAX_WAIT_SECONDS = 25;
 // WeChat cuts long texts in the client; splitting here keeps each part whole.
 export const SEND_CHUNK = 1500;
 const MAX_BODY_BYTES = 64 * 1024;
-/** POST /login's bounds: at least minGapMs between two accepted requests and at most
- *  perHour in any hour (counted in this process's memory: a restart starts `idle` and asks
- *  for nothing by itself); a requested QR that has not appeared within qrWaitMs gives up
- *  (`idle`, login_failed). */
-export const LOGIN_LIMITS = Object.freeze({ minGapMs: 2 * 60_000, perHour: 5, qrWaitMs: 30_000 });
-const HOUR_MS = 3_600_000;
+/** POST /login's bounds: at least minGapMs between two accepted requests, at most perHour
+ *  in any hour and perDay in any 24 hours (counted in this process's memory: a restart starts
+ *  `idle` and asks for nothing by itself; the director's ownerChannels.login keeps the same
+ *  count on its side, so a bridge restart does not reset it there); a requested QR that has
+ *  not appeared within qrWaitMs gives up (`idle`, login_failed), and one that appeared but
+ *  was neither logged in with nor reported over within qrLifeMs ends here (`idle`,
+ *  qr_expired) whatever the puppet still does - neo's own loop ends in about 2 minutes. */
+export const LOGIN_LIMITS = Object.freeze({ minGapMs: 2 * 60_000, perHour: 5, perDay: 12, qrWaitMs: 30_000,
+  qrLifeMs: 5 * 60_000 });
+const HOUR_MS = 3_600_000, DAY_MS = 24 * HOUR_MS;
 
 /** Texts of more than `size` characters, cut into consecutive parts of at most
  *  `size` code points (a surrogate pair is never split). */
@@ -75,10 +81,11 @@ export function isOwnerCandidate(message, types) {
 }
 
 /** `loginEnabled` false (WECHAT_BRIDGE_SKIP_LOGIN=1) answers every POST /login
- *  `login_disabled`: the puppet is never started. */
-export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
+ *  `login_disabled`: no bot is ever built or started. */
+export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
   log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
+  if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
   const ring = [];
   // Sequence numbers start at the boot time in ms: a cursor a client kept from
@@ -86,7 +93,7 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
   // new messages behind an old cursor (and needs no reset rule).
   let seq = now().getTime();
   let waiters = new Set();
-  // phase: idle (no QR, not logged in, the puppet stopped; idle_reason says why) |
+  // phase: idle (no QR, not logged in, no bot running; idle_reason says why) |
   // starting (a QR was requested and has not appeared yet) | waiting_qr (a QR can be
   // scanned; the only phase with `qr`) | scanned (scanned, to be confirmed on the phone)
   // | logged_in.
@@ -100,55 +107,78 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
     catch { log('the login QR could not be drawn'); return undefined; }
   };
 
-  // Puppet starts and stops run one at a time, in order. `generation` changes with every
-  // request and every end, so a step or timer of an earlier one does nothing; `ownStops`
-  // counts the stops this code is running, whose own logout/error events are not news.
-  let chain = Promise.resolve(), generation = 0, ownStops = 0, qrTimer;
+  // `bot` is the current attempt's (undefined before the first request). `generation`
+  // changes with every request and every end; each bot's events and each timer carry the
+  // generation they were made for, so those of an earlier attempt do nothing. `tasks`
+  // holds the starts and stops still running (settled() waits for them).
+  let bot, generation = 0, qrTimer, lifeTimer;
   const accepted = [];
-  const serial = step => { chain = chain.then(step).catch(error => log('login step failed: ' + short(error))); return chain; };
-  const stopPuppet = async () => {
-    ownStops++;
-    try { await bot.stop(); } catch (error) { log('stopping the puppet failed: ' + short(error)); }
-    finally { ownStops--; }
+  const tasks = new Set();
+  const track = promise => {
+    const task = promise.catch(error => log('login step failed: ' + short(error))).finally(() => tasks.delete(task));
+    tasks.add(task);
+    return task;
   };
+  const stopBot = old => track((async () => {
+    try { await old.stop(); } catch (error) { log('stopping the puppet failed: ' + short(error)); }
+  })());
   const loginLive = () => ['starting', 'waiting_qr', 'scanned'].includes(state.phase);
-  /** This login attempt is over: idle with `reason`, and the puppet stopped so nothing
-   *  talks to WeChat until the next request. */
+  const clearTimers = () => { clearTimeout(qrTimer); clearTimeout(lifeTimer); };
+  /** This login attempt is over: idle with `reason`, and its bot stopped so nothing talks
+   *  to WeChat until the next request. */
   const end = reason => {
     generation++;
-    clearTimeout(qrTimer);
+    clearTimers();
     setState({ phase: 'idle', idle_reason: reason, logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log(`idle (${reason}): no QR until one is requested`);
-    void serial(stopPuppet);
+    const old = bot;
+    bot = undefined;
+    if (old) void stopBot(old);
   };
 
-  bot.on('scan', (qrcode, status) => {
-    if (status === types.ScanStatus.Waiting && qrcode) {
-      clearTimeout(qrTimer);
-      setState({ phase: 'waiting_qr', logged_in: false, user_id: undefined, qr: qrcode, qr_svg: drawn(qrcode) });
-      log('login QR waiting (GET /status carries it)');
-    } else if (status === types.ScanStatus.Timeout || status === types.ScanStatus.Cancel) {
-      // Only a waiting QR can be scanned; once timed out or cancelled it is gone.
-      if (loginLive()) end(status === types.ScanStatus.Timeout ? 'qr_expired' : 'qr_cancelled');
-    } else if ((status === types.ScanStatus.Scanned || status === types.ScanStatus.Confirmed) && state.phase !== 'logged_in') {
-      setState({ phase: 'scanned', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
-    }
-  });
-  bot.on('login', user => {
-    clearTimeout(qrTimer);
-    setState({ phase: 'logged_in', logged_in: true, user_id: user?.id, qr: undefined, qr_svg: undefined });
-    log('logged in');
-  });
-  bot.on('logout', () => {
-    if (ownStops > 0 || state.phase === 'idle') return;
-    end('logged_out');
-  });
-  bot.on('error', error => {
-    log('error: ' + short(error));
-    // An error while logged in is only logged (Wechaty reports message handling failures
-    // that way); before a login it ends the attempt: neo then gives up its session.
-    if (ownStops === 0 && loginLive()) end('login_failed');
-  });
+  /** The event handlers of the bot built for attempt `mine`: an event of any other
+   *  attempt's bot (one that ended, still stopping) is ignored, and within the attempt
+   *  each event counts only in the phase it can follow. */
+  const attach = (target, mine) => {
+    const current = () => mine === generation;
+    target.on('scan', (qrcode, status) => {
+      if (!current()) return;
+      if (status === types.ScanStatus.Waiting && qrcode) {
+        if (state.phase !== 'starting' && state.phase !== 'waiting_qr') return;
+        clearTimeout(qrTimer);
+        // The QR's own bound, armed once per attempt: it ends a QR the puppet never reports over.
+        if (state.phase === 'starting') {
+          lifeTimer = setTimeout(() => { if (current() && loginLive()) end('qr_expired'); }, loginLimits.qrLifeMs);
+          lifeTimer.unref?.();
+        }
+        setState({ phase: 'waiting_qr', logged_in: false, user_id: undefined, qr: qrcode, qr_svg: drawn(qrcode) });
+        log('login QR waiting (GET /status carries it)');
+      } else if (status === types.ScanStatus.Timeout || status === types.ScanStatus.Cancel) {
+        // Only a waiting QR can be scanned; once timed out or cancelled it is gone.
+        if (loginLive()) end(status === types.ScanStatus.Timeout ? 'qr_expired' : 'qr_cancelled');
+      } else if ((status === types.ScanStatus.Scanned || status === types.ScanStatus.Confirmed)
+        && (state.phase === 'waiting_qr' || state.phase === 'scanned')) {
+        setState({ phase: 'scanned', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
+      }
+    });
+    target.on('login', user => {
+      if (!current()) return;
+      clearTimers();
+      setState({ phase: 'logged_in', logged_in: true, user_id: user?.id, qr: undefined, qr_svg: undefined });
+      log('logged in');
+    });
+    target.on('logout', () => {
+      if (!current() || state.phase === 'idle') return;
+      end('logged_out');
+    });
+    target.on('error', error => {
+      log('error: ' + short(error));
+      // An error while logged in is only logged (Wechaty reports message handling failures
+      // that way); before a login it ends the attempt: neo then gives up its session.
+      if (current() && loginLive()) end('login_failed');
+    });
+    target.on('message', message => { if (current()) relay(message); });
+  };
 
   /** POST /login: [status, body]. Accepted only while idle; a refusal changes nothing. */
   function requestLogin() {
@@ -157,34 +187,41 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
     if (state.phase === 'waiting_qr' || state.phase === 'scanned') return [409, { refused: 'qr_waiting' }];
     if (state.phase === 'starting') return [409, { refused: 'login_starting' }];
     const at = now().getTime();
-    while (accepted.length && accepted[0] <= at - HOUR_MS) accepted.shift();
+    while (accepted.length && accepted[0] <= at - DAY_MS) accepted.shift();
+    const lastHour = accepted.filter(time => time > at - HOUR_MS);
     const waits = [];
     if (accepted.length) waits.push(accepted.at(-1) + loginLimits.minGapMs - at);
-    if (accepted.length >= loginLimits.perHour) waits.push(accepted[accepted.length - loginLimits.perHour] + HOUR_MS - at);
+    if (lastHour.length >= loginLimits.perHour) waits.push(lastHour[lastHour.length - loginLimits.perHour] + HOUR_MS - at);
+    if (accepted.length >= loginLimits.perDay) waits.push(accepted[accepted.length - loginLimits.perDay] + DAY_MS - at);
     const wait = Math.max(0, ...waits);
     if (wait > 0) return [429, { refused: 'rate_limited', retry_after_s: Math.ceil(wait / 1000) }];
     accepted.push(at);
     const mine = ++generation;
     setState({ phase: 'starting', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log('login QR requested');
-    void serial(async () => {
-      // A stopped puppet's start opens a new session and asks for a new QR; start() on a
-      // puppet still active would return at once (state-switch), so stop it first.
-      await stopPuppet();
-      if (mine !== generation) return;
-      qrTimer = setTimeout(() => { if (mine === generation && state.phase === 'starting') end('login_failed'); },
-        loginLimits.qrWaitMs);
-      qrTimer.unref?.();
-      try { await bot.start(); }
+    let fresh;
+    try { fresh = makeBot(); }
+    catch (error) {
+      log('building the puppet failed: ' + short(error));
+      end('login_failed');
+      return [202, { phase: 'starting' }];
+    }
+    bot = fresh;
+    attach(fresh, mine);
+    qrTimer = setTimeout(() => { if (mine === generation && state.phase === 'starting') end('login_failed'); },
+      loginLimits.qrWaitMs);
+    qrTimer.unref?.();
+    void track((async () => {
+      try { await fresh.start(); }
       catch (error) {
         log('starting the puppet failed: ' + short(error));
         if (mine === generation && state.phase === 'starting') end('login_failed');
       }
-    });
+    })());
     return [202, { phase: 'starting' }];
   }
 
-  bot.on('message', message => {
+  function relay(message) {
     try {
       if (!isOwnerCandidate(message, types)) return;
       // When the owner wrote it, as WeChat says; a message WeChat does not date carries no
@@ -201,7 +238,7 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
       // Never the text: only that a message could not be read.
       log('message skipped: ' + String(error?.message ?? error).slice(0, 200));
     }
-  });
+  }
 
   const after = cursor => ring.filter(event => event.seq > cursor);
 
@@ -222,7 +259,7 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
   }
 
   async function send(to, text) {
-    if (!state.logged_in) return [409, { error: 'not_logged_in' }];
+    if (!state.logged_in || !bot) return [409, { error: 'not_logged_in' }];
     // Neo can only write to a peer it has seen in this login (a message from them).
     const contact = await bot.Contact.find({ id: to });
     if (!contact) return [409, { error: 'recipient_unknown' }];
@@ -314,18 +351,22 @@ export function createBridge({ bot, types, token, ringSize = RING_SIZE, maxWaitS
     state,
     /** Long polls waiting now (each holds a timer until it is answered or closed). */
     get waiting() { return waiters.size; },
-    /** Settles once every puppet start/stop asked for so far has run. */
-    settled: () => chain,
+    /** Settles once every bot start/stop asked for so far has run. */
+    settled: async () => { while (tasks.size) await Promise.allSettled([...tasks]); },
     listen: (port = DEFAULT_PORT, host = HOST) => new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => { server.off('error', reject); resolve(server.address()); });
     }),
-    close: () => new Promise(resolve => {
+    /** Stops the server and the current bot (main.mjs on SIGINT/SIGTERM). */
+    close: async () => {
       generation++;
-      clearTimeout(qrTimer);
+      clearTimers();
+      const old = bot;
+      bot = undefined;
       for (const wake of waiters) wake();
       server.closeAllConnections?.();
-      server.close(() => resolve());
-    }),
+      await new Promise(resolve => server.close(() => resolve()));
+      if (old) await stopBot(old);
+    },
   };
 }

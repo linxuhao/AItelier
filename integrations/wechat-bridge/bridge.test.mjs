@@ -1,5 +1,6 @@
-/** The bridge's HTTP layer against a fake Wechaty: no puppet is loaded and nothing
- *  reaches WeChat. The fake emits Wechaty-shaped events and answers Contact.find. */
+/** The bridge's HTTP layer against fake Wechaty bots: no puppet is loaded and nothing
+ *  reaches WeChat. Each fake emits Wechaty-shaped events and answers Contact.find; the
+ *  bridge builds one per POST /login (`makeBot`). */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -14,6 +15,7 @@ import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LO
 const types = { Message: { Text: 7, Image: 6 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
   ScanStatus: { Cancel: 1, Waiting: 2, Scanned: 3, Confirmed: 4, Timeout: 5 } };
 const TOKEN = 'test-token-123';
+const HOUR = 3_600_000;
 
 const until = async (check, ms = 3000) => {
   const end = Date.now() + ms;
@@ -51,15 +53,30 @@ function message({ id = 'm1', from = 'wxid_owner', text = 'hello', type = types.
     talker: () => ({ id: from, type: () => contactType }) };
 }
 
+const noBot = () => { throw new Error('no bot expected'); };
+
+/** A listening bridge whose `makeBot` hands out fake bots: `bots` in the order built,
+ *  `bot()` the newest. `login()` requests a QR and logs in with it on the new bot. */
 async function started(options = {}) {
-  const bot = fakeBot(options);
-  const bridge = createBridge({ bot, types, token: TOKEN, ...options });
+  const bots = [];
+  const makeBot = () => { const made = fakeBot(options); if (options.prepare) options.prepare(made); bots.push(made); return made; };
+  const bridge = createBridge({ makeBot, types, token: TOKEN, ...options });
   const address = await bridge.listen(0);
   const base = `http://${address.address}:${address.port}`;
   const call = (path, { token = TOKEN, method = 'GET', body } = {}) => fetch(base + path, {
     method, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
     body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
-  return { bot, bridge, address, call, json: async (...args) => { const r = await call(...args); return [r.status, await r.json()]; } };
+  const json = async (...args) => { const r = await call(...args); return [r.status, await r.json()]; };
+  const bot = () => bots.at(-1);
+  const request = async () => { const answer = await json('/login', { method: 'POST' }); await bridge.settled(); return answer; };
+  const login = async () => {
+    assert.equal((await request())[0], 202);
+    bot().emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+    bot().emit('login', { id: 'wxid_bot' });
+    assert.equal(bridge.state.phase, 'logged_in');
+    return bot();
+  };
+  return { bots, bot, bridge, address, call, json, request, login };
 }
 
 test('listens on 127.0.0.1 only', async () => {
@@ -78,7 +95,7 @@ test('the bind address is loopback unless the bridge runs in its container', asy
   assert.throws(() => bindHost('0.0.0.0', false), /refused: bind address/, 'never every interface outside a container');
   for (const other of ['::', '192.168.1.5', 'localhost', '0.0.0.0 ']) assert.throws(() => bindHost(other, true), /refused/);
   // The listener takes that address.
-  const bridge = createBridge({ bot: fakeBot(), types, token: TOKEN });
+  const bridge = createBridge({ makeBot: noBot, types, token: TOKEN });
   try {
     const address = await bridge.listen(0, bindHost(CONTAINER_HOST, true));
     assert.equal(address.address, '0.0.0.0');
@@ -87,9 +104,10 @@ test('the bind address is loopback unless the bridge runs in its container', asy
   } finally { await bridge.close(); }
 });
 
-test('refuses to start without a token', () => {
-  assert.throws(() => createBridge({ bot: fakeBot(), types, token: '  \n' }), /no token/);
-  assert.throws(() => createBridge({ bot: fakeBot(), types, token: undefined }), /no token/);
+test('refuses to start without a token or a bot factory', () => {
+  assert.throws(() => createBridge({ makeBot: noBot, types, token: '  \n' }), /no token/);
+  assert.throws(() => createBridge({ makeBot: noBot, types, token: undefined }), /no token/);
+  assert.throws(() => createBridge({ types, token: TOKEN }), /no makeBot/);
 });
 
 test('every endpoint needs the bearer token', async () => {
@@ -106,12 +124,14 @@ test('every endpoint needs the bearer token', async () => {
 });
 
 test('status follows scan, login and logout, and carries the QR only while it can be scanned', async () => {
-  const { bot, bridge, json } = await started();
+  const { bot: newest, bridge, json, request } = await started();
   try {
     let [, body] = await json('/status');
     assert.equal(body.logged_in, false);
     assert.equal(body.qr, undefined);
     assert.ok(body.since);
+    await request();
+    const bot = newest();
     bot.emit('scan', 'https://login.weixin.qq.com/l/abc', types.ScanStatus.Waiting);
     [, body] = await json('/status');
     assert.deepEqual([body.logged_in, body.qr], [false, 'https://login.weixin.qq.com/l/abc']);
@@ -131,19 +151,24 @@ test('while a scan is needed, status carries the QR drawn as an SVG, and never l
   const QR = 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN';
   const drawn = [], logs = [];
   const renderQr = qr => { drawn.push(qr); return `<svg xmlns="http://www.w3.org/2000/svg">${drawn.length}</svg>`; };
-  const { bot, bridge, json } = await started({ renderQr, log: line => logs.push(line) });
+  const { bot: newest, bridge, json, request } = await started({ renderQr, log: line => logs.push(line) });
   try {
     let [, body] = await json('/status');
     assert.equal(body.qr_svg, undefined, 'no QR before a scan is asked for');
+    await request();
+    const bot = newest();
     bot.emit('scan', QR, types.ScanStatus.Waiting);
     [, body] = await json('/status');
     assert.deepEqual([body.qr, body.qr_svg, drawn], [QR, '<svg xmlns="http://www.w3.org/2000/svg">1</svg>', [QR]]);
-    bot.emit('scan', '', types.ScanStatus.Scanned);
-    [, body] = await json('/status');
-    assert.equal(body.qr_svg, undefined, 'a scanned QR is not shown again');
     bot.emit('scan', QR + '-2', types.ScanStatus.Waiting);
     [, body] = await json('/status');
     assert.equal(body.qr_svg, '<svg xmlns="http://www.w3.org/2000/svg">2</svg>', 'a new QR is drawn anew');
+    bot.emit('scan', '', types.ScanStatus.Scanned);
+    [, body] = await json('/status');
+    assert.equal(body.qr_svg, undefined, 'a scanned QR is not shown again');
+    bot.emit('scan', QR + '-3', types.ScanStatus.Waiting);
+    [, body] = await json('/status');
+    assert.deepEqual([body.phase, body.qr_svg], ['scanned', undefined], 'once scanned, no QR comes back');
     bot.emit('login', { id: 'wxid_bot' });
     [, body] = await json('/status');
     assert.deepEqual([body.logged_in, body.qr_svg], [true, undefined]);
@@ -154,19 +179,21 @@ test('while a scan is needed, status carries the QR drawn as an SVG, and never l
 test('a QR that cannot be drawn leaves only the payload, and the failure is logged without it', async () => {
   const logs = [];
   const renderQr = () => { throw new Error('too long: SECRET-LOGIN-TOKEN'); };
-  const { bot, bridge, json } = await started({ renderQr, log: line => logs.push(line) });
+  const { bot, bridge, json, request } = await started({ renderQr, log: line => logs.push(line) });
   try {
-    bot.emit('scan', 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN', types.ScanStatus.Waiting);
+    await request();
+    bot().emit('scan', 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN', types.ScanStatus.Waiting);
     const [, body] = await json('/status');
     assert.deepEqual([body.logged_in, body.qr_svg], [false, undefined]);
     assert.ok(body.qr, 'the payload itself is still served');
-    assert.deepEqual(logs, ['the login QR could not be drawn', 'login QR waiting (GET /status carries it)']);
+    assert.deepEqual(logs, ['login QR requested', 'the login QR could not be drawn', 'login QR waiting (GET /status carries it)']);
   } finally { await bridge.close(); }
 });
 
 test('only 1:1 text messages from another contact become events', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
+    const bot = await login();
     bot.emit('message', message({ id: 'room', room: { id: 'r@chatroom' } }));
     bot.emit('message', message({ id: 'self', self: true }));
     bot.emit('message', message({ id: 'image', type: types.Message.Image }));
@@ -184,8 +211,9 @@ test('only 1:1 text messages from another contact become events', async () => {
 });
 
 test('a message WeChat does not date carries no time, never the bridge\'s own', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
+    const bot = await login();
     bot.emit('message', message({ id: 'undated', date: null, text: '同意 proposal p-1' }));
     bot.emit('message', message({ id: 'bad-date', date: new Date(Number.NaN) }));
     const [, body] = await json('/events?after=0');
@@ -194,8 +222,9 @@ test('a message WeChat does not date carries no time, never the bridge\'s own', 
 });
 
 test('a long poll returns as soon as a message arrives, and empty with the same cursor when none does', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
+    const bot = await login();
     let [, body] = await json('/events?after=0&wait=0');
     assert.deepEqual(body, { events: [], next_after: 0 });
     const t0 = Date.now();
@@ -242,8 +271,9 @@ test('a long poll never waits longer than the cap', async () => {
 });
 
 test('events are kept in a bounded ring', async () => {
-  const { bot, bridge, json } = await started({ ringSize: 3 });
+  const { bridge, json, login } = await started({ ringSize: 3 });
   try {
+    const bot = await login();
     for (let i = 1; i <= 5; i++) bot.emit('message', message({ id: 'm' + i }));
     const [, body] = await json('/events?after=0');
     assert.deepEqual(body.events.map(e => e.message_ref), ['m3', 'm4', 'm5']);
@@ -251,13 +281,17 @@ test('events are kept in a bounded ring', async () => {
 });
 
 test('a cursor kept from before a bridge restart is below every new sequence number', async () => {
-  const first = createBridge({ bot: fakeBot(), types, token: TOKEN, now: () => new Date('2026-11-18T10:00:00Z') });
+  const first = createBridge({ makeBot: noBot, types, token: TOKEN, now: () => new Date('2026-11-18T10:00:00Z') });
   const bot = fakeBot();
-  const second = createBridge({ bot, types, token: TOKEN, now: () => new Date('2026-11-18T10:05:00Z') });
+  const second = createBridge({ makeBot: () => bot, types, token: TOKEN, now: () => new Date('2026-11-18T10:05:00Z') });
   const address = await second.listen(0);
   try {
     // Many events in the first life still leave its cursor below the second life's.
     const oldCursor = new Date('2026-11-18T10:00:00Z').getTime() + 10_000;
+    await fetch(`http://${address.address}:${address.port}/login`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } });
+    await second.settled();
+    bot.emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+    bot.emit('login', { id: 'wxid_bot' });
     bot.emit('message', message({ id: 'after-restart' }));
     const body = await (await fetch(`http://${address.address}:${address.port}/events?after=${oldCursor}`,
       { headers: { authorization: `Bearer ${TOKEN}` } })).json();
@@ -266,19 +300,19 @@ test('a cursor kept from before a bridge restart is below every new sequence num
 });
 
 test('send refuses before login and to a peer this login has not seen', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
     assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'hi' } }), [409, { error: 'not_logged_in' }]);
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_stranger', text: 'hi' } }), [409, { error: 'recipient_unknown' }]);
     assert.deepEqual(bot.said, []);
   } finally { await bridge.close(); }
 });
 
 test('send writes the text to the peer, splitting long text into parts of at most 1500 characters', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'short' } }), [200, { ref: 'out-1' }]);
     const long = '好'.repeat(SEND_CHUNK) + 'x'.repeat(SEND_CHUNK) + 'tail';
     const [status, body] = await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: long } });
@@ -291,9 +325,9 @@ test('send writes the text to the peer, splitting long text into parts of at mos
 });
 
 test('send answers a bad body with 400 and a failed send with send_failed', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     assert.deepEqual(await json('/send', { method: 'POST', body: '{not json' }), [400, { error: 'bad_request' }]);
     assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: '   ' } }), [400, { error: 'bad_request' }]);
     assert.deepEqual(await json('/send', { method: 'POST', body: { text: 'hi' } }), [400, { error: 'bad_request' }]);
@@ -305,9 +339,9 @@ test('send answers a bad body with 400 and a failed send with send_failed', asyn
 });
 
 test('a body over 64 KiB is refused with 413 and nothing is sent', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     const big = { to: 'wxid_owner', text: 'x'.repeat(64 * 1024) };
     assert.deepEqual(await json('/send', { method: 'POST', body: big }), [413, { error: 'body_too_large' }]);
     assert.deepEqual(bot.said, []);
@@ -317,35 +351,37 @@ test('a body over 64 KiB is refused with 413 and nothing is sent', async () => {
 });
 
 test('a peer neo no longer knows is recipient_unknown, not a failed send', async () => {
-  const { bot, bridge, json } = await started();
+  const { bridge, json, login } = await started();
   try {
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     bot.sayError = new Error('Neo supports text to an observed peer or group');
     assert.deepEqual(await json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'hi' } }), [409, { error: 'recipient_unknown' }]);
   } finally { await bridge.close(); }
 });
 
 test('the bridge starts idle (boot) and asks WeChat for nothing by itself', async () => {
-  const { bot, bridge, json } = await started();
+  const { bots, bridge, json } = await started();
   try {
     const [status, body] = await json('/status');
     assert.equal(status, 200);
     assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.qr, body.qr_svg], ['idle', 'boot', false, undefined, undefined]);
     await new Promise(resolve => setTimeout(resolve, 50));
-    assert.deepEqual(bot.calls, [], 'the puppet is not started without a request');
+    assert.deepEqual(bots, [], 'no bot is built without a request');
   } finally { await bridge.close(); }
 });
 
-test('POST /login stops then starts the puppet, and the phases follow the QR to a login', async () => {
+test('POST /login builds and starts a fresh bot, and the phases follow the QR to a login', async () => {
   const QR = 'https://login.weixin.qq.com/l/SECRET-LOGIN-TOKEN';
   const logs = [];
-  const { bot, bridge, json } = await started({ log: line => logs.push(line), renderQr: () => '<svg xmlns="http://www.w3.org/2000/svg"/>' });
+  const { bots, bridge, json } = await started({ log: line => logs.push(line), renderQr: () => '<svg xmlns="http://www.w3.org/2000/svg"/>' });
   try {
     const answer = await json('/login', { method: 'POST' });
     assert.deepEqual(answer, [202, { phase: 'starting' }]);
     assert.equal((await json('/status'))[1].phase, 'starting');
     await bridge.settled();
-    assert.deepEqual(bot.calls, ['stop', 'start'], 'stop first: start() on a puppet still active returns at once');
+    assert.equal(bots.length, 1);
+    const [bot] = bots;
+    assert.deepEqual(bot.calls, ['start']);
     bot.emit('scan', QR, types.ScanStatus.Waiting);
     let [, body] = await json('/status');
     assert.deepEqual([body.phase, body.idle_reason, body.qr], ['waiting_qr', undefined, QR]);
@@ -361,7 +397,7 @@ test('POST /login stops then starts the puppet, and the phases follow the QR to 
   } finally { await bridge.close(); }
 });
 
-test('an expired or cancelled QR, a logout and a failure before login leave the bridge idle: the puppet stopped, never started again, the process up', async () => {
+test('an expired or cancelled QR, a logout and a failure before login leave the bridge idle: the bot stopped, none started again, the process up', async () => {
   const cases = [
     ['qr_expired', bot => bot.emit('scan', '', types.ScanStatus.Timeout)],
     ['qr_cancelled', bot => bot.emit('scan', '', types.ScanStatus.Cancel)],
@@ -370,10 +406,10 @@ test('an expired or cancelled QR, a logout and a failure before login leave the 
     ['logged_out', bot => { bot.emit('login', { id: 'wxid_bot' }); bot.emit('logout', { id: 'wxid_bot' }); }],
   ];
   for (const [reason, happen] of cases) {
-    const { bot, bridge, json } = await started({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
+    const { bots, bridge, json, request } = await started({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
     try {
-      assert.equal((await json('/login', { method: 'POST' }))[0], 202);
-      await bridge.settled();
+      assert.equal((await request())[0], 202);
+      const [bot] = bots;
       bot.emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
       happen(bot);
       // neo also reports the ended QR as an error after the scan event: it changes nothing.
@@ -381,47 +417,137 @@ test('an expired or cancelled QR, a logout and a failure before login leave the 
       await bridge.settled();
       const [, body] = await json('/status');
       assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.qr, body.qr_svg], ['idle', reason, false, undefined, undefined], reason);
-      assert.deepEqual(bot.calls, ['stop', 'start', 'stop'], `${reason}: stopped once, not started again`);
+      assert.deepEqual(bot.calls, ['start', 'stop'], `${reason}: stopped once, not started again`);
       await new Promise(resolve => setTimeout(resolve, 30));
-      assert.deepEqual(bot.calls, ['stop', 'start', 'stop'], `${reason}: no QR asked for by itself`);
-      // A new request is taken again.
-      assert.equal((await json('/login', { method: 'POST' }))[0], 202, reason);
-      await bridge.settled();
-      assert.deepEqual(bot.calls.slice(3), ['stop', 'start']);
+      assert.deepEqual([bots.length, bot.calls], [1, ['start', 'stop']], `${reason}: no QR asked for by itself`);
+      // A new request is taken again, on a new bot.
+      assert.equal((await request())[0], 202, reason);
+      assert.equal(bots.length, 2);
+      assert.deepEqual([bots[0].calls, bots[1].calls], [['start', 'stop'], ['start']]);
     } finally { await bridge.close(); }
   }
 });
 
 test('an error while logged in is only logged', async () => {
   const logs = [];
-  const { bot, bridge, json } = await started({ log: line => logs.push(line) });
+  const { bridge, json, login } = await started({ log: line => logs.push(line) });
   try {
-    bot.emit('login', { id: 'wxid_bot' });
+    const bot = await login();
     bot.emit('error', new Error('message not found for id: m1'));
     assert.equal((await json('/status'))[1].phase, 'logged_in');
     assert.ok(logs.includes('error: message not found for id: m1'));
-    assert.deepEqual(bot.calls, []);
+    assert.deepEqual(bot.calls, ['start']);
   } finally { await bridge.close(); }
 });
 
-test('the logout and error events of the bridge\'s own stop do not end the attempt it makes', async () => {
-  const { bot, bridge, json } = await started();
-  try {
+test('whatever an ended attempt\'s bot emits later changes nothing: its stop\'s logout and error, a late QR or login', async () => {
+  const { bots, bridge, json, request } = await started({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 },
     // Wechaty emits logout from a stop of a logged-in puppet, and may report a stop's failure.
-    bot.stop = async () => { bot.calls.push('stop'); bot.emit('logout', {}); bot.emit('error', new Error('stopping')); };
-    assert.equal((await json('/login', { method: 'POST' }))[0], 202);
+    prepare: made => { made.stop = async () => { made.calls.push('stop'); made.emit('logout', {}); made.emit('error', new Error('stopping')); }; } });
+  try {
+    await request();
+    const [first] = bots;
+    first.emit('scan', '', types.ScanStatus.Timeout);
     await bridge.settled();
-    assert.deepEqual(bot.calls, ['stop', 'start']);
-    assert.equal((await json('/status'))[1].phase, 'starting');
+    assert.deepEqual([bridge.state.phase, bridge.state.idle_reason, first.calls], ['idle', 'qr_expired', ['start', 'stop']]);
+    // A QR or a login that the ended attempt's puppet still delivers (security review case A, B).
+    first.emit('scan', 'https://login.weixin.qq.com/l/late', types.ScanStatus.Waiting);
+    first.emit('scan', '', types.ScanStatus.Scanned);
+    first.emit('login', { id: 'wxid_late' });
+    first.emit('message', message({ id: 'late' }));
+    let [, body] = await json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.qr, body.logged_in], ['idle', 'qr_expired', undefined, false]);
+    assert.deepEqual((await json('/events?after=0'))[1].events, []);
+    // The next request is taken, and its own bot's stop events do not end it either.
+    await request();
+    const second = bots[1];
+    first.emit('error', new Error('Timeout after 15000 ms'));
+    first.emit('logout', {});
+    first.emit('scan', '', types.ScanStatus.Timeout);
+    first.emit('login', { id: 'wxid_late' });
+    assert.equal(bridge.state.phase, 'starting', 'the old bot\'s events neither end nor complete the new attempt');
+    second.emit('scan', 'https://login.weixin.qq.com/l/q2', types.ScanStatus.Waiting);
+    [, body] = await json('/status');
+    assert.deepEqual([body.phase, body.qr], ['waiting_qr', 'https://login.weixin.qq.com/l/q2']);
   } finally { await bridge.close(); }
+});
+
+test('events an attempt\'s own bot sends out of order count only in the phase they can follow', async () => {
+  const { bot, bridge, request } = await started();
+  try {
+    await request();
+    bot().emit('scan', '', types.ScanStatus.Scanned);
+    assert.equal(bridge.state.phase, 'starting', 'nothing to scan yet');
+    bot().emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+    bot().emit('login', { id: 'wxid_bot' });
+    bot().emit('scan', 'https://login.weixin.qq.com/l/again', types.ScanStatus.Waiting);
+    bot().emit('scan', '', types.ScanStatus.Scanned);
+    assert.deepEqual([bridge.state.phase, bridge.state.qr], ['logged_in', undefined], 'a login is not undone by a stray scan');
+  } finally { await bridge.close(); }
+});
+
+test('a QR the puppet never reports over ends at qrLifeMs, so a request is never refused forever', async () => {
+  const { bots, bridge, json, request } = await started({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0, qrLifeMs: 80 } });
+  try {
+    await request();
+    bots[0].emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+    assert.deepEqual(await json('/login', { method: 'POST' }), [409, { refused: 'qr_waiting' }]);
+    bots[0].emit('scan', '', types.ScanStatus.Scanned);
+    await until(() => bridge.state.phase === 'idle', 2000);
+    assert.equal(bridge.state.idle_reason, 'qr_expired');
+    await bridge.settled();
+    assert.deepEqual(bots[0].calls, ['start', 'stop']);
+    assert.equal((await request())[0], 202);
+    // A login in time cancels that bound.
+    bots[1].emit('scan', 'https://login.weixin.qq.com/l/q2', types.ScanStatus.Waiting);
+    bots[1].emit('login', { id: 'wxid_bot' });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(bridge.state.phase, 'logged_in');
+  } finally { await bridge.close(); }
+});
+
+test('a slow stop of an ended bot never holds up or ends the next attempt', async () => {
+  let release;
+  const { bots, bridge, request } = await started({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
+  try {
+    await request();
+    bots[0].stop = () => { bots[0].calls.push('stop'); return new Promise(resolve => { release = resolve; }); };
+    bots[0].emit('error', new Error('Neo could not start QR login'));
+    assert.equal(bridge.state.phase, 'idle');
+    // The first bot is still stopping; the next request starts its own bot at once.
+    const [status] = await (async () => { const r = await fetch(`http://${HOST}:${bridge.server.address().port}/login`,
+      { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } }); return [r.status]; })();
+    assert.equal(status, 202);
+    await until(() => bots[1]?.calls.includes('start'));
+    bots[0].emit('error', new Error('Timeout after 15000 ms'));
+    assert.equal(bridge.state.phase, 'starting');
+    release();
+    await bridge.settled();
+    assert.deepEqual([bots[0].calls, bots[1].calls], [['start', 'stop'], ['start']]);
+  } finally { await bridge.close(); }
+});
+
+test('close() stops the current bot, and a start still running when it closes ends nothing later', async () => {
+  let finishStart;
+  const { bots, bridge, json } = await started({ prepare: made => {
+    made.start = () => { made.calls.push('start'); return new Promise(resolve => { finishStart = resolve; }); }; } });
+  assert.equal((await json('/login', { method: 'POST' }))[0], 202);
+  const closed = bridge.close();
+  finishStart();
+  await closed;
+  await bridge.settled();
+  assert.deepEqual(bots[0].calls, ['start', 'stop']);
+  bots[0].emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+  assert.equal(bridge.state.qr, undefined);
 });
 
 test('POST /login refuses while logged in, while a QR waits or is scanned, and while one is starting, changing nothing', async () => {
-  const { bot, bridge, json } = await started();
+  const { bots, bridge, json } = await started();
   try {
     assert.equal((await json('/login', { method: 'POST' }))[0], 202);
     assert.deepEqual(await json('/login', { method: 'POST' }), [409, { refused: 'login_starting' }]);
     await bridge.settled();
+    const [bot] = bots;
     bot.emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
     assert.deepEqual(await json('/login', { method: 'POST' }), [409, { refused: 'qr_waiting' }]);
     bot.emit('scan', '', types.ScanStatus.Scanned);
@@ -429,25 +555,25 @@ test('POST /login refuses while logged in, while a QR waits or is scanned, and w
     bot.emit('login', { id: 'wxid_bot' });
     assert.deepEqual(await json('/login', { method: 'POST' }), [409, { refused: 'already_logged_in' }]);
     await bridge.settled();
-    assert.deepEqual(bot.calls, ['stop', 'start'], 'no refusal touched the puppet');
+    assert.deepEqual([bots.length, bot.calls], [1, ['start']], 'no refusal touched a bot');
     assert.equal((await json('/status'))[1].phase, 'logged_in');
   } finally { await bridge.close(); }
 });
 
-test('two requests at once start the puppet once', async () => {
-  const { bot, bridge, json } = await started();
+test('two requests at once start one bot', async () => {
+  const { bots, bridge, json } = await started();
   try {
     const answers = await Promise.all([json('/login', { method: 'POST' }), json('/login', { method: 'POST' })]);
     assert.deepEqual(answers.map(([status]) => status).sort(), [202, 409]);
     await bridge.settled();
-    assert.deepEqual(bot.calls, ['stop', 'start']);
+    assert.deepEqual([bots.length, bots[0].calls], [1, ['start']]);
   } finally { await bridge.close(); }
 });
 
-test('POST /login is rate limited: 2 minutes apart and 5 an hour, with retry_after_s', async () => {
+test('POST /login is rate limited: 2 minutes apart, 5 an hour and 12 a day, with retry_after_s', async () => {
   let clock = Date.parse('2026-11-20T12:00:00Z');
-  const { bot, bridge, json } = await started({ now: () => new Date(clock) });
-  const expire = async () => { await bridge.settled(); bot.emit('scan', '', types.ScanStatus.Timeout); await bridge.settled(); };
+  const { bot, bots, bridge, json } = await started({ now: () => new Date(clock) });
+  const expire = async () => { await bridge.settled(); bot().emit('scan', '', types.ScanStatus.Timeout); await bridge.settled(); };
   try {
     assert.equal((await json('/login', { method: 'POST' }))[0], 202);
     await expire();
@@ -464,41 +590,60 @@ test('POST /login is rate limited: 2 minutes apart and 5 an hour, with retry_aft
     assert.deepEqual(await json('/login', { method: 'POST' }), [429, { refused: 'rate_limited', retry_after_s: 3600 - 600 }]);
     clock = Date.parse('2026-11-20T13:00:00Z');
     assert.equal((await json('/login', { method: 'POST' }))[0], 202, 'the first is an hour old');
-    const starts = bot.calls.filter(call => call === 'start').length;
-    assert.equal(starts, 6, 'a refused request never started the puppet');
+    assert.equal(bots.length, 6, 'a refused request never built a bot');
+    // Six more, one an hour (12 in all, the first at 12:00): the 13th waits until 12:00 tomorrow.
+    for (let i = 0; i < 6; i++) { await expire(); clock += HOUR; assert.equal((await json('/login', { method: 'POST' }))[0], 202, `hour ${i}`); }
+    await expire();
+    clock += HOUR;
+    const dayEnd = Date.parse('2026-11-21T12:00:00Z');
+    assert.deepEqual(await json('/login', { method: 'POST' }), [429, { refused: 'rate_limited', retry_after_s: (dayEnd - clock) / 1000 }]);
+    clock = dayEnd;
+    assert.equal((await json('/login', { method: 'POST' }))[0], 202, 'the first is a day old');
+    assert.equal(bots.length, 13);
   } finally { await bridge.close(); }
 });
 
-test('a start that fails, or a QR that never appears, ends the attempt as login_failed', async () => {
+test('a bot that cannot be built or started, or a QR that never appears, ends the attempt as login_failed', async () => {
   const logs = [];
-  const { bot, bridge, json } = await started({ log: line => logs.push(line), loginLimits: { minGapMs: 0, perHour: 5, qrWaitMs: 50 } });
+  let buildError;
+  const { bots, bridge, json } = await started({ log: line => logs.push(line),
+    loginLimits: { ...LOGIN_LIMITS, minGapMs: 0, qrWaitMs: 50 },
+    prepare: () => { if (buildError) throw buildError; } });
   try {
-    bot.startError = new Error('puppet start exploded');
+    buildError = new Error('no native addon');
     assert.equal((await json('/login', { method: 'POST' }))[0], 202);
-    await bridge.settled();
-    await until(() => bridge.state.phase === 'idle');
-    assert.deepEqual([bridge.state.phase, bridge.state.idle_reason], ['idle', 'login_failed']);
-    assert.ok(logs.includes('starting the puppet failed: puppet start exploded'));
-    bot.startError = undefined;
+    assert.deepEqual([bridge.state.phase, bridge.state.idle_reason, bots.length], ['idle', 'login_failed', 0]);
+    assert.ok(logs.includes('building the puppet failed: no native addon'));
+    buildError = undefined;
     assert.equal((await json('/login', { method: 'POST' }))[0], 202);
     await bridge.settled();
     assert.equal(bridge.state.phase, 'starting');
     await until(() => bridge.state.phase === 'idle', 2000);
     assert.equal(bridge.state.idle_reason, 'login_failed', 'no QR within qrWaitMs');
+    // A start that throws.
+    const { bots: failing, bridge: other, json: otherJson } = await started({ log: line => logs.push(line),
+      prepare: made => { made.startError = new Error('puppet start exploded'); } });
+    try {
+      assert.equal((await otherJson('/login', { method: 'POST' }))[0], 202);
+      await other.settled();
+      await until(() => other.state.phase === 'idle');
+      assert.deepEqual([other.state.idle_reason, failing[0].calls], ['login_failed', ['start', 'stop']]);
+      assert.ok(logs.includes('starting the puppet failed: puppet start exploded'));
+    } finally { await other.close(); }
     // A QR that comes in time cancels that timer.
     assert.equal((await json('/login', { method: 'POST' }))[0], 202);
     await bridge.settled();
-    bot.emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
+    bots.at(-1).emit('scan', 'https://login.weixin.qq.com/l/q', types.ScanStatus.Waiting);
     await new Promise(resolve => setTimeout(resolve, 120));
     assert.equal(bridge.state.phase, 'waiting_qr');
   } finally { await bridge.close(); }
 });
 
-test('with login disabled (WECHAT_BRIDGE_SKIP_LOGIN=1) every request is refused and the puppet never starts', async () => {
-  const { bot, bridge, json } = await started({ loginEnabled: false });
+test('with login disabled (WECHAT_BRIDGE_SKIP_LOGIN=1) every request is refused and no bot is built', async () => {
+  const { bots, bridge, json } = await started({ loginEnabled: false });
   try {
     assert.deepEqual(await json('/login', { method: 'POST' }), [409, { refused: 'login_disabled' }]);
-    assert.deepEqual(bot.calls, []);
+    assert.deepEqual(bots, []);
     assert.equal((await json('/status'))[1].phase, 'idle');
   } finally { await bridge.close(); }
 });

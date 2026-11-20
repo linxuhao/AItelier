@@ -3,13 +3,14 @@
  *  address WECHAT_BRIDGE_BIND (bridge.mjs bindHost: loopback, or 0.0.0.0 in the
  *  container). It runs in its own container (Dockerfile, run.sh).
  *
- *  The puppet is not started here: the bridge starts `idle` and asks WeChat for a QR
- *  only when POST /login asks it to (bridge.mjs). A QR nobody scanned in time, a logout
- *  or a puppet failure before a login leave it `idle` again; the process ends only on
+ *  No bot is built here: the bridge starts `idle` and builds and starts one (makeBot)
+ *  only when POST /login asks for a QR (bridge.mjs), a fresh one for each request. A QR
+ *  nobody scanned in time, a logout or a puppet failure before a login leave it `idle`
+ *  again; the process ends only on
  *  SIGINT/SIGTERM (0), a missing token or a refused bind address (78), or a crash.
  *
  *  WECHAT_BRIDGE_SKIP_LOGIN=1 serves the HTTP API and refuses every POST /login
- *  (`login_disabled`), so the puppet is never started: the start check of the image,
+ *  (`login_disabled`), so no puppet is ever started: the start check of the image,
  *  which must not log in. */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -33,9 +34,9 @@ catch (error) { log(error.message); process.exit(78); }
 
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file
 // (the container's root filesystem is read-only; the login is in memory anyway).
-const bot = WechatyBuilder.build({ puppet: new PuppetNeo() });
+const makeBot = () => WechatyBuilder.build({ puppet: new PuppetNeo() });
 const skipLogin = process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1';
-const bridge = createBridge({ bot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin });
+const bridge = createBridge({ makeBot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin });
 
 let stopping = false;
 async function stop(reason, code) {
@@ -43,7 +44,6 @@ async function stop(reason, code) {
   stopping = true;
   log(reason);
   await bridge.close().catch(() => {});
-  await bot.stop().catch(() => {});
   process.exit(code);
 }
 

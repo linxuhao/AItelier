@@ -406,7 +406,8 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
   bot.stop = async () => {};
   bot.Contact = { find: async ({ id }) => ({ id, say: async text => { said.push({ id, text }); } }) };
   const SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
-  const bridge = createBridge({ bot, types, token: TOKEN, renderQr: () => SVG });
+  // The bridge builds a bot per login request; this test's one fake is that bot.
+  const bridge = createBridge({ makeBot: () => bot, types, token: TOKEN, renderQr: () => SVG });
   const address = await bridge.listen(0);
   const channels = fakeChannels();
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet,

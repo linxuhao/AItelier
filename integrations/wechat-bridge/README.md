@@ -11,11 +11,13 @@ WeChat out.
 A login QR is asked of WeChat only on request, one at a time (owner, 2026-11-20: a
 button or the steward's tool, never a manual container restart): `POST /login`, which
 the channel plugin calls for the dashboard's "新二维码" button and for the steward's
-`request_wechat_qr` tool. Inside the running process the bridge stops the puppet and
-starts it again; puppet-neo opens a new session and a new QR on each start ("stop and
-start it again to log in with a new QR code", its `logout()` doc). A QR nobody scans, a
-cancelled one, a logout and a puppet failure before a login leave the bridge `idle`:
-still running, the puppet stopped, asking WeChat for nothing until the next request.
+`request_wechat_qr` tool. Inside the running process the bridge builds a fresh Wechaty
+bot with a fresh puppet-neo for each request, which opens a new session and asks for a
+new QR; an attempt that ends stops its own bot. No puppet state is shared between
+attempts: a slow stop of an old bot never holds up the next one, and whatever an old bot
+still emits (a late QR, a login, an error) is ignored. A QR nobody scans, a cancelled
+one, a logout and a puppet failure before a login leave the bridge `idle`: still
+running, no bot running, asking WeChat for nothing until the next request.
 (OpenClaw's WeChat channel needs no long-running process at all: it uses Tencent's iLink
 API and keeps the account token on disk. puppet-neo neither exports nor restores a login,
 so this bridge must stay up - but it never needs a restart for a new QR.)
@@ -60,10 +62,10 @@ What the build checks, and what it found (2026-11-18, log in
   prints `EBADENGINE` and goes on). Its JavaScript uses nothing newer than node 24, and
   the build loads `wechaty` and `wechaty-puppet-neo` and opens and closes a native
   session the way the puppet does (`new PuppetNeo().createSession()`), twice, then
-  starts and stops a Wechaty bot with the puppet twice in the same process, with no
-  network (`RUN --network=none`): each start opens a fresh session and tries a new QR
-  login (which fails offline, as it should), and each stop closes it - the in-process
-  restart `POST /login` relies on. It works on node 24. A real login was not tried.
+  builds, starts and stops a fresh Wechaty bot with a fresh puppet twice in the same
+  process, with no network (`RUN --network=none`): each start opens a fresh session and
+  tries a new QR login (which fails offline, as it should), and each stop closes it -
+  what `POST /login` does. It works on node 24. A real login was not tried.
 
 ## Run
 
@@ -99,7 +101,9 @@ phone`, `connected`, or why not).
   servers);
 - `--restart unless-stopped`: a start is `idle` and asks WeChat for nothing, so a
   restart (a crash, a host reboot) is harmless and the bridge is back to wait for a
-  request.
+  request. (`on-failure:N` would not bring it back after a host reboot. The cost: a
+  missing token or a refused bind address, exit 78, restarts under Docker's backoff
+  forever - log lines only, WeChat is never asked.)
 
 Then ask for a QR (the dashboard's Channels tab, "新二维码", or ask the steward) and scan
 it: `GET /status` carries it as `qr` and drawn as an SVG image as `qr_svg` (qr-svg.mjs,
@@ -118,7 +122,7 @@ The host port is 18741 and not the container's 18731 because on this host
 for both `run.sh` and the steward's host (or the plugin's `url` config).
 
 Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API and never
-starts the puppet (`POST /login` answers `409 login_disabled`). With the `run.sh` flags, a throwaway token and host port 18741, on
+builds a bot (`POST /login` answers `409 login_disabled`). With the `run.sh` flags, a throwaway token and host port 18741, on
 2026-11-18 `GET /status` answered `200 {"logged_in":false,...}`, without the token `401`,
 `/events` `200`, `/send` `409 not_logged_in`, and the root filesystem refused writes
 (log: `s19-wechat-image-startcheck.txt` next to the build log). The same check of
@@ -137,22 +141,26 @@ Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
 - `GET /status` → `{phase, idle_reason?, logged_in, user_id?, qr?, qr_svg?, since}`.
-  `phase`: `idle` (no QR, not logged in, the puppet stopped; `idle_reason` is `boot`,
+  `phase`: `idle` (no QR, not logged in, no bot running; `idle_reason` is `boot`,
   `qr_expired`, `qr_cancelled`, `logged_out` or `login_failed`), `starting` (a QR was
   requested and has not appeared yet), `waiting_qr`, `scanned` (to be confirmed on the
   phone) or `logged_in`. `qr` (the payload) and `qr_svg` (it drawn as an SVG, absent if
   it cannot be drawn within 64 KiB) only in `waiting_qr`; `since` is when the current
   phase began.
-- `POST /login` (no body) → `202 {phase: "starting"}`: stop the puppet, start it again,
-  and a new QR follows in `/status` (usually within seconds). Taken only while `idle`;
+- `POST /login` (no body) → `202 {phase: "starting"}`: build and start a fresh bot, and
+  a new QR follows in `/status` (usually within seconds). Taken only while `idle`;
   otherwise it changes nothing and answers `409 {refused}`: `already_logged_in` (log out
   on the phone first to change accounts), `qr_waiting` (a QR is waiting or was just
   scanned: scan that one), `login_starting` (the last request has not shown its QR yet),
   `login_disabled` (`WECHAT_BRIDGE_SKIP_LOGIN=1`); or `429 {refused: "rate_limited",
-  retry_after_s}`: at least 2 minutes between two accepted requests and at most 5 in any
-  hour (`LOGIN_LIMITS`, kept in memory). A start that fails, or a QR that has not
-  appeared within 30 seconds, ends as `idle` (`login_failed`); the reason is logged (at
-  most 200 characters, never a QR).
+  retry_after_s}`: at least 2 minutes between two accepted requests, at most 5 in any
+  hour and 12 in any 24 hours (`LOGIN_LIMITS`, kept in memory; the director's
+  `ownerChannels.login` keeps the same count, so a bridge restart does not reset it
+  there). A bot that cannot be built or started, or a QR that has not appeared within 30
+  seconds, ends as `idle` (`login_failed`); a QR still waiting or scanned 5 minutes after
+  it appeared ends as `idle` (`qr_expired`) whatever the puppet still does (neo's own
+  loop ends in about 2 minutes). The reason is logged (at most 200 characters, never a
+  QR).
 - `GET /events?after=<n>&wait=<sec>` → `{events: [{seq, type: "message", sender_ref,
   message_ref, text, at}], next_after}`. Long-poll: waits up to `wait` seconds
   (capped at 25) for an event after `after`. Only 1:1 text messages from another
@@ -192,5 +200,5 @@ Message texts are never logged.
 node --test bridge.test.mjs qr-svg.test.mjs
 ```
 
-A fake Wechaty; nothing loads the puppet or reaches WeChat. The real puppet's
-in-process stop/start is checked offline by the image build (above).
+Fake Wechaty bots; nothing loads the puppet or reaches WeChat. Fresh real bots started
+and stopped in one process are checked offline by the image build (above).

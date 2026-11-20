@@ -25,23 +25,23 @@ RUN ldd --version | head -n 1 \
     && ! ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node | grep -q 'not found'
 COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs ./
 # puppet-neo declares node >= 26; this is node 24. Load both packages, open (then close)
-# a native session the way the puppet does, twice, then start and stop a Wechaty bot with
-# the puppet twice in this one process, with no network: proves the addon loads and runs
-# on this node and this glibc, and that a stopped puppet starts again with a fresh session
-# and a new login attempt (offline each attempt fails: one error per start), which is what
-# POST /login does (bridge.mjs) - without logging in to anything.
+# a native session the way the puppet does, twice, then build, start and stop a fresh
+# Wechaty bot with a fresh puppet twice in this one process, with no network: proves the
+# addon loads and runs on this node and this glibc, and that each new bot makes a new
+# login attempt (offline each attempt fails: one error per start), which is what POST
+# /login does (bridge.mjs) - without logging in to anything.
 RUN --network=none node --input-type=module -e " \
       const { WechatyBuilder } = await import('wechaty'); \
       const { PuppetNeo } = await import('wechaty-puppet-neo'); \
       for (let i = 0; i < 2; i++) { const session = new PuppetNeo().createSession(); await session.close(); } \
-      const bot = WechatyBuilder.build({ puppet: new PuppetNeo() }); \
-      let errors = 0, scans = 0; bot.on('error', () => { errors++; }); bot.on('scan', () => { scans++; }); \
       for (let i = 1; i <= 2; i++) { \
+        const bot = WechatyBuilder.build({ puppet: new PuppetNeo() }); \
+        let errors = 0, scans = 0; bot.on('error', () => { errors++; }); bot.on('scan', () => { scans++; }); \
         await bot.start(); \
-        for (let t = 0; errors < i && t < 100; t++) await new Promise(r => setTimeout(r, 100)); \
-        if (errors < i || scans) throw new Error('start ' + i + ': no fresh login attempt'); \
+        for (let t = 0; !errors && t < 100; t++) await new Promise(r => setTimeout(r, 100)); \
+        if (!errors || scans) throw new Error('bot ' + i + ': no fresh login attempt'); \
         await bot.stop(); } \
-      console.log('neo: two native sessions and two puppet start/stop cycles in one process on node', process.version, 'glibc', process.report.getReport().header.glibcVersionRuntime); \
+      console.log('neo: two native sessions and two fresh bots started and stopped in one process on node', process.version, 'glibc', process.report.getReport().header.glibcVersionRuntime); \
       process.exit(0);"
 
 FROM python:3.12-slim

@@ -82,9 +82,15 @@ PRIVATE_STATE_TABLES = frozenset({
     # rule. Private for the same reason the store is: the digest IS the identity
     # of the private bundle and the row names the commit it came from, so an
     # untrusted read would hand out the release history of candidates in
-    # projects the caller cannot open. No projection. (The ``state_git_bundle_custody``
-    # view over these two tables is refused by the same verdict, because SQLite
-    # expands it into reads of the tables themselves.)
+    # projects the caller cannot open. The ACTOR - who retired the bytes - stays
+    # private. What an untrusted read of an OPENED project's attempt may answer
+    # is the disclosure the reader needs and nothing more: WHEN the bytes left
+    # and under which RULE (``PROJECTIONS`` below, scoped to artifacts the
+    # opened projects' attempts name), so a released candidate can never be
+    # reported as one whose bytes State still holds. The
+    # ``state_git_bundle_custody`` view over these two tables is refused by the
+    # same verdict, because SQLite expands it into reads of the tables
+    # themselves.
     "state_git_bundle_releases",
     # Who is working on what (design/multi-driver-coop.md §4.2). The declared
     # workspace, request key and every history row (release reasons) are
@@ -313,6 +319,22 @@ PROJECTIONS = {
         "WHERE commit_sha IN (SELECT artifact_ref FROM main.state_attempts "
         f"WHERE project_id IN ({_OPENED}))",
         None),
+    # The release record of an artifact an OPENED project's attempt names:
+    # WHEN State stopped holding the bytes and under which RULE - and never the
+    # actor, which is who retired them (core.state_git_artifacts
+    # RELEASE_PUBLIC_COLUMNS is this same subset). Every other column is NULL
+    # here and REFUSED by the column verdict, so ``SELECT *`` over this copy is
+    # still denied: the sizes and the counter chain stay private. The filter is
+    # the artifact projection's own - a candidate of a project the caller cannot
+    # open contributes no release row - so the two projections agree row for row.
+    "state_git_bundle_releases": (
+        "SELECT bundle_sha256, commit_sha, NULL AS codec, NULL AS base_sha256, "
+        "NULL AS raw_size, NULL AS payload_bytes, released_at, NULL AS actor, rule, "
+        "NULL AS rows_before, NULL AS payload_before, NULL AS rows_after, "
+        "NULL AS payload_after FROM main.state_git_bundle_releases "
+        "WHERE commit_sha IN (SELECT artifact_ref FROM main.state_attempts "
+        f"WHERE project_id IN ({_OPENED}))",
+        frozenset({"bundle_sha256", "commit_sha", "released_at", "rule"})),
     # Claims of opened projects: holder, purpose, fence and lease only
     # (core.state_claims.PUBLIC_CLAIM_COLUMNS); never workspace or request key.
     "state_node_claims": (

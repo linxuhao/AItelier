@@ -26,7 +26,11 @@ from tests.integration.test_state_git_candidate_only_custody import (
     broad_bundle, git, has_object, set_unrelated)
 
 PREFIX = "state-db:git-bundle:sha256:"
-META_KEYS = {"commit_sha", "tree_sha", "bundle_sha256", "retained_ref", "custody", "legacy_cas_path"}
+# ``released`` belongs to this dict: the custody answer says whether a release
+# RECORD exists (null for a candidate whose bytes State still holds) on top of
+# the four stored columns and the two derived ones.
+META_KEYS = {"commit_sha", "tree_sha", "bundle_sha256", "retained_ref", "custody",
+             "legacy_cas_path", "released"}
 
 
 @pytest.fixture(autouse=True)
@@ -133,6 +137,7 @@ def test_new_intake_stores_one_pack_and_writes_no_second_bundle_file(tmp_path):
     meta = read(service, new_attempt)["git_artifact"]
     assert set(meta) == META_KEYS
     assert meta["custody"] == "state_db_fullpack" and meta["legacy_cas_path"] is None
+    assert meta["released"] is None  # no release record for held bytes
     dest = tmp_path / "dest.git"
     git(tmp_path, "init", "-q", "--bare", str(dest))
     materialize_candidate(service.store, commit2, str(dest))
@@ -171,6 +176,7 @@ def test_get_attempt_matrix_trusted_public_and_private(tmp_path):
     public = StateService(StateDatabase(str(db)), actor="anyone", project_read_trusted=False)
     trusted = read(service, attempt)["git_artifact"]
     assert set(trusted) == META_KEYS and trusted["custody"] == "state_db_fullpack"
+    assert trusted["released"] is None
     with pytest.raises(ProjectPrivate):  # project not opened
         read(public, attempt)
     with public.store.transaction() as conn:

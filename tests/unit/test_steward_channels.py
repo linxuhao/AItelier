@@ -30,6 +30,7 @@ from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError, canonical
 from core.state_service import StateService
+from tests.unit.test_driver_inbox_answer_citation import BASE_ROW_KEYS
 
 HOME = "aitelier-home"
 OWNER = "owner@example.com"
@@ -627,8 +628,10 @@ def test_the_steward_is_woken_with_each_owner_messages_channel_and_a_dashboard_m
         assert by_id[slack["message_id"]]["source_channel"] == "slack"
         assert by_id[wechat["message_id"]]["source_channel"] == "wechat"
         assert "source_channel" not in by_id[dashboard["message_id"]], "no source row = dashboard, no key"
-        # Only the channel's name, never the account or the platform's message ref.
-        assert set(by_id[slack["message_id"]]) - set(by_id[dashboard["message_id"]]) == {"source_channel"}
+        # Only the channel's name, never the account or the platform's message ref; a
+        # dashboard message keeps the plain row shape.
+        assert set(by_id[dashboard["message_id"]]) == BASE_ROW_KEYS
+        assert set(by_id[slack["message_id"]]) == BASE_ROW_KEYS | {"source_channel"}
         assert SLACK_USER not in json.dumps(rows) and "slack-ts-1" not in json.dumps(rows)
 
 

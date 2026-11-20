@@ -173,6 +173,10 @@ SUBAGENT_PROVIDER = "aitelier"
 RECOVERY_ACTORS = frozenset({"dsh-host-recovery", "dsh-runtime-recovery"})
 
 DSH_EXTRA_MCP_DEFAULTS = {
+    # These four are the DIRECTOR's capabilities. The steward role gets none of
+    # them (see `_environment`): its role presents no tool of any of these
+    # services, so the entries bought it nothing - while the pwmcp one aimed a
+    # steward start at the SHARED browser and evicted a director mid-playtest.
     "devmcp": "http://127.0.0.1:7676/mcp",
     "zvec": "http://127.0.0.1:7999/mcp",
     # Media definitions stay behind caller-scoped search_tools/call_tool for
@@ -630,21 +634,33 @@ class DshDrivers:
         # The mapping is parsed unconditionally: a malformed value is a config
         # error whether or not this driver's entry is the one that would be used.
         driver_ports = pwmcp_driver_ports()
+        role = role_for_project(row["project_id"])
+        # The steward gets NONE of these, and the rewrite strips them from a
+        # profile written before this rule existed (the file is rewritten whole
+        # on every start). Its role is `presented_only` for pwmcp, so it cannot
+        # call one pwmcp tool - but pwmcp holds ONE client session and a second
+        # `initialize` silently evicts the first, so a steward start pointing at
+        # the SHARED 8931 URL kicked the director out of its browser mid-playtest
+        # (its next call answered -32001 Session not found). devmcp (a shell),
+        # zvec and agentmcp are unused by the role for the same reason: not
+        # presented, so never callable. A director keeps all four, mapped port
+        # and all.
         extra = []
-        for server, default_url in DSH_EXTRA_MCP_DEFAULTS.items():
-            url = os.environ.get(
-                "AITELIER_DSH_MCP_" + server.upper(), default_url).strip()
-            if not url:
-                # Blank withdraws the entry outright; the per-driver mapping must
-                # not resurrect a service the operator took away.
-                continue
-            if server == "pwmcp":
-                port = driver_ports.get(row["driver_id"])
-                if port is not None:
-                    url = f"http://127.0.0.1:{port}/mcp"
-            extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
-                "serverName": server, "transport": "streamable-http", "url": url,
-                "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
+        if role != "steward":
+            for server, default_url in DSH_EXTRA_MCP_DEFAULTS.items():
+                url = os.environ.get(
+                    "AITELIER_DSH_MCP_" + server.upper(), default_url).strip()
+                if not url:
+                    # Blank withdraws the entry outright; the per-driver mapping
+                    # must not resurrect a service the operator took away.
+                    continue
+                if server == "pwmcp":
+                    port = driver_ports.get(row["driver_id"])
+                    if port is not None:
+                        url = f"http://127.0.0.1:{port}/mcp"
+                extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
+                    "serverName": server, "transport": "streamable-http", "url": url,
+                    "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
         # Auto-compact fires at `min(W * thresholdRatio, W - O - B)`; the shipped
         # ratio is 0.8. It is a RATIO of the model's own window, not a token
         # count: a quarter is 250k on a 1M window and 50k on a 200k one.
@@ -659,7 +675,6 @@ class DshDrivers:
         # previous policy (half the window, DSH's default 16% verbatim tail), now
         # written as their own policy rather than left to the default.
         roles = load_roles()
-        role = role_for_project(row["project_id"])
         # dsh-base's tool-result-pruner runs first at pressure and trims old tool
         # outputs in place. Measured 2026-11-06 (wuxia-myth, 253k): a 21.5k trim
         # brought the context back under the trigger, so the summary never ran,

@@ -833,6 +833,105 @@ def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch
     assert "mcp-aitelier" in ids
 
 
+# ── The steward role gets none of the extra services ─────────────────────────
+# roles.json presents not ONE tool of devmcp, zvec, agentmcp or pwmcp to the
+# steward, so those four entries bought the role nothing. The pwmcp one was
+# worse than useless: the shared 8931 URL is a server holding ONE client
+# session, and a steward start's `initialize` there evicted the director whose
+# browser was in use (its next call answered -32001 Session not found) - the
+# steward kicking a director out of a playtest it cannot even join. The same
+# profile writer runs on every start, so the rule below also strips the entries
+# from profiles written before it existed.
+
+STEWARD_PROJECT = "aitelier-home"
+EXTRA_MCP_IDS = ("mcp-devmcp", "mcp-zvec", "mcp-agentmcp", "mcp-pwmcp")
+
+
+def _steward_row(runtime):
+    """The reserved project's driver, created through the real State service:
+    the shared fixture only makes ordinary projects."""
+    from core.state_service import StateService
+    StateService(runtime.db, actor="fixture", project_read_trusted=True).store.create_project(
+        STEWARD_PROJECT, "Home")
+    return runtime._provision(STEWARD_PROJECT, "aitelier", "steward", "fixture")
+
+
+def _inserted(runtime, row):
+    return next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)
+
+
+def test_a_steward_start_writes_no_extra_mcp_entry(runtime, monkeypatch):
+    for server in EXTRA_MCP_IDS:
+        monkeypatch.delenv("AITELIER_DSH_MCP_" + server[4:].upper(), raising=False)
+    steward = _steward_row(runtime)
+    runtime._environment(steward)
+    entries = _inserted(runtime, steward)
+    ids = [e["id"] for e in entries]
+    assert [i for i in ids if i in EXTRA_MCP_IDS] == [], (
+        "a steward start must not register the director's local services")
+    # Not one MCP client at all: the steward has no State MCP wiring either, so
+    # nothing in its profile can open a session on a service it cannot call.
+    assert not [e for e in entries if e["name"] == "@deepseek-ai/dsh-mcp-client"], ids
+    assert ids[:2] == ["dsh-director", "aitelier-driver"], ids
+
+
+def test_a_director_keeps_all_four_services_and_its_mapped_browser_port(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.delenv("AITELIER_DSH_MCP_PWMCP", raising=False)
+    monkeypatch.setenv(PWMCP_PORTS_ENV, f" {alpha['driver_id']}=18932 ")
+    entries = _mcp_entries(runtime, alpha)
+    assert set(EXTRA_MCP_IDS) <= set(entries), sorted(entries)
+    assert entries["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:18932/mcp", (
+        "the per-driver mapping still wins for a director")
+    assert entries["mcp-pwmcp"]["config"]["url"] != "http://127.0.0.1:8931/mcp"
+
+
+def test_a_director_without_a_mapping_keeps_the_shared_browser_url(runtime, monkeypatch):
+    alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.delenv(PWMCP_PORTS_ENV, raising=False)
+    for server in EXTRA_MCP_IDS:
+        monkeypatch.delenv("AITELIER_DSH_MCP_" + server[4:].upper(), raising=False)
+    entries = _mcp_entries(runtime, alpha)
+    assert set(EXTRA_MCP_IDS) <= set(entries), sorted(entries)
+    assert entries["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"
+
+
+def test_a_steward_profile_already_on_disk_loses_the_four_entries(runtime):
+    """Existing profiles, not only newly created ones: the writer rewrites the
+    whole file, so the same call removes what an older build put there."""
+    import yaml
+    steward = _steward_row(runtime)
+    runtime._environment(steward)
+    profile = (runtime.root / steward["driver_id"] / "home" / "profiles" / "driver"
+               / "cordis.patch.yml")
+    # The shape an older writer left behind: the shared URLs, no mapping.
+    old_services = (("devmcp", "http://127.0.0.1:7676/mcp"),
+                    ("zvec", "http://127.0.0.1:7999/mcp"),
+                    ("agentmcp", "http://127.0.0.1:9003/mcp"),
+                    ("pwmcp", "http://127.0.0.1:8931/mcp"))
+    stale = [{"insert": [
+        {"id": "dsh-director", "name": "/srv/old/dsh-director/index.mjs"},
+        {"id": "aitelier-driver", "name": "/srv/old/dsh-driver/runtime.mjs"},
+    ] + [{"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
+        "serverName": server, "transport": "streamable-http", "url": url,
+        "failOnStartupError": False, "toolCallTimeoutMs": 960000}}
+         for server, url in old_services]}]
+    profile.write_text(yaml.safe_dump(stale, sort_keys=False))
+    seeded = [e["id"] for e in _inserted(runtime, steward)]
+    assert list(EXTRA_MCP_IDS) == [i for i in seeded if i in EXTRA_MCP_IDS], (
+        "the seed really is a steward profile still carrying the four entries")
+
+    runtime._environment(steward)  # the same call this change touches
+
+    entries = _inserted(runtime, steward)
+    ids = [e["id"] for e in entries]
+    assert [i for i in ids if i in EXTRA_MCP_IDS] == [], (
+        "a profile on disk still carrying the entries is rewritten without them")
+    assert ids[:2] == ["dsh-director", "aitelier-driver"], ids
+    assert entries[0]["name"] != "/srv/old/dsh-director/index.mjs", (
+        "the profile was rewritten whole, not merged with the stale entries")
+
+
 # ── Auto-compact policy ──────────────────────────────────────────────────────
 # DSH fires automatic compaction at min(W * thresholdRatio, W - O - B), shipped
 # ratio 0.8. The director's own route compacts near-clear: the State snapshot is

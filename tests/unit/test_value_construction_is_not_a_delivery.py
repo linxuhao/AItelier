@@ -32,12 +32,40 @@ as the value of an assignment - a response class the module rebinds AFTER the
 reader looked at it, a builtins dict mutated after the read, and a followed
 helper whose ``__code__`` was swapped under the same function object.
 
-Measured boundaries (accepted, deliberately, and NOT claimed to be safe): a
-process that monkeypatches a third-party class's own method
-(``starlette.responses.JSONResponse.__init__``) after the read keeps the class
-identity the reader whitelisted, so the cached verdict survives; and the five
-callee/physical shapes listed in iss-a555f839083d405d were accepted before this
-fix too. Both are recorded there rather than silently trusted.
+The shapes below are a second, measured family: each was observed EXECUTING the
+private action while the reader answered ``ok=True`` (iss-a555f839083d405d and
+iss-0d84268ff0af47ee), and each is refused now for the reason it leaked. They are
+witnessed at the DOOR, not only at the binding: the product's own dispatch route
+(``POST /api/state/query/{action}``) and the router's own guard, with the row's
+handler installed on it, refused with the guard's own message, while a handler
+that delivers the judged action directly answers 200 on the same route.
+
+* ``N8``  a callee behind an ATTRIBUTE: ``helpers.leak(service)``
+* ``N9``  a callee behind a SUBSCRIPT: ``[_leak][0](service)``
+* ``N12`` a value constructor (``str``) handed an object whose ``__str__`` reads
+  the mailbox
+* ``N12b`` that same object handed out BARE, with no constructor at all
+* ``C1``  ``functools.partial(LeakyResponse)(service)``
+* ``E9``  the HANDLER's own ``__code__`` swapped after the first read
+* ``E10`` local-variable flow: ``x = _leak(service); return x``
+* ``E11`` an ``execute`` ALIAS rebound after the first read
+
+What is still accepted, and why that is a claim rather than a shrug (each is
+recorded where the rule lives, never left as a silent pass):
+
+* a call in a CONDITION. Its truth value picks a branch and is never handed out,
+  so a private body cannot leave through it - which is what keeps the product's
+  own ``return await result if inspect.isawaitable(result) else result``
+  readable (``_delivering_nodes``).
+* ``anyio.to_thread.run_sync(<the action call>)``: a callable that only RUNS the
+  callable it is handed, whitelisted by OBJECT IDENTITY and transparent only when
+  what it is handed is a recognized action call, which is the product's own
+  thread offload of the dispatch (``_DISPATCH_WRAPPERS``). Handed anything else it
+  is refused, and the row below pins that.
+* a process that monkeypatches a third-party class's own method
+  (``starlette.responses.JSONResponse.__init__``) after the read keeps the class
+  identity the reader whitelisted, so the cached verdict survives. That is a
+  measured boundary, not a claimed safety property.
 """
 from __future__ import annotations
 
@@ -46,15 +74,19 @@ import functools
 import linecache
 
 import pytest
-from fastapi import Depends
+from fastapi import Depends, FastAPI
+from fastapi.testclient import TestClient
 from starlette.responses import JSONResponse
 
 from api.state_graph_routers import get_service
 from api.state_graph_routers import router as state_router
-from api.state_verdict import binding_for
-from core.state_commands import execute
+from api.state_verdict import DECLARATION_ATTR, binding_for
+from core.state_commands import READ_REQUESTS, execute, is_public_read
+from core.state_database import StateDatabase
 from core.state_graph import StateWriteBusy
-from tests.support.state_author_surface import GEN_PID, PRIVATE_ACTION
+from core.state_service import StateService
+from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, PRIVATE_ACTION,
+                                                seed_private_mail)
 
 TEMPLATE = "/api/state/query/{action}"
 
@@ -564,3 +596,373 @@ def _leaky_busy(exc):
 def test_a_delivery_the_reader_cannot_explain_is_still_refused(build):
     binding = binding_for(build(), "get_graph", TEMPLATE)
     assert binding.ok is False, (binding,)
+
+
+# ── the eight measured delivery shapes, at the door ──────────────────────────
+# Everything above decides a shape by CALLING the reader. These witnesses make
+# the request instead: the product's dispatch route and the router's own guard,
+# with the row's handler installed on that route. The control in every row is a
+# handler that delivers the action the guard judged DIRECTLY, so a green row
+# cannot be a route that answers 403 for some unrelated reason.
+DOOR_REFUSAL = "state route declaration does not match its handler"
+# The one visibility table decides which actions are public - derived here, and
+# again for the servable one, so no list of action names is hand-written.
+PUBLIC_ACTIONS = sorted(action for action in READ_REQUESTS if is_public_read(action))
+
+
+def _busy_call(service, action, arguments=None, write=False):
+    """The dispatch never gets the lock, so the row's leaky branch is what RUNS.
+
+    The house `_namespace` `_call` asserts instead, on purpose: the reader must
+    never run a handler. These witnesses do run one, so their dispatch refuses the
+    lock and the handler takes the branch each shape hides behind.
+    """
+    raise StateWriteBusy("the write lock was busy")
+
+
+def _door_compiled(name: str, source: str, extra: dict | None = None) -> dict:
+    """Compile witness sources for the door, with a dispatch that is always busy."""
+    namespace = _namespace()
+    namespace["_call"] = _busy_call
+    namespace.update(extra or {})
+    exec(compile(source, _register(name, source), "exec"), namespace)
+    return namespace
+
+
+def _door_service(tmp_path, name: str) -> StateService:
+    """A service whose private mailbox is seeded and whose reads are not refused
+    again at execution: what the door decides is the only thing left in the way."""
+    service = StateService(StateDatabase(str(tmp_path / f"door-{name}.sqlite")),
+                           actor="door-seeder", project_read_trusted=True)
+    service.create_project(GEN_PID, GEN_PID)
+    seed_private_mail(service, GEN_PID, LEAK_MARK)
+    service.open_project(GEN_PID)
+    return service
+
+
+def _served_public_action(service) -> str:
+    """A PUBLIC read the product actually serves for the fixture project.
+
+    Derived from the same table the guard consults, not hand-written: the control
+    handler has to deliver the action the route was asked for, so the action must
+    be one the product can answer with this project's arguments.
+    """
+    for action in PUBLIC_ACTIONS:
+        try:
+            execute(service, action, {"project_id": GEN_PID})
+        except Exception:                     # not answerable with these arguments
+            continue
+        return action
+    raise AssertionError("the product serves none of its public reads here")
+
+
+def _door(handler, service) -> FastAPI:
+    """The product's dispatch route and its own guard, with `handler` installed.
+
+    The handler carries the declaration the product's dispatch family carries
+    (`("read", None)`: the action lives in the URL), is added under the same
+    template and moved in front of the product's own copy of the route, and the
+    router's own guard is attached to it - so the request is judged exactly as the
+    product's route is judged.
+    """
+    app = FastAPI()
+    app.include_router(state_router)
+    app.dependency_overrides[get_service] = lambda: service
+    setattr(handler, DECLARATION_ATTR, ("read", None))
+    app.router.add_api_route(
+        TEMPLATE, handler, methods=["POST"],
+        dependencies=[Depends(state_router.dependencies[0].dependency)])
+    app.router.routes.insert(0, app.router.routes.pop())
+    return app
+
+
+def _post(app, action: str):
+    with TestClient(app) as client:
+        return client.post(f"/api/state/query/{action}",
+                           json={"project_id": GEN_PID})
+
+
+_CONTROL_SOURCE = (
+    "def control(action: str, arguments: dict, service=Depends(get_service)):\n"
+    "    return execute(service, action, arguments)\n")
+
+
+def _assert_control_serves(service, action: str) -> None:
+    """The control pole: a handler that delivers the judged action directly."""
+    control = _compiled("control", _CONTROL_SOURCE)
+    served = _post(_door(control, service), action)
+    assert served.status_code == 200, (served.status_code, served.text[:300])
+    assert LEAK_MARK not in served.text
+
+
+def _assert_the_shape_leaks_when_run(handler, service) -> None:
+    """The shape really runs the private action when it is RUN.
+
+    Measured, not assumed: the door refuses it before it runs on this tree, and on
+    a tree whose reader accepts it the same handler answers 200 with this text.
+    Without this half a witness could rot into "some handler is refused".
+    """
+    out = handler(action="get_graph", arguments={"project_id": GEN_PID},
+                  service=service)
+    text = str(out) + repr(getattr(out, "body", b""))
+    assert LEAK_MARK in text, text[:300]
+
+
+def _assert_door_refuses(app, action: str) -> None:
+    refused = _post(app, action)
+    assert refused.status_code == 403, (refused.status_code, refused.text[:300])
+    assert refused.json()["detail"] == DOOR_REFUSAL, refused.text[:300]
+    assert LEAK_MARK not in refused.text
+
+
+_N8_SOURCE = f'''
+class _Helpers:
+    def leak(self, service):
+        return execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}})
+
+_helpers = _Helpers()
+
+def h_n8(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return _helpers.leak(service)
+'''
+
+
+def test_n8_attribute_callee_is_refused_at_the_door(tmp_path):
+    """N8: a callee reached through an ATTRIBUTE, delivered."""
+    service = _door_service(tmp_path, "n8")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_n8", _N8_SOURCE)["h_n8"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_N9_SOURCE = f'''
+def _leak(service):
+    return execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}})
+
+def h_n9(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return [_leak][0](service)
+'''
+
+
+def test_n9_subscript_callee_is_refused_at_the_door(tmp_path):
+    """N9: a callee reached through a SUBSCRIPT, delivered."""
+    service = _door_service(tmp_path, "n9")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_n9", _N9_SOURCE)["h_n9"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_N12_SOURCE = f'''
+class _LeakyStr:
+    def __str__(self):
+        return str(execute(SERVICE, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}}))
+
+_OBJ = _LeakyStr()
+
+def h_n12(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return str(_OBJ)
+'''
+
+
+def test_n12_str_of_an_unexplainable_object_is_refused_at_the_door(tmp_path):
+    """N12: an inert-looking `str(obj)` whose `__str__` runs the private action.
+
+    `str` is inert as a CALLEE; the value it is handed is not covered by that, and
+    a free name resolving to an arbitrary object is a value this reader cannot
+    attribute.
+    """
+    service = _door_service(tmp_path, "n12")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_n12", _N12_SOURCE, {"SERVICE": service})["h_n12"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_N12B_SOURCE = f'''
+class _LeakyStr:
+    def __str__(self):
+        return str(execute(SERVICE, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}}))
+
+_OBJ = _LeakyStr()
+
+def h_n12b(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return _OBJ
+'''
+
+
+def test_n12b_bare_unexplainable_object_is_refused_at_the_door(tmp_path):
+    """N12b: the same object returned BARE - the row proving N12 is not about `str`."""
+    service = _door_service(tmp_path, "n12b")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_n12b", _N12B_SOURCE, {"SERVICE": service})["h_n12b"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_C1_SOURCE = f'''
+class _LeakyPartialResponse(JSONResponse):
+    def __init__(self, service):
+        super().__init__(
+            execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}}))
+
+def h_c1(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return functools.partial(_LeakyPartialResponse)(service)
+'''
+
+
+def test_c1_partial_of_a_value_constructor_is_refused_at_the_door(tmp_path):
+    """C1: `functools.partial(LeakyResponse)(service)` - a callee built by a CALL."""
+    service = _door_service(tmp_path, "c1")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_c1", _C1_SOURCE, {"functools": functools})["h_c1"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_E9_SOURCE = f'''
+def h_e9(action: str, arguments: dict, service=Depends(get_service)):
+    return execute(service, action, arguments)
+
+def _leaky_e9(action: str, arguments: dict, service=None):
+    return execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}})
+'''
+
+
+def test_e9_handler_body_swapped_after_the_first_read_is_refused_at_the_door(tmp_path):
+    """E9: the HANDLER's own `__code__` changes under the cached read."""
+    service = _door_service(tmp_path, "e9")
+    action = _served_public_action(service)
+    namespace = _door_compiled("h_e9", _E9_SOURCE)
+    handler = namespace["h_e9"]
+    app = _door(handler, service)
+
+    # The first read: the handler as written delivers the action the route takes
+    # from its path, so the door serves it.
+    first = _post(app, action)
+    assert first.status_code == 200, (first.status_code, first.text[:300])
+
+    # The body that changes is the HANDLER'S OWN - not a global, not a helper.
+    handler.__code__ = namespace["_leaky_e9"].__code__
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(app, action)
+    _assert_control_serves(service, action)
+
+
+_E10_SOURCE = f'''
+def _leak(service):
+    return execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}})
+
+def h_e10(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        x = _leak(service)
+        return x
+'''
+
+
+def test_e10_local_variable_flow_is_refused_at_the_door(tmp_path):
+    """E10: the private body reaches a `return` through a LOCAL VARIABLE."""
+    service = _door_service(tmp_path, "e10")
+    action = _served_public_action(service)
+    handler = _door_compiled("h_e10", _E10_SOURCE)["h_e10"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(_door(handler, service), action)
+    _assert_control_serves(service, action)
+
+
+_E11_SOURCE = f'''
+def h_e11(action: str, arguments: dict, service=Depends(get_service)):
+    try:
+        return _call(service, action, arguments)
+    except StateWriteBusy:
+        return runner(service, action, arguments)
+
+def _leak_runner(service, action, arguments):
+    return execute(service, {PRIVATE_ACTION!r}, {{"project_id": {GEN_PID!r}}})
+'''
+
+
+def test_e11_execute_alias_rebound_after_the_first_read_is_refused_at_the_door(tmp_path):
+    """E11: the name that resolved to `execute` is rebound after the first read."""
+    service = _door_service(tmp_path, "e11")
+    action = _served_public_action(service)
+    namespace = _door_compiled("h_e11", _E11_SOURCE, {"runner": execute})
+    handler = namespace["h_e11"]
+    app = _door(handler, service)
+
+    # The first read: `runner` IS the action callable, and the call is the judged
+    # path parameter, so the dispatch binds.
+    first = _post(app, action)
+    assert first.status_code == 200, (first.status_code, first.text[:300])
+
+    # The same name, resolving somewhere else. Only the identity recorded during
+    # the first read can notice.
+    namespace["runner"] = namespace["_leak_runner"]
+    _assert_the_shape_leaks_when_run(handler, service)
+    _assert_door_refuses(app, action)
+    _assert_control_serves(service, action)
+
+
+def test_the_dispatch_wrapper_is_transparent_only_for_an_action_call():
+    """The one accepted wrapper cannot become a way around the callee rule.
+
+    `anyio.to_thread.run_sync` is whitelisted by object identity because it only
+    runs the callable it is handed; that is exactly why it may be transparent ONLY
+    when what it is handed is a recognized action call. Handed a function this
+    reader never read, it is a delivery it cannot explain.
+    """
+    from anyio import to_thread
+
+    wrapper_running_an_unread_callee = _compiled(
+        "h_unread_wrapper",
+        ("def h_unread_wrapper(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    return to_thread.run_sync(_busy, service)\n"),
+        {"to_thread": to_thread, "_busy": _busy_call})
+    binding = binding_for(wrapper_running_an_unread_callee, "get_graph", TEMPLATE)
+    assert binding.ok is False, binding
+
+    wrapper_running_the_action_call = _compiled(
+        "h_action_wrapper",
+        ("def h_action_wrapper(action: str, arguments: dict, service=Depends(get_service)):\n"
+         "    return to_thread.run_sync(partial(_call, service, action, arguments))\n"),
+        {"to_thread": to_thread, "partial": functools.partial})
+    binding = binding_for(wrapper_running_the_action_call, "get_graph", TEMPLATE)
+    assert binding.ok is True, binding
+
+
+def test_every_public_read_still_binds_the_dispatch_door():
+    """No over-tightening: the product's OWN dispatch route still serves them all.
+
+    The action set is derived from the one visibility table, and the endpoint from
+    the product's own router, so neither the answer nor the question is a list
+    somebody could keep in step by hand.
+    """
+    assert PUBLIC_ACTIONS, "the visibility table declares no public read"
+    endpoint = next(route.endpoint for route in state_router.routes
+                    if getattr(route, "path", "") == TEMPLATE)
+    refused = [action for action in PUBLIC_ACTIONS
+               if not binding_for(endpoint, action, TEMPLATE).ok]
+    assert refused == [], refused

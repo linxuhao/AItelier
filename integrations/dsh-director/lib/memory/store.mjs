@@ -57,7 +57,8 @@ const VECTOR_PENDING = 'vector-pending-forget';
 const NOTICE_IDS_SHOWN = 50;
 const vectorPendingText = (since, ids, file, code) =>
   `本地向量文件自 ${since} 去不掉 ${ids.length} 条已忘掉（或已彻底删除）条目的向量行（${file} · ${code}）；`
-  + '原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；文件恢复可写后会自动去掉。编号：'
+  + '原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；'
+  + (code === 'CHECK_FAILED' ? '过滤结果没通过双边检查，文件没动，下次过滤通过后会自动去掉。编号：' : '文件恢复可写后会自动去掉。编号：')
   + ids.slice(0, NOTICE_IDS_SHOWN).join(', ') + (ids.length > NOTICE_IDS_SHOWN ? ' …' : '');
 
 export class MemoryUnavailable extends Error {
@@ -283,6 +284,12 @@ export class MemoryStore {
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     chmodSync(this.root, 0o700);
     this.#acquireLock();
+    // design 3.8.2 (r30): a filter that failed in an earlier process left its rows in the
+    // vector file and their ids on its notice row (kept, hidden, once acknowledged); they are
+    // this process's pending set from here - seeded before the purge recovery, whose own filter
+    // takes the whole set and whose failure must add to that round, not start one without it.
+    this.#readNotices();
+    this.#seedVectorPending();
     const notice = await this.#recoverPurge();
     // f7: the notice outlives this process: it is kept beside the repository until the
     // owner acknowledges it, shown on status and in every snapshot meanwhile.
@@ -290,11 +297,7 @@ export class MemoryStore {
     if (notice && !parseLines(this.noticesFile).some(n => n.text === notice))
       appendDurable(this.noticesFile, JSON.stringify({ at: this.now(), text: notice }) + '\n');
     this.#readNotices();
-    // design 3.8.2 (r30): a filter that failed in an earlier process left its rows in the
-    // vector file and their ids on its notice; they are this process's pending set from here
-    // (an acknowledged notice names none: the load's reconciliation removes those), retried now,
-    // before the load, so the load's own reconciliation finds nothing left to do.
-    this.#seedVectorPending();
+    // Retried now, before the load, so the load's own reconciliation finds nothing left to do.
     if (this.vectorPending.size) await this.#filterVectorsBestEffort([]);
     if (!existsSync(this.dir)) {
       const leftovers = readdirSync(this.root).filter(name => name.startsWith(this.userId + '.pre-purge-'));
@@ -373,16 +376,24 @@ export class MemoryStore {
     try { if (Number(readFileSync(this.lockFile, 'utf8').trim()) === process.pid) unlinkSync(this.lockFile); } catch {}
   }
 
-  /** The owner has seen the notices: they leave status and the snapshot. */
+  /** The owner has seen the notices: they leave status and the snapshot. The vector-pending
+   *  row alone stays in the file, marked acknowledged and shown nowhere: its ids are the rows
+   *  still to remove, which the next process must know (design 3.8.2, r30) - the owner
+   *  acknowledged being told, not the rows going. It goes when they do. */
   acknowledgeNotices() {
-    if (existsSync(this.noticesFile)) writeDurable(this.noticesFile, '');
-    this.notices = []; this.noticeRows = [];
+    if (existsSync(this.noticesFile)) {
+      const kept = parseLines(this.noticesFile).filter(r => r.kind === VECTOR_PENDING)
+        .map(r => ({ ...r, acknowledged: r.acknowledged ?? this.now() }));
+      writeDurable(this.noticesFile, kept.map(r => JSON.stringify(r) + '\n').join(''));
+    }
+    this.#readNotices();
   }
 
-  /** The owner notices file, as rows ({at, text, kind?, …}); kept in memory once read. */
+  /** The owner notices file, as rows ({at, text, kind?, acknowledged?, …}); kept in memory
+   *  once read. `notices` - what status and the snapshot show - leaves out acknowledged rows. */
   #readNotices() {
     this.noticeRows = parseLines(this.noticesFile);
-    this.notices = this.noticeRows.map(n => n.text);
+    this.notices = this.noticeRows.filter(n => !n.acknowledged).map(n => n.text);
     return this.noticeRows;
   }
 
@@ -872,7 +883,7 @@ export class MemoryStore {
     const round = this.vectorRound;
     this.vectorRound = undefined;
     if (round || (this.noticeRows ?? []).some(r => r.kind === VECTOR_PENDING)) this.#notice(VECTOR_PENDING);
-    if (round) this.log('memory/vector-forget-cleared', { ids: cleared.slice(0, 50), ...(cleared.length > 50 ? { count: cleared.length } : {}),
+    if (round && cleared.length) this.log('memory/vector-forget-cleared', { ids: cleared.slice(0, 50), ...(cleared.length > 50 ? { count: cleared.length } : {}),
       since: round.since, until: this.now() });
   }
 
@@ -989,6 +1000,12 @@ export class MemoryStore {
       if (!e) return { refused: 'not_in_history', reason: 'the entry was never committed, so git cannot return it' };
       this.forgotten.delete(id);
       this.#appendEntries([e]);
+      // A restored id is live again: a row a failed filter left for it is its own (same text,
+      // same vector), not one to remove - it leaves the pending set, and its notice with it.
+      if (this.vectorPending.delete(id)) {
+        this.log('memory/vector-forget-withdrawn', { ids: [id], by: 'restore' });
+        this.#vectorForgetDone(new Set());
+      }
       appendDurable(join(this.dir, 'forgotten.jsonl'), JSON.stringify({ id, at: this.now(), restored: true, by }) + '\n');
       await this.#commit(`restore ${id} (${by})`);
       if (this.remote) this.#remoteAdd([e]);
@@ -1160,7 +1177,15 @@ export class MemoryStore {
     };
     let taken = attempt();
     let r = await this.grepHelper.grep(this.dir, args, taken.options);
-    if (r.fallback) { taken = attempt(); r = await git(this.dir, args, taken.options); }
+    // A store closed meanwhile forks nothing more: no process outlives its store.
+    if (r.fallback === 'helper-closed') r = { code: 128, killed: false, stderr: 'the memory store was closed; grep not run' };
+    else if (r.fallback) {
+      taken = attempt();
+      // A spawn that fails here (ENOMEM, EAGAIN, a directory a purge's renames moved) answers
+      // as the helper does - 127 with the reason, an incomplete grep - and never fails the search.
+      r = await git(this.dir, args, taken.options)
+        .catch(error => ({ code: 127, killed: false, stderr: String(error?.message ?? error) }));
+    }
     await taken.reader.end();
     return { source, complete: !r.killed && (r.code === 0 || r.code === 1),
       ...(r.killed ? { reason: `grep killed after ${this.grepTimeoutMs} ms; partial` } : r.code > 1 ? { reason: r.stderr.trim().slice(0, 200) } : {}),

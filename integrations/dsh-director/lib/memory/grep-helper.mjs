@@ -31,15 +31,22 @@ const say = error => String(error?.message ?? error);
 
 export class GrepHelper {
   #child; #pid; #reason; #closed = false; #active; #queue = Promise.resolve();
-  #frames = ''; #stderr = []; #seq = 0;
+  #frames = ''; #stderr = []; #seq = 0; #downs = 0; #retryAt = 0; #lastReason;
 
   /** @param {object} o log(event, fields): the store's logger; answerGraceMs (5000): how long
    *  past the request's own timeoutMs the helper may take to answer before it is treated as
    *  wedged - the query then falls back and the helper is killed; command/script/args/env: what
-   *  to run as the helper (process.execPath and grep-child.mjs; tests hand it a broken one). */
-  constructor({ log = () => {}, answerGraceMs = 5000, command = process.execPath, script = SCRIPT, args = [], env } = {}) {
+   *  to run as the helper (process.execPath and grep-child.mjs; tests hand it a broken one) -
+   *  its environment is PATH alone by default (git gets the spec's own, whatever this is), so
+   *  the host's NODE_OPTIONS and the like do not reach it; restartBackoffMs ({min: 60000, max:
+   *  1800000}) and now (Date.now): see #fail. */
+  constructor({ log = () => {}, answerGraceMs = 5000, command = process.execPath, script = SCRIPT, args = [], env,
+    restartBackoffMs = {}, now = Date.now } = {}) {
     this.log = log; this.answerGraceMs = answerGraceMs;
-    this.command = command; this.script = script; this.args = args; this.env = env;
+    this.command = command; this.script = script; this.args = args;
+    this.env = env ?? { PATH: process.env.PATH ?? '/usr/bin:/bin' };
+    this.backoff = { min: restartBackoffMs.min ?? 60000, max: restartBackoffMs.max ?? 1800000 };
+    this.now = now;
   }
 
   /** The helper's pid (the last one, once it is gone); undefined before the first start. */
@@ -53,13 +60,19 @@ export class GrepHelper {
    *  leaves each query to the direct spawn, which is where a search falls back anyway. */
   start() {
     if (this.#closed || this.#child) return this;
+    if (this.#downs >= 2 && this.now() < this.#retryAt) {
+      // Failed again before it ever answered: not restarted until the backoff runs out, so a
+      // helper that cannot run costs each search the one direct fork, not two (see #fail).
+      this.#reason = `helper-backoff until ${new Date(this.#retryAt).toISOString()}: ${this.#lastReason}`;
+      return this;
+    }
     this.#reason = undefined;
     this.#stderr = [];
     this.#frames = '';
     let child;
     try {
       child = spawn(this.command, [this.script, ...this.args], { stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
-        env: this.env ?? process.env });
+        env: this.env });
     } catch (error) {
       this.#fail('helper-unavailable: ' + say(error));
       return this;
@@ -104,7 +117,7 @@ export class GrepHelper {
     // Whatever happens here - a bug in this file included - the query must never fail: it is
     // answered by the direct spawn instead.
     const result = await queued.catch(error => ({ fallback: 'helper-error: ' + say(error) }));
-    if (result.fallback) this.log('memory/grep-spawn-fallback', { reason: String(result.fallback).slice(0, 200) });
+    if (result.fallback && result.fallback !== 'helper-closed') this.log('memory/grep-spawn-fallback', { reason: String(result.fallback).slice(0, 200) });
     return result;
   }
 
@@ -186,6 +199,7 @@ export class GrepHelper {
    *  pipes are independent, so the count is what orders them) and the answer is in: settle it. */
   #maybeFinish(active) {
     if (active.settled || !active.end || active.got < (active.end.bytes ?? 0)) return;
+    this.#downs = 0; // it answered: a later failure is a first one again
     this.#settle({
       code: active.end.code, stdout: Buffer.concat(active.out), stderr: active.end.stderr ?? '',
       killed: active.end.killed === true, pid: active.pid,
@@ -201,14 +215,31 @@ export class GrepHelper {
   }
 
   /** The helper is unusable: remember why, take the process down (a wedged one included) and
-   *  let the request in flight fall back. The next request starts a fresh one, unless the
-   *  store has been closed. */
+   *  its git with it, and let the request in flight fall back. The next request starts a fresh
+   *  one, unless the store has been closed - or the helper has now failed twice with no answer
+   *  in between (it cannot start, or dies at once): then the restart waits min, doubling to
+   *  max, each search meanwhile going straight to the direct spawn; an answer resets it. */
   #fail(reason) {
     if (this.#reason) return;
     this.#reason = reason;
+    this.#lastReason = reason;
     const child = this.#child;
     this.#child = undefined;
+    const active = this.#active;
+    // A git still running for the request in flight: the helper that would have killed it at
+    // timeoutMs is (being) gone, and git would run on, reparented, for as long as it likes.
+    // It leads its own process group (grep-child.mjs), so the group is killed - only while
+    // no end frame says it is done, so the pid cannot be someone else's yet.
+    if (active && !active.settled && Number.isInteger(active.pid) && !active.end) {
+      try { process.kill(-active.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
     this.#settle({ fallback: reason });
+    this.#downs++;
+    if (this.#downs >= 2) {
+      const wait = Math.min(this.backoff.min * 2 ** (this.#downs - 2), this.backoff.max);
+      this.#retryAt = this.now() + wait;
+      this.log('memory/grep-helper-backoff', { reason: reason.slice(0, 200), failures: this.#downs, retry_in_ms: wait });
+    } else if (!active) this.log('memory/grep-helper-down', { reason: reason.slice(0, 200) });
     if (!child) return;
     for (const stream of [child.stdin, child.stdout, child.stderr, child.stdio[3]]) {
       try { stream.destroy(); } catch { /* already closed */ }

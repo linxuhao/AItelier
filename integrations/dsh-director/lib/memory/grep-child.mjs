@@ -39,7 +39,10 @@ function run(request) {
     const { id, spec, timeoutMs } = request;
     let child;
     try {
-      child = spawn(spec.command, spec.argv, { cwd: spec.cwd, env: spec.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      // detached: git leads a process group of its own (its pid), so the store's process can
+      // still kill it if this helper dies under it (grep-helper.mjs #fail) - the helper's timer
+      // was the only thing bounding it. The command, cwd and environment are untouched.
+      child = spawn(spec.command, spec.argv, { cwd: spec.cwd, env: spec.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     } catch (error) {
       // A git that cannot even be spawned answers the way a shell would: 127, with the reason.
       control({ id, event: 'end', code: 127, killed: false, stderr: String(error?.message ?? error).slice(0, 500), bytes: 0 });

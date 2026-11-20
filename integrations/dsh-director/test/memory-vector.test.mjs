@@ -620,6 +620,11 @@ test('10: the two-sided check names arm (a): the temporary file still holds a dr
   assert.match(r.reason, /two-sided check failed/);
   assert.match(r.reason, /\(a\) 1 dropped rows left/, r.reason);
   assert.deepEqual(readFileSync(vfile(root)), before, 'the vector file is byte-unchanged');
+  // The id stays forgotten with its row in the file: pending, and the notice says why in the
+  // words of a check that failed, not of a file that cannot be written.
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids · .* · CHECK_FAILED · two-sided check failed: \(a\)/);
+  assert.equal(pendingRows(root)[0]?.text, pendingText(pendingRows(root)[0]?.since, ['t-gone-0'], root, 'CHECK_FAILED')
+    .replace('文件恢复可写后会自动去掉。', '过滤结果没通过双边检查，文件没动，下次过滤通过后会自动去掉。'));
   assert.equal(journalOf(root).at(-1).outcome, 'rolled_back');
   assert.deepEqual(readdirSync(root).filter(n => n.includes('.filter-')), []);
   assert.ok(gitIn(repo(root), 'log', '-p', '--all').stdout.toString().includes('PURGE-ME'), 'nothing was purged');
@@ -753,7 +758,10 @@ test('8 (r30): a forget the vector file refuses - visible on status and one noti
 
   store.acknowledgeNotices();
   await store.forget(['t-c-0'], { reason: 'owner asked', by: 'owner' });
-  assert.deepEqual(pendingRows(root), [], 'acknowledged: not added back in the same round');
+  rows = pendingRows(root);
+  assert.equal(rows.length, 1, 'acknowledged: not added back in the same round - the one row stays, hidden');
+  assert.ok(rows[0].acknowledged, 'marked acknowledged, so the next process still knows its ids');
+  assert.deepEqual(rows[0].ids, ['t-a-0', 't-b-0', 't-c-0'], 'rewritten in place as the ids change');
   assert.equal(store.statusLine().notices, undefined);
   assert.match(store.statusLine().vector_forget, /^rows left since \S+: 3 forgotten ids · /, 'status still says so');
 
@@ -819,6 +827,167 @@ test('8 (r30): a reconciliation that cannot filter joins the same pending set an
   assert.equal(store.statusLine().vector_forget, undefined);
   assert.deepEqual(pendingRows(root), []);
   await store.close();
+});
+
+// ---- review of r30 (s21 follow-ups): restore, the boot's order, acknowledgement across a
+// restart, a purge's step 1, the retry with vectors off, its backoff, and a rebuild.
+
+test('8 (r30): restoring a pending id takes it out of the round - no notice calls a live entry forgotten, and its row is kept', async () => {
+  const fake = await server();
+  const now = clock();
+  const root = newRoot();
+  const events = [];
+  const store = await open(root, fake.url, { now, logger: (event, fields) => events.push([event, fields]) });
+  await store.recordTurn('a', [{ role: 'owner', text: 'pelican harbour ONE' }]);
+  await store.recordTurn('b', [{ role: 'owner', text: 'pelican harbour TWO' }]);
+  await store.recordTurn('k', [{ role: 'owner', text: 'pelican harbour KEEP' }]);
+  await ready(store);
+  const unblock = blockFilter(root);
+  await store.forget(['t-a-0', 't-b-0'], { reason: 'owner asked', by: 'owner' });
+  assert.match(store.statusLine().vector_forget ?? '', /: 2 forgotten ids · /);
+  unblock();
+  assert.equal((await store.restore('t-a-0')).restored, 't-a-0');
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids · /, 'only the one still forgotten');
+  assert.deepEqual(pendingRows(root)[0].ids, ['t-b-0'], 'the notice is rewritten without the restored id');
+  assert.ok(!pendingRows(root)[0].text.includes('t-a-0'));
+  assert.equal((await store.restore('t-b-0')).restored, 't-b-0');
+  assert.equal(store.statusLine().vector_forget, undefined, 'none left: the round is over');
+  assert.deepEqual(pendingRows(root), []);
+  assert.deepEqual(events.filter(([e]) => e === 'memory/vector-forget-withdrawn').map(([, f]) => f.ids), [['t-a-0'], ['t-b-0']]);
+  assert.deepEqual(events.filter(([e]) => e === 'memory/vector-forget-cleared'), [], 'nothing was removed from the file');
+  // A later write's retry has nothing to do: the restored entries' rows are their own.
+  now.advance(10 * 60000);
+  await store.recordTurn('e', [{ role: 'owner', text: 'pelican harbour LAST' }]);
+  await ready(store);
+  assert.ok(['t-a-0', 't-b-0', 't-k-0', 't-e-0'].every(id => fileIds(root).includes(id)), JSON.stringify(fileIds(root)));
+  await store.close();
+  const embeds = fake.embeds();
+  const again = await open(root, fake.url, { now });
+  await ready(again);
+  assert.ok(again.vector.mem.has('t-a-0') && again.vector.mem.has('t-b-0'));
+  assert.equal(fake.embeds(), embeds, 'nothing had to be embedded again');
+  await again.close();
+});
+
+test('8 (r30): an earlier round\'s ids survive a boot whose purge recovery cannot filter either - one round, its first since', async () => {
+  const root = newRoot();
+  const fixture = new URL('./fixtures/memory-crash.mjs', import.meta.url).pathname;
+  const child = spawnSync(process.execPath, [fixture, root, USER, 'beforeForgetStrip', '0'], { encoding: 'utf8' });
+  assert.equal(child.signal, 'SIGKILL', child.stderr + child.stdout);
+  appendFileSync(vfile(root), row('t-old-0', hashVector('old', DIMS)) + '\n');
+  const since = '2026-11-18T00:00:00.000Z';
+  writeFileSync(join(root, USER + '.notices.jsonl'), JSON.stringify({ at: since, kind: 'vector-pending-forget', text: 'earlier',
+    since, code: 'EACCES', message: 'x', ids: ['t-old-0'] }) + '\n');
+  const unblock = blockFilter(root);
+  let store = await open(root); // vectors off: no load reconciliation would find t-old-0 again
+  assert.match(store.statusLine().vector_forget ?? '', new RegExp(`^rows left since ${since}: 2 forgotten ids · `), store.statusLine().vector_forget);
+  const rows = pendingRows(root);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].since, since);
+  assert.deepEqual(rows[0].ids, ['t-gone-0', 't-old-0']);
+  await store.close();
+  unblock();
+  store = await open(root);
+  assert.deepEqual(fileIds(root).filter(id => id === 't-gone-0' || id === 't-old-0'), [], JSON.stringify(fileIds(root)));
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  await store.close();
+});
+
+test('8 (r30): vectors off, an old file beside - an acknowledged round survives a restart: still on status, not shown again, and removed once writable', async () => {
+  const now = clock();
+  const root = newRoot();
+  let store = await open(root, undefined, { now, vectorTuning: TUNING });
+  await store.recordTurn('a', [{ role: 'owner', text: 'one' }]);
+  await store.recordTurn('k', [{ role: 'owner', text: 'keep' }]);
+  await store.flush();
+  writeFileSync(vfile(root), headerLine(MODEL, DIMS) + '\n' + ['t-a-0', 't-k-0'].map(id => row(id, hashVector(id, DIMS)) + '\n').join(''), { mode: 0o600 });
+  const unblock = blockFilter(root);
+  await store.forget(['t-a-0'], { reason: 'owner asked', by: 'owner' });
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids · /);
+  store.acknowledgeNotices();
+  assert.equal(store.statusLine().notices, undefined);
+  await store.close();
+  store = await open(root, undefined, { now, vectorTuning: TUNING });
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids · /, 'the next process still knows the ids');
+  assert.equal(store.statusLine().notices, undefined, 'and does not tell the owner a second time');
+  assert.deepEqual(await profileSection({ store }).then(t => t.includes('本地向量文件自')), false);
+  await store.close();
+  unblock();
+  store = await open(root, undefined, { now, vectorTuning: TUNING });
+  assert.deepEqual(fileIds(root), ['t-k-0'], 'the boot removed the row');
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  await store.close();
+});
+
+test('8 (r30): vectors off - the retry after a write removes the rows (no load, no restart), backed off 2x up to the cap', async () => {
+  const now = clock();
+  const root = newRoot();
+  const events = [];
+  const tuning = { backoffMinMs: 1000, backoffMaxMs: 3000 };
+  const store = await open(root, undefined, { now, vectorTuning: tuning, logger: (event, fields) => events.push([event, fields]) });
+  await store.recordTurn('a', [{ role: 'owner', text: 'one' }]);
+  await store.recordTurn('k', [{ role: 'owner', text: 'keep' }]);
+  await store.flush();
+  writeFileSync(vfile(root), headerLine(MODEL, DIMS) + '\n' + ['t-a-0', 't-k-0'].map(id => row(id, hashVector(id, DIMS)) + '\n').join(''), { mode: 0o600 });
+  const unblock = blockFilter(root);
+  await store.forget(['t-a-0'], { reason: 'owner asked', by: 'owner' });
+  const tries = () => events.filter(([e]) => e === 'memory/vector-filter-failed').length;
+  assert.equal(tries(), 1);
+  let n = 0;
+  const write = async () => { await store.recordTurn('w' + n++, [{ role: 'owner', text: 'later' }]); await store.flush(); };
+  // backoff 1000, then 2000, then 3000 (the cap, not 4000), then 3000 again
+  for (const wait of [1000, 2000, 3000, 3000]) {
+    const before = tries();
+    now.advance(wait - 1); await write();
+    assert.equal(tries(), before, `no retry ${wait - 1} ms in`);
+    now.advance(1); await write();
+    assert.equal(tries(), before + 1, `one retry at ${wait} ms`);
+  }
+  unblock();
+  now.advance(3000); await write();
+  assert.deepEqual(fileIds(root), ['t-k-0'], 'removed by a write\'s retry with vectors off');
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  assert.equal(events.filter(([e]) => e === 'memory/vector-forget-cleared').length, 1);
+  await store.close();
+});
+
+test('10 (r30): a purge whose step 1 cannot filter leaves its ids pending and visible; the next purge\'s step 1 takes them and ends the round', async () => {
+  const fake = await server();
+  const { root, store } = await purgeSeed(fake.url);
+  const unblock = blockFilter(root);
+  const r = await store.purge(['t-gone-0']);
+  assert.equal(r.purged, false);
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids · /);
+  assert.deepEqual(pendingRows(root)[0]?.ids, ['t-gone-0']);
+  unblock();
+  const r2 = await store.purge(['t-old-0']);
+  assert.equal(r2.purged, true, JSON.stringify(r2));
+  assert.ok(!fileIds(root).includes('t-gone-0'), 'the pending row went with this purge\'s step 1');
+  assert.equal(store.statusLine().vector_forget, undefined, 'and the round ended with it');
+  assert.deepEqual(pendingRows(root), []);
+  await store.close();
+});
+
+test('9 (r30): a rebuild that deletes the file ends the round - its rows went with the file', async () => {
+  const { fake, root } = await seededFile();
+  writeFileSync(join(root, USER + '.notices.jsonl'), JSON.stringify({ at: '2026-11-18T00:00:00.000Z', kind: 'vector-pending-forget',
+    text: 'earlier', since: '2026-11-18T00:00:00.000Z', code: 'EACCES', message: 'x', ids: ['t-zz-0'] }) + '\n');
+  appendFileSync(vfile(root), row('t-zz-0', hashVector('zz', DIMS)) + '\n');
+  const lines = readFileSync(vfile(root), 'utf8').split('\n');
+  lines[0] = JSON.stringify({ model: MODEL, dims: DIMS, quant: 'int8', input_chars: 500 });
+  writeFileSync(vfile(root), lines.join('\n'));
+  const unblock = blockFilter(root); // the boot's own filter fails; the rebuild's unlink does not
+  const store = await open(root, fake.url);
+  assert.match(store.statusLine().vector_forget ?? '', /: 1 forgotten ids/);
+  await store.vector.whenLoaded();
+  assert.ok(!fileIds(root).includes('t-zz-0'));
+  assert.equal(store.statusLine().vector_forget, undefined);
+  assert.deepEqual(pendingRows(root), []);
+  await store.close();
+  try { unblock(); } catch { /* the file was rebuilt: nothing to undo */ }
 });
 
 // ---------------------------------------------------------------- review of r27's build

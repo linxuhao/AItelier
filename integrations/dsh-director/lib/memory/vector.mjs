@@ -202,7 +202,7 @@ export async function filterVectorFile(file, drop, { write } = {}) {
     if (after.rows !== valid - removed) problems.push(`(b) ${after.rows} rows, expected ${valid} - ${removed}`);
     if (after.headerLine !== first) problems.push('(c) the header line changed');
     if (after.bad || !after.header) problems.push(`(d) ${after.bad} lines do not parse to ${header.dims} bytes`);
-    if (problems.length) throw new Error('two-sided check failed: ' + problems.join('; '));
+    if (problems.length) throw Object.assign(new Error('two-sided check failed: ' + problems.join('; ')), { code: 'CHECK_FAILED' });
     chmodSync(tmp, 0o600);
     await rename(tmp, file);
     await fsyncDirOf(file);

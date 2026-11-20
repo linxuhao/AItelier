@@ -123,7 +123,7 @@ const within = (promise, ms, what) => {
  *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000, receiptMs: 30000 });
+  lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -258,10 +258,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // outage, is not announced as news - and its record is done (handle), so it is not re-asked
   // every owedMs for good. A message still owed its DELIVERY has no such bound: it is relayed
   // whenever the host takes it (the host dates an approval phrase itself).
-  const lineExpired = record => {
+  const olderThan = (record, ms) => {
     const born = Math.min(...[record?.at, record?.owedAt].filter(text).map(Date.parse).filter(Number.isFinite));
-    return Number.isFinite(born) && Date.now() - born > limits.lineMaxAgeMs;
+    return Number.isFinite(born) && Date.now() - born > ms;
   };
+  const lineExpired = record => olderThan(record, limits.lineMaxAgeMs);
   const forget = key => { if (owed.delete(key)) owedSave(); };
   // Which minute a refusal line belongs to: the binding-code line has a minute of its own, so
   // no other line ever holds back the news that a code was retired.
@@ -355,13 +356,17 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // It is this code's fixed line, sent straight to the channel: nothing about it reaches the
   // host, so it is no steward message, wakes nothing, answers nothing (the unanswered-owner
   // check and the mirror never see it) and is not remembered. At most one per channel and
-  // receiptMs, the window spent by the attempt, so a burst gets one. Best effort: not
+  // receiptMs, the window spent by the attempt, so a burst gets one (the window is this
+  // process's memory: a restart inside it may let one more through). Only while it is news:
+  // a message relayed more than receiptMaxAgeMs after the owner wrote (held through an
+  // outage, drained from the owed store) gets none. Best effort: not
   // awaited (the channel's next message is not held up by a slow send), a failure is
   // logged and dropped - no retry, nothing owed.
   const receipts = new Map();
-  const receipt = (channel, senderRef, messageRef) => {
+  const receipt = (channel, senderRef, messageRef, record) => {
     const entry = registered.get(channel);
-    if (!entry) return;
+    if (!entry) { log('channel_receipt_skipped', { channel, reason: 'not_registered' }); return; }
+    if (olderThan(record, limits.receiptMaxAgeMs)) { log('channel_receipt_skipped', { channel, reason: 'late' }); return; }
     const last = receipts.get(channel);
     if (last !== undefined && Date.now() - last < limits.receiptMs) { log('channel_receipt_skipped', { channel, reason: 'window' }); return; }
     receipts.set(channel, Date.now());
@@ -592,7 +597,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       }
       // A new owner message the steward will now answer: the receipt (relay accepted means the
       // host found the sender bound to this channel now).
-      if (!result?.duplicate && !result?.approval) receipt(channel, senderRef, messageRef);
+      if (!result?.duplicate && !result?.approval) receipt(channel, senderRef, messageRef, { at, owedAt: owed.get(owed1)?.owedAt });
       // A decision is answered once per channel message (answer() keeps that within the
       // process). A redelivery of a message whose line went out is not answered again; one
       // whose line never went out is: this process got no answer the first time, the host

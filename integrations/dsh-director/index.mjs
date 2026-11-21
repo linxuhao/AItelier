@@ -152,8 +152,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const groupTurns = rootRole === 'steward' ? new GroupTurns({ stateDir: config.stateDir, limits: GROUP_LIMITS,
     pausedTools: Array.isArray(host.groups?.pausedTools) ? host.groups.pausedTools : [] }) : undefined;
   if (groupTurns) {
-    // Synchronous, keyed on the caller's session; call_tool reaches the same guard.
+    // Synchronous, keyed on the caller's session; call_tool reaches the same guard. The turn DSH
+    // has open keys the bookkeeping: a group turn's call count is that turn's, from 0.
     ctx.tools.guard(exec => exec.agent?.session?.id === config.sessionId ? groupTurns.guard(exec.name) : undefined);
+    ctx.on('session/event', (session, event) => {
+      if (session.id === config.sessionId && event.type === 'turn/start') groupTurns.turnOpened(event.data?.turn);
+    });
     // A compaction of the steward's session never carries a group turn (7.7.6a two): the request
     // is rebuilt without those messages and sent once more; that copy passes through untouched.
     const rebuilt = new WeakSet();
@@ -821,9 +825,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
         const said = (event.data?.message?.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join('').trim();
         if (said) last = said;
       } else if (event.type === 'turn/end') {
-        const turn = groupTurns.current, body = last;
+        const turn = groupTurns.open(), body = last;
         last = '';
-        if (turn?.audience.kind !== 'group' || !body || event.data?.reason?.kind !== 'completed' || !turn.questions.length) return;
+        if (turn?.audience.kind !== 'group' || !body || event.data?.reason?.kind !== 'completed' || !turn.questions.length
+          || (turn.turn !== undefined && turn.turn !== String(event.data?.turn))) return;
         const questions = [...turn.questions];
         void host.groups.reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body })
           .then(sent => sent?.text ? channels.sendGroup(sent.channel, sent.group_ref, sent.text) : ctx.logger.warn('group reply refused: ' + String(sent?.refused)))

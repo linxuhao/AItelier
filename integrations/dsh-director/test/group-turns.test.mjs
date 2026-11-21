@@ -5,7 +5,7 @@
  *  integrations/dsh-driver/runtime.group.test.mjs. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -298,6 +298,130 @@ test('grep_chat_history never finds what a group turn said', () => {
     ev('turn/start'), ev('user/message', group('FAMILY_WORD')), ev('tool/call', { arguments: 'FAMILY_WORD' }), ev('turn/end')]);
   const kept = JSON.stringify(withoutGroupTurns(events));
   assert.ok(kept.includes('OWNER_WORD') && !kept.includes('FAMILY_WORD'));
+});
+
+// --- r44n 7.7.3 item 3, 7.7.5, 7.7.16 (platform director 466 A): the counts are this turn's ---
+
+test('guard: the call count is this group turn\'s - a second group turn\'s first call works, an owner turn\'s seventh too', () => {
+  const g = turns();
+  // DSH opens turn 1 (turn/start), its first step is a group question; seven calls, the 7th refused.
+  g.turnOpened(1);
+  g.split([group('Q1')], 1, 1);
+  for (let call = 1; call <= 6; call += 1) assert.equal(g.guard('portfolio_project'), undefined, 'call ' + call);
+  assert.equal(g.guard('portfolio_project'), answerNow);
+  assert.equal(g.current.turn, '1');
+  // Turn 2, another group turn: its count starts at 0.
+  g.turnOpened(2);
+  g.split([group('Q2')], 1, 2);
+  assert.equal(g.guard('portfolio_projects'), undefined, 'the second group turn\'s first call');
+  assert.equal(g.current.calls, 1);
+  // Turn 3, an owner turn: no count at all - its 7th (and 8th) call goes through.
+  g.turnOpened(3);
+  g.split([message('OWNER')], 1, 3);
+  for (let call = 1; call <= 8; call += 1) assert.equal(g.guard('portfolio_project'), undefined, 'owner call ' + call);
+  assert.equal(g.current.calls, 0, 'an owner turn counts nothing');
+  // The audience before the count: an owner turn's refusal is the family one, never "answer now".
+  assert.equal(g.guard('family_memory_note'), familyRefusal);
+  // Turn 4 opened but its first step not set up yet (or rejected): another turn's bookkeeping is
+  // never borrowed - fail closed as a group of unknown audience, with no count to spend.
+  g.turnOpened(4);
+  assert.equal(g.audience().kind, 'group');
+  assert.equal(g.audience().unknown, true);
+  assert.equal(g.guard('memory_note'), groupTurnRefusal);
+  assert.equal(g.guard('portfolio_project'), answerNow);
+});
+
+test('audience: the merge cap is this group turn\'s - a second group turn merges five again', () => {
+  const g = turns();
+  const batch = tag => Array.from({ length: 7 }, (_, i) => group(tag + i));
+  g.turnOpened(10);
+  assert.equal(g.split(batch('A'), 1, 10).keep.length, 5);
+  assert.equal(g.split([group('A-later')], 2, 10).keep.length, 0, 'the cap holds within the turn');
+  g.turnOpened(11);
+  const second = g.split(batch('B'), 1, 11);
+  assert.equal(second.keep.length, 5, 'the second group turn starts from 0');
+  assert.equal(g.current.merged, 5);
+  // A later step of a turn whose first step this object never saw (a restart) reads its count
+  // from that turn's log, not from the previous turn's bookkeeping.
+  const events = script([ev('turn/start', { turn: 12 }), ev('user/message', group('LOGGED', 'r1', 'q-logged'))]);
+  const setup = createGroupSetup({ turns: g, groups: {}, createUserMessage: m => m, fold: () => 0 });
+  g.turnOpened(12);
+  return setup.step({ step: 2, turn: 12, agent: { inbox: fakeInbox(), session: { snapshotEvents: () => events } } },
+    { kind: 'enter', messages: [group('C1'), group('C2')] }).then(decision => {
+    assert.equal(decision.messages.length, 2);
+    assert.equal(g.current.turn, '12');
+    assert.equal(g.current.merged, 3);
+  });
+});
+
+test('setup: writing group-pause.json failing rejects the step like a failed fold - kept, delivered again in 30 s, then group_turn_setup_failed', async () => {
+  const w = setupWorld();
+  // A directory where the pause file's temporary goes: the write throws (EISDIR).
+  mkdirSync(w.g.pauseFile + '.tmp');
+  const q = group('PAUSE_WRITE_FAILS');
+  assert.deepEqual(await w.setup.step(w.payload(1), { kind: 'enter', messages: [q] }), { kind: 'reject' });
+  assert.deepEqual(JSON.parse(readFileSync(w.pendingFile, 'utf8')).map(m => m.content[0].text), ['PAUSE_WRITE_FAILS'],
+    'recorded before it is delivered again');
+  assert.equal(w.g.current, undefined);
+  await sleep(80);
+  assert.deepEqual(texts(w.calls.steered), ['PAUSE_WRITE_FAILS']);
+  assert.deepEqual(await w.setup.step(w.payload(2), { kind: 'enter', messages: [w.calls.steered[0]] }), { kind: 'reject' });
+  assert.match(w.calls.errors.join(), /^group_turn_setup_failed: .*EISDIR/);
+  await sleep(80);
+  assert.equal(w.calls.steered.length, 1, 'no third try');
+  // Once the pause can be written, the next group turn runs and the pause is in effect.
+  rmSync(w.g.pauseFile + '.tmp', { recursive: true });
+  assert.equal((await w.setup.step(w.payload(3), { kind: 'enter', messages: [group('NEXT')] })).kind, 'enter');
+  assert.ok(w.g.paused());
+  assert.equal(w.calls.cleared, 1);
+});
+
+// Every tool call in a request has its result and every result its call.
+function wellFormed(messages) {
+  const calls = messages.filter(m => m.role === 'assistant').flatMap(m => (m.content ?? []).filter(b => b.type === 'tool-call').map(b => b.id));
+  const results = messages.filter(m => m.role === 'tool').map(m => m.toolCallId);
+  return JSON.stringify([...calls].sort()) === JSON.stringify([...results].sort());
+}
+
+test('compaction filter: turns first, then audience - one readable and one unreadable message in a turn removes the whole turn, the request stays well formed', () => {
+  const make = input => ({ ...input, id: 'fold-' + ++ids, role: 'user' });
+  const owner = id => ({ ...message('OWNER_' + id), id });
+  const call = (id, callId) => ({ id, role: 'assistant', content: [{ type: 'tool-call', id: callId, name: 'portfolio_project' }] });
+  const result = (id, callId, text) => ({ id, role: 'tool', toolCallId: callId, content: [{ type: 'text', text }] });
+  const logged = list => list.map(m => m.role === 'user' ? ev('user/message', m) : ev(m.role === 'tool' ? 'tool/result' : 'assistant/message', { message: m }));
+  // (1) The log: turn 2 has an owner message that reads and one whose source does not
+  // (a group tag without its group_ref): the whole turn is a group's of unknown group.
+  const t1 = [owner('u1'), call('a1', 'c1'), result('r1', 'c1', 'OWNER_RESULT')];
+  const unreadable = { id: 'u2b', role: 'user', content: [{ type: 'text', text: 'HALF_TURN_TEXT' }], source: { kind: GROUP_SOURCE, channel: 'wechat' } };
+  const t2 = [owner('u2'), call('a2', 'c2'), result('r2', 'c2', 'TURN_TWO_RESULT'), unreadable, call('a3', 'c3'), result('r3', 'c3', 'TURN_TWO_LATER')];
+  const events = script([ev('turn/start', { turn: 1 }), ...logged(t1), ev('turn/end', { turn: 1 }),
+    ev('turn/start', { turn: 2 }), ...logged(t2), ev('turn/end', { turn: 2 })]);
+  assert.deepEqual(turnSpans(events).map(s => s.audience), [{ kind: 'owner' }, { kind: 'group', unknown: true }]);
+  const system = { id: 'sys', role: 'system', content: [] }, instruction = { role: 'user', content: [{ type: 'text', text: 'compaction instruction' }] };
+  const request = { purpose: 'compaction', sessionId: 's', messages: [system, ...t1, ...t2, instruction] };
+  const replay = filterCompactionRequest(request, events, make);
+  const body = JSON.stringify(replay.messages);
+  for (const gone of ['OWNER_u2', 'TURN_TWO_RESULT', 'HALF_TURN_TEXT', 'TURN_TWO_LATER', '"c2"', '"c3"']) assert.ok(!body.includes(gone), gone);
+  assert.deepEqual(replay.messages.map(m => m.id ?? m.content[0].text), ['sys', 'u1', 'a1', 'r1', replay.messages[4].id, 'compaction instruction']);
+  assert.equal(replay.messages[4].source.kind, FOLD_SOURCE);
+  assert.ok(wellFormed(replay.messages));
+  // (2) The request: a message that cannot be matched to the log (its id is not there) follows
+  // two of an owner turn's - it is that turn's, so the whole turn goes, not just the matched half.
+  const logOnly = script([ev('turn/start', { turn: 1 }), ...logged(t1), ev('turn/end', { turn: 1 }),
+    ev('turn/start', { turn: 2 }), ...logged([owner('u2'), call('a2', 'c2')]), ev('turn/end', { turn: 2 })]);
+  const stray = result('not-in-log', 'c2', 'UNMATCHED_RESULT');
+  const half = filterCompactionRequest({ purpose: 'compaction', messages: [system, ...t1, owner('u2'), call('a2', 'c2'), stray, instruction] }, logOnly, make);
+  const halfBody = JSON.stringify(half.messages);
+  assert.ok(!halfBody.includes('UNMATCHED_RESULT') && !halfBody.includes('"c2"') && !halfBody.includes('OWNER_u2'));
+  assert.ok(wellFormed(half.messages));
+  // Before this rule the matched half would go and the stray result stay: a result without its call.
+  assert.ok(!wellFormed([system, ...t1, stray, instruction]));
+  // The compaction instruction (last, no id) is no turn's and stays; readable owner turns pass as is.
+  // An unmatched message with no turn before it is the next turn's: here the owner turn after it goes too.
+  const leading = filterCompactionRequest({ purpose: 'compaction', messages: [system, stray, ...t1, instruction] }, logOnly, make);
+  assert.deepEqual(leading.messages.map(m => m.id ?? m.content[0].text), ['sys', leading.messages[1].id, 'compaction instruction']);
+  assert.ok(wellFormed(leading.messages));
+  assert.equal(filterCompactionRequest({ purpose: 'compaction', messages: [system, ...t1, instruction] }, logOnly, make), undefined);
 });
 
 // --- the channel service's group path (7.7.11) -------------------------------------------

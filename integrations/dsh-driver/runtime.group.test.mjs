@@ -10,7 +10,9 @@
  *  Snapshot: the rest of group turn 1 after its compaction, and group turn 2, are not given the
  *  snapshot; owner turn 2 is.
  *  Also: the guard refuses memory_note in a group turn and family_memory_show in an owner turn,
- *  and the host records the audience of every turn before its first step. */
+ *  and the host records the audience of every turn before its first step.
+ *  Hook order (7.7.3, platform director 466): the audience of a turn is fixed before the
+ *  snapshot is injected into it - observed, not inferred from registration order. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -83,6 +85,9 @@ const post = (path, body) => fetch(process.env.STW_TEST_URL + path, { method: 'P
 export function apply(ctx, config) {
   const host = localHost(config);
   host.capabilities = [...host.capabilities, 'groups'];
+  // The snapshot's source: called only when the snapshot is injected (ContextInjection.prepare).
+  const context = host.context.bind(host);
+  host.context = async (...args) => { await post('/test/context', {}); return context(...args); };
   const family = [];
   host.groups = {
     list: async () => ({ owner_refs: {}, groups: [{ channel: 'wechat', group_ref: 'r1', label: '家庭群', mention_prefix: '@管家' }] }),
@@ -144,14 +149,15 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
   const directory = await mkdtemp(join(homedir(), 'dsh-group-'));
   const root = join(directory, 'steward'), memRoot = join(directory, 'memory');
   const MARKER = 'FAMILY-' + randomUUID();
-  const events = [], requests = [], audiences = [], family = [], marks = {};
+  const events = [], requests = [], audiences = [], family = [], marks = {}, order = [];
   let output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
     if (req.url === '/test/event') events.push(body);
     else if (req.url === '/test/request') requests.push(body);
-    else if (req.url === '/test/audience') audiences.push(body);
+    else if (req.url === '/test/audience') { audiences.push(body); order.push('audience:' + body.audience); }
+    else if (req.url === '/test/context') order.push('snapshot');
     else if (req.url === '/test/family') family.push(body.text);
     else marks[req.url] = body;
     res.end('{}');
@@ -240,6 +246,12 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
     assert.deepEqual(audiences.map(a => a.audience), ['owner', 'group', 'group', 'owner']);
     assert.deepEqual(audiences[1].group, { channel: 'wechat', group_ref: 'r1' });
     assert.deepEqual(audiences[1].senderRefs, ['wxid_m1']);
+    // Hook order: every snapshot was built after its turn's audience was recorded, and that
+    // audience was the owner's (a snapshot before the record would follow the previous turn's).
+    assert.ok(order.includes('snapshot'), 'no snapshot was injected: ' + order.join(' '));
+    order.forEach((entry, at) => { if (entry === 'snapshot') assert.equal(order.slice(0, at).findLast(e => e !== 'snapshot'), 'audience:owner', order.join(' ')); });
+    assert.equal(order.filter(e => e.startsWith('audience:'))[0], order[0], 'the first turn\'s audience came before any snapshot');
+    assert.ok(order.lastIndexOf('snapshot') > order.lastIndexOf('audience:owner'), 'owner turn 2\'s snapshot was built after its audience: ' + order.join(' '));
     assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

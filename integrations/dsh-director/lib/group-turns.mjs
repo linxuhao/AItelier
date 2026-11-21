@@ -6,9 +6,9 @@
  *  - the AUDIENCE of a turn: a turn whose first step claims a message tagged by the host
  *    (`source.kind` GROUP_SOURCE) is that group's turn, any other turn the owner's; input of
  *    another audience is put back to open the next turn;
- *  - the GUARD: a group turn may call only GROUP_TOOLS (at most turnToolCalls calls), an owner
- *    turn never the family memory tools, and after a group turn, until the owner writes, an
- *    owner turn not the PAUSED_TOOLS (group-pause.json);
+ *  - the GUARD: a group turn may call only GROUP_TOOLS (at most turnToolCalls calls, counted
+ *    per turn id from 0), an owner turn never the family memory tools, and after a group turn,
+ *    until the owner writes, an owner turn not the PAUSED_TOOLS (group-pause.json);
  *  - the FOLD: each finished group turn is replaced on the surface by one fixed line at the
  *    first step of the next turn (DSH's own positional replace, the one compaction uses), so
  *    an owner turn's request carries no byte of a group turn;
@@ -35,6 +35,15 @@ export const pausedRefusal = 'a group turn ran since your owner last wrote; this
 export const answerNow = 'answer now';
 
 const isGroup = message => message?.source?.kind === GROUP_SOURCE;
+/** Whether a logged user message's audience can be read: a source object with a string kind,
+ *  and for a group tag its channel and group_ref. One that cannot makes its turn a group turn
+ *  of unknown group (7.7.3 item 1, 7.7.6a two: fail closed, for the whole turn). */
+const readable = message => {
+  const source = message?.source;
+  if (!source || typeof source !== 'object' || typeof source.kind !== 'string') return false;
+  return source.kind !== GROUP_SOURCE || (typeof source.channel === 'string' && typeof source.group_ref === 'string');
+};
+const turnKey = turn => turn === undefined || turn === null ? undefined : String(turn);
 /** DSH's own per-step context (working directory, sandbox policy): nobody's input, kept in
  *  whichever turn it arrives with and never a reason to put anything back. */
 const NEUTRAL = new Set(['runtime-context', FOLD_SOURCE]);
@@ -43,16 +52,18 @@ const keepOnFold = event => event.type === 'user/message'
   && (event.data?.source?.kind === FOLD_SOURCE || /compact/.test(String(event.data?.source?.kind ?? '')));
 const FOLDABLE = new Set(['user/message', 'assistant/message', 'tool/result']);
 
-/** The turns of a session log: [{start, end?, audience}], audience {kind: 'group', channel,
- *  group_ref, label} when any of the turn's user messages carries the group tag, else
- *  {kind: 'owner'}. A turn's tag is persisted with its messages, so this is the same after a
- *  restart. */
+/** The turns of a session log, segmented by turn/start .. turn/end first: [{start, end?, turn,
+ *  audience}], audience {kind: 'group', channel, group_ref, label} when any of the turn's user
+ *  messages carries the group tag, {kind: 'group', unknown: true} when any of them has an
+ *  audience that cannot be read, else {kind: 'owner'}. A turn's tag is persisted with its
+ *  messages, so this is the same after a restart. */
 export function turnSpans(events) {
   const spans = [];
   let open;
   for (const event of events) {
-    if (event.type === 'turn/start') { open = { start: event.seq, audience: { kind: 'owner' }, questions: 0, questionIds: [], calls: 0 }; spans.push(open); }
+    if (event.type === 'turn/start') { open = { start: event.seq, turn: turnKey(event.data?.turn), audience: { kind: 'owner' }, questions: 0, questionIds: [], calls: 0 }; spans.push(open); }
     else if (event.type === 'turn/end' && open) { open.end = event.seq; open = undefined; }
+    else if (event.type === 'user/message' && open && !readable(event.data)) open.audience = { kind: 'group', unknown: true };
     else if (event.type === 'user/message' && open && isGroup(event.data)) {
       const source = event.data.source;
       if (open.audience.kind !== 'group') open.audience = { kind: 'group', channel: source.channel, group_ref: source.group_ref, label: source.group_label };
@@ -106,28 +117,57 @@ export function foldGroupTurns(session, createUserMessage, { before } = {}) {
 }
 
 /** A compaction request without any message of a group turn (each removed run becomes one
- *  fold line), or undefined when it carries none. Messages are matched to the log by id. */
+ *  fold line), or undefined when it carries none (7.7.6a two). Turns are segmented first
+ *  (turn/start .. turn/end), then judged: messages are matched to the log by id; one that
+ *  cannot be matched is the turn's of the message before it (or, with none before it in a turn,
+ *  of the one after it) and makes that whole turn count as a group's. So what is removed is
+ *  always whole turns: never a tool call without its result, or a result without its call. A
+ *  message outside every turn stays: the system prompt, a checkpoint, a fold line, and the
+ *  compaction instruction compaction-basic appends last (no id). */
 export function filterCompactionRequest(options, events, createUserMessage) {
-  const inGroup = groupSeqs(events);
+  const spans = turnSpans(events);
+  const spanOf = seq => spans.findIndex(span => seq >= span.start && (span.end === undefined || seq <= span.end));
   const seqOf = new Map();
   for (const event of events) {
     const id = event.type === 'user/message' ? event.data?.id : event.data?.message?.id;
     if (id !== undefined) seqOf.set(id, event);
   }
+  const list = options.messages ?? [];
+  // The turn of each message: a span index, -1 for none, undefined while unmatched.
+  const segment = list.map((message, at) => {
+    if (message?.role === 'system') return -1;
+    if (at === list.length - 1 && message?.role === 'user' && message.id === undefined) return -1;
+    const event = message?.id === undefined ? undefined : seqOf.get(message.id);
+    if (event === undefined) return undefined;
+    return keepOnFold(event) ? -1 : spanOf(event.seq);
+  });
+  const unreadable = new Set();
+  const matched = segment.map(value => value);
+  segment.forEach((value, at) => {
+    if (value !== undefined) return;
+    let before = at - 1, after = at + 1;
+    while (before >= 0 && matched[before] === undefined) before -= 1;
+    while (after < list.length && matched[after] === undefined) after += 1;
+    const turn = before >= 0 && matched[before] >= 0 ? matched[before] : after < list.length && matched[after] >= 0 ? matched[after] : -1;
+    segment[at] = turn;
+    if (turn >= 0) unreadable.add(turn);
+  });
   const messages = [];
   let changed = false, folding = false;
-  for (const message of options.messages ?? []) {
-    const event = seqOf.get(message?.id);
-    const drop = message?.role !== 'system' && event !== undefined && inGroup.has(event.seq) && !keepOnFold(event);
-    if (!drop) { messages.push(message); folding = false; continue; }
+  list.forEach((message, at) => {
+    const turn = segment[at];
+    const drop = turn >= 0 && (spans[turn].audience.kind === 'group' || unreadable.has(turn));
+    if (!drop) { messages.push(message); folding = false; return; }
     changed = true;
     if (!folding) messages.push(createUserMessage({ content: [{ type: 'text', text: FOLD_LINE }], source: { kind: FOLD_SOURCE } }));
     folding = true;
-  }
+  });
   return changed ? { ...options, messages } : undefined;
 }
 
-/** Turn bookkeeping for the root session: audience, merge bounds, the guard and the pause. */
+/** Turn bookkeeping for the root session: audience, merge bounds, the guard and the pause.
+ *  The merge count and the tool call count belong to one turn id (`current.turn`): each turn
+ *  starts them at 0, and only a group turn counts (7.7.3 item 3, 7.7.5). */
 export class GroupTurns {
   constructor({ stateDir, limits, log = () => {}, pausedTools = [] }) {
     Object.assign(this, { limits, log });
@@ -140,6 +180,16 @@ export class GroupTurns {
     try { if (this.waitingFile && existsSync(this.waitingFile)) this.waiting = new Set(JSON.parse(readFileSync(this.waitingFile, 'utf8'))); }
     catch { this.waiting = new Set(); }
     this.current = undefined;
+    // The turn DSH has open (its turn/start), when the host reports it (turnOpened).
+    this.liveTurn = undefined;
+  }
+
+  /** DSH opened turn `turn` (the root session's turn/start). */
+  turnOpened(turn) { this.liveTurn = turnKey(turn); }
+  /** The bookkeeping of the turn that is open now, or undefined when it is another turn's. */
+  open() {
+    const turn = this.current;
+    return turn && (this.liveTurn === undefined || turn.turn === undefined || turn.turn === this.liveTurn) ? turn : undefined;
   }
 
   /** Owner input `id` was put back by a group turn (or redelivered after a failed setup). */
@@ -158,26 +208,27 @@ export class GroupTurns {
 
   /** A restart in the middle of a turn: its audience, questions and calls so far, from the
    *  session log (the group tag is persisted with the turn's messages), never from memory. */
-  resume(events) {
+  resume(events, turn) {
     const open = turnSpans(events).findLast(span => span.end === undefined);
     if (!open) return false;
-    this.current = { audience: open.audience, calls: open.calls, merged: open.questionIds.length, ownerWaiting: false,
-      questions: [...open.questionIds] };
+    this.current = { turn: turnKey(turn) ?? open.turn, audience: open.audience, calls: open.calls, merged: open.questionIds.length,
+      ownerWaiting: false, questions: open.audience.unknown ? [] : [...open.questionIds] };
     return true;
   }
 
-  /** Whose turn it is now; unknown reads as a group (fail closed: the narrower rules). */
-  audience() { return this.current?.audience ?? { kind: 'group', unknown: true }; }
+  /** Whose turn it is now; unknown (or another turn's) reads as a group (fail closed: the
+   *  narrower rules). */
+  audience() { return this.open()?.audience ?? { kind: 'group', unknown: true }; }
 
   /** Split one step's claimed messages: what this turn keeps and what goes back (in order). */
-  split(messages, step) {
-    if (step === 1 || !this.current) {
+  split(messages, step, turnId) {
+    if (step === 1 || !this.current || this.current.turn !== turnKey(turnId)) {
       // Owner input a group turn put back opens this turn, whatever else came with it.
       const waited = messages.some(m => !isGroup(m) && !isNeutral(m) && this.waiting.has(m.id));
       const first = waited ? undefined : messages.find(isGroup);
       const audience = first ? { kind: 'group', channel: first.source.channel, group_ref: first.source.group_ref,
         label: first.source.group_label } : { kind: 'owner' };
-      this.current = { audience, calls: 0, merged: 0, ownerWaiting: false, questions: [] };
+      this.current = { turn: turnKey(turnId), audience, calls: 0, merged: 0, ownerWaiting: false, questions: [] };
     }
     const turn = this.current, keep = [], back = [];
     let served = false;
@@ -201,14 +252,15 @@ export class GroupTurns {
     return { keep, back };
   }
 
-  /** The guard's verdict for one root tool call (a refusal string, or undefined). */
+  /** The guard's verdict for one root tool call (a refusal string, or undefined). The audience
+   *  first, then the count: only a group turn counts its calls, from 0 in each turn. */
   guard(name) {
-    const audience = this.audience();
-    if (audience.kind === 'group') {
+    const turn = this.open();
+    if ((turn?.audience.kind ?? 'group') === 'group') {
       if (!GROUP_TOOLS.has(name)) return groupTurnRefusal;
-      if (this.current) this.current.calls += 1;
-      if ((this.current?.calls ?? Infinity) > this.limits.turnToolCalls) return answerNow;
-      return undefined;
+      if (!turn) return answerNow;
+      turn.calls += 1;
+      return turn.calls > this.limits.turnToolCalls ? answerNow : undefined;
     }
     if (FAMILY_TOOLS.has(name)) return familyRefusal;
     if (this.paused() && this.pausedTools.has(name)) return pausedRefusal;
@@ -251,7 +303,8 @@ const short = error => String(error?.message ?? error).slice(0, 300);
 
 /** The first step of every steward turn (7.7.3 items 2, 5, 6): decide its audience, put input of
  *  another audience back, fold the finished group turns, record the audience on the host and
- *  set or clear the pause - all before the step runs. Any failure rejects the step; its input is
+ *  set or clear the pause - all before the step runs. Any failure (the fold, the audience
+ *  record, writing group-pause.json) rejects the step; its input is
  *  kept in `pendingFile` and delivered again after `retryMs`; a second failure in a row is
  *  reported as the host error group_turn_setup_failed (cleared, and what was kept delivered,
  *  by the next first step that succeeds). */
@@ -271,8 +324,8 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
     return messages.length;
   };
   async function step(payload, decision) {
-    if (payload.step !== 1 && !turns.current) turns.resume(payload.agent.session.snapshotEvents());
-    const { keep, back } = turns.split(decision.messages, payload.step);
+    if (payload.step !== 1 && turns.current?.turn !== turnKey(payload.turn)) turns.resume(payload.agent.session.snapshotEvents(), payload.turn);
+    const { keep, back } = turns.split(decision.messages, payload.step, payload.turn);
     putBack(payload.agent.inbox, back, turns);
     if (payload.step !== 1) return { ...decision, messages: keep };
     const audience = turns.audience();

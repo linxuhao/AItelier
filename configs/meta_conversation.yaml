@@ -17,7 +17,7 @@
 # (see core/meta_run.py). On checkpoint approval the run advances into the
 # `finalize` tool step, which emits the project artifacts (project_brief.md,
 # spec.md, step1_goals.json); the node_reached end-condition then completes the
-# run, after which the butler triggers the DPE pipeline (core/project_submit.py).
+# run. Triggering DPE is approve_and_submit_meta's job (see above), not the run's.
 
 name: "meta_conversation"
 description: "Project requirements gathering → brief (approving it triggers DPE)"
@@ -67,7 +67,7 @@ steps:
         match: { from_file: "intent_result.json", field: "intent", value: "new_project" }
       - to: "gather"
         match: { from_file: "intent_result.json", field: "intent", value: "existing_code" }
-      - to: null          # not a software project — butler just chats
+      - to: null          # not a software project — the run ends, nothing to gather
         match: { from_file: "intent_result.json", field: "intent", value: "rejected" }
 
   - id: "gather"

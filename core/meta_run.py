@@ -1,20 +1,21 @@
-"""meta_run — drive the meta_conversation skillflow run for the chat butler.
+"""meta_run — helpers over a meta_conversation skillflow run.
 
-Thin AItelier-layer helpers over skillflow primitives so the butler relays a
-deterministic requirements-gathering conversation:
+Thin AItelier-layer helpers over skillflow primitives for the deterministic
+requirements-gathering conversation (configs/meta_conversation.yaml). The chat
+butler that used to relay it (core/meta_agent.py) is retired; the run is now
+stepped by core/run_driver.py and its brief approved over HTTP:
 
-  - The `gather` step pauses (checkpoint) on every completion. The butler reads
-    ``gather_state.json`` (via :func:`read_gather_state`) to decide whether to
-    relay a clarifying *question* or present the finished *brief*.
+  - The `gather` step pauses (checkpoint) on every completion;
+    ``gather_state.json`` (via :func:`read_gather_state`) says whether it holds a
+    clarifying *question* or the finished *brief*.
   - A user *answer* resumes the gather step with the answer carried as feedback
     (:func:`submit_user_answer`) — implemented with skillflow's existing
     reject-with-redirect resume primitive, so we never expose "reject" semantics
-    for a normal answer. The full conversation also lives in the workspace
-    transcript ``meta/conversation.md`` (maintained by the butler), which the
-    gather step reads as context.
-  - Approving the brief (:func:`approve_meta`) resumes the checkpoint; the
-    finalize tool emits the reviewed artifacts and completes the run, after which
-    the butler triggers DPE (``core/project_submit.seed_and_trigger``).
+    for a normal answer.
+  - Approving the brief (:func:`approve_and_submit_meta`, called by the
+    api/meta_routers.py checkpoint route) resumes the checkpoint; the finalize
+    tool emits the reviewed artifacts and completes the run, then the brief is
+    submitted and DPE triggered (``core/project_submit.seed_and_trigger``).
 
 No skillflow changes are required.
 """
@@ -41,9 +42,8 @@ def submit_user_answer(sf, run_id: str, answer: str) -> None:
     """Resume the paused gather step with the user's answer.
 
     Uses reject-with-redirect so the gather step re-runs (status pending,
-    current_node=gather) with the answer injected as feedback. The transcript
-    file the butler maintains carries the full conversation; this just unblocks
-    the run.
+    current_node=gather) with the answer injected as feedback; this just
+    unblocks the run.
     """
     sf.reject_checkpoint(run_id, GATHER_STEP, feedback=answer or "(continue)",
                          redirect_to=GATHER_STEP)

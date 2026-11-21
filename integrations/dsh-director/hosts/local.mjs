@@ -140,6 +140,8 @@ export function localHost(options = {}) {
     return await stat(dir).then(s => s.isDirectory(), () => false) ? dir : undefined;
   };
   const unknownProject = id => ({ refused: 'unknown_project', reason: `no project ${id} under ${projectsDir}` });
+  // The whole progress log is read for its last line: one short line per phase report, so
+  // a listing stays cheap; a host whose logs grow large keeps its own index.
   const lastPhase = async dir => {
     let text = '';
     try { text = await readFile(join(dir, 'progress.jsonl'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -149,11 +151,17 @@ export function localHost(options = {}) {
   const questionsOf = async dir => Object.entries(await readJson(join(dir, 'questions.json'), {})).map(([id, q]) => ({ id, ...q }));
   const portfolio = {
     async projects() {
+      // One project whose files do not parse (edited by hand) is reported as such; it does
+      // not hide the others.
       return { projects: await Promise.all((await projectIds()).map(async id => {
         const dir = join(projectsDir, id);
-        const meta = await readJson(join(dir, 'project.json'), {});
-        return { project_id: id, title: meta.title ?? null, director: await lastPhase(dir),
-          open_questions: (await questionsOf(dir)).filter(q => q.status === 'open').length };
+        try {
+          const meta = await readJson(join(dir, 'project.json'), {});
+          return { project_id: id, title: meta.title ?? null, director: await lastPhase(dir),
+            open_questions: (await questionsOf(dir)).filter(q => q.status === 'open').length };
+        } catch (error) {
+          return { project_id: id, error: 'unreadable', reason: String(error?.message ?? error).slice(0, 300) };
+        }
       })) };
     },
     async project(id) {

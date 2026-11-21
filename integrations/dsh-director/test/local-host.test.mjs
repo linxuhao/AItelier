@@ -308,6 +308,14 @@ test('local host, step 15: projectsDir is the steward\'s portfolio - every subdi
   assert.deepEqual((await readdir(projectsDir)).sort(), ['.hidden', 'alpha', 'beta', 'not-a-dir']);
 });
 
+test('local host, step 15: one project whose files do not parse is reported as such and hides no other', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  await mkdir(join(projectsDir, 'broken'));
+  await writeFile(join(projectsDir, 'broken', 'project.json'), '{ edited by hand');
+  const listed = (await localHost({ root, projectsDir }).portfolio.projects()).projects;
+  assert.deepEqual(listed.map(p => [p.project_id, p.error ?? null]), [['alpha', null], ['beta', null], ['broken', 'unreadable']]);
+});
+
 test('local host, step 15: proposals - create_project only; the owner approves with /approve, the project appears whole, the steward is woken', async () => {
   const { root, projectsDir } = await projectsFixture();
   const host = localHost({ root, ...required, projectsDir, pollMs: 10 });

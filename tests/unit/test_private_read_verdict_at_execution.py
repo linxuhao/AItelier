@@ -79,6 +79,7 @@ _ARGS = {
     # Step 24.1a: the steward's connections and one connection's tools.
     "list_steward_connections": {},
     "list_steward_connection_tools": {"conn_id": C.STEWARD_CONNECTION},
+    "list_pushed_owner_questions": {},
 }
 
 
@@ -119,7 +120,8 @@ def _steward_reader(trusted, tmp_path):
                         project_read_trusted=True)
 
 
-# Step 19: the channel reads answer the owner's session or the steward too.
+# Step 19: the channel reads answer the owner's session or the steward too; step 22's
+# pushed-questions read the same.
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
                        "list_owner_channel_login_requests", "message_sources", "due_channel_alerts",
                        # Step 23: the steward's host reads its groups and a group's recent exchanges.
@@ -127,7 +129,8 @@ _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules",
                        # Step 25 C4: the family lists (the steward, the owner's session, a group turn).
                        "list_list_items",
                        # Step 24.1a: the connection reads answer the owner's session or the steward.
-                       "list_steward_connections", "list_steward_connection_tools"}
+                       "list_steward_connections", "list_steward_connection_tools",
+                       "list_pushed_owner_questions"}
 
 
 def _family_reader(steward):

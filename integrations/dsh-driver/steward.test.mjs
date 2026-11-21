@@ -273,7 +273,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience
   // is groups.audience); 24.1b: the requester and the confirmations.
   assert.deepEqual(Object.keys(steward.catalog).sort(), ['confirm', 'connections', 'humanInput', 'requesterOf', 'resyncDue', 'writes']);
-  assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['create', 'deliver', 'get']);
+  assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['cancel', 'create', 'deliver', 'get']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),

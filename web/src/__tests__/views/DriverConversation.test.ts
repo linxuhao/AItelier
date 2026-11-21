@@ -96,6 +96,7 @@ describe('one conversation, both directions', () => {
       await fireEvent.click(view.getByRole('button', {name: 'Send'}));
       await waitFor(() => expect(
         (view.getByRole('textbox', {name: 'Write a message'}) as HTMLTextAreaElement).value).toBe(''));
+      await waitFor(() => expect(view.getByRole('button', {name: 'Send'})).toBeTruthy());  // the send finished
       return view.container.querySelector('[data-confirmation-line]')?.textContent ?? null;
     };
     expect(await send('确认 K7Q2A', {result: {message_id: 'm', confirmation: {code: 'K7Q2A', action: 'confirm', outcome: 'confirmed'}}}))

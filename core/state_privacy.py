@@ -125,6 +125,12 @@ PRIVATE_STATE_TABLES = frozenset({
     # Step 25: the channel-down alert ledger, one row per outage and kind (which channel
     # carried it, how it went, the channel's error). No projection.
     "state_channel_alerts",
+    # Step 23: the family group (core.state_groups): the bound group per channel, its
+    # @-messages and the steward's replies (withheld originals included), its members'
+    # dashboard names, the family memory and the owner's note to the family, whose turn the
+    # steward is in, and the groups awaiting the owner's pick. No projection: never public.
+    "state_owner_groups", "state_group_messages", "state_group_members", "state_family_memory",
+    "state_family_note", "state_steward_turn_audience", "state_pending_groups",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

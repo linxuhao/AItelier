@@ -4,6 +4,7 @@ from fastapi import Depends, Request
 from api.authz import (is_via_cloudflare, may_read_private, request_actor, request_identity,
                        require_reader, require_writer)
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
+from core.state_commands import FAMILY_MEMORY_ACTIONS
 from core.state_service import StateService
 
 from api.state_http import create_state_router
@@ -32,17 +33,33 @@ def authenticated_is_admin(request) -> bool:
                 and (identity.kind == "owner" or not is_via_cloudflare(request)))
 
 
+READ_AS_HEADER = "X-AItelier-Read-As"
+
+
 def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_workspace_manager)):
     from api.mcp_router import _start_driver
     # WHO this request is is recorded ONCE, from the raw credential and not from
     # any route declaration, and travels into the service so `execute` can consult
     # it. A route author who forges a guard cannot reopen a private project: the
     # project decision is taken before routing and independent of the guard.
+    # Step 23 (design-steward 7.7.6): `X-AItelier-Read-As` (any value) makes THIS request
+    # an anonymous reader, whoever its credential is - the steward's tools send it in a
+    # group turn. It is judged per request (this dependency builds a new service every
+    # time) and can only narrow: without a credential, in test mode or with the gate off
+    # the request is still anonymous, and `execute` refuses every write
+    # (public_view_read_only). The one exception is the family memory pair, which a
+    # trusted credential reaches with the header only (core.state_groups judges the
+    # recorded turn audience); that service serves nothing else (core.state_commands.execute).
+    public_view = request.headers.get(READ_AS_HEADER) is not None
+    trusted = may_read_private(request)
+    if public_view:
+        trusted = trusted and request.path_params.get("action") in FAMILY_MEMORY_ACTIONS
     service = StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
                            runtime_factory=lambda: (get_skillflow(), get_config_registry()),
-                           project_read_trusted=may_read_private(request),
+                           project_read_trusted=trusted,
                            driver_id=authenticated_driver_id(request),
-                           is_admin=authenticated_is_admin(request))
+                           is_admin=authenticated_is_admin(request) and not public_view,
+                           public_view=public_view)
     service.steward.driver_runner = _driver_runner(request)
     return service
 

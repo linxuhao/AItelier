@@ -462,7 +462,7 @@ def live_codes(conn, moment):
     {code_hash: channel}. Read without the pepper: only the digests are stored."""
     return {row["code_hash"]: row["channel"] for row in conn.execute(
         "SELECT code_hash,channel,expires_at FROM state_owner_channel_codes "
-        "WHERE used_at IS NULL AND retired_at IS NULL")
+        "WHERE kind='account' AND used_at IS NULL AND retired_at IS NULL")
         if datetime.fromisoformat(row["expires_at"]) > moment}
 
 
@@ -611,6 +611,14 @@ class StateChannels:
                 if added["down_since"]:
                     conn.execute("UPDATE state_owner_channel_status SET down_since=? WHERE connected=0 AND live=1",
                                  (_now().isoformat(),))
+                # Step 23 (design-steward 7.7.9): a code is an ACCOUNT code (6 digits, 1:1 chat)
+                # or a GROUP code (core.state_groups); a group code may carry the group's name.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(state_owner_channel_codes)")}
+                if "kind" not in columns:
+                    conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN kind TEXT NOT NULL DEFAULT 'account' "
+                                 "CHECK(kind IN ('account','group'))")
+                if "label" not in columns:
+                    conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN label TEXT")
                 conn.commit()
             if inbox is not None:  # the inbox's owner writers scan their text first
                 inbox.owner_text_guard = self.owner_text_guard
@@ -1072,12 +1080,12 @@ class StateChannels:
                 return replay
             moment = _now()
             # At most one: issue_code deletes the channel's earlier unused codes.
-            live = conn.execute("SELECT * FROM state_owner_channel_codes WHERE channel=? AND used_at IS NULL",
-                                (channel,)).fetchone()
+            live = conn.execute("SELECT * FROM state_owner_channel_codes WHERE channel=? AND kind='account' "
+                                "AND used_at IS NULL", (channel,)).fetchone()
             if live is not None and datetime.fromisoformat(live["expires_at"]) <= moment:
                 live = None
             well_formed = len(code) == 6 and code.isascii() and code.isdigit()
-            row = conn.execute("SELECT * FROM state_owner_channel_codes WHERE code_hash=?",
+            row = conn.execute("SELECT * FROM state_owner_channel_codes WHERE code_hash=? AND kind='account'",
                                (digest,)).fetchone() if well_formed else None
             if live is not None and live["retired_at"] is not None:
                 refusal = "code_retired"
@@ -1436,7 +1444,8 @@ class StateChannels:
         pepper = self._code_key()
         moment = _now()
         with self.store.transaction(write=True) as conn:
-            conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND used_at IS NULL", (channel,))
+            conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND kind='account' AND used_at IS NULL",
+                         (channel,))
             while True:
                 code = f"{secrets.randbelow(10 ** 6):06d}"
                 digest = _code_hash(pepper, channel, code)

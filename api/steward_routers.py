@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import authz
 from api.dsh_driver_routers import manager
 from api.state_graph_routers import get_service
-from core.state_graph import StateGraphError, StateNotFound
+from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, ScheduleConflict, ScheduleInvalid,
                                 impact_is_empty, preview_schedule, stop_impact)
 
@@ -290,3 +290,99 @@ def message_sources(ids: str = "", service=Depends(get_service)):
         return service.channels.message_sources(message_ids)
     except StateGraphError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# --- the family group (step 23, design-steward 7.7) -----------------------------------------
+# The owner's session only, like the channel routes: issue a group code, unbind (deleting the
+# group's records), clear the records, name a member the bridge reported, write the family
+# note, delete family memory, and - only on the pick-a-group path - pick a pending group.
+
+
+class GroupCode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str | None = Field(default=None, max_length=40)
+
+
+class MemberName(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=20)
+
+
+class FamilyNote(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(max_length=1000)
+
+
+class PendingPick(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    channel: Channel
+    room_ref: str = Field(min_length=1, max_length=200)
+
+
+def _group_call(call, *args):
+    try:
+        return call(*args)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(503 if str(exc).startswith("channel_secret_missing") else 422, str(exc)) from exc
+
+
+@router.get("/groups", dependencies=[Depends(authz.require_reader)])
+def list_groups(channel: Channel | None = None, service=Depends(get_service)):
+    """The bound groups (names, members, counts); with `channel`, that group's records
+    (withheld replies with their original and reason), family note and family memory."""
+    _owner(service)
+    return _group_call(service.groups.owner_view, channel)
+
+
+@router.post("/groups/{channel}/code", dependencies=[Depends(authz.require_writer)])
+def issue_group_code(channel: Channel, body: GroupCode | None = None, service=Depends(get_service)):
+    """A group code G-XXXX-XXXX, valid 10 minutes, once: the owner posts '@<the bot> code' in
+    the group from the bound account."""
+    _owner(service)
+    return _group_call(service.groups.issue_group_code, channel, body.label if body else None)
+
+
+@router.delete("/groups/{channel}", dependencies=[Depends(authz.require_writer)])
+def unbind_group(channel: Channel, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.unbind_owner_group, channel)
+
+
+@router.post("/groups/{channel}/clear", dependencies=[Depends(authz.require_writer)])
+def clear_group(channel: Channel, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.clear_group_messages, channel)
+
+
+@router.put("/groups/{channel}/members/{sender_ref}", dependencies=[Depends(authz.require_writer)])
+def name_member(channel: Channel, sender_ref: str, body: MemberName, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.name_group_member, channel, sender_ref, body.label)
+
+
+@router.put("/groups/{channel}/family-note", dependencies=[Depends(authz.require_writer)])
+def set_family_note(channel: Channel, body: FamilyNote, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.set_family_note, channel, body.text)
+
+
+@router.delete("/groups/{channel}/family-memory", dependencies=[Depends(authz.require_writer)])
+def delete_family_memory(channel: Channel, entry_id: str | None = None, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.delete_family_memory, channel, entry_id)
+
+
+@router.get("/groups-pending", dependencies=[Depends(authz.require_reader)])
+def pending_groups(service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.list_pending_groups)
+
+
+@router.post("/groups-pending/pick", dependencies=[Depends(authz.require_writer)])
+def pick_pending_group(body: PendingPick, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(service.groups.pick_pending_group, body.channel, body.room_ref)

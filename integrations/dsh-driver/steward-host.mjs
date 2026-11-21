@@ -192,10 +192,15 @@ async function ownerMessageById({ request, project, id, signal }) {
 /** A State refusal as a tool answer: the error text, bounded. */
 const refusedBy = error => ({ refused: 'state_refused', reason: String(error?.message ?? error).slice(0, 500) });
 
-/** The steward's open proposals, for its snapshot. */
+/** The steward's open proposals, for its snapshot. A connection_change keeps only op,
+ *  conn_id and widens: its stored payload carries the card's snapshot (each tool's whole
+ *  definition, written by the upstream server) and tool names, the server's own text,
+ *  which reaches the model only through connection_tools / connection_refresh, where
+ *  the turn is marked external (7.8.4). */
 export async function openProposals(request, signal) {
   const listed = await request('/api/state/query/list_steward_proposals', { status: 'open', limit: 50 }, signal);
-  return (listed.result ?? listed).proposals ?? [];
+  return ((listed.result ?? listed).proposals ?? []).map(p => p.kind !== 'connection_change' ? p
+    : { ...p, payload: { op: p.payload?.op, conn_id: p.payload?.conn_id, widens: p.payload?.widens } });
 }
 
 // ---- letters: replying to a director and marking a letter read (owner 2026-11-17) ----

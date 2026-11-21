@@ -173,6 +173,8 @@ async def test_a_stamp_lock_refusal_is_raised_and_writes_nothing(hosted, monkeyp
 async def test_a_users_own_start_that_cannot_spawn_still_answers_enabled_0(hosted, monkeypatch):
     _backend, host = hosted
     host._provision("alpha", "aitelier", "driver", "fixture")
+    # Enabled before the start, so enabled=0 afterwards is the user branch's own write.
+    host.update("alpha", enabled=1, phase="running")
     monkeypatch.setattr(host, "_environment", lambda row: (_ for _ in ()).throw(ValueError("broken")))
     with pytest.raises(ValueError):
         await host.start("alpha", actor="owner:o@example.com")

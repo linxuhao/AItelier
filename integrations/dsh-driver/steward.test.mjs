@@ -1617,3 +1617,27 @@ test('owner channel login requests (step 19): each pending request asks the chan
   assert.deepEqual(out, { pending: 3, done: 0 });
   assert.ok(logged.some(line => /q1: boom/.test(line)) && logged.some(line => /q1: result not written/.test(line)));
 });
+
+test('the snapshot names an open connection_change by op, conn_id and widens only: no tool definition or name from the server (review R1)', async () => {
+  const MARK = 'SERVER-WRITTEN-DESCRIPTION-MARK';
+  const proposals = [
+    { proposal_id: 'p-1', version: 1, kind: 'connection_change', status: 'open', reason: 'the owner asked', created_at: 't',
+      payload: { op: 'reenable', conn_id: 'mailpub', conn_uid: 'u', expect_config_version: 3, widens: true,
+        widened: ['reenable', `tools.${MARK}-name.allowed`], tools: [{ raw_name: `${MARK}-name`, schema_sha256: 'a'.repeat(64), allowed: true }],
+        snapshot: { connection: { label: 'Mail' }, tools: [{ raw_name: `${MARK}-name`, definition: { description: MARK } }],
+          source: { kind: 'owner_message', owner_message: { text: 'enable it' } } } } },
+    { proposal_id: 'p-2', version: 1, kind: 'start_driver', status: 'open', reason: 'r', created_at: 't', payload: { project_id: 'alpha' } }];
+  const request = async path => {
+    if (path === '/api/state/query/list_steward_proposals') return { result: { proposals } };
+    if (path === '/api/state/query/list_steward_schedules') return { result: { schedules: [] } };
+    if (path === '/api/state/query/list_user_conversation') return { messages: [], next_cursor: null };
+    throw new Error('unexpected ' + path);
+  };
+  const runtime = { refresh: async () => {}, render: () => 'STATE' };
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_STATE_DIR: mkdtempSync(join(tmpdir(), 'r1-')) }), { request, runtime });
+  const text = await host.context();
+  assert.ok(!text.includes(MARK), text);
+  const listed = JSON.parse(text.split('Your open proposals:\n')[1].split('\n')[0]);
+  assert.deepEqual(listed[0].payload, { op: 'reenable', conn_id: 'mailpub', widens: true });
+  assert.deepEqual(listed[1].payload, { project_id: 'alpha' }, 'other kinds are unchanged');
+});

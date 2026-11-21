@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from datetime import timedelta
 
 import pytest
@@ -24,7 +28,7 @@ from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
 from core.state_steward import OLD_KIND_CHECK, SCHEMA, ProposalConflict
-from tests.unit.test_steward_connections import (HOME, OWNER, TOOLS, add, allow, discover, listed, shown,  # noqa: F401
+from tests.unit.test_steward_connections import (HOME, OWNER, TOOLS, add, allow, discover, listed, resolver, shown,  # noqa: F401
                                                  world)
 from tests.unit.test_steward_oauth_confirm import ask, bind_slack, dashboard, mail_ready, relay, status_of
 
@@ -141,7 +145,8 @@ def test_a_label_or_id_that_imitates_an_existing_one(world):
     add(world, conn_id="media", label="Media", url="http://mcp_server:9003/mcp")
     with pytest.raises(StateGraphError, match="label_confusable"):
         propose(world, "add", "other", **{**ADD, "label": "MEDIA"})
-    for conn_id in ("mailpub2", "mailpob", "mailpu", "media7"):
+    # media12 / mailpub10 are two edits away: only the trailing-digits rule refuses them.
+    for conn_id in ("mailpub2", "mailpob", "mailpu", "media7", "media12", "mailpub10"):
         with pytest.raises(StateGraphError, match="conn_id_confusable"):
             propose(world, "add", conn_id, **ADD)
     assert propose(world, "add", "ocrpub", **ADD)["status"] == "open"
@@ -286,6 +291,18 @@ def test_the_source_must_be_a_recent_owner_message(world):
                                                                 "subject": "s", "body": "I could add one"}, allow_write=True)
     with pytest.raises(StateGraphError, match="source_not_an_owner_message"):
         propose(world, "add", "ocrpub", source={"kind": "owner_message", "ref": steward_said["message_id"]}, **ADD)
+    # Each condition alone (review N1): a system notice in the home project (no sender, no
+    # channel), and a driver's row on channel `user`.
+    with world.db.get_connection() as conn:
+        for mid, sender, channel in (("notice-1", None, None), ("driver-user-1", world.steward_row["driver_id"], "user")):
+            conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,kind,"
+                         "delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,channel) "
+                         "VALUES(?,?,?,?,'note','transient','s','add one','[]',NULL,?,?)",
+                         (mid, mid, sender, HOME, sc._iso(sc._utcnow()), channel))
+        conn.commit()
+    for ref in ("notice-1", "driver-user-1"):
+        with pytest.raises(StateGraphError, match="source_not_an_owner_message"):
+            propose(world, "add", "ocrpub", source={"kind": "owner_message", "ref": ref}, **ADD)
     old = said(world)
     with world.db.get_connection() as conn:
         conn.execute("UPDATE driver_inbox_messages SET created_at=? WHERE message_id=?",
@@ -343,6 +360,19 @@ def test_a_letter_is_a_source_only_as_a_reply_to_a_handoff_citing_an_owner_messa
         propose(world, "add", "ocrpub", source={"kind": "director_letter", "ref": unsolicited}, **ADD)
     with pytest.raises(StateGraphError, match="source_not_found"):
         propose(world, "add", "ocrpub", source={"kind": "director_letter", "ref": "no-such-delivery"}, **ADD)
+    # Defence in depth (review N3): a delivery to another project (the steward's own handoff
+    # to alpha) is not found, and a reply to a citing letter some other project sent is no
+    # handoff reply.
+    _message, cited = _handoff(world)
+    with pytest.raises(StateGraphError, match="source_not_found"):
+        propose(world, "add", "ocrpub", source={"kind": "director_letter", "ref": cited}, **ADD)
+    letter = _reply(world, cited)
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_director_messages SET sender_project_id='alpha' WHERE message_id="
+                     "(SELECT message_id FROM state_director_deliveries WHERE delivery_id=?)", (cited,))
+        conn.commit()
+    with pytest.raises(StateGraphError, match="source_not_a_handoff_reply"):
+        propose(world, "add", "ocrpub", source={"kind": "director_letter", "ref": letter}, **ADD)
 
 
 def test_only_the_steward_cites_and_only_an_owner_message(world):
@@ -519,6 +549,20 @@ def test_enabling_needs_the_secret_and_the_account_first(world):
         visibility="private")
     pid = propose(world, "update", "mailme", **version(world, "mailme"), enabled=True)["proposal_id"]
     assert approve(world, pid)["result"]["error"] == "needs_dashboard: oauth_consent"
+    # Signed in (a fake token file), the account not yet confirmed (review S2).
+    sc.write_secret("mailme", {"tokens": {"access_token": "fake-not-a-token"}})
+    assert sc.secret_status(_connection_row(world, "mailme")) == "set"
+    pid = propose(world, "update", "mailme", **version(world, "mailme"), enabled=True)["proposal_id"]
+    before = registry(world)
+    failed = approve(world, pid)
+    assert failed["status"] == "failed" and failed["result"]["error"] == "needs_dashboard: identity"
+    assert failed["result"]["connect_url"].endswith("/#/steward/connections/mailme/connect")
+    assert registry(world) == before
+
+
+def _connection_row(world, conn_id):
+    with world.db.get_connection() as conn:
+        return conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
 
 
 def test_an_added_header_connection_answers_where_to_set_the_secret(world, monkeypatch):
@@ -593,7 +637,7 @@ def test_two_approvals_at_once_execute_once(world):
     assert sorted(outcomes) == ["conflict", "done"]
 
 
-def test_an_add_reruns_every_creation_check_at_approval(world):
+def test_an_add_reruns_every_creation_check_at_approval(world, monkeypatch):
     pid = propose(world, "add", "mailpub", **{**ADD, "label": "Pub"})["proposal_id"]
     add(world, conn_id="mailpub2", label="Other", url="https://good.example/mcp")
     before = registry(world)
@@ -605,6 +649,13 @@ def test_an_add_reruns_every_creation_check_at_approval(world):
     before = registry(world)
     failed = approve(world, pid)
     assert failed["status"] == "failed" and failed["result"]["error"].startswith("connection_exists")
+    assert registry(world) == before
+    # A name that resolves to the backend only after the proposal was made (review S3).
+    pid = propose(world, "add", "webpub", **{**ADD, "label": "Web", "url": "https://good.example/mcp"})["proposal_id"]
+    monkeypatch.setattr(sc, "RESOLVER", lambda host, port: resolver("aitelier" if host == "good.example" else host, port))
+    before = registry(world)
+    failed = approve(world, pid)
+    assert failed["status"] == "failed" and failed["result"]["error"].startswith("reserved_endpoint")
     assert registry(world) == before
 
 
@@ -653,6 +704,54 @@ def test_a_director_proposes_nothing_and_writes_no_registry(world):
     assert "steward_connection_refresh" in STEWARD_WRITE_ACTIONS
     assert not {"steward_connection_upsert", "steward_connection_tools_set", "steward_connection_secret_set",
                 "steward_connection_probe", "steward_connection_delete"} & STEWARD_WRITE_ACTIONS
+
+
+def test_a_director_reads_no_proposal_the_connection_facts_are_copied_into(world):
+    """Review R2: a connection_change's payload copies what the connection reads give only
+    the owner's session and the steward (auth_identity, url, header_name, definitions)."""
+    ready(world)
+    pid = propose(world, "update", **version(world), tools=[tool(world, "ocr_image", allowed=True)])["proposal_id"]
+    with pytest.raises(StateGraphError, match="owner_or_steward_required"):
+        execute(world.director, "list_steward_proposals", {"status": "all"})
+    with pytest.raises(StateGraphError, match="owner_or_steward_required"):
+        world.director.steward.get_proposal(pid)
+    for reader in (world.owner, world.steward):
+        rows = execute(reader, "list_steward_proposals", {})["proposals"]
+        assert [r["payload"]["snapshot"]["tools"][0]["raw_name"] for r in rows if r["proposal_id"] == pid] == ["ocr_image"]
+    assert world.steward.steward.get_proposal(pid)["proposal_id"] == pid
+
+
+_KILL_MID_TRANSACTION = """
+import os, signal, sys
+from core import state_steward_connection_proposals as ccp
+from core.state_database import StateDatabase
+from core.state_service import StateService
+real = ccp.execute
+def killed(conn, payload, proposal_id):
+    real(conn, payload, proposal_id)  # the INSERT is written, not committed
+    os.kill(os.getpid(), signal.SIGKILL)
+ccp.execute = killed
+ccp.check_address = lambda payload: None  # judged in the parent's test; no resolver here
+StateService(StateDatabase(sys.argv[1]), actor=sys.argv[2], project_read_trusted=True
+             ).steward.execute_connection_change(sys.argv[3])
+"""
+
+
+def test_a_process_killed_in_the_transaction_leaves_nothing_and_recover_settles_it(world):
+    """7.8.18 「在事务中途杀进程 → recover 后有确定终态」 (review R6): SIGKILL after the write,
+    before the commit, in another process on the same database file."""
+    pid = propose(world, "add", "ocrpub", **ADD)["proposal_id"]
+    world.owner.steward.begin_approval(pid, 1)
+    root = Path(__file__).resolve().parents[2]
+    killed = subprocess.run([sys.executable, "-c", _KILL_MID_TRANSACTION, world.db.db_path, OWNER, pid],
+                            cwd=root, env={**os.environ, "PYTHONPATH": str(root)}, capture_output=True, text=True,
+                            timeout=120)
+    assert killed.returncode == -9, killed.stderr[-2000:]
+    assert proposal(world, pid)["status"] == "executing"
+    assert not [c for c in listed(world)["connections"] if c["conn_id"] == "ocrpub"]
+    world.owner.steward.recover()
+    assert proposal(world, pid)["status"] == "done"
+    assert facts(world, "ocrpub")["last_change"] == f"proposal:{pid}"
 
 
 def test_a_refresh_changes_no_permission_and_voids_no_open_proposal(world, monkeypatch):

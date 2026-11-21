@@ -660,8 +660,16 @@ class StateSteward:
                                 {"proposal_id": proposal_id, "version": result["version"],
                                  "status": "withdrawn"})
 
+    def _owner_or_steward(self):
+        # A connection_change's stored payload copies connection facts (auth_identity, url,
+        # header_name, whole tool definitions) the connection reads give only these two
+        # (7.8.4): a proposal read is judged the same way (review R2).
+        if not (self.is_owner_session() or self.is_steward()):
+            raise StateGraphError("owner_or_steward_required")
+
     @writer_only_read("list_steward_proposals")
     def list_proposals(self, status="open", limit=50):
+        self._owner_or_steward()
         where = "" if status == "all" else "WHERE status='open'"
         with self.store.transaction() as conn:
             rows = conn.execute(f"SELECT * FROM state_steward_proposals {where} "
@@ -670,6 +678,7 @@ class StateSteward:
 
     @writer_only_read("list_steward_proposals")
     def get_proposal(self, proposal_id):
+        self._owner_or_steward()
         with self.store.transaction() as conn:
             return _proposal(self._get(conn, proposal_id))
 

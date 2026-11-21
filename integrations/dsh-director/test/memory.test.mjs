@@ -104,6 +104,22 @@ test('a turn is on disk when recordTurn resolves; one commit per turn; a replay 
   await store.close();
 });
 
+test('a message\'s channel is kept on its entry only when it is a non-empty string, and survives a reopen', async () => {
+  const root = newRoot(); let store = await open(root);
+  await store.recordTurn('c1', [{ role: 'owner', part: 'o', at: '2026-11-20T12:00:00Z', text: 'from slack', channel: 'slack' },
+    { role: 'steward', part: 's', at: '2026-11-20T12:01:00Z', text: 'ok' }]);
+  await store.recordTurn('c2', [{ role: 'owner', part: 'o', at: '2026-11-20T12:02:00Z', text: 'number channel', channel: 42 }]);
+  await store.recordTurn('c3', [{ role: 'owner', part: 'o', at: '2026-11-20T12:03:00Z', text: 'empty channel', channel: '' }]);
+  await store.flush(); await store.close();
+  store = await open(root);
+  const read = await store.read(['t-c1-o', 't-c1-s', 't-c2-o', 't-c3-o']);
+  assert.deepEqual(read.entries.map(e => [e.id, 'channel' in e, e.channel]),
+    [['t-c1-o', true, 'slack'], ['t-c1-s', false, undefined], ['t-c2-o', false, undefined], ['t-c3-o', false, undefined]]);
+  assert.deepEqual(store.recentTurns().map(t => t.split('\n')[0]), ['[2026-11-20T12:00:00Z] owner (slack): from slack',
+    '[2026-11-20T12:02:00Z] owner: number channel', '[2026-11-20T12:03:00Z] owner: empty channel']);
+  await store.close();
+});
+
 test('one search, both answers, each naming its source and marking the other', async () => {
   const root = newRoot(); const store = await open(root);
   await store.recordTurn('t1', [{ role: 'owner', text: 'I want a small Ledger app for 记账' }]);

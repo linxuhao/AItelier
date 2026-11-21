@@ -13,6 +13,8 @@ import { DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/co
 
 /** How many conversation pages a sync or an owner-message check reads at most. */
 const PAGE = 100, MAX_PAGES = 10, OWNER_CHECK_PAGES = 5;
+// message_sources answers at most 200 message ids per call.
+const SOURCES_PAGE = 200;
 
 /** The bounds of the steward's two inbox readers (`portfolio.inbox` for a project letter,
  *  `portfolio.privateInbox` for a private one), stated in their tool descriptions by the
@@ -110,14 +112,18 @@ const older = (a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.cre
  *  its message id, part `o`); a message this steward sent joins the turn of the owner
  *  message it replies to, else of the latest owner message before it, else opens its own;
  *  its part is its own message id, so a reply recorded later never renumbers anything.
- *  Messages from anyone else are not the owner's conversation with this steward. */
-export function conversationTurns(messages, me) {
+ *  Messages from anyone else are not the owner's conversation with this steward. `sources`
+ *  (message_sources' answer) names the chat channel an owner message came from; one with no
+ *  inbound source row came from the dashboard and carries no channel. */
+export function conversationTurns(messages, me, sources = {}) {
   const turns = new Map();
   let current;
   for (const m of [...messages].sort(older)) {
     if (m.sender_kind === 'user') {
       current = m.message_id;
-      turns.set(current, [{ role: 'owner', part: 'o', at: m.created_at, text: textOf(m) }]);
+      const source = sources[m.message_id];
+      turns.set(current, [{ role: 'owner', part: 'o', at: m.created_at, text: textOf(m),
+        ...(source?.direction === 'in' && source.channel ? { channel: source.channel } : {}) }]);
     } else if (m.sender_kind === 'driver' && m.sender_driver_id === me) {
       // State lets a driver's message reply only to a user's message, so reply_to names an
       // owner message even when that message is older than the pages read.
@@ -131,7 +137,10 @@ export function conversationTurns(messages, me) {
 
 /** Record the conversation into memory: newest pages first, until a page reaches an owner
  *  message memory already knows (or MAX_PAGES), then every turn on them - recordTurn writes only
- *  what is new, and never brings back what was forgotten. */
+ *  what is new, and never brings back what was forgotten. The owner messages memory does not
+ *  have yet are first looked up in message_sources, so each is written with its channel; an
+ *  entry is never written again, so a failed lookup fails the sync (logged, tried next time)
+ *  rather than writing the message without its channel. */
 export async function syncConversation({ request, project, me, memory, signal }) {
   if (!memory) return { written: 0 };
   const messages = [];
@@ -146,8 +155,14 @@ export async function syncConversation({ request, project, me, memory, signal })
     if (known || !result.next_cursor) break;
     cursor = result.next_cursor;
   }
+  const fresh = messages.filter(m => m.sender_kind === 'user' && !memory.known(`t-${m.message_id}-o`)).map(m => m.message_id);
+  const sources = {};
+  for (let i = 0; i < fresh.length; i += SOURCES_PAGE) {
+    const listed = await request('/api/state/query/message_sources', { message_ids: fresh.slice(i, i + SOURCES_PAGE) }, signal);
+    Object.assign(sources, (listed?.result ?? listed)?.sources ?? {});
+  }
   let written = 0;
-  for (const [turn, parts] of conversationTurns(messages, me)) written += (await memory.recordTurn(turn, parts)).written ?? 0;
+  for (const [turn, parts] of conversationTurns(messages, me, sources)) written += (await memory.recordTurn(turn, parts)).written ?? 0;
   return { written };
 }
 
@@ -394,9 +409,18 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
       .split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return undefined; } })
       .filter(h => h && h.at >= since);
     if (sent.length) {
-      const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
-        statuses: ['unread', 'acknowledged', 'resolved'], after: 0, limit: 100 }, signal);
-      const replied = new Set(((listed.result ?? listed).items ?? []).map(i => i.message?.reply_to_delivery_id).filter(Boolean));
+      // The reader pages forward from the oldest delivery: every page is read, so a reply
+      // newer than the first 100 deliveries still counts.
+      const replied = new Set();
+      for (let after = 0; ;) {
+        const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
+          statuses: ['unread', 'acknowledged', 'resolved'], after, limit: 100 }, signal);
+        const page = listed.result ?? listed, items = page.items ?? [];
+        for (const i of items) if (i.message?.reply_to_delivery_id) replied.add(i.message.reply_to_delivery_id);
+        // A page with nothing on it, or a cursor that did not move, cannot be paged past.
+        if (!page.has_more || !items.length || !(page.next_after > after)) break;
+        after = page.next_after;
+      }
       threads.handoffs_last_7_days = sent.map(h => ({ at: h.at, project_id: h.project_id, cites_user_message_id: h.cites_user_message_id,
         answered: (h.delivery_ids ?? []).some(id => replied.has(id)) }));
     } else threads.handoffs_last_7_days = [];

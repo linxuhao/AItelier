@@ -95,7 +95,7 @@ export function apply(ctx, config) {
     reply: async () => ({ refused: 'not_in_test' }), recent: async () => ({ recent: [] }),
     audience: async a => { await post('/test/audience', a); return { recorded: true }; },
     ownerSpokeSince: async () => false,
-    familyNote: async text => { family.push(text); await post('/test/family', { text }); return { noted: true }; },
+    familyNote: async (text, _signal, { turn } = {}) => { family.push(text); await post('/test/family', { text, turn }); return { noted: true }; },
     familyShow: async () => ({ entries: family.map(text => ({ text })) }),
   };
   ctx.provide('directorHost', host);
@@ -149,7 +149,7 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
   const directory = await mkdtemp(join(homedir(), 'dsh-group-'));
   const root = join(directory, 'steward'), memRoot = join(directory, 'memory');
   const MARKER = 'FAMILY-' + randomUUID();
-  const events = [], requests = [], audiences = [], family = [], marks = {}, order = [];
+  const events = [], requests = [], audiences = [], family = [], familyTurns = [], marks = {}, order = [];
   let output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -158,7 +158,7 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
     else if (req.url === '/test/request') requests.push(body);
     else if (req.url === '/test/audience') { audiences.push(body); order.push('audience:' + body.audience); }
     else if (req.url === '/test/context') order.push('snapshot');
-    else if (req.url === '/test/family') family.push(body.text);
+    else if (req.url === '/test/family') { family.push(body.text); familyTurns.push(body.turn); }
     else marks[req.url] = body;
     res.end('{}');
   });
@@ -245,6 +245,8 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
     // The audience of each turn, recorded before its first step.
     assert.deepEqual(audiences.map(a => a.audience), ['owner', 'group', 'group', 'owner']);
     assert.deepEqual(audiences[1].group, { channel: 'wechat', group_ref: 'r1' });
+    // The family tool named the turn it ran in: the very turn the host recorded as the group's (477 N1).
+    assert.ok(typeof familyTurns[0] === 'string' && familyTurns[0] === audiences[1].turn, JSON.stringify([familyTurns, audiences[1]]));
     assert.deepEqual(audiences[1].senderRefs, ['wxid_m1']);
     // Hook order: every snapshot was built after its turn's audience was recorded, and that
     // audience was the owner's (a snapshot before the record would follow the previous turn's).

@@ -656,10 +656,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       scope.tools.register(defineTool({ name: 'family_memory_note',
         description: 'Group turns only. Keep one short thing someone in this family group asked you to remember for the family (at most 200 characters). Never your owner\'s memory; shopping and to-do items go to the family lists.',
         parameters: { text: { type: 'string', required: true } }, output: jsonOutput,
-        execute: (args, exec) => host.groups.familyNote(args.text, exec.signal) }));
+        execute: (args, exec) => host.groups.familyNote(args.text, exec.signal, { turn: groupTurns.open()?.turn }) }));
       scope.tools.register(defineTool({ name: 'family_memory_show',
         description: 'Group turns only. This group\'s family memory (newest first) and your owner\'s note to the family.',
-        parameters: {}, output: jsonOutput, execute: (_args, exec) => host.groups.familyShow(exec.signal) }));
+        parameters: {}, output: jsonOutput, execute: (_args, exec) => host.groups.familyShow(exec.signal, { turn: groupTurns.open()?.turn }) }));
     }
   };
   // Step 23: the first step of every steward turn decides its audience, puts input of another

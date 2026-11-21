@@ -1355,6 +1355,12 @@ class SetStewardTurnAudience(Project):
 class NoteFamilyMemory(Project):
     request_key: str = Field(min_length=1, max_length=320)
     text: str = Field(min_length=1, max_length=1000)
+    # The turn the request is made in (the plugin's open turn); it must be the recorded one.
+    turn: str = Field(min_length=1, max_length=64)
+
+
+class ListFamilyMemory(Request):
+    turn: str = Field(min_length=1, max_length=64)
 
 
 class ListGroupRecent(Request):
@@ -1399,7 +1405,7 @@ READ_REQUESTS = {
     "list_owner_channels": Empty, "message_sources": MessageSources,
     "list_owner_channel_login_requests": Empty,
     "due_channel_alerts": Empty,
-    "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": Empty,
+    "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": ListFamilyMemory,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -2034,7 +2040,8 @@ def _driver_defaults(service, action, arguments):
 # for them): a group code posted by the bound account, a group @-message the bridge passed,
 # the reply a group turn ended with (exit-checked, to the question's own group) and whose turn
 # this is. note_family_memory is the model's family memory tool, accepted only from a group
-# turn: the public-read header plus a recorded group audience (core.state_groups).
+# turn: the public-read header plus a recorded group audience of the turn the request names
+# (core.state_groups).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",

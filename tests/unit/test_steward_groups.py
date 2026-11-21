@@ -63,10 +63,10 @@ def family_view(world):
                         project_read_trusted=True, public_view=True)
 
 
-def audience(world, kind="group", room=ROOM, senders=(MEMBER,)):
+def audience(world, kind="group", room=ROOM, senders=(MEMBER,), turn="t1"):
     group = {"channel": "wechat", "group_ref": room} if kind == "group" else None
     return execute(world.steward, "set_steward_turn_audience",
-                   {"turn": "t1", "audience": kind, "group": group, "sender_refs": list(senders)}, allow_write=True)
+                   {"turn": turn, "audience": kind, "group": group, "sender_refs": list(senders)}, allow_write=True)
 
 
 # --- the director's ruling: the numbers live in code -------------------------------------------
@@ -348,11 +348,11 @@ def test_a_public_view_service_reads_only_public_projects_and_writes_nothing(wor
 def test_family_memory_without_the_header_is_refused_to_the_steward_and_the_owner(world):
     bound_group(world)
     audience(world)
-    refused(lambda: execute(world.steward, "note_family_memory", {"request_key": "k", "text": "周六去外婆家"},
+    refused(lambda: execute(world.steward, "note_family_memory", {"request_key": "k", "text": "周六去外婆家", "turn": "t1"},
                             allow_write=True), "family_memory_group_turn_only")
-    refused(lambda: execute(world.steward, "list_family_memory", {}), "family_memory_group_turn_only")
+    refused(lambda: execute(world.steward, "list_family_memory", {"turn": "t1"}), "family_memory_group_turn_only")
     with pytest.raises((StateGraphError, ProjectPrivate)):
-        execute(world.owner, "list_family_memory", {})
+        execute(world.owner, "list_family_memory", {"turn": "t1"})
 
 
 @pytest.mark.parametrize("setup", ["none", "owner", "other_group"])
@@ -362,7 +362,7 @@ def test_family_memory_with_the_header_but_no_group_turn_is_refused(world, setup
         audience(world, "owner")
     elif setup == "other_group":
         audience(world, "group", room=ROOM2)
-    refused(lambda: execute(family_view(world), "note_family_memory", {"request_key": "k", "text": "x"},
+    refused(lambda: execute(family_view(world), "note_family_memory", {"request_key": "k", "text": "x", "turn": "t1"},
                             allow_write=True), "family_memory_group_turn_only")
 
 
@@ -372,25 +372,25 @@ def test_family_memory_in_a_group_turn_takes_group_and_author_from_the_record(wo
     world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
     audience(world, senders=(MEMBER,))
     view = family_view(world)
-    noted = execute(view, "note_family_memory", {"request_key": "k1", "text": " 周六去外婆家 "}, allow_write=True)
+    noted = execute(view, "note_family_memory", {"request_key": "k1", "text": " 周六去外婆家 ", "turn": "t1"}, allow_write=True)
     assert noted["added_by"] == "妈妈"
-    assert execute(view, "list_family_memory", {})["entries"][0]["text"] == "周六去外婆家"
-    refused(lambda: execute(view, "note_family_memory", {"request_key": "k2", "text": "长" * 201},
+    assert execute(view, "list_family_memory", {"turn": "t1"})["entries"][0]["text"] == "周六去外婆家"
+    refused(lambda: execute(view, "note_family_memory", {"request_key": "k2", "text": "长" * 201, "turn": "t1"},
                             allow_write=True), "entry_too_long")
     for i in range(99):
-        execute(view, "note_family_memory", {"request_key": f"n{i}", "text": f"事 {i}"}, allow_write=True)
-    refused(lambda: execute(view, "note_family_memory", {"request_key": "full", "text": "第101条"},
+        execute(view, "note_family_memory", {"request_key": f"n{i}", "text": f"事 {i}", "turn": "t1"}, allow_write=True)
+    refused(lambda: execute(view, "note_family_memory", {"request_key": "full", "text": "第101条", "turn": "t1"},
                             allow_write=True), "family_memory_full")
     # Thirty days later the next write removes the old entries.
     real = state_channels._now
     monkeypatch.setattr(state_channels, "_now", lambda: real() + timedelta(days=31))
-    execute(view, "note_family_memory", {"request_key": "late", "text": "新的"}, allow_write=True)
+    execute(view, "note_family_memory", {"request_key": "late", "text": "新的", "turn": "t1"}, allow_write=True)
     assert rows(world, "SELECT text FROM state_family_memory") == [("新的",)]
     # A service trusted for the family pair serves nothing else.
     with pytest.raises(ProjectPrivate):
         execute(view, "list_owner_channels", {})
     world.owner.groups.set_family_note("wechat", "外婆家在城南")
-    assert execute(view, "list_family_memory", {})["family_note"] == "外婆家在城南"
+    assert execute(view, "list_family_memory", {"turn": "t1"})["family_note"] == "外婆家在城南"
     world.owner.groups.unbind_owner_group("wechat")
     assert rows(world, "SELECT COUNT(*) FROM state_family_memory") == [(0,)]
     assert rows(world, "SELECT COUNT(*) FROM state_family_note") == [(0,)]
@@ -402,14 +402,47 @@ def test_family_memory_in_a_merged_turn_of_several_askers_names_nobody(world):
     ask(world, "m2", sender=MEMBER2)
     world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
     audience(world, senders=(MEMBER, MEMBER2))
-    noted = execute(family_view(world), "note_family_memory", {"request_key": "k1", "text": "周六去外婆家"},
+    noted = execute(family_view(world), "note_family_memory", {"request_key": "k1", "text": "周六去外婆家", "turn": "t1"},
                     allow_write=True)
     assert noted["added_by"] is None
     assert rows(world, "SELECT added_by_ref FROM state_family_memory") == [(None,)]
     # The same asker twice is still that one person.
     audience(world, senders=(MEMBER, MEMBER))
-    assert execute(family_view(world), "note_family_memory", {"request_key": "k2", "text": "周日在家"},
+    assert execute(family_view(world), "note_family_memory", {"request_key": "k2", "text": "周日在家", "turn": "t1"},
                    allow_write=True)["added_by"] == "妈妈"
+
+
+def test_family_memory_names_the_live_turn_and_a_stale_record_serves_no_other_turn(world):
+    """Director 477 N1: the audience record is one overwritten row; the family memory pair is
+    accepted only for the turn it was written for. A group turn t1 ended and the next turn t2
+    is not recorded yet (the stale window): a request of t2 meets t1's row and is refused; a
+    request naming no turn or another turn is refused; once t2 is recorded as the owner's,
+    even t1's own late request is refused."""
+    bound_group(world)
+    ask(world, "m1")
+    audience(world, turn="t1")
+    view = family_view(world)
+    note = lambda key, **turn: execute(view, "note_family_memory", {"request_key": key, "text": "周六去外婆家", **turn},
+                                       allow_write=True)
+    assert note("k1", turn="t1")["noted"] is True
+    # The stale window: t1's group row stands, the live turn is t2.
+    refused(lambda: note("k2", turn="t2"), "family_memory_group_turn_only")
+    refused(lambda: execute(view, "list_family_memory", {"turn": "t2"}), "family_memory_group_turn_only")
+    refused(lambda: execute(view, "list_family_memory", {"turn": "t0"}), "family_memory_group_turn_only")
+    with pytest.raises(StateGraphError):
+        note("k3")  # no turn at all: invalid_request
+    with pytest.raises(StateGraphError):
+        execute(view, "list_family_memory", {})
+    # t2 recorded as an owner turn: neither t2 nor t1's late request gets the family memory.
+    audience(world, "owner", turn="t2")
+    refused(lambda: note("k4", turn="t2"), "family_memory_group_turn_only")
+    refused(lambda: note("k5", turn="t1"), "family_memory_group_turn_only")
+    refused(lambda: execute(view, "list_family_memory", {"turn": "t1"}), "family_memory_group_turn_only")
+    # A later group turn t3 is served, under its own id only.
+    audience(world, turn="t3")
+    assert execute(view, "list_family_memory", {"turn": "t3"})["entries"][0]["text"] == "周六去外婆家"
+    refused(lambda: execute(view, "list_family_memory", {"turn": "t1"}), "family_memory_group_turn_only")
+    assert rows(world, "SELECT turn, audience FROM state_steward_turn_audience") == [("t3", "group")]
 
 
 def test_the_family_note_is_the_owners_route_alone(world, client):

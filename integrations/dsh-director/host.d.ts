@@ -328,8 +328,10 @@ export interface GroupsHost {
   recent(a: { channel: string; groupRef: string }, signal?: AbortSignal): Promise<{ recent: unknown[] }>;
   audience(a: { turn: string; audience: 'owner' | 'group'; group?: { channel: string; group_ref: string }; senderRefs: string[] }, signal?: AbortSignal): Promise<unknown>;
   ownerSpokeSince(since: string, input: string, signal?: AbortSignal): Promise<boolean>;
-  familyNote(text: string, signal?: AbortSignal): Promise<unknown>;
-  familyShow(signal?: AbortSignal): Promise<unknown>;
+  /** `turn`: the turn the tool runs in (the plugin's open turn, the one `audience` recorded);
+   *  the host refuses a request that does not name the recorded turn. */
+  familyNote(text: string, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  familyShow(signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
 }
 
 export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };

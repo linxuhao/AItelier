@@ -20,7 +20,8 @@ What the backend decides here, in code, never the model nor the message text:
   for the owner;
 - the turn audience the steward's host records each turn (`set_steward_turn_audience`):
   the family memory (`note_family_memory`, `list_family_memory`) is accepted only on a
-  request with the public-read header whose recorded audience is a bound group.
+  request with the public-read header that names the recorded turn (`turn`), whose
+  recorded audience is a bound group.
 
 None of these writes a State event and none notifies a subscriber: a group message must
 never reach the steward as an owner-audience runtime event (7.7.7). Logs carry channel,
@@ -669,10 +670,14 @@ class StateGroups:
                           group["group_ref"] if audience == "group" else None, json.dumps(refs), _now().isoformat()))
         return {"recorded": True, "turn": str(turn), "audience": audience}
 
-    def _family_group(self, conn):
+    def _family_group(self, conn, turn):
         """The bound group whose turn this is, or refused: only a request with the
-        public-read header (a group turn's tool) whose recorded turn audience is a group
-        bound now (7.7.8a)."""
+        public-read header (a group turn's tool) that names the turn the host recorded last
+        (`turn`, the plugin's open turn) whose recorded audience is a group bound now
+        (7.7.8a). The record is one overwritten row; naming its turn means a stale row can
+        serve no turn but the one it was written for (director 477 N1): the next turn is
+        recorded before its first step runs, so a request of that turn never meets the
+        previous turn's row as its own."""
         if not self.public_view:
             raise StateGraphError("family_memory_group_turn_only: family memory is read and written in group "
                                   "turns only")
@@ -680,9 +685,11 @@ class StateGroups:
         row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1").fetchone()
         if row is None or row["audience"] != "group" or self._live_group(conn, row["channel"], row["group_ref"]) is None:
             raise StateGraphError("family_memory_group_turn_only: this turn is not a bound group's")
+        if not isinstance(turn, str) or row["turn"] != turn:
+            raise StateGraphError("family_memory_group_turn_only: this request is not the recorded turn's")
         return row
 
-    def note_family_memory(self, project_id, request_key, text):
+    def note_family_memory(self, project_id, request_key, text, turn):
         text = unicodedata.normalize("NFKC", str(text)).strip()
         if not text:
             raise StateGraphError("empty_text")
@@ -690,7 +697,7 @@ class StateGroups:
             raise StateGraphError(f"entry_too_long: at most {FAMILY_LIMITS['entry_chars']} characters")
         moment = _now()
         with self.store.transaction(write=True) as conn:
-            turn = self._family_group(conn)
+            turn = self._family_group(conn, turn)
             channel, group = turn["channel"], turn["group_ref"]
             request_hash = _hash([channel, group, text])
             replay = self.steward._replay(conn, "note_family_memory", request_key, request_hash)
@@ -716,9 +723,9 @@ class StateGroups:
             return self.steward._record(conn, "note_family_memory", request_key, request_hash, result)
 
     @writer_only_read("list_family_memory")
-    def list_family_memory(self, project_id=None):
+    def list_family_memory(self, turn, project_id=None):
         with self.store.transaction() as conn:
-            turn = self._family_group(conn)
+            turn = self._family_group(conn, turn)
             key = (turn["channel"], turn["group_ref"])
             note = conn.execute("SELECT text FROM state_family_note WHERE channel=? AND group_ref=?", key).fetchone()
             entries, size = [], 0

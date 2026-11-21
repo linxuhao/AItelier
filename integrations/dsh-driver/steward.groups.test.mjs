@@ -48,12 +48,14 @@ test('the group operations are the host\'s own requests; only the family memory 
     { refused: 'channel_sender_not_bound' });
   await ops.reply({ questionId: 'g1', alsoAnswers: ['g0'], body: 'answer' });
   await ops.audience({ turn: '3', audience: 'group', group: { channel: 'wechat', group_ref: 'r1' }, senderRefs: ['m'] });
-  await ops.familyNote('周六去外婆家');
-  await ops.familyShow();
+  await ops.familyNote('周六去外婆家', undefined, { turn: '3' });
+  await ops.familyShow(undefined, { turn: '3' });
   assert.ok(host.calls.every(c => c.readAs === undefined));
   assert.deepEqual(host.calls.map(c => c.path.split('/').at(-1)), ['relay_group_message', 'bind_owner_group', 'post_group_reply', 'set_steward_turn_audience']);
   assert.deepEqual(host.calls[2].body, { request_key: 'group-reply:g1', question_id: 'g1', body: 'answer', also_answers: ['g0'] });
   assert.deepEqual(tool.calls.map(c => [c.path.split('/').at(-1), c.readAs]), [['note_family_memory', 'public'], ['list_family_memory', 'public']]);
+  // Both name the turn they run in (director 477 N1: the backend wants the recorded one).
+  assert.deepEqual(tool.calls.map(c => c.body.turn), ['3', '3']);
 });
 
 test('the runtime: in a group turn every tool request carries the header, the host\'s requests never; in an owner turn none', async () => {

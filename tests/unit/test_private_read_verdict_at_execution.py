@@ -72,7 +72,8 @@ _ARGS = {
     # Step 23: the family group's reads (core/state_groups.py).
     "list_owner_groups": {},
     "list_group_recent": {"channel": "wechat", "group_ref": "room-canary"},
-    "list_family_memory": {},
+    # The turn the reader's request is made in: the one _family_reader records (477 N1).
+    "list_family_memory": {"turn": "1"},
 }
 
 

@@ -697,9 +697,11 @@ export function groupOps({ request, toolRequest = request, project, me }) {
       return (await unansweredOwnerMessages({ request, project, me, signal }))
         .some(m => input.includes(m.message_id) && String(m.created_at) > String(since));
     },
-    familyNote: (text, signal) => toolRequest('/api/state/commands/note_family_memory',
-      { request_key: `family:${digest(String(text))}`, text: String(text ?? '') }, signal).then(result, refusedBy),
-    familyShow: signal => toolRequest('/api/state/query/list_family_memory', {}, signal).then(result, refusedBy),
+    // `turn` is the plugin's open turn: the backend accepts it only when it is the turn the
+    // host recorded with `audience` (director 477 N1).
+    familyNote: (text, signal, { turn } = {}) => toolRequest('/api/state/commands/note_family_memory',
+      { request_key: `family:${digest(String(text))}`, text: String(text ?? ''), turn }, signal).then(result, refusedBy),
+    familyShow: (signal, { turn } = {}) => toolRequest('/api/state/query/list_family_memory', { turn }, signal).then(result, refusedBy),
   };
 }
 

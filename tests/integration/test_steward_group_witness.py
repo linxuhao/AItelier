@@ -155,9 +155,9 @@ def test_with_the_header_writes_are_refused_and_the_family_memory_needs_a_group_
                       json={"project_id": "aitelier-home", "subject": "s", "body": "b"})
     assert write.status_code == 422 and write.json()["detail"].startswith("public_view_read_only"), write.text
     family = http.post("/api/state/commands/note_family_memory", headers={**token, **HEADER},
-                       json={"request_key": "k", "text": "x"})
+                       json={"request_key": "k", "text": "x", "turn": "t"})
     assert family.status_code == 422 and "family_memory_group_turn_only" in family.text, family.text
-    plain = http.post("/api/state/commands/note_family_memory", headers=token, json={"request_key": "k", "text": "x"})
+    plain = http.post("/api/state/commands/note_family_memory", headers=token, json={"request_key": "k", "text": "x", "turn": "t"})
     assert plain.status_code == 422 and "family_memory_group_turn_only" in plain.text, plain.text
     questions = http.post("/api/state/query/list_user_questions", headers={**token, **HEADER},
                           json={"project_id": "aitelier-home"})

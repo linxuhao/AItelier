@@ -131,6 +131,13 @@ PRIVATE_STATE_TABLES = frozenset({
     # steward is in, and the groups awaiting the owner's pick. No projection: never public.
     "state_owner_groups", "state_group_messages", "state_group_members", "state_family_memory",
     "state_family_note", "state_steward_turn_audience", "state_pending_groups",
+    # Step 24.1a: the steward's own MCP connections (addresses, the owner's ticks, the
+    # tools' definitions), the served hash, the fallback-restart markers and their record,
+    # and the call ledger. No projection. (The turn audience the gateway judges by is step
+    # 23's state_steward_turn_audience, above.)
+    "state_steward_connections", "state_steward_connection_tools",
+    "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
+    "state_steward_tool_calls",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

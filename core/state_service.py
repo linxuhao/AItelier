@@ -202,6 +202,9 @@ class StateService:
         from core.state_groups import StateGroups
         self.groups = StateGroups(self.store, actor, driver_id, steward=self.steward, channels=self.channels,
                                   public_view=self.public_view)
+        # Step 24.1a: the steward's own MCP connections (after the steward: its identity checks).
+        from core.state_steward_connections import StateStewardConnections
+        self.steward_connections = StateStewardConnections(self.store, actor, driver_id, steward=self.steward)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

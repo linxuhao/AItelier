@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 import signal
 import sys
@@ -250,7 +251,10 @@ ROLE_NAMES = ("director", "worker", "steward")
 _REQUIRED_ROLES = ("director", "worker")
 _ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", "forbidden")
 # Optional in every role: true refuses any tool the role does not present.
-_OPTIONAL_ROLE_KEYS = ("presented_only",)
+# `catalog: "host"` (step 24.1a): the role finds and calls its further tools only in the
+# catalog its host gives for the turn (the steward's own connections).
+_OPTIONAL_ROLE_KEYS = ("presented_only", "catalog")
+_CATALOGS = ("host",)
 _COMPACTION_KEYS = ("thresholdRatio", "retainTokens")
 _EFFORTS = ("off", "low", "high", "max")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_]+")
@@ -312,6 +316,8 @@ def validate_roles(table):
             raise ValueError(f"roles: {role} both presents and forbids {', '.join(both)}")
         if "presented_only" in value and not isinstance(value["presented_only"], bool):
             raise ValueError(f"roles: {role}.presented_only must be a boolean")
+        if "catalog" in value and value["catalog"] not in _CATALOGS:
+            raise ValueError(f"roles: {role}.catalog must be one of {', '.join(_CATALOGS)}")
     return table
 
 
@@ -494,7 +500,7 @@ class DshDrivers:
             row = conn.execute("SELECT * FROM dsh_drivers WHERE project_id=?", (project_id,)).fetchone()
         return dict(row) if row else None
 
-    def update(self, project_id, **fields):
+    def update(self, project_id, *, clear_restart_markers_of=None, **fields):
         """Stamp one driver row, tolerating a lock that outlives a single wait.
 
         A single attempt waits only its own connection's busy timeout, so a write
@@ -527,6 +533,12 @@ class DshDrivers:
                     # Stated, not inherited from `sqlite3.connect`'s default.
                     conn.execute(f"PRAGMA busy_timeout={int(STAMP_BUSY_TIMEOUT_MS)}")
                     conn.execute(statement, params)
+                    if clear_restart_markers_of:
+                        # Step 24.1a: spawning the steward's process deletes its fallback
+                        # restart markers in the SAME transaction (the new process reads
+                        # the whole tool list anyway). No table yet: no markers.
+                        from core.state_steward_connections import clear_restart_markers
+                        clear_restart_markers(conn, clear_restart_markers_of)
                     conn.commit()
                 return
             except sqlite3.OperationalError as error:
@@ -661,6 +673,18 @@ class DshDrivers:
                 extra.append({"id": "mcp-" + server, "name": "@deepseek-ai/dsh-mcp-client", "config": {
                     "serverName": server, "transport": "streamable-http", "url": url,
                     "failOnStartupError": False, "toolCallTimeoutMs": 960000}})
+        else:
+            # Step 24.1a (design-steward 7.8.5): the steward's OWN connections all come
+            # through ONE fixed entry, the backend's aggregating gateway; adding or
+            # changing a connection never touches this profile (the gateway announces
+            # tools/list_changed instead). `sw` keeps the public names short; the retry
+            # count is large because the client gives up for good after it.
+            extra.append({"id": "mcp-sw", "name": "@deepseek-ai/dsh-mcp-client", "config": {
+                "serverName": "sw", "transport": "streamable-http",
+                "url": self.base_url.rstrip("/") + "/api/steward/mcp",
+                "headers": {"X-AItelier-Driver-Token": "__DRIVER_TOKEN__"},
+                "failOnStartupError": False, "toolCallTimeoutMs": 180000,
+                "reconnect": {"maxAttempts": 1000000}}})
         # Auto-compact fires at `min(W * thresholdRatio, W - O - B)`; the shipped
         # ratio is 0.8. It is a RATIO of the model's own window, not a token
         # count: a quarter is 250k on a 1M window and 50k on a 200k one.
@@ -774,7 +798,8 @@ class DshDrivers:
             try:
                 env = self._environment(row)
                 await asyncio.to_thread(self.update, project_id, enabled=1, phase="starting",
-                                        last_error="", subagents_json="[]")
+                                        last_error="", subagents_json="[]",
+                                        clear_restart_markers_of=row["driver_id"])
                 log_fd = os.open(directory / "runtime.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 with os.fdopen(log_fd, "ab") as log:
                     proc = await asyncio.create_subprocess_exec(*self.command, "--profile", "driver",
@@ -832,8 +857,11 @@ class DshDrivers:
                 self.gateways.pop(project_id, None)
                 await asyncio.to_thread(self.update, project_id, phase="stopped", subagents_json="[]")
                 return self.public(self.get(project_id))
-            await asyncio.to_thread(self.update, project_id, enabled=int(preserve_enabled),
-                                    phase="stopping")
+            # A restart (`preserve_enabled`) never writes `enabled`: an owner's stop that
+            # landed meanwhile keeps its 0, so nothing respawns a driver its owner stopped
+            # (design-steward 7.8.10a). Only an owner stop writes enabled=0.
+            await asyncio.to_thread(self.update, project_id, phase="stopping",
+                                    **({} if preserve_enabled else {"enabled": 0}))
             proc = self.processes.get(project_id)
             if proc is not None and proc.returncode is None:
                 # The process has a private session/group. Never signal other drivers.
@@ -1102,3 +1130,93 @@ class DshDrivers:
         for p in projects.values():
             p.update(counts(p.pop("drivers")))
         return {**counts(drivers), "projects": projects}
+
+
+# ---------------------------------------------------------------- step 24.1a: fallback restart
+# How long a turn in progress may hold back a due fallback restart (design-steward 7.8.10a).
+FALLBACK_WAIT_FOR_IDLE = timedelta(minutes=5)
+FALLBACK_TICK_SECONDS = 10
+
+
+def _error_code(exc) -> str:
+    return type(exc).__name__[:100]
+
+
+async def fallback_restart(runtime, row, *, then_start, moment=None) -> bool:
+    """Execute a due `state_steward_restart_due` marker for this driver row, by whoever
+    spawns its process (the DSH host's supervision loop; the backend in non-host mode,
+    `then_start=True`). Returns True when it stopped the child.
+
+    Waits while the row's phase is `running` (a turn), at most 5 minutes past the
+    earliest due marker. Only a LIVE child of this runtime is restarted. One transaction
+    re-reads `enabled`, deletes ALL the driver's markers and - when it deleted any and
+    the driver is still enabled - records the restart (`state_steward_restart_done`)
+    BEFORE the stop, so a crash in between never loops. The stop preserves `enabled`
+    (an owner's stop that lands meanwhile wins); a failure is kept as a code in the
+    record, which the gateway's check tells the owner about once."""
+    from core.state_steward_connections import _iso, _utcnow, take_due_markers
+    project, driver_id = row["project_id"], row["driver_id"]
+    moment = moment or _utcnow()
+
+    def due():
+        with runtime.db.get_connection() as conn:
+            return take_due_markers(conn, driver_id, moment)[0]
+    earliest = await asyncio.to_thread(due)
+    if earliest is None:
+        return False
+    if row.get("phase") == "running" and moment < earliest + FALLBACK_WAIT_FOR_IDLE:
+        return False
+    if not runtime.running(project):
+        return False
+
+    def account():
+        with runtime.db.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            enabled = conn.execute("SELECT enabled FROM dsh_drivers WHERE project_id=?", (project,)).fetchone()
+            reasons = [{"reason": r[0], "effective_hash": r[1]} for r in conn.execute(
+                "SELECT reason, effective_hash FROM state_steward_restart_due WHERE driver_id=? ORDER BY reason",
+                (driver_id,))]
+            conn.execute("DELETE FROM state_steward_restart_due WHERE driver_id=?", (driver_id,))
+            if not reasons or enabled is None or not enabled[0]:
+                conn.commit()
+                return None
+            done = conn.execute("INSERT INTO state_steward_restart_done(driver_id,reasons_json,restarted_at) "
+                                "VALUES(?,?,?)", (driver_id, json.dumps(reasons), _iso(_utcnow()))).lastrowid
+            conn.commit()
+            return done
+    done = await asyncio.to_thread(account)
+    if done is None:
+        return False
+
+    def failed(exc):
+        with runtime.db.get_connection() as conn:
+            conn.execute("UPDATE state_steward_restart_done SET error=? WHERE id=?", (_error_code(exc), done))
+            conn.commit()
+    try:
+        await runtime.stop(project, preserve_enabled=True)
+    except Exception as exc:  # noqa: BLE001 - recorded; the owner is told once
+        await asyncio.to_thread(failed, exc)
+        return False
+    if then_start:
+        try:
+            await runtime.start(project, actor="dsh-runtime-recovery")
+        except Exception as exc:  # noqa: BLE001 - recorded; the owner is told once
+            await asyncio.to_thread(failed, exc)
+    return True
+
+
+async def fallback_restart_tick(runtime) -> None:
+    """Non-host mode: one pass of the backend's own executor over every enabled row."""
+    for row in await asyncio.to_thread(runtime.rows):
+        if row["enabled"]:
+            try:
+                await fallback_restart(runtime, row, then_start=True)
+            except Exception:  # noqa: BLE001 - the next tick tries again
+                import logging
+                logging.getLogger(__name__).exception("fallback restart of %s failed", row["project_id"])
+
+
+async def fallback_restart_loop(runtime) -> None:
+    while True:
+        await fallback_restart_tick(runtime)
+        await asyncio.sleep(FALLBACK_TICK_SECONDS)

@@ -12,7 +12,11 @@ export const ROLE_NAMES = ['director', 'worker', 'steward'];
 /** A table without these is refused; `steward` is optional (no steward, nothing changes). */
 const REQUIRED_ROLES = ['director', 'worker'];
 const TOP_KEYS = ['version', ...ROLE_NAMES];
-const ROLE_KEYS = ['route', 'reasoning_effort', 'compaction', 'prompt', 'presented', 'forbidden', 'presented_only'];
+const ROLE_KEYS = ['route', 'reasoning_effort', 'compaction', 'prompt', 'presented', 'forbidden', 'presented_only', 'catalog'];
+/** Optional keys; `catalog: "host"` (step 24.1a): the role finds and calls its further tools
+ *  only in the catalog its host gives for the turn (tool-discovery.mjs). */
+const OPTIONAL_KEYS = ['presented_only', 'catalog'];
+const CATALOGS = ['host'];
 /** The roles a host may run its root session as (HostConfig.rootRole). */
 export const ROOT_ROLES = ['director', 'steward'];
 const COMPACTION_KEYS = ['thresholdRatio', 'retainTokens'];
@@ -41,7 +45,7 @@ export function validateRoles(table) {
   for (const role of ROLE_NAMES) {
     const value = table[role];
     if (value === undefined && !REQUIRED_ROLES.includes(role)) continue;
-    exactKeys(value, ROLE_KEYS, role, ROLE_KEYS.filter(key => key !== 'presented_only'));
+    exactKeys(value, ROLE_KEYS, role, ROLE_KEYS.filter(key => !OPTIONAL_KEYS.includes(key)));
     if (typeof value.route !== 'string' || !value.route) throw new Error(`roles: ${role}.route must be a non-empty string`);
     if (!EFFORTS.includes(value.reasoning_effort)) throw new Error(`roles: ${role}.reasoning_effort must be one of ${EFFORTS.join(', ')}`);
     exactKeys(value.compaction, COMPACTION_KEYS, role + '.compaction', ['thresholdRatio']);
@@ -59,6 +63,8 @@ export function validateRoles(table) {
     // Checked last, as core/dsh_driver.py does, so both parsers name the same first problem.
     if (Object.hasOwn(value, 'presented_only') && typeof value.presented_only !== 'boolean')
       throw new Error(`roles: ${role}.presented_only must be a boolean`);
+    if (Object.hasOwn(value, 'catalog') && !CATALOGS.includes(value.catalog))
+      throw new Error(`roles: ${role}.catalog must be one of ${CATALOGS.join(', ')}`);
   }
   return table;
 }

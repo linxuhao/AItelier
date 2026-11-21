@@ -104,6 +104,9 @@ MALFORMED = {
     "non-boolean steward presented_only": lambda t: _with_steward(t, presented_only="yes"),
     "non-boolean director presented_only": lambda t: t["director"].update(presented_only=1),
     "null worker presented_only": lambda t: t["worker"].update(presented_only=None),
+    # Step 24.1a: `catalog` is optional on any role and has one value.
+    "unknown steward catalog": lambda t: _with_steward(t, catalog="dsh"),
+    "boolean director catalog": lambda t: t["director"].update(catalog=True),
     "missing director": lambda t: t.pop("director"),
 }
 
@@ -160,6 +163,23 @@ def test_steward_and_presented_only_are_optional_and_accepted_when_well_formed()
                                        t["director"].update(presented_only=True)))
     assert validate_roles(copy.deepcopy(with_steward)) == with_steward
     assert with_steward["steward"] == STEWARD
+
+
+def test_the_steward_finds_its_tools_in_its_hosts_catalog():
+    """Step 24.1a (design-steward 7.8.7): the repository's steward presents search_tools
+    and call_tool, no longer forbids them, and searches only its host's catalog."""
+    steward = load_roles()["steward"]
+    assert steward["catalog"] == "host"
+    assert {"search_tools", "call_tool"} <= set(steward["presented"])
+    assert not {"search_tools", "call_tool"} & set(steward["forbidden"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")
+def test_python_and_node_agree_on_a_catalog_role(tmp_path):
+    table = _variant(lambda t: (_with_steward(t, catalog="host"), t["worker"].update(catalog="host")))
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(table))
+    assert _python_parse(path) == _node_parse(path) == ("ok", table)
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")

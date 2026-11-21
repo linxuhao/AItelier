@@ -258,6 +258,9 @@ def require_admin(request: Request) -> None:
 # endpoints, which `owned()` in api/dsh_driver_routers.py also pins to its token.
 _STEWARD_STATE_PREFIXES = ("/api/state/commands/", "/api/state/query/")
 _STEWARD_RUNTIME_ENDPOINTS = ("completion", "heartbeat", "activity")
+# Step 24.1a: the steward's MCP gateway. Its route checks who enters itself, on every
+# method and whatever the gate says (api/steward_gateway.steward_driver).
+_STEWARD_GATEWAY_PATH = "/api/steward/mcp"
 
 
 def _steward_denial(request, row) -> str | None:
@@ -269,7 +272,7 @@ def _steward_denial(request, row) -> str | None:
     if getattr(request, "method", None) in ("GET", "HEAD"):
         return None
     path = request.url.path
-    if path.startswith(_STEWARD_STATE_PREFIXES):
+    if path.startswith(_STEWARD_STATE_PREFIXES) or path == _STEWARD_GATEWAY_PATH:
         return None
     parts = path.split("/")
     if (len(parts) == 5 and parts[:3] == ["", "api", "dsh-drivers"]

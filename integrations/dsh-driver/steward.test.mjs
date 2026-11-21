@@ -6,7 +6,7 @@
  *  runtime.steward.test.mjs. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadRoles, validateRoles, roleOf } from './roles.mjs';
@@ -14,7 +14,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, autoReplyBody, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -1189,6 +1189,40 @@ test('message time 3.6: the system clock lines the steward copied to the start o
   assert.equal(calls.at(-1).body, '现在是巴黎 11:14。', 'the stored reply carries no clock line');
 });
 
+test('an automatic reply is recorded where the next process reads it: a warn for a refused one, an info and a sync for a sent one, nothing otherwise', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-auto-reply-'));
+  const file = join(stateDir, 'auto-replies.jsonl');
+  const logged = [], synced = [];
+  const log = { warn: line => logged.push(['warn', line]), info: line => logged.push(['info', line]) };
+  const sync = async () => { synced.push('sync'); };
+  const lines = () => readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  // Nothing to report: not forwarded, not already answered, no reason - nothing is written.
+  await recordAutoReply({ sent: { forwarded: false }, stateDir, log, sync });
+  assert.equal(existsSync(file), false, 'an answer that has nothing to report writes nothing');
+  assert.deepEqual(logged, []);
+  // The only-clock-text case: one line saying why, logged at warn, no sync.
+  await recordAutoReply({ sent: { forwarded: false, reason: 'only_clock_text' }, stateDir, log, sync });
+  let rows = lines();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].reason, 'only_clock_text');
+  assert.ok(Number.isFinite(Date.parse(rows[0].at)), 'the line carries its own time');
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0][0], 'warn', 'a reply that was not sent is a warning');
+  assert.match(logged[0][1], /only_clock_text/);
+  assert.deepEqual(synced, [], 'an unsent reply records no conversation');
+  // A sent reply: recorded, logged at info, and the conversation synced once.
+  await recordAutoReply({ sent: { forwarded: true, reply_to: 'm1', message_id: 'm2' }, stateDir, log, sync });
+  rows = lines();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].message_id, 'm2');
+  assert.equal(logged.at(-1)[0], 'info');
+  assert.deepEqual(synced, ['sync']);
+  // State refusing a second answer for the same message is recorded too (it is why nothing was sent).
+  await recordAutoReply({ sent: { forwarded: false, already_replied: 'm1' }, stateDir, log, sync });
+  assert.equal(lines().length, 3);
+  assert.deepEqual(synced, ['sync'], 'still one sync: nothing was sent');
+});
+
 test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the director\'s are byte-for-byte today\'s', async () => {
   const directorTexts = await import('./aitelier-texts.mjs');
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' })).texts, director = aitelierHost(env()).texts;
@@ -1297,6 +1331,33 @@ test('step 17 layer 2: an inbox page that is empty, or a cursor that does not mo
   }
 });
 
+test('step 17 layer 2: an inbox that always says has_more is read to the page bound, and the answer says it stopped short', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  const conversation = [owner('o1', '2026-11-18T10:00:00Z', 'tell wuxia to pause'), mine('s1', '2026-11-18T10:01:00Z', 'ok', 'o1')];
+  const pages = [];
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/send_director_message')) return { result: { message: { message_id: 'hm1' }, deliveries: [{ delivery_id: 'hd1' }] } };
+    if (path.endsWith('/list_director_messages')) {
+      pages.push(body.after);
+      // 100 deliveries a page and never the end: a server that is always one page further on.
+      const items = Array.from({ length: body.limit }, (_, i) => ({ message: { message_id: 'r' + (body.after + i) },
+        delivery: { delivery_id: 'd' + (body.after + i), delivery_seq: body.after + i + 1 } }));
+      return { result: { items, matched_total: Infinity, has_more: true, next_after: body.after + body.limit } };
+    }
+    throw new Error('unexpected ' + path);
+  };
+  const ops = stewardOps({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'pause please', citesUserMessageId: 'o1' })).handed_off, true);
+  const { openThreads } = await import('./steward-host.mjs');
+  const threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.equal(pages.length, 10, 'MAX_PAGES pages, not the whole history');
+  assert.deepEqual(pages, [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]);
+  assert.deepEqual(threads.handoffs_last_7_days.map(h => [h.project_id, h.answered]), [['wuxia', false]]);
+  assert.equal(threads.handoffs_read_partial.pages, 10, 'the answer names how far it got');
+  assert.match(threads.handoffs_read_partial.note, /not read to the end/);
+});
+
 test('open threads name the chat channel each unanswered owner message came from, and nothing for a dashboard one', async () => {
   const conversation = [owner('o1', '2026-11-20T12:48:00Z', '测试'), owner('o2', '2026-11-20T12:49:00Z', 'from wechat'),
     owner('o3', '2026-11-20T12:50:00Z', 'from the dashboard')];
@@ -1318,14 +1379,22 @@ test('open threads name the chat channel each unanswered owner message came from
   assert.deepEqual(asked, [['o1', 'o2', 'o3']], 'one sources read for the whole list');
   assert.deepEqual(threads.unanswered_owner_messages.map(m => m.source_channel), ['slack', 'wechat', undefined]);
   assert.equal('source_channel' in threads.unanswered_owner_messages[2], false, 'a dashboard message carries no source key');
-  // message-time review F2: the owner's write time on the channel rides beside `at` when the channel gave one.
-  assert.deepEqual(threads.unanswered_owner_messages.map(m => [m.at, m.channel_at]), [['2026-11-20T12:48:00Z', undefined],
+  // message-time review F2: the owner's write time on the channel rides beside the message's
+  // own time, under the names steward.md teaches (`created_at`, `channel_at`).
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => [m.created_at, m.channel_at]), [['2026-11-20T12:48:00Z', undefined],
     ['2026-11-20T12:49:00Z', '2026-11-20T12:48:41+00:00'], ['2026-11-20T12:50:00Z', undefined]]);
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => 'at' in m), [false, false, false], 'no second name for the same time');
   assert.deepEqual(threads.unanswered_owner_messages.map(m => 'channel_at' in m), [false, true, false], 'no key without a channel time');
   assert.doesNotMatch(JSON.stringify(threads), /U0OWNER|ts-1|wxid|wx-1/, 'only the channel name, never the account or message ref');
   sourcesFail = true;
   threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
   assert.deepEqual(threads.unanswered_owner_messages.map(m => m.message_id), ['o1', 'o2', 'o3'], 'a failed sources read keeps the list');
+  assert.equal('unanswered_sources_unread' in threads, true,
+    'a failed lookup is said out loud: without it "no channel" would be read as "came from the dashboard"');
+  assert.match(threads.unanswered_sources_unread.error, /state down/);
+  assert.match(threads.unanswered_sources_unread.note, /not evidence it came from the dashboard/);
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => 'source_channel' in m), [false, false, false],
+    'a message is never given a channel by a read that failed');
 });
 
 test('review 340 (a): every tool the adapter adds to the steward\'s presented list is one runtime.mjs registers', () => {

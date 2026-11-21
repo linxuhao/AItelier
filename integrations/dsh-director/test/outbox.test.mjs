@@ -101,4 +101,24 @@ test('replay finishes even when its bookkeeping cannot be written', async () => 
   assert.ok(logs.some(line => line.includes('replay counts not written')), logs.join('\n'));
 });
 
+test('a host event and a replayed notice reach the session byte-identical: no prefix, no suffix, no clock line', async () => {
+  const dir = await fresh(), got = [];
+  // One text through the two producers: `deliverOnce` (the host-event / notify path, delivered
+  // now) and `send` (a runtime notice, recorded first and delivered by replay after a restart).
+  const TEXT = 'Work changed: the release landed\n\nwhat waits on you: one question';
+  let outbox = await box(dir, got);
+  await outbox.deliverOnce('inbox:x', TEXT);
+  // The notice is recorded by a process that then dies before delivering it.
+  const dying = await box(dir, got, async () => { throw new Error('crash during delivery'); });
+  await assert.rejects(dying.send('watch:1:1', TEXT));
+  const next = await box(dir, got);                    // the next process
+  await next.replay();
+  assert.deepEqual(got, [TEXT, TEXT], 'both producers delivered the text, in order');
+  assert.equal(got[0], got[1], 'the wake text and the outbox text are the same bytes');
+  for (const delivered of got) {
+    assert.equal(delivered, TEXT, 'delivered exactly as written');
+    assert.ok(!delivered.includes('[system clock]'), 'nothing prepends a clock line to a wake');
+  }
+});
+
 test.after(async () => { for (const dir of dirs) await rm(dir, { recursive: true, force: true }); });

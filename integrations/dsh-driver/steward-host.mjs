@@ -13,6 +13,10 @@ import { CLOCK_TAG, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-dire
 
 /** How many conversation pages a sync or an owner-message check reads at most. */
 const PAGE = 100, MAX_PAGES = 10, OWNER_CHECK_PAGES = 5;
+/** How long one snapshot's forward walk of the steward's own inbox may run. The sibling
+ *  readers are bounded by page counts; this walk also has a wall clock, because each page is
+ *  a request and a slow server would otherwise decide how long a snapshot takes. */
+const INBOX_READ_BUDGET_MS = 5000;
 // message_sources answers at most 200 message ids per call.
 const SOURCES_PAGE = 200;
 
@@ -369,6 +373,22 @@ export async function forwardFinalText({ request, project, me, text, input = '',
   }
 }
 
+/** One automatic reply recorded where the next process reads it: one JSONL line in the state
+ *  dir, with its own time, at the level the outcome deserves (a reply that was not sent is a
+ *  warn; a sent one is the info line that says so). An outcome with nothing to report - not
+ *  forwarded, not already answered, no reason - writes nothing. This is runtime.mjs's
+ *  production writer of auto-replies.jsonl, lifted out of its boot closure so the branch can
+ *  be driven without a DSH boot; the guards and the write are the same. */
+export async function recordAutoReply({ sent, stateDir, log, sync }) {
+  if (!sent.forwarded && !sent.already_replied && !sent.reason) return;
+  if (sent.reason) log.warn('auto-reply not sent ' + JSON.stringify(sent));
+  else log.info('auto-reply ' + JSON.stringify(sent));
+  const { appendFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  await appendFile(join(stateDir, 'auto-replies.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...sent }) + '\n', { mode: 0o600 });
+  if (sent.forwarded) await sync();
+}
+
 /** The steward's wording where the director's would mislead it (the director's names State
  *  claims, frontier nodes and workers the steward does not have). */
 const stewardAsk = 'Anything you wait on from your owner (a decision, an approval) must be a question they can see: ask it with ask_owner before you go dormant.';
@@ -405,16 +425,22 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
   try {
     const unanswered = await unansweredOwnerMessages({ request, project, me, signal });
     // Which chat channel each came from (no inbound source row = the dashboard) and, when the
-    // channel dated it, when the owner wrote it there. Without the sources read the messages
-    // are still listed, only without a channel.
+    // channel dated it, when the owner wrote it there. A failed read is NOT "no source row":
+    // the steward reads a message without a channel as one that came from the dashboard
+    // (steward.md), so the answer says the lookup failed instead of letting that be inferred.
+    let sourcesUnread;
     const sources = unanswered.length ? await request('/api/state/query/message_sources',
-      { message_ids: unanswered.map(m => m.message_id) }, signal).then(r => (r?.result ?? r)?.sources ?? {}, () => ({})) : {};
+      { message_ids: unanswered.map(m => m.message_id) }, signal)
+      .then(r => (r?.result ?? r)?.sources ?? {}, error => { sourcesUnread = String(error?.message ?? error).slice(0, 200); return {}; }) : {};
     threads.unanswered_owner_messages = unanswered.map(m => {
       const source = sources[m.message_id];
-      return { message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300),
+      // `created_at` / `channel_at` are the names steward.md teaches the steward to read.
+      return { message_id: m.message_id, created_at: m.created_at, text: textOf(m).slice(0, 300),
         ...(source?.direction === 'in' && source.channel ? { source_channel: source.channel } : {}),
         ...(source?.direction === 'in' && source.channel_at ? { channel_at: source.channel_at } : {}) };
     });
+    if (sourcesUnread) threads.unanswered_sources_unread = { error: sourcesUnread,
+      note: 'the channel lookup failed: a message here without a channel was not looked up, so it is not evidence it came from the dashboard' };
   } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
   try {
     const { readFile } = await import('node:fs/promises');
@@ -424,20 +450,28 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
       .split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return undefined; } })
       .filter(h => h && h.at >= since);
     if (sent.length) {
-      // The reader pages forward from the oldest delivery: every page is read, so a reply
-      // newer than the first 100 deliveries still counts.
+      // The reader pages forward from the oldest delivery so a reply newer than the first
+      // 100 deliveries still counts - bounded like the sibling readers (PAGE / MAX_PAGES at
+      // the top of this file) and, because a page is a request, by a wall clock as well. A
+      // server that keeps answering has_more with an advancing cursor must not make every
+      // snapshot read the steward's whole inbox history; when the bound stops the walk the
+      // answer says so instead of letting the list read as complete.
       const replied = new Set();
-      for (let after = 0; ;) {
+      const deadline = Date.now() + INBOX_READ_BUDGET_MS;
+      let pages = 0, more = false;
+      for (let after = 0; pages < MAX_PAGES && Date.now() < deadline; pages++) {
         const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
-          statuses: ['unread', 'acknowledged', 'resolved'], after, limit: 100 }, signal);
+          statuses: ['unread', 'acknowledged', 'resolved'], after, limit: PAGE }, signal);
         const page = listed.result ?? listed, items = page.items ?? [];
         for (const i of items) if (i.message?.reply_to_delivery_id) replied.add(i.message.reply_to_delivery_id);
         // A page with nothing on it, or a cursor that did not move, cannot be paged past.
-        if (!page.has_more || !items.length || !(page.next_after > after)) break;
+        more = Boolean(page.has_more && items.length && page.next_after > after);
+        if (!more) break;
         after = page.next_after;
       }
       threads.handoffs_last_7_days = sent.map(h => ({ at: h.at, project_id: h.project_id, cites_user_message_id: h.cites_user_message_id,
         answered: (h.delivery_ids ?? []).some(id => replied.has(id)) }));
+      if (more) threads.handoffs_read_partial = { pages, note: 'the inbox was not read to the end: only these deliveries were searched for a reply' };
     } else threads.handoffs_last_7_days = [];
   } catch (error) { threads.handoffs_last_7_days = { error: String(error?.message ?? error).slice(0, 200) }; }
   return threads;

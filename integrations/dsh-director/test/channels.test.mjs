@@ -1887,6 +1887,15 @@ test('login: past loginPerHour or loginPerDay accepted logins the channel is not
   } finally { Date.now = realNow; channels.stop(); }
 });
 
+test('channelText: a body that is whitespace alone mirrors nothing, never a line with only the tail', () => {
+  for (const channel of CHANNEL_NAMES) {
+    for (const body of [' '.repeat(3000), '\n'.repeat(3000), '\t \n'.repeat(500)]) {
+      assert.equal(channelText(channel, body), '', `${channel} ${JSON.stringify(body.slice(0, 3))}: nothing to mirror`);
+    }
+    assert.equal(channelText(channel, '   '), '   ', 'a short whitespace body still goes as written');
+  }
+});
+
 test('channelText: a text with nothing left once flattened goes as written, still within the cap', () => {
   const rules = '|---|---|\n'.repeat(200);
   for (const channel of CHANNEL_NAMES) {

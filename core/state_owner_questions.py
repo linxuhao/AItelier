@@ -298,7 +298,8 @@ class StateOwnerQuestions:
             messages = self._push(conn, moment, default, found, archived)
             unmirrored = [{"message_id": r["message_id"], "body": r["body"]} for r in conn.execute(
                 "SELECT m.message_id,m.body FROM driver_inbox_messages m WHERE m.project_id=? AND m.audience='user' "
-                "AND m.sender_driver_id=? AND m.subject=? AND m.created_at<=? AND m.created_at>=? "
+                "AND m.sender_driver_id=? AND m.subject=? AND m.reply_to_message_id IS NULL "
+                "AND m.created_at<=? AND m.created_at>=? "
                 "AND NOT EXISTS(SELECT 1 FROM state_message_sources s WHERE s.message_id=m.message_id) "
                 "ORDER BY m.created_at,m.message_id LIMIT 20",
                 (steward_project(), self.driver_id, PUSH_SUBJECT, (moment - UNMIRRORED_AFTER).isoformat(),
@@ -314,7 +315,7 @@ class StateOwnerQuestions:
                   for r in conn.execute("SELECT * FROM state_owner_question_pushes")}
         # Closed since: answered, withdrawn or archived (a relay closes its own row).
         for row in ledger.values():
-            if row["closed_at"] is not None:
+            if row["closed_at"] is not None or row["pushed_at"] is None:  # the 「另有 K 个」 rest: never pushed
                 continue
             question = found.get((row["message_id"], row["segment_id"]))
             how = None
@@ -374,7 +375,7 @@ class StateOwnerQuestions:
             if created > moment - WAIT:
                 continue
             (older if created <= moment - OLDER else fresh).append(question)
-        fresh, older_rest = fresh[:NEW_MAX], max(0, len(older) - OLDER_MAX)
+        fresh, older_rest = fresh[:NEW_MAX], older[OLDER_MAX:]
         older = older[:OLDER_MAX]
         # Closed notices: in a message going anyway, or alone NOTICE_ALONE after the first.
         notices = []
@@ -400,6 +401,13 @@ class StateOwnerQuestions:
                                               asker["sender_driver_id"] if asker else None, stamp,
                                               int(question in older)))
             question["code_no"] = cursor.lastrowid
+        # The older backlog is pushed once: the rest past OLDER_MAX are only counted 「另有 K 个，
+        # 见面板」, and recorded as seen (no pushed_at: no code shown, never pushed or listed).
+        for question in older_rest:
+            asker = self._message(conn, question["message_id"])
+            conn.execute("INSERT INTO state_owner_question_pushes(project_id,message_id,segment_id,asker_driver_id,"
+                         "older) VALUES(?,?,?,?,1)", (question["project_id"], question["message_id"],
+                                                      question["segment_id"], asker["sender_driver_id"] if asker else None))
         full = [(q["code_no"], q["project_id"], q["message_id"], q["text"]) for q in fresh]
         full += [(r["code_no"], r["project_id"], r["message_id"], self._text(found, r)) for r in owed_now]
         chunks = []
@@ -428,7 +436,7 @@ class StateOwnerQuestions:
                 chunks.append(("\n", f"Q{question['code_no']} · {titles.get(question['project_id'], question['project_id'])}："
                                      f"｜{_first_line(question['text'])}"))
             if older_rest:
-                chunks.append(("\n", f"另有 {older_rest} 个，见面板。"))
+                chunks.append(("\n", f"另有 {len(older_rest)} 个，见面板。"))
         if notices:
             labels = {"dashboard": "已在面板回答", "withdrawn": "已撤回", "wechat": "已在微信回答", "slack": "已在 Slack 回答"}
             groups = {}
@@ -454,6 +462,12 @@ class StateOwnerQuestions:
         for code, _, _, _ in full:
             conn.execute("UPDATE state_owner_question_pushes SET push_message_id=?,push_failed=0 WHERE code_no=?",
                          (where.get(code, written[0]["message_id"]), code))
+        # A resend owed now that falls on a due reminder is that reminder.
+        for row in owed_now:
+            target = sum(moment >= _at(row["pushed_at"]) + step for step in REMINDERS)
+            if not row["older"] and target > row["reminders_sent"]:
+                conn.execute("UPDATE state_owner_question_pushes SET reminders_sent=?,last_reminded_at=? "
+                             "WHERE code_no=?", (target, stamp, row["code_no"]))
         for question in older:
             conn.execute("UPDATE state_owner_question_pushes SET push_message_id=? WHERE code_no=?",
                          (where.get(question["code_no"], written[0]["message_id"]), question["code_no"]))
@@ -497,8 +511,13 @@ class StateOwnerQuestions:
                 return replay
             source = self._source(conn, home, source_message_id)
             require_bound(conn, source["channel"], source["sender_ref"])
-        # Every owner-text writer refuses a live binding code (raised before any write).
+            previous = self._previous(conn, home, source) \
+                if parse_codes(source["body"], source["channel"])["codes_only"] else None
+        # Every owner-text writer refuses a live binding code (raised before any write), also in
+        # the words a message of codes alone relays.
         self.channels.refuse_owner_text_code(source["body"])
+        if previous is not None:
+            self.channels.refuse_owner_text_code(previous["body"])
         moment = _now()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)

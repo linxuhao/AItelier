@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { loadRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { readHistory, fullReadHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
@@ -192,14 +192,14 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     // The execution mode is this test's decision, never the invoking shell's:
     // an inherited AITELIER_DSH_EXECUTION=host would boot the host branch here
     // and silently stop exercising the workspace-write path.
-    const environment = withoutCallerMode({ ...process.env,
+    const environment = { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_TEST_CHILD_CWD: childDirectory,
       AITELIER_TEST_OUTSIDE_CWD: outsideDirectory,
-    });
+    };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
       child.stdout.on('data', chunk => output += chunk); child.stderr.on('data', chunk => output += chunk);
@@ -468,12 +468,12 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] }]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: withoutCallerMode({ ...process.env,
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'host-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'host-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
-    }) });
+    } });
     proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
     // The watched signals, all of them the child's own: the activity phases it
     // posts, the completions that reach this server, the cursor it persists for

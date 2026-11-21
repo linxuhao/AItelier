@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { parseRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { watchProgress } from './progress.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,11 +96,11 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
     // Production's execution mode, chosen here rather than inherited from the shell.
-    const environment = { ...withoutCallerMode({ ...process.env,
+    const environment = { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-roles', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'roles-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
-      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets') }),
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access' };
 
     /** One boot: launch, serve a full director turn around one native child, check the split under `table`, stop. */

@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 
 const PROVIDER = `
 import { createRequire } from 'node:module';
@@ -87,7 +87,7 @@ test('native send_user_message tool calls the durable driver -> user action', { 
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
@@ -159,7 +159,7 @@ async function driveSendUserMessage(t, toolArgs) {
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,

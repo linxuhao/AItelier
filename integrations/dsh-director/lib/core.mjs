@@ -93,6 +93,21 @@ export class Clock {
     return { at, text: this.line({ now: at, tz: this.tz, where }) };
   }
   written(at) { this.lastAt = at; }
+  /** The time a message carrying this line records for itself, to be read back from the log:
+   *  the exact instant, where the text is only to the minute. */
+  static sourceAt(at) { return new Date(at).toISOString(); }
+  /** The log is the truth (message-time design 2): a clock line advances `lastAt` when the
+   *  message carrying it is IN the session, not when a hook proposes it. The two sites that
+   *  add a line (`preStep`, `ContextInjection.prepare`) write `clock_at` into the message
+   *  source and leave `lastAt` alone; this reads it back. A value that does not parse leaves
+   *  `lastAt` as it was, never throws: a message a later hook dropped or replaced must not
+   *  silence the next line. The tool-result line (postExecute) has no message of its own -
+   *  it rides in the accepted result - so that site still marks itself written. */
+  observe(event) {
+    if (event?.type !== 'user/message') return;
+    const at = Date.parse(event.data?.source?.clock_at ?? '');
+    if (Number.isFinite(at)) this.lastAt = at;
+  }
   failure(site, error) {
     if (this.failed) return;
     this.failed = true;
@@ -106,8 +121,8 @@ export class Clock {
       if (decision.kind !== 'enter' || payload.signal?.aborted || payload.agent?.session !== this.session) return decision;
       if (!(payload.messages ?? []).some(message => !this.notInput.has(message?.source?.kind ?? 'user'))) return decision;
       const { at, text } = this.read();
-      const clock = this.createMessage({ content: [{ type: 'text', text }], source: { kind: this.kind, form: 'notice', summary: text } });
-      this.written(at);
+      const clock = this.createMessage({ content: [{ type: 'text', text }],
+        source: { kind: this.kind, form: 'notice', summary: text, clock_at: Clock.sourceAt(at) } });
       return { ...decision, messages: [clock, ...decision.messages] };
     } catch (error) { this.failure('pre-step', error); return decision; }
   }
@@ -156,9 +171,9 @@ export class ContextInjection {
       catch (error) { this.clock.failure('snapshot', error); }
     }
     const text = this.header + (clock ? clock.text + '\n' : '') + this.runtime.render();
-    if (clock) this.clock.written(clock.at);
     const message = this.createMessage({ content: [{ type: 'text', text }], source: {
       kind: this.kind, form: 'snapshot', compaction_seq: this.epoch,
+      ...(clock ? { clock_at: Clock.sourceAt(clock.at) } : {}),
       sections: [{ name: this.section, text }],
     } });
     this.queued = { epoch: this.epoch, message };

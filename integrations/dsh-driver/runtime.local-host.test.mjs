@@ -14,7 +14,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -116,7 +116,7 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
           idleReviewMs: 600000 } }] },
     ]));
     // No AITELIER_* variable reaches this process: the director must not need one.
-    const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
+    const environment = withoutHostWiring(process.env);
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
         DSH_HOME: join(directory, 'home'), LOCAL_TEST_DSH_ENTRY: entry, LOCAL_TEST_URL: `http://127.0.0.1:${server.address().port}` } });

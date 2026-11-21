@@ -25,7 +25,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { DriverRuntime, TodoCli, batchRedispatchRows, batchesToRedispatch, todoSummary } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
@@ -203,7 +203,7 @@ test('real pinned DSH: a find_verify batch fans out, expands, refuses a finder a
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-batch-provider.mjs') }, { id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] },
     ]));
     const token = join(directory, 'token'); await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
-    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,

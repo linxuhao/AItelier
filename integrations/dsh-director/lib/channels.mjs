@@ -148,7 +148,14 @@ export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
   const lines = body.split('\n').map(line => flattenLine(line, channel)).filter(line => line !== null);
   const shaped = lines.join('\n');
   // Nothing left once flattened (only rule rows or marks): the text goes as written, still capped.
-  if (!shaped.trim()) return Array.from(body).length <= max ? body : cutAt(Array.from(body), max - MORE_CHARS) + MORE;
+  // The MORE tail is kept only when there is text before it: a body that is whitespace alone
+  // has nothing to mirror, and a line with only the tail would be garbage, not a summary.
+  if (!shaped.trim()) {
+    const points = Array.from(body);
+    if (points.length <= max) return body;
+    const kept = cutAt(points, max - MORE_CHARS);
+    return kept ? kept + MORE : '';
+  }
   if (Array.from(shaped).length <= max) return shaped;
   const phrases = lines.filter(line => VERBATIM.test(line));
   const rest = Array.from(lines.filter(line => !VERBATIM.test(line)).join('\n').trim());

@@ -9,7 +9,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { execFileSync } from 'node:child_process';
 import { bindDriverGoal, goalMdCommit, ROUND_TOP_UP_BELOW, ROUND_TOP_UP_TO } from './goal.mjs';
 
@@ -210,7 +210,7 @@ async function driverHarness(t, goalRows = []) {
   const readSeeds = async () => { try { return (await readFile(seedFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
   const run = async (variant, until) => {
     activity.length = 0;
-    proc = spawn(process.execPath, [entry, '--profile', 'driver-' + variant], { cwd: directory, env: { ...withoutCallerMode(process.env),
+    proc = spawn(process.execPath, [entry, '--profile', 'driver-' + variant], { cwd: directory, env: { ...withoutHostWiring(process.env),
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'seed-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'seed-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,

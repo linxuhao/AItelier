@@ -17,8 +17,8 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, forwardFinalText, openProposals, openThreads, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
-  textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
+import { autoReplyBody, forwardFinalText, openProposals, openThreads, recordAutoReply, replyToLetter, stewardHostTexts, stewardOps,
+  syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -29,7 +29,7 @@ import * as core from '../dsh-director/lib/core.mjs';
 import { exitCause, failureClass } from '../dsh-director/lib/exit-cause.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, rename, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, rename } from 'node:fs/promises';
 import { writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -850,14 +850,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // the steward's last words go to them as the reply (owner 2026-11-17).
       if (steward) {
         // Each automatic reply is recorded (log line + auto-replies.jsonl in the state dir), and so
-        // is one that was not sent because the last words were only system clock lines.
-        const record = async sent => {
-          if (!sent.forwarded && !sent.already_replied && !sent.reason) return;
-          if (sent.reason) ctx.logger.warn('auto-reply not sent ' + JSON.stringify(sent));
-          else ctx.logger.info('auto-reply ' + JSON.stringify(sent));
-          await appendFile(join(env.AITELIER_DSH_STATE_DIR, 'auto-replies.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...sent }) + '\n', { mode: 0o600 });
-          if (sent.forwarded) await sync();
-        };
+        // is one that was not sent because the last words were only system clock lines. The
+        // recorder lives in steward-host.mjs so that branch is testable without a DSH boot.
+        const record = sent => recordAutoReply({ sent, stateDir: env.AITELIER_DSH_STATE_DIR, log: ctx.logger, sync });
         const watch = turnWatcher((text, input) => void forwardFinalText({ request, project, me: env.AITELIER_DRIVER_ID, text, input })
           // An automatic reply is the steward's message too: it goes where the answered message came from.
           .then(sent => { if (sent.forwarded) void ownerMessageSent(sent.message_id, autoReplyBody(text), sent.reply_to); return record(sent); })

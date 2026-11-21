@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -104,7 +104,7 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000,
           dormantCompactMinTokens: 0, memory: { userId: 'owner', root: memRoot } } }] },
     ]));
-    const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
+    const environment = withoutHostWiring(process.env);
     const launch = boot => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
         // Tagged like a launched driver (AItelier sets AITELIER_DSH_SESSION the same way): the

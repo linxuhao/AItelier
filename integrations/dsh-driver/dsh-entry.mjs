@@ -92,6 +92,31 @@ export function withoutCallerMode(env = process.env) {
   return copy;
 }
 
+/** Variables the AITelier host deployment sets on a RESIDENT driver and its todo CLI: the
+ *  hooks module that supplies the gate policy and the template directory it reads
+ *  (`core/dsh_todo_hooks.py` CLI_ENV). A fixture that boots the pinned DSH answers these
+ *  itself - the plugin ships its own templates - so inheriting the host's wiring points the
+ *  fixture's `todo_plan` at a template directory that is not the plugin's: measured
+ *  2026-11-21, `change_files` was refused as `unknown_template` against
+ *  <checkout>/todo_templates inside the resident driver's environment and accepted from a
+ *  plain shell, which is the one place the suite is run from. */
+export const hostWiringKeys = ['DSH_TODO_HOOKS', 'DSH_TODO_HOOKS_PATH', 'DSH_TODO_TEMPLATES'];
+
+/** Copy of `env` without the caller's execution mode AND without the host deployment's own
+ *  wiring: what every fixture that boots the measured DSH is given, so the same suite cannot
+ *  measure one thing from a developer's shell and another from the driver that dispatched it.
+ *  AITELIER_* carries the deployment's State identity, state directory and model route - a
+ *  fixture must never reach the live one - and is dropped whole rather than key by key.
+ *  A fixture that sets values of its own in that namespace applies them AFTER this call: an
+ *  override handed in here is stripped with the inherited ones, because nothing in a key name
+ *  says whether this process set it or its supervisor did. */
+export function withoutHostWiring(env = process.env) {
+  const copy = withoutCallerMode(env);
+  for (const key of Object.keys(copy)) if (key.startsWith('AITELIER_')) delete copy[key];
+  for (const key of hostWiringKeys) delete copy[key];
+  return copy;
+}
+
 /** Candidate binaries, in the only order that matters: most explicit first. */
 export function dshEntryCandidates({ env = process.env, home = homedir(), root = packageRoot, systemRoots = true } = {}) {
   const candidates = [];

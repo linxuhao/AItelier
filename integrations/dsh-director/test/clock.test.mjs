@@ -58,7 +58,8 @@ test('pre-step: one clock line FIRST among the step\'s new messages, as a notice
   assert.equal(decision.messages.length, 3);
   const [line] = decision.messages;
   assert.equal(line.content[0].text, '[system clock] now 2026-11-20T10:14Z');
-  assert.deepEqual(line.source, { kind: defaultLabels.clock, form: 'notice', summary: '[system clock] now 2026-11-20T10:14Z' });
+  assert.deepEqual(line.source, { kind: defaultLabels.clock, form: 'notice', summary: '[system clock] now 2026-11-20T10:14Z',
+    clock_at: Clock.sourceAt(T) }, 'the source carries the exact instant the line reads back from the log');
   assert.equal(decision.messages[1], owner, 'the input itself is the same object, its text unchanged');
   assert.equal(decision.messages[2], runtimeContext, 'the runtime context stays last');
   const three = [wake, owner, event('child', 'agent-message')];
@@ -131,7 +132,8 @@ const accept = async () => ({ kind: 'accept' });
 test('tool result: a clock block at the end once the last line is ten minutes old, then not again', async () => {
   const { clock, at } = clockOf();
   const owner = event('hello');
-  await clock.preStep(step([owner]), enter([owner]));
+  const logged = await clock.preStep(step([owner]), enter([owner]));
+  clock.observe({ type: 'user/message', data: logged.messages[0] });   // that line is in the log
   at(T + CLOCK_TOOL_GAP_MS - 1);
   assert.deepEqual(await clock.postExecute(tool(), result, accept), { kind: 'accept' }, 'under ten minutes: unchanged');
   at(T + CLOCK_TOOL_GAP_MS);
@@ -176,11 +178,34 @@ test('a failure of the step or the tool itself is not the clock\'s: it propagate
 
 test('tool result: gapMs (tests only) replaces the ten-minute gap', async () => {
   const { clock, at } = clockOf({ gapMs: 5 });
-  await clock.preStep(step([event('hello')]), enter([event('hello')]));
+  const logged = await clock.preStep(step([event('hello')]), enter([event('hello')]));
+  clock.observe({ type: 'user/message', data: logged.messages[0] });
   at(T + 4);
   assert.deepEqual(await clock.postExecute(tool(), result, accept), { kind: 'accept' });
   at(T + 5);
   assert.equal((await clock.postExecute(tool(), result, accept)).content.at(-1).text, '[system clock] now 2026-11-20T10:14Z (after tool)');
+});
+
+// ---- 7. the log is the truth
+test('message time TEETH: the clock advances on the log, not on the proposal', async () => {
+  const { clock, at } = clockOf();
+  const owner = event('hello');
+  const decision = await clock.preStep(step([owner]), enter([owner]));
+  assert.equal(clock.lastAt, -Infinity, 'a proposed line has written nothing');
+  // An outer hook replaced the step's messages: the line never entered the log, so the ten
+  // minutes were not paid and the next tool result still carries its own line.
+  at(T + 1);
+  const content = (await clock.postExecute(tool(), result, accept)).content;
+  assert.equal(content.at(-1).text, '[system clock] now 2026-11-20T10:14Z (after tool)');
+  // The line that DID enter the log pays the gap for the tool result.
+  clock.observe({ type: 'user/message', data: decision.messages[0] });
+  assert.equal(clock.lastAt, T);
+  at(T + 2);
+  assert.deepEqual(await clock.postExecute(tool(), result, accept), { kind: 'accept' }, 'the logged line is the last clock');
+  // A clock_at that is not a time leaves lastAt where it was, and never throws.
+  clock.observe({ type: 'user/message', data: { source: { kind: defaultLabels.clock, clock_at: 'not a time' } } });
+  clock.observe({ type: 'tool/result', data: { source: { clock_at: Clock.sourceAt(T + 10) } } });
+  assert.equal(clock.lastAt, T, 'neither a bad value nor a non-message moves it');
 });
 
 // ---- 7. snapshot and history
@@ -195,7 +220,9 @@ test('snapshot: the context snapshot carries its own clock line after the header
   const injection = new ContextInjection(fakeSession(), source, createMessage, { header: 'Snapshot:\n', clock });
   const message = await injection.prepare();
   assert.equal(message.content[0].text, 'Snapshot:\n[system clock] now 2026-11-20T10:14Z (context snapshot)\nthe state');
-  assert.equal(clock.lastAt, T, 'the snapshot line counts as the last clock');
+  assert.equal(clock.lastAt, -Infinity, 'prepared is not appended: only the log counts');
+  clock.observe({ type: 'user/message', data: message });
+  assert.equal(clock.lastAt, T, 'the snapshot line counts as the last clock once its message is in the session');
   const bare = await new ContextInjection(fakeSession(), source, createMessage, { header: 'Snapshot:\n' }).prepare();
   assert.equal(bare.content[0].text, 'Snapshot:\nthe state', 'no clock, no line');
 });

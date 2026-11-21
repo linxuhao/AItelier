@@ -12,7 +12,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
 
 const PROVIDER = String.raw`
@@ -111,7 +111,7 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
           dormantCompactMinTokens: 0, clockToolGapMs: 1, rootRole: 'steward', memory: { userId: 'owner', root: memRoot, ...memory } } }] },
     ]));
     await writePatch({});
-    const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
+    const environment = withoutHostWiring(process.env);
     const launch = boot => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
         DSH_HOME: join(directory, 'home'), STW_TEST_DSH_ENTRY: entry, STW_TEST_BOOT: boot, STW_TEST_URL: `http://127.0.0.1:${server.address().port}` } });

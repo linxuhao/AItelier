@@ -379,7 +379,11 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     const contextHooks = () => {
       if (hooksDone) return; hooksDone = true;
       scope.on('session/event', (session, event) => {
-        if (session === subject.session) injection.observe(event);
+        if (session !== subject.session) return;
+        injection.observe(event);
+        // A clock line advances the clock when its message is in the log, not when a hook
+        // proposed it (lib/core.mjs Clock.observe).
+        clock.observe(event);
       });
       scope.on('agent/pre-step', async (_payload, next) => {
         const decision = await next(); // Includes the base automatic compactor.

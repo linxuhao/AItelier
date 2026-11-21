@@ -9,13 +9,16 @@
  *    /approve <id>              run one (create_project) now; the result wakes the steward
  *    /decline <id> [reason]     decline one
  *    /profile                   the resident profile, its version and its file (with memory only)
- *    /purge <id>                purge one memory entry from every version; it asks for the
- *                               confirmation word first: /purge <id> PURGE (with memory only)
+ *    /purge <id>                purge one memory entry from every version: the first /purge <id>
+ *                               only warns; /purge <id> PURGE within 5 minutes of that warning
+ *                               purges (with memory only)
  *
  *  A DSH command carries no user identity (CommandInvocation: commandId, agent, rawInput,
  *  attachments, signal), so every decision taken here is the owner's as owner:local. */
 
 export const PURGE_WORD = 'PURGE';
+/** How long a /purge warning stands for its confirmation. */
+export const PURGE_CONFIRM_MS = 5 * 60 * 1000;
 const OWNER = 'owner:local';
 const ok = text => ({ kind: 'success', text });
 const fail = text => ({ kind: 'error', text });
@@ -72,6 +75,8 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         const result = await decide({ id, approve: false, ...(reason ? { reason } : {}), by: OWNER });
         return result.refused ? refusal(`Not declined ${id}`, result) : ok(`Declined ${id}.`);
       } });
+  // id -> until when its confirmation is accepted; filled only by a warning the owner was shown.
+  const purgeWarned = new Map();
   if (memory) defs.push(
     { name: 'profile', description: 'Show your resident profile, its version and the file to edit.',
       async handler() {
@@ -85,8 +90,13 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
       async handler({ rawInput }) {
         const [id, word] = split(rawInput);
         if (!id) return fail(`Usage: /purge <id> (then /purge <id> ${PURGE_WORD} to confirm)`);
-        if (!word) return ok(`Nothing purged yet. Purging ${id} cannot be undone: its text is removed from the whole history of your memory. To go ahead, send: /purge ${id} ${PURGE_WORD}`);
-        if (word !== PURGE_WORD) return fail(`Nothing purged: the confirmation word is ${PURGE_WORD} (/purge ${id} ${PURGE_WORD}).`);
+        if (word && word !== PURGE_WORD) return fail(`Nothing purged: the confirmation word is ${PURGE_WORD} (/purge ${id} ${PURGE_WORD}).`);
+        // The word counts only after the warning (design 3.6: type it a second time).
+        if (!word || !(purgeWarned.get(id) > Date.now())) {
+          purgeWarned.set(id, Date.now() + PURGE_CONFIRM_MS);
+          return ok(`Nothing purged yet. Purging ${id} cannot be undone: its text is removed from the whole history of your memory. To go ahead, send within 5 minutes: /purge ${id} ${PURGE_WORD}`);
+        }
+        purgeWarned.delete(id);
         const result = await memory.purge([id], { by: OWNER });
         return result.purged === true ? ok(`Purged ${id}: ${JSON.stringify(result)}`) : fail(`Not purged ${id}: ${JSON.stringify(result)}`);
       } });

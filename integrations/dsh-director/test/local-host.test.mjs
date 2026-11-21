@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
 import { localHost, LOCAL_OWNER } from '../hosts/local.mjs';
-import { PURGE_WORD } from '../hosts/local-commands.mjs';
+import { PURGE_WORD, PURGE_CONFIRM_MS } from '../hosts/local-commands.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { MemoryStore } from '../lib/memory/store.mjs';
 
@@ -450,10 +450,18 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     assert.equal((await commands.run('purge', ' t-t1-0 yes')).kind, 'error');
     assert.deepEqual((await store.read(['t-t1-0'])).not_found ?? [], [], 'nothing was purged before the word');
     assert.equal((await commands.run('purge', '')).kind, 'error');
+    // The word counts only after a warning the owner was shown, and only for a while.
+    const unwarned = await commands.run('purge', ` t-t1-1 ${PURGE_WORD}`);
+    assert.match(unwarned.text, /^Nothing purged yet\./, 'the word typed at once only warns');
+    const now = Date.now;
+    try { Date.now = () => now() + PURGE_CONFIRM_MS + 1; assert.match((await commands.run('purge', ` t-t1-1 ${PURGE_WORD}`)).text, /^Nothing purged yet\./, 'an old warning does not count'); }
+    finally { Date.now = now; }
+    assert.deepEqual((await store.read(['t-t1-1'])).not_found ?? [], [], 'nothing was purged without a standing warning');
     const done = await commands.run('purge', ` t-t1-0 ${PURGE_WORD}`);
     assert.equal(done.kind, 'success', done.text);
     assert.match(done.text, /"purged":true/);
     assert.deepEqual((await store.read(['t-t1-0'])).not_found, ['t-t1-0']);
+    await commands.run('purge', ' t-nope');
     assert.match((await commands.run('purge', ` t-nope ${PURGE_WORD}`)).text, /unknown_ids/);
     events.stop(); await events.done;
   } finally { await store.close(); }

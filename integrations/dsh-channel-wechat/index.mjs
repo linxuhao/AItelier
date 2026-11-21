@@ -98,7 +98,12 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
    *  pause, however long that takes, so the cursor stays on it and nothing after it
    *  overtakes it. */
   async function deliver(event) {
-    const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, text: event.text, at: event.at };
+    // Step 23: a group's @-message or group code carries its room as the conversation; the
+    // host answers it finally (accepted or refused), so it never holds the owner's 1:1 messages.
+    const room = event.type === 'group_message' || event.type === 'group_bind'
+      ? { conversationRef: event.room_ref, ...(event.type === 'group_bind' ? { groupBind: { prefix: event.prefix, code: event.code } } : {}) } : {};
+    const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref,
+      text: event.type === 'group_bind' ? event.code : event.text, at: event.at, ...room };
     let pause = retryMs;
     for (let attempt = 1; !stopping.signal.aborted; attempt++) {
       let reason;
@@ -151,6 +156,17 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       if (typeof to !== 'string' || !to) throw Object.assign(new Error('wechat: no recipient named'), { code: 'recipient_unknown' });
       const { ref } = await call('/send', { method: 'POST', body: { to, text } });
       return ref ? { ref } : {};
+    },
+    /** Step 23: one message into a bound group (the bridge sends only to rooms it was given). */
+    async sendGroup(room, text) {
+      if (!token) throw new Error('wechat channel not configured');
+      const { ref } = await call('/send', { method: 'POST', body: { room, text } });
+      return ref ? { ref } : {};
+    },
+    /** Step 23: the bridge's whitelist, set whole: the bound account and each bound room. */
+    async setRooms({ ownerRef, rooms }) {
+      if (!token) return;
+      await call('/rooms', { method: 'PUT', body: { owner_ref: ownerRef ?? null, rooms } });
     },
     status: () => status,
     /** A new login QR from the bridge: {requested: true} or {refused, retry_after_s?}

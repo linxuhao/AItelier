@@ -13,8 +13,8 @@ Callers pass a `ref` that may be a skillflow run id OR a project id, because the
 two circulate together and making a caller guess which one a tool wants is a
 needless failure (`api/run_routers._resolve_run` makes the same accommodation).
 
-Extracted from `core/meta_agent.py`, whose butler tools now delegate here — the
-MCP endpoint needs the identical semantics, and a second implementation of
+Extracted from the retired `core/meta_agent.py`, whose butler tools delegated
+here — the MCP endpoint needs the identical semantics, and a second implementation of
 "which rows count as an error" would drift from the first on its first edit.
 Caller SQL is never accepted: the `where` fragments are built here.
 """

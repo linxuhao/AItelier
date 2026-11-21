@@ -172,8 +172,7 @@ def test_the_agent_facing_prompt_constants_are_corpus_surfaces():
     for name in MOD.PROSE_PROMPT_CONSTANTS:
         assert name in corpus, name
         exempted = {":".join(key) for key in MOD.PROSE_CONSTANT_EXEMPTIONS}
-    for name in ("core/meta_agent.py:SYSTEM_PROMPT",
-                 "core/state_driver_guide.py:STATE_DRIVER_GUIDE",
+    for name in ("core/state_driver_guide.py:STATE_DRIVER_GUIDE",
                  "core/meta_conversation.py:META_JSON_SCHEMA",
                  "core/meta_conversation.py:_INTENT_SCHEMA"):
         assert name not in exempted, name

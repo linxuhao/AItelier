@@ -8,9 +8,10 @@ the dashboards) with no bespoke wiring:
   * writes the seed input into the config's seed dir (read by the first step's
     ``{from: config}`` context), or delegates to the DPE brief→step-1 pre-hook,
   * creates + starts the skillflow run,
-  * wakes the polling scheduler for scheduler-owned configs (DPE etc.); butler-
-    driven configs (meta_conversation, skill_converter) are left for the butler
-    to drive.
+  * wakes the polling scheduler for scheduler-owned configs (DPE etc.); the
+    others (meta_conversation, skill_converter) are left for their starter to
+    drive (MCP run_pipeline steps them via core/run_driver.py; the retired
+    butler, core/meta_agent.py, used to drive them inline).
 
 The DPE config keeps its exact, proven seeding path (``project_submit.seed_and_trigger``)
 so nothing about the demo-critical build changes.
@@ -287,9 +288,8 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
             + f", read by step '{m['reader']}')"
             for m in missing)
         remedy = (
-            "Run the meta conversation for this project first — start the build "
-            "through the butler, which drives meta_conversation to finalize and "
-            "then launches the pipeline."
+            "Run the meta conversation for this project first — it must reach "
+            "finalize (step1_goals.json) before this config can start."
             if any(m["config"] == "meta_conversation" for m in missing)
             else "Run the producing config for this project first, then start "
                  "this one.")

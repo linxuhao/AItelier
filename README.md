@@ -500,7 +500,7 @@ Any other MCP host configures the same endpoint URL directly (streamable HTTP tr
 
 ## Generate a workflow from a description
 
-**Don't want to hand-write a pipeline? Describe it.** ✅ *Works today.* In the butler's **coding mode** — or from any external agent [over MCP](#use-aitelier-from-another-agent-mcp) — the `generate_pipeline` tool turns a plain-language workflow into a real, runnable [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline — grounded in the live tool registry, self-provisioning any tools it needs, and gated before it ships. No YAML by hand, no server restart.
+**Don't want to hand-write a pipeline? Describe it.** ✅ *Works today.* From any external agent [over MCP](#use-aitelier-from-another-agent-mcp), the `generate_pipeline` tool turns a plain-language workflow into a real, runnable [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline — grounded in the live tool registry, self-provisioning any tools it needs, and gated before it ships. No YAML by hand, no server restart.
 
 1. **Describe it.** *"Make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The grounded `pipeline_forge` generator surveys the real tool registry → designs the graph → **builds and registers any missing tools** → emits the config → passes a 3-part gate (lint + registry check + dry-run smoke) → pauses at a review checkpoint.
 2. **It's registered automatically.** On approval the graph lands under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix can never clash with a built-in config).
@@ -514,7 +514,7 @@ Every generated run gets the same deterministic execution, human checkpoints, an
 To change which models or agents the pipeline uses, edit the config files directly:
 
 - **`llm_providers.json` + `model_routes.json`** — providers, endpoints, and which endpoints serve each model name; the full story is [docs/models-and-providers.md](docs/models-and-providers.md).
-- **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
+- **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the requirements-conversation graph (`configs/meta_conversation.yaml`) takes its models from the `intent_detector` and `meta_conversation_agent` roles in `meta_conversation.yaml` — configurable exactly like the pipeline roles. (Its `meta_agent` and `compacter` sections configured the retired chat butler and are read by nothing now. The `/api/meta` Q&A routes' `MetaConversationAgent` does not read this file: it takes the `meta_conversation:` section of an optional `dpe_roles_config.yaml`, else built-in defaults.)
 - **`templates/`** — the LLM prompt templates each step uses
 - **`AITELIER_HOST_AGENT_MODEL`** (env, default `ark/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)).
 

@@ -3,11 +3,11 @@
 A project id is a filesystem path component (`ws.setup_workspace(pid)`,
 `ws._get_secure_path(pid)`, `api/project_routers` interpolates it into a path)
 AND it is rendered into a `{@html}` block in the SPA's delete confirmation. Its
-value can arrive straight from a model: `core/meta_agent` reads
-`args.get("project_id")` from the tool call and only falls back to slugifying.
+value can arrive straight from a model: the retired `core/meta_agent` read
+`args.get("project_id")` from the tool call and only fell back to slugifying.
 
 The REST schema grew a `pattern=` first. That guarded `POST /api/projects` —
-which is not the door the butler uses — so the constraint existed and the actual
+which was not the door the butler used — so the constraint existed and the actual
 path in was still open. Hence this module: one pattern, both callers, and a test
 that counts the callers rather than naming one.
 """

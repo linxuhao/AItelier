@@ -331,18 +331,6 @@ class TestTheReadCache:
 
 
 class TestTheEnvScrubCoversTheUnattendedPath:
-    def test_the_rule_has_one_definition(self):
-        """It was a private attribute on MetaAgent and applied to the one
-        subprocess a human watches. The pipeline's test runner — which runs
-        LLM-authored pytest and `npm ci` postinstall scripts unattended —
-        passed os.environ through untouched."""
-        # Coding Mode no longer spawns a backend shell at all (the owned
-        # executor runs it with a fixed environment), so MetaAgent holds no
-        # copy of the rule that could drift from this one.
-        from core.env_scrub import ENV_SECRET_RE  # noqa: F401 -- the one definition
-        from core.meta_agent import MetaAgent
-        assert not hasattr(MetaAgent, "_ENV_SECRET_RE")
-
     def test_secrets_are_dropped_and_ordinary_vars_kept(self, monkeypatch):
         from core.env_scrub import scrubbed_env
         monkeypatch.setenv("SOMETHING_API_KEY", "x")

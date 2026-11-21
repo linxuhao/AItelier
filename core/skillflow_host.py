@@ -797,8 +797,7 @@ class AItelierSkillFlow(SkillFlow):
             return
         project_id, config_name = run["project_id"], run["graph_name"]
         try:
-            from core.meta_agent import _declare_isolation
-            _declare_isolation(db, run_id, project_id, config_name)
+            run_isolation.declare_isolation(db, run_id, project_id, config_name)
         except Exception as exc:
             reason = (f"could not isolate run {run_id}: "
                       f"{type(exc).__name__}: {exc}")

@@ -215,24 +215,6 @@ async def test_explicit_auto_policy_and_manual_meta_path_use_sdk_identity(live):
     assert _approval_count(sf, newer) == 1
 
 
-@pytest.mark.asyncio
-async def test_butler_uses_supplied_observation_and_exact_run(live, monkeypatch):
-    sf, rid, client, tools = live
-    from core.meta_agent import MetaAgent
-    agent = MetaAgent.__new__(MetaAgent)
-    agent.db = deps.get_db_manager()
-    view = MetaAgent._summarize_run_state(agent, rid)
-    assert view['outputs'] == {'proposal':'reviewed text'}
-    newer = _sibling(sf)
-    async def no_model_driver(run_id): return {'run_id':run_id, 'status':sf.get_run(run_id)['status']}
-    monkeypatch.setattr(agent, '_run_pipeline_until_checkpoint', no_model_driver)
-    monkeypatch.setattr(sf, 'get_checkpoint', lambda *a: (_ for _ in ()).throw(AssertionError('fresh token')))
-    result = await agent._tool_approve_checkpoint(view)
-    assert 'error' not in result, result
-    assert result['run_id'] == rid
-    assert sf.get_run(newer)['status'] == 'paused'
-
-
 def test_fixed_slot_review_is_retained_not_reread_from_mutable_files(live):
     from pathlib import Path
     sf, rid, client, tools = live

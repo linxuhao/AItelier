@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { push } from 'svelte-spa-router';
+  import { replace } from 'svelte-spa-router';
 
+  // replace, not push: the unknown route must not stay in history, or Back
+  // would land on it and bounce forward again.
   onMount(() => {
-    push('#/');
+    replace('/');
   });
 </script>
 

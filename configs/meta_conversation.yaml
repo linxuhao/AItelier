@@ -1,9 +1,15 @@
 # configs/meta_conversation.yaml
 # Requirements-gathering conversation as a deterministic skillflow graph.
 #
-# The butler (core/meta_agent.py) drives this run synchronously and relays the
-# gather step's question / brief into the chat. The conversation transcript
-# lives in the workspace file `meta/conversation.md` (maintained by the butler).
+# The butler (the retired core/meta_agent.py) used to create this run, drive it
+# synchronously and relay the gather step's question / brief into the chat; the
+# conversation transcript in the workspace file `meta/conversation.md` was
+# maintained by it. Nothing in-process creates the run any more: one started
+# generically (MCP run_pipeline) is stepped by core/run_driver.py, and approving
+# its brief checkpoint over HTTP (api/meta_routers.py checkpoint route →
+# core/meta_run.py:approve_and_submit_meta) submits the brief and triggers DPE.
+# (The /api/meta Q&A routes are a separate path: core/meta_conversation.py's
+# MetaConversationAgent, which does not use this graph.)
 # The gather step writes a single `gather_state.json`:
 #   - {"need_input": true,  "question": "...", "analysis_so_far": "..."}  (ask)
 #   - {"need_input": false, "brief": { ...incl. user_stories... }}        (finalize)
@@ -14,12 +20,12 @@
 # run, after which the butler triggers the DPE pipeline (core/project_submit.py).
 
 name: "meta_conversation"
-description: "Project requirements gathering → brief (butler triggers DPE on approval)"
+description: "Project requirements gathering → brief (approving it triggers DPE)"
 
 # Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
 x-aitelier:
   label: "Requirements Conversation"
-  scheduler_owned: false          # driven imperatively by the butler, not the poller
+  scheduler_owned: false          # driven by its starter (core/run_driver.py), not the poller
   output_step: "gather"
   checkpoint_kinds:
     gather: conversational        # a chat turn, not a file-diff review

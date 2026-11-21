@@ -7,7 +7,6 @@ binding, status, owner audit or disposition result is mocked.
 from contextlib import contextmanager
 import json
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -18,7 +17,6 @@ from skillflow.graph import PipelineGraph, StepNode, Transition
 from api import dependencies as deps, meta_routers as mr, project_routers as pr, run_routers as rr
 from api.auth import get_optional_user
 from core.db_manager import DBManager
-from core.meta_agent import MetaAgent
 from core.run_launcher import start_config_run
 from tests.integration.test_state_graph_entrypoints import live, start, failed_code_attempt
 
@@ -56,7 +54,7 @@ def retained_task(live, pid):
 
 @pytest.mark.parametrize("reconciled", [False, True], ids=["stale-state", "terminal-state"])
 @pytest.mark.parametrize("stopped", [False, True], ids=["step-failed", "operator-stopped"])
-@pytest.mark.parametrize("entry", ["api", "db", "butler", "reactivate_run", "re_run", "resume_run", "pause_run"])
+@pytest.mark.parametrize("entry", ["api", "db", "reactivate_run", "re_run", "resume_run", "pause_run"])
 def test_generic_recovery_refuses_before_any_durable_change(live, monkeypatch, reconciled, stopped, entry):
     attempt = start(live)
     rid, pid = attempt["run_id"], attempt["execution_project_id"]
@@ -86,8 +84,6 @@ def test_generic_recovery_refuses_before_any_durable_change(live, monkeypatch, r
             with pytest.raises(ValueError, match="successor disposition"):
                 if entry == "db":
                     live.db.retry_project(pid)
-                elif entry == "butler":
-                    MetaAgent._tool_retry_project(SimpleNamespace(db=live.db, ws=live.ws), {"project_id": pid})
                 else:
                     getattr(live.sf, entry)(rid)
     assert snapshot(live) == before

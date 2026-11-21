@@ -390,7 +390,6 @@ def test_an_in_flight_coding_source_write_excludes_a_direct_acquisition(live):
     """Interactive Coding Mode edits no longer write the Source checkout; the
     write that does — the seed/handoff — holds the exclusive coding_workspace
     admission, and a direct run cannot take the checkout inside it."""
-    from core.meta_agent import MetaAgent
     src = live["src"]
     adm = ri.admit_write(live["db"], src, kind="coding_workspace",
                          detail='{"purpose": "handoff"}')
@@ -399,12 +398,9 @@ def test_an_in_flight_coding_source_write_excludes_a_direct_acquisition(live):
     assert "coding_workspace" in str(e.value)
     ri.retire_write(live["db"], adm["id"])
     _direct_run(live, "p2")  # retired: the next run may have it
-    for gone in ("_tool_edit_file", "_tool_create_file", "_tool_bash"):
-        assert not hasattr(MetaAgent, gone), f"{gone} would write the Source checkout"
 
 
 def test_a_direct_lease_excludes_every_supported_write(live):
-    from core.meta_agent import MetaAgent
     from core.workspace_manager import WorkspaceManager
 
     src = live["src"]
@@ -416,24 +412,16 @@ def test_a_direct_lease_excludes_every_supported_write(live):
 
     ws = WorkspaceManager(str(live["tmp"] / "ws"),
                           projects_base=str(live["tmp"] / "pb"))
-    # Coding Mode's own Source write (seed/handoff admission) is refused...
+    # Coding Mode's own Source write (seed/handoff admission) is refused, and
+    # so is every workspace repository write.
     with pytest.raises(CheckoutLeased):
         ri.admit_write(live["db"], src, kind="coding_workspace", detail="handoff")
-    # ...and a coding agent without the authenticated session scope reaches no
-    # tree at all: there is no Source fallback for edit/create/bash.
-    agent = MetaAgent(live["db"], ws, owner_email="t@local", mode="coding")
-    for name, args in (("edit_file", {"path": "file.txt", "old_str": "original", "new_str": "x"}),
-                       ("create_file", {"path": "new.txt", "content": "x"}),
-                       ("bash", {"command": "echo hi > hi.txt"})):
-        out = asyncio.run(agent._execute_tool(name, {"project_id": "p2", **args}))
-        assert "authenticated coding session" in out["error"], out
     for call in (lambda: ws.repo_commit("p2", "m"),
                  lambda: ws.repo_pull("p2"),
                  lambda: ws.repo_set_remote("p2", "https://example.invalid/x")):
         with pytest.raises(CheckoutLeased):
             call()
     assert (src / "file.txt").read_text() == "original\n"
-    assert not (src / "new.txt").exists() and not (src / "hi.txt").exists()
 
 
 def test_an_admission_is_retired_even_when_the_write_raises(live):

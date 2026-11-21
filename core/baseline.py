@@ -17,7 +17,8 @@ Two halves, because only one of them can always be collected:
     an addon may target raw base ids (game_harness hangs off `5_knowledge`,
     `t_plan`, `t_impl`), so a base rename silently breaks it today.
   * ``observed`` — what a real drive actually produced, per step. Only `gen_*`
-    pipelines can earn this; `drive_pipeline` is their entry point.
+    pipelines can earn this; its entry point was the butler's `drive_pipeline`
+    (retired with core/meta_agent.py), and `capture_observed` has no live caller now.
 
 The stub drive is not always available: a graph whose first step requires context
 from ANOTHER config's run cannot boot in the stub's empty workspace, which is true

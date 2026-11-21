@@ -1,18 +1,15 @@
 """Use the installed engine's real run resolution and trace_query over its SQLite DB."""
 import json
-from unittest.mock import MagicMock
 
 import pytest
 from skillflow import SkillFlow
 from skillflow.graph import PipelineGraph, StepNode
 
-from core.meta_agent import MetaAgent
 from core.trace_reader import trace_list
 
 
 @pytest.mark.parametrize('order', ['asc', 'desc'])
-@pytest.mark.parametrize('via_butler', [False, True])
-def test_errors_only_reaches_late_matches_through_real_sdk(tmp_path, monkeypatch, order, via_butler):
+def test_errors_only_reaches_late_matches_through_real_sdk(tmp_path, order):
     sf = SkillFlow(str(tmp_path / 'sdk.db'), workspace_base=str(tmp_path / 'artifacts'),
                    artifact_history=False)
     try:
@@ -40,16 +37,8 @@ def test_errors_only_reaches_late_matches_through_real_sdk(tmp_path, monkeypatch
                               json.dumps({'error': 'outside requested scope'})))
         sf._conn.commit()
         before = sf._conn.execute('SELECT * FROM skillflow_trace ORDER BY id').fetchall()
-        if via_butler:
-            import api.dependencies as deps
-            monkeypatch.setattr(deps, 'get_skillflow', lambda: sf)
-            agent = MetaAgent(MagicMock(), MagicMock(), owner_email='fixture@example.invalid')
-            result = agent._tool_trace_list({'run': 'trace-project', 'step': '2',
-                                            'category': 'step', 'errors_only': True,
-                                            'order': order, 'limit': 12})
-        else:
-            result = trace_list(sf, 'trace-project', step='2', category='step',
-                                errors_only=True, order=order, limit=12)
+        result = trace_list(sf, 'trace-project', step='2', category='step',
+                            errors_only=True, order=order, limit=12)
         wanted = ['first failure', 'late native failure', 'passed=false', 'escaped key failure']
         assert [e['summary'] for e in result['entries']] == (wanted if order == 'asc' else wanted[::-1])
         assert result['run_id'] == run and result['resolved']['run_id'] == run

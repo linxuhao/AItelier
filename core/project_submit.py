@@ -2,7 +2,8 @@
 
 Extracted from ``api.project_routers.submit_project`` so the chat butler can
 trigger the DPE pipeline deterministically once the meta_conversation brief is
-approved (``core/meta_agent.py::_tool_approve_project_brief``): clear the
+approved (``_tool_approve_project_brief``, was in the retired
+``core/meta_agent.py``): clear the
 drafting gate, cache the brief in the DB (web UI panel), mark planning step
 ``"1"`` complete, and wake the scheduler (which creates + drives the
 ``dpe_default_v2`` run).
@@ -61,7 +62,7 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # Host-side brief guard: the DPE researcher reads the FINALIZED brief from the
     # meta_conversation finalize step (step1_goals.json). If it's absent, the build
     # would run brief-less and hallucinate a project — refuse to trigger. The
-    # proper flow (butler → meta finalize → seed_and_trigger) always has it; a
+    # proper flow (meta finalize → seed_and_trigger) always has it; a
     # direct start that skipped meta does not. (skillflow's required-context flag
     # on step 1 also catches this at run time; this fails earlier, at submit, with
     # a clear message.)
@@ -87,7 +88,7 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
             return _refuse(
                 "Cannot start the build: no finalized brief (the meta "
                 "conversation must produce step1_goals.json first). Start the "
-                "build through the butler / meta conversation, not directly.")
+                "build through the meta conversation, not directly.")
     except Exception as e:
         # Fail CLOSED. This used to be `pass` ("never block the proper flow on a
         # guard-internal error"), but a guard whose whole job is to refuse must

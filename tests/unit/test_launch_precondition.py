@@ -120,7 +120,10 @@ def test_dpe_game_without_a_meta_conversation_creates_no_run(tmp_path):
     assert "dpe_game" in msg
     assert "step1_goals.json" in msg
     assert "meta_conversation" in msg and "finalize" in msg
-    assert "butler" in msg
+    assert "Run the meta conversation for this project first" in msg
+    # The remedy used to say "start the build through the butler"; the butler
+    # (core/meta_agent.py) is retired, so naming it sends the caller nowhere.
+    assert "butler" not in msg
 
 
 def test_dpe_game_starts_once_finalize_has_produced_the_goals(tmp_path):

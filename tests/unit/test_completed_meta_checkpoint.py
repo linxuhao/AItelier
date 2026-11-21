@@ -1,4 +1,3 @@
-import json
 from uuid import uuid4
 import pytest
 from skillflow.graph import PipelineGraph, StepNode, Transition
@@ -7,7 +6,6 @@ from skillflow.exceptions import SkillFlowError
 from tests.unit.test_normal_checkpoint_protocol import live
 from core.checkpoint_protocol import checkpoint_view
 from core.meta_run import approve_meta
-from core.meta_agent import MetaAgent
 from api import mcp_router
 
 
@@ -97,52 +95,6 @@ def test_completed_human_meta_helper_refuses_missing_identity(live):
     # SDK itself refuses this same missing identity, even after completion.
     with pytest.raises(SkillFlowError): sf.approve_checkpoint(rid)
     with pytest.raises(SkillFlowError): approve_meta(sf,rid)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('mode',['missing','stale','malformed','foreign','collision','valid-retry','valid-cli-recovery'])
-async def test_completed_brief_tool_binds_original_token_and_retained_brief(live, monkeypatch, mode):
-    sf, _, client, _ = live
-    rid, observed, original = completed_meta(sf, client if mode == 'valid-cli-recovery' else None)
-    agent=MetaAgent.__new__(MetaAgent)
-    effects=[]
-    from api.dependencies import get_db_manager
-    agent.db=get_db_manager()
-    update=agent.db.update_project
-    def retain_update(*args,**kwargs):
-        effects.append(('update',kwargs))
-        return update(*args,**kwargs)
-    monkeypatch.setattr(agent.db,'update_project',retain_update)
-    agent.ws=object()
-    agent._log_error=lambda msg:None
-    def resolve_build_config(sf,args):
-        effects.append(('config',args))
-        return 'controlled-build',''
-    agent._resolve_build_config=resolve_build_config
-    async def no_build(args):
-        effects.append(('start',args)); return {'status':'CONTROLLED_DISPATCH','run_id':rid}
-    agent._tool_start_pipeline=no_build
-    mutation={'brief':{'user_stories':['Disk changed AFTER approval'], 'goal':'MUTATED'}}
-    monkeypatch.setattr('core.meta_run.read_gather_state',lambda ws,pid:mutation)
-    def no_seed(db,ws,pid,brief):
-        effects.append(('seed',brief)); return {'status':'submitted'}
-    monkeypatch.setattr('core.project_submit.seed_and_trigger',no_seed)
-    args={'run_id':rid}
-    if mode!='missing': args.update(expected_checkpoint=observed['expected_checkpoint'],decision_id=observed['decision_id'])
-    if mode=='stale': args['expected_checkpoint']={**args['expected_checkpoint'],'version':999}
-    if mode=='malformed': args['expected_checkpoint']={**args['expected_checkpoint'],'outputs_sha256':'invalid'}
-    if mode in ('foreign','collision'):
-        _, other, _ = completed_meta(sf)
-        if mode=='foreign': args['expected_checkpoint']=other['expected_checkpoint']
-        else: args['decision_id']=other['decision_id']
-    result=await agent._tool_approve_project_brief(args)
-    print(json.dumps({'mode':mode,'result':result,'effects':effects},ensure_ascii=False))
-    if mode in ('valid-retry','valid-cli-recovery'):
-        assert [effect[0] for effect in effects] == ['config','update','seed','start']
-        assert effects[2] == ('seed',original['brief']), 'Valid retry must use retained original brief, not current disk'
-        assert result['status']=='CONTROLLED_DISPATCH'
-    else:
-        assert result.get('status')=='error' and not effects,'Missing/colliding completed approval must refuse before seed/build'
 
 
 @pytest.mark.parametrize('mode', ['missing','stale','different-decision','foreign'])

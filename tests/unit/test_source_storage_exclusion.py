@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from core.meta_agent import MetaAgent
 from core.prompt_assembler import PromptAssembler
 import aitelier.tools.semantic_search.impl as semantic_impl
 import api.project_routers as project_routers
@@ -39,28 +38,6 @@ class _Db:
 
     def __init__(self, repo):
         self.repo = repo
-
-
-def _agent(repo):
-    agent = object.__new__(MetaAgent)
-    agent.ws = _Workspace(repo)
-    return agent
-
-
-def test_butler_search_and_tree_hide_root_and_nested_index_storage(tmp_path):
-    repo = _repo(tmp_path)
-    agent = _agent(repo)
-    assert agent._tool_search_code({"project_id": "p", "pattern": "INTERNAL_ONLY_NEEDLE"})["matches"] == []
-    assert [m["file"] for m in agent._tool_search_code({"project_id": "p", "pattern": "REAL_SOURCE_NEEDLE"})["matches"]] == ["src/main.py"]
-    hidden = agent._tool_search_code({"project_id": "p", "pattern": "VISIBLE_HIDDEN_SOURCE_NEEDLE"})
-    assert [m["file"] for m in hidden["matches"]] == [".github/workflow.yml"]
-    for result in (agent._tool_list_code_tree({"project_id": "p"}),
-                   agent._tool_list_workspace_tree({"project_id": "p"})):
-        assert not any(".zvec-grep" in path for path in result["tree"])
-        assert ".github/workflow.yml" in result["tree"]
-    assert agent._tool_list_code_tree(
-        {"project_id": "p", "subdir": ".zvec-grep"}
-    )["tree"] == []
 
 
 def test_prompt_tree_hides_index_storage_but_keeps_dot_source(tmp_path):

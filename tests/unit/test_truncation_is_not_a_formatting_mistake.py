@@ -477,8 +477,6 @@ PROSE_CODE_FILES = ("core/dpe_pipeline.py", "core/prompt_assembler.py",
 # read by an agent, so they are corpus surfaces even though they are not the
 # apply_patch guidance blocks. Keyed by the surface name the corpus uses.
 PROSE_PROMPT_CONSTANTS = {
-    "core/meta_agent.py:SYSTEM_PROMPT":
-        ("core/meta_agent.py", "SYSTEM_PROMPT"),
     "core/meta_conversation.py:REVISION_SYSTEM_PROMPT":
         ("core/meta_conversation.py", "REVISION_SYSTEM_PROMPT"),
     "core/meta_conversation.py:_INTENT_SYSTEM_PROMPT":

@@ -13,6 +13,7 @@
   import StateRun from './views/StateRun.svelte';
   import Trace from './views/Trace.svelte';
   import Tracking from './views/Tracking.svelte';
+  import RedirectToDashboard from './views/RedirectToDashboard.svelte';
   import NotificationPanel from './views/NotificationPanel.svelte';
   import CheckpointModal from './views/CheckpointModal.svelte';
   import ConfirmDialog from './views/ConfirmDialog.svelte';
@@ -46,6 +47,9 @@
     '/tracking': Tracking,
     '/repos': Repositories,
     '/repos/:repoPath': Repositories,
+    // Anything else (a retired route such as '#/chat', a mistyped link) goes
+    // to the default view instead of rendering an empty page.
+    '*': RedirectToDashboard,
   };
 
   // SSE handler for checkpoint_reached: auto-open the CheckpointModal.

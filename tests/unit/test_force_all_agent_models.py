@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 from core.agents import AgentFactory, HOST_AGENT_MODEL
 from core.ai_router import resolve_agent_model
-from core.meta_agent import MetaAgent
 from skillflow.agent_registry import AgentRegistry
 
 ENV = "AITELIER_FORCE_ALL_AGENT_MODELS"
@@ -158,52 +157,3 @@ class TestMetaConversation:
     def test_pin_reaches_intent_detection(self, monkeypatch):
         monkeypatch.setenv(ENV, PIN)
         assert self._intent_model().endswith("deepseek-v4-flash")
-
-
-class TestMetaAgent:
-    """The butler bypasses AIGateway — it resolves its own model."""
-
-    @pytest.fixture
-    def deps(self, tmp_path):
-        db = MagicMock()
-        ws = MagicMock()
-        ws._get_secure_path.return_value = tmp_path
-        return db, ws
-
-    def test_unset_keeps_the_configured_model(self, deps):
-        db, ws = deps
-        with patch("core.meta_agent._load_meta_agent_config",
-                   return_value={"model": "deepseek/deepseek-v4-pro"}):
-            agent = MetaAgent(db, ws, owner_email="t@local")
-        assert agent._raw_model == "deepseek/deepseek-v4-pro"
-        assert agent.litellm_model.endswith("deepseek-v4-pro")
-
-    def test_pin_wins(self, deps, monkeypatch):
-        db, ws = deps
-        monkeypatch.setenv(ENV, PIN)
-        with patch("core.meta_agent._load_meta_agent_config",
-                   return_value={"model": "deepseek/deepseek-v4-pro"}):
-            agent = MetaAgent(db, ws, owner_email="t@local")
-        assert agent._raw_model == PIN
-        assert agent.litellm_model.endswith("deepseek-v4-flash")
-
-    async def test_pin_reaches_the_compacter(self, deps, monkeypatch):
-        db, ws = deps
-        monkeypatch.setenv(ENV, "deepseek/deepseek-v4-pro")
-        agent = MetaAgent(db, ws, owner_email="t@local", mode="coding")
-        seen = {}
-
-        async def fake_acompletion(**kwargs):
-            seen.update(kwargs)
-            resp = MagicMock()
-            resp.choices[0].message.content = "summary"
-            return resp
-
-        with patch("core.meta_agent._load_agent_role_config",
-                   return_value={"model": "deepseek/deepseek-v4-flash",
-                                 "template": "compaction.md"}):
-            with patch("litellm.acompletion", side_effect=fake_acompletion):
-                out = await agent._summarize_chunk("some transcript")
-
-        assert out == "summary"
-        assert seen["model"].endswith("deepseek-v4-pro")

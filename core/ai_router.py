@@ -581,8 +581,9 @@ def measure_outgoing_body(kwargs: dict) -> tuple[int, list[dict]]:
     """(total bytes, per-part breakdown) of the body `kwargs` becomes.
 
     Called ONCE per completion by `refuse_if_body_too_large` (the funnel
-    `_complete_prebuilt` and both of `core/meta_agent.py`'s direct
-    `litellm.acompletion` sites go through it), never per candidate attempt and
+    `_complete_prebuilt` goes through it, as did both direct
+    `litellm.acompletion` sites in the retired core/meta_agent.py), never per
+    candidate attempt and
     never twice in one call. Cost: one JSON encoding of
     the payload the transport is about to encode anyway — a second pass over
     bytes that then go out over a network call costing seconds to minutes, so
@@ -706,17 +707,20 @@ def refuse_if_body_too_large(kwargs: dict, *, identity: dict | None = None) -> N
     """Measure the outgoing body once; refuse locally if it is over OUR bound.
 
     THE ONE GUARD for every writer that assembles a provider request itself.
-    There are three, and before this was lifted out of `AIGateway` only the
+    There were three, and before this was lifted out of `AIGateway` only the
     first was covered:
 
       1. `AIGateway._complete_prebuilt` — the gateway funnel (both public
          completions enter there).
-      2. `core/meta_agent.py:_summarize_chunk` — the compacter, which calls
-         `litellm.acompletion` directly and swallows every failure into None.
-      3. `core/meta_agent.py:_stream_llm` — the butler's streaming turn, through
-         its `_open_stream` attempt.
+      2. `_summarize_chunk` (was in the retired core/meta_agent.py) — the
+         compacter, which called `litellm.acompletion` directly and swallowed
+         every failure into None.
+      3. `_stream_llm` (was in the retired core/meta_agent.py) — the butler's
+         streaming turn, through its `_open_stream` attempt.
 
-    Sites 2 and 3 bypass the gateway entirely, so a body over the bound there
+    Sites 2 and 3 went with the butler; only site 1 remains today, and any new
+    direct `litellm.acompletion` caller must call this guard itself.
+    Sites 2 and 3 bypassed the gateway entirely, so a body over the bound there
     was forwarded unexamined and died upstream with the same unattributable
     `decoded body exceeds 50331648 bytes` the guard exists to replace. The
     bound, the error type and this message shape live HERE and nowhere else; an
@@ -1395,9 +1399,9 @@ class AIGateway:
         paying the same pass to rediscover the same number.
 
         The guard itself is `refuse_if_body_too_large` at module level, since
-        `core/meta_agent.py` calls `litellm.acompletion` directly at two sites
-        and needs the same policy; see its docstring for the three writers it
-        covers.
+        the retired core/meta_agent.py called `litellm.acompletion` directly at
+        two sites and needed the same policy; see its docstring for the writers
+        it covered.
         """
         refuse_if_body_too_large(
             kwargs, identity=self._body_identity(kwargs, native=native))

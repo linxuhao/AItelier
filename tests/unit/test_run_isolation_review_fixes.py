@@ -9,7 +9,6 @@ into a checkout a run was holding; and a routing fix had quietly acquired a
 remote branch push per run.
 """
 
-import asyncio
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -338,64 +337,6 @@ def test_explicit_direct_mode_leases_even_a_checkout_it_would_not_isolate(
         ri.ensure_for_run(db, run_id="run-p2", project_id="d2",
                           config_name="coding_impl", repo_mode="code",
                           requested_mode=ri.MODE_DIRECT)
-
-
-# ── P2-1: the interactive write surface ──────────────────────────────
-
-@pytest.fixture
-def butler(db, home, tmp_path, monkeypatch):
-    import api.dependencies as deps
-    from core.meta_agent import MetaAgent
-    from core.workspace_manager import WorkspaceManager
-
-    src = tmp_path / "src"
-    _init_repo(src)
-    (src / "file.txt").write_text("original\n")
-    subprocess.run(["git", "add", "-A"], cwd=src, check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "file"], cwd=src, check=True)
-    db.ensure_project("held", name="held", repo_type="existing", repo_path=str(src))
-    db.ensure_project("holder", name="holder", repo_type="existing",
-                      repo_path=str(src))
-    monkeypatch.setattr(deps, "db_instance", db)
-    ws = WorkspaceManager(str(tmp_path / "ws"), projects_base=str(tmp_path / "pb"))
-    ri.ensure_for_run(db, run_id="run-holding", project_id="holder",
-                      config_name="coding_impl", repo_mode="code",
-                      requested_mode=ri.MODE_DIRECT)
-    return MetaAgent(db, ws, owner_email="t@local", mode="coding"), src
-
-
-def test_coding_edit_and_create_never_write_the_leased_source(butler):
-    """Coding Mode file tools write only a session's owned working tree; with no
-    authenticated session scope they reach nothing — never the Source checkout."""
-    agent, src = butler
-    for name, args in (("edit_file", {"path": "file.txt", "old_str": "original",
-                                      "new_str": "changed"}),
-                       ("create_file", {"path": "new.txt", "content": "x"})):
-        out = asyncio.run(agent._execute_tool(name, {"project_id": "held", **args}))
-        assert "authenticated coding session" in out["error"], out
-    assert (src / "file.txt").read_text() == "original\n"
-    assert not (src / "new.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_coding_bash_never_runs_on_the_backend(butler, monkeypatch):
-    """No backend subprocess, leased or not: the owned shell or unavailable."""
-    agent, src = butler
-
-    async def forbidden(*a, **k):
-        raise AssertionError("a backend shell was spawned")
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
-    res = await agent._execute_tool("bash", {"project_id": "held", "command": "echo hello"})
-    assert "error" in res and "hello" not in str(res.get("stdout", ""))
-
-
-def test_butler_reads_are_unaffected_by_a_lease(butler):
-    agent, src = butler
-    tree = agent._tool_list_code_tree({"project_id": "held"})
-    assert "error" not in tree
-    read = agent._tool_read_code_file({"project_id": "held", "path": "file.txt"})
-    assert "error" not in read and "original" in read.get("content", "")
 
 
 # ── P2-2: pushing is a delivery policy, not a routing side effect ─────

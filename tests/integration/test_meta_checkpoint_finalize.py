@@ -306,32 +306,6 @@ def test_ordinary_concurrent_same_decision_requests_emit_once_and_select_one_bui
     assert len([r for r in sf.list_runs(pid) if r['graph_name']=='dpe_default_v2'])==1
 
 
-@pytest.mark.asyncio
-async def test_normal_butler_approval_and_old_replay_do_not_restart_later_build(normal,monkeypatch):
-    from core.meta_agent import MetaAgent
-    sf,db,ws,pid,rid,root,client,cp,wakes=normal
-    register_dpe(normal)
-    scheduler._sync_project_status_to_db(pid)
-    agent=MetaAgent.__new__(MetaAgent);agent.db=db;agent.ws=ws;agent._log_error=lambda msg:None
-    dispatch=[]
-    async def start(args):
-        # Only paid model execution is replaced; ordinary construction is real.
-        selected=db.get_active_projects(limit=10)
-        assert [p['project_id'] for p in selected]==[pid]
-        build=scheduler._get_or_create_skillflow_run(pid)
-        dispatch.append(build)
-        return {'status':'controlled-paid-dispatch','run_id':build}
-    monkeypatch.setattr(agent,'_tool_start_pipeline',start)
-    args={'run_id':rid,'expected_checkpoint':cp['expected_checkpoint'],'decision_id':'butler-reviewed'}
-    result=await agent._tool_approve_project_brief(args)
-    assert result['status']=='controlled-paid-dispatch',result
-    before=db.get_project(pid)
-    replay=await agent._tool_approve_project_brief(args)
-    assert replay['status']=='already_planned',replay
-    assert len(dispatch)==1 and db.get_project(pid)==before
-
-
-
 def test_real_meta_auth_and_state_controller_refuse_before_approval(normal,monkeypatch):
     from api.auth import CurrentUser
     from tests.unit.test_state_p3_checkpoint_entry import _bind_state_attempt, _as

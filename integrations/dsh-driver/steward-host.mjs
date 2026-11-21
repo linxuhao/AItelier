@@ -653,12 +653,69 @@ export function channelOps(request) {
   };
 }
 
-export function stewardOps({ request, project, me, stateDir }) {
+/** Step 23 (design-steward 7.7.6): what a group turn is shown of one project - the summary
+ *  without the fields that name drivers or carry internal words (live claims, evidence, hold
+ *  reasons). */
+export function publicProjectSummary(summary) {
+  if (!summary || !Array.isArray(summary.open_work)) return summary;
+  const strip = ({ live_claims, latest_evidence, held_reason, held_reason_truncated, held_reason_chars, ...line }) => line;
+  return { ...summary, open_work: summary.open_work.map(strip) };
+}
+
+/** Step 23 (design-steward 7.7): the host side of the family group, over the State commands
+ *  and queries of step 23. Every call is the HOST's own (no public-read header) except the two
+ *  family memory tools, which go through `toolRequest` - the request a group turn's tools use,
+ *  carrying X-AItelier-Read-As - because the backend accepts them only from a group turn. Request
+ *  keys derive from the channel's own message identity, so a redelivery is State's replay. */
+export function groupOps({ request, toolRequest = request, project, me }) {
+  const result = r => r?.result ?? r;
+  const refused = error => {
+    const code = refusalCode(error);
+    if (code) return { refused: code };
+    if (error?.status === 400 || error?.status === 422) return { refused: 'invalid_request' };
+    throw error;
+  };
+  return {
+    list: signal => request('/api/state/query/list_owner_groups', {}, signal).then(result),
+    bind: ({ channel, groupRef, senderRef, messageRef, prefix, code }, signal) => request('/api/state/commands/bind_owner_group', {
+      request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
+      code, mention_prefix: prefix, channel_message_ref: messageRef }, signal).then(result, refused),
+    relay: ({ channel, groupRef, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_group_message', {
+      request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
+      channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}) }, signal).then(result, refused),
+    reply: ({ questionId, alsoAnswers = [], body }, signal) => request('/api/state/commands/post_group_reply', {
+      request_key: `group-reply:${questionId}`, question_id: questionId, body,
+      ...(alsoAnswers.length ? { also_answers: alsoAnswers } : {}) }, signal).then(result, refused),
+    recent: ({ channel, groupRef }, signal) => request('/api/state/query/list_group_recent',
+      { channel, group_ref: groupRef, limit: 6 }, signal).then(result),
+    audience: ({ turn, audience, group, senderRefs = [] }, signal) => request('/api/state/commands/set_steward_turn_audience',
+      { turn, audience, ...(group ? { group } : {}), sender_refs: senderRefs }, signal).then(result),
+    /** An owner message newer than `since` is among the turn's input (the reading forwardFinalText uses). */
+    async ownerSpokeSince(since, input, signal) {
+      return (await unansweredOwnerMessages({ request, project, me, signal }))
+        .some(m => input.includes(m.message_id) && String(m.created_at) > String(since));
+    },
+    familyNote: (text, signal) => toolRequest('/api/state/commands/note_family_memory',
+      { request_key: `family:${digest(String(text))}`, text: String(text ?? '') }, signal).then(result, refusedBy),
+    familyShow: signal => toolRequest('/api/state/query/list_family_memory', {}, signal).then(result, refusedBy),
+  };
+}
+
+export function stewardOps({ request, rawRequest = request, project, me, stateDir, groupTurn = () => false }) {
   const list = (path, body, signal) => request(path, body, signal).then(r => r.result ?? r);
   return {
     memory: { ownerMessage: async (id, signal) => Boolean(await ownerMessageById({ request, project, id, signal })) },
     portfolio: {
       async projects(signal) {
+        // Step 23: in a group turn only the public projects, read as an anonymous reader would
+        // (the request carries the public-read header): names and counts, no director state,
+        // no open questions (both need a credential).
+        if (groupTurn()) {
+          const catalog = await list('/api/state/query/project_catalog', {}, signal);
+          const rows = Array.isArray(catalog) ? catalog : catalog.projects ?? [];
+          return { projects: rows.filter(p => p.project_id !== project).map(p => ({ project_id: p.project_id, title: p.title,
+            node_count: p.node_count ?? null, verified_count: p.verified_count ?? null })) };
+        }
         const [projects, drivers] = await Promise.all([list('/api/state/query/list_projects', {}, signal),
           request('/api/dsh-drivers', undefined, signal)]);
         const rows = (Array.isArray(projects) ? projects : projects.projects ?? []).filter(p => p.project_id !== project);
@@ -678,6 +735,20 @@ export function stewardOps({ request, project, me, stateDir }) {
         // "the first page" (review 360).
         if (issuesAfter !== undefined && issuesAfter !== null && !(Number.isInteger(issuesAfter) && issuesAfter >= 0))
           return { refused: 'invalid_issues_after', reason: 'issues_after is the issues_next_after integer a previous answer gave' };
+        if (groupTurn()) {
+          // A private project and one that does not exist answer the same (7.7.5).
+          let overview, issues;
+          try {
+            [overview, issues] = await Promise.all([list('/api/state/query/project_overview', { project_id: projectId }, signal),
+              list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: ISSUES_PAGE,
+                ...(Number.isInteger(issuesAfter) && issuesAfter > 0 ? { after: issuesAfter } : {}) }, signal)]);
+          } catch (error) {
+            if (error?.status === 403 || error?.status === 404) return { refused: 'not_found' };
+            throw error;
+          }
+          return { project_id: projectId, overview: publicProjectSummary(projectSummary(overview, { openAfter })),
+            open_issues: issuesSummary(issues) };
+        }
         const [overview, issues, questions] = await Promise.all([
           list('/api/state/query/project_overview', { project_id: projectId }, signal),
           list('/api/state/query/list_issues', { project_id: projectId, statuses: ['open'], limit: ISSUES_PAGE,
@@ -779,7 +850,9 @@ export function stewardOps({ request, project, me, stateDir }) {
       withdraw: ({ id, reason }, signal) => request('/api/state/commands/withdraw_steward_proposal',
         { request_key: `withdraw-proposal:${id}`, proposal_id: id, reason }, signal).then(r => r.result ?? r, refusedBy),
     },
-    channels: channelOps(request),
+    // The channels and the group are the host's own (never a group turn's header).
+    channels: channelOps(rawRequest),
+    groups: groupOps({ request: rawRequest, toolRequest: request, project, me }),
     async handoff({ projectId, text, citesUserMessageId }, signal) {
       if (typeof projectId !== 'string' || !projectId || projectId === project) return { refused: 'invalid_project', reason: 'name another project' };
       if (typeof text !== 'string' || !text.trim()) return { refused: 'empty_text' };

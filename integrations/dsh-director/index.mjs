@@ -13,7 +13,7 @@
  *  used to be a backend call. Order of registration is kept, because the order of
  *  tools in a request is part of the request (design §9 MF2). */
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -31,7 +31,8 @@ import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
-import { createOwnerChannels } from './lib/channels.mjs';
+import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
+import { GroupTurns, GROUP_SOURCE, foldGroupTurns, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 
 export const name = 'dsh-director';
@@ -52,7 +53,7 @@ export function ownerChannelsFor(ctx, host) {
   // The owed store lives in the director's own state dir: a message that still owes a line
   // outlives the process, and it does so in the one directory this session already owns.
   const stateDir = host.config?.stateDir;
-  return createOwnerChannels({ host: host.channels,
+  return createOwnerChannels({ host: host.channels, ...(host.groups ? { groups: host.groups } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
     log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
 }
@@ -146,6 +147,24 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     void refusals.add(describeDispatch(exec.arguments), 'dsh').catch(warn);
   });
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
+  // Step 23 (design-steward 7.7): the steward's family-group turns - whose turn it is, what it
+  // may call, and that a group turn never stays in the owner's context (lib/group-turns.mjs).
+  const groupTurns = rootRole === 'steward' ? new GroupTurns({ stateDir: config.stateDir, limits: GROUP_LIMITS }) : undefined;
+  if (groupTurns) {
+    // Synchronous, keyed on the caller's session; call_tool reaches the same guard.
+    ctx.tools.guard(exec => exec.agent?.session?.id === config.sessionId ? groupTurns.guard(exec.name) : undefined);
+    // A compaction of the steward's session never carries a group turn (7.7.6a two): the request
+    // is rebuilt without those messages and sent once more; that copy passes through untouched.
+    const rebuilt = new WeakSet();
+    ctx.on('llm/stream', (options, next) => {
+      if (options?.purpose !== 'compaction' || options.sessionId !== config.sessionId || rebuilt.has(options) || !agent) return next();
+      const replay = filterCompactionRequest(options, agent.session.snapshotEvents(), createUserMessage);
+      if (!replay) return next();
+      rebuilt.add(replay);
+      ctx.logger.info('compaction request: group turns removed');
+      return ctx.llm.stream(replay);
+    });
+  }
   // Plugin step 11: the owner's memory, only when the host config asks for it. A memory
   // that cannot start is {error}: its tools answer that, everything else runs.
   const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId,
@@ -178,7 +197,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Tests shrink a minute; production never sets it.
   const dormantMinuteMs = Number(config.dormantMinuteMs) > 0 ? Number(config.dormantMinuteMs) : 60 * 1000;
   // idleReview is created after the agent; tools reach it only when called.
-  let agent, agentCtx, idleReview, waiting = false, disposed = false;
+  let agent, agentCtx, idleReview, waiting = false, disposed = false, resolveAgent;
+  const agentExists = new Promise(resolve => { resolveAgent = resolve; });
   // watch_process: pid -> { note, since }. One poller while any watch exists.
   const watches = new Map();
   const endsDormancy = endsDormancyFor(wakeSourcesFor(labels));
@@ -299,6 +319,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     liveSessions, planWork, todoPlans, batchRedispatch, notify: notifyEvent, eventMessage, report, currentPhase,
     memory: memory?.store,
     memoryError: memory?.error,
+    /** Step 23: whose turn the steward is in ({kind: 'owner'} or {kind: 'group', ...}); unknown
+     *  reads as a group. undefined for a director. */
+    turnAudience: () => groupTurns?.audience(),
     ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
@@ -310,6 +333,21 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Host-scoped additions of the host first (they precede the plan tools in every
   // request, as they always did), then the worker-facing plan tools.
   await op('install')(api);
+  // Step 23: an accepted group question is steered into the steward tagged with its group (the
+  // tag, never the text, makes the turn a group turn), with that group's recent exchanges.
+  if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label }) => {
+    await agentExists;
+    const listed = await host.groups.list().catch(() => ({}));
+    const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
+    const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
+    while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
+    const wake = { group_turn: { group: group?.label ?? '家庭群', messages: [{ message_id, sender_role, sender: sender_label,
+      ...(at ? { at } : {}), text }], recent } };
+    ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
+      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: group?.label ?? null, question_ids: [message_id],
+        sender_refs: [senderRef] } })));
+    await ctx.sessionPersistence.flush();
+  });
   // The host is installed: the channel plugins' messages may reach it now.
   channels?.ready();
   const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };
@@ -368,7 +406,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       // Tests shrink the gap before a tool result's clock; production never sets it.
       ...(Number(config.clockToolGapMs) > 0 ? { gapMs: Number(config.clockToolGapMs) } : {}) });
     const injection = new ContextInjection(subject.session, contextSource, createUserMessage,
-      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock });
+      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock,
+        // Step 23: never in a group turn (7.7.6).
+        ...(groupTurns ? { audience: () => groupTurns.audience().kind } : {}) });
     // The director prompt section and the snapshot hooks are the director's own; a
     // host that registers sections of its own calls these at the point it wants them
     // (the backend adapter: after its goal and protocol sections and its model selection), and
@@ -386,8 +426,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
         clock.observe(event);
       });
       scope.on('agent/pre-step', async (_payload, next) => {
-        const decision = await next(); // Includes the base automatic compactor.
+        let decision = await next(); // Includes the base automatic compactor.
         if (decision.kind !== 'enter') return decision;
+        if (groupTurns) {
+          decision = await groupStep(_payload, decision);
+          if (decision.kind !== 'enter') return decision;
+        }
         const message = await injection.prepare();
         return message ? { ...decision, messages: [...decision.messages, message] } : decision;
       });
@@ -586,7 +630,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(args, exec) {
         const observation = await ctx.sessionQuery.observeSession(subject.session.id, { signal: exec.signal, projectionMode: 'none' });
-        try { return { session_id: subject.session.id, ...grepHistory(observation.events, args.pattern, args, { clockKind: labels.clock }) }; }
+        // Step 23: nothing a group turn said is found here (7.7.6a three).
+        const events = groupTurns ? withoutGroupTurns(observation.events) : observation.events;
+        try { return { session_id: subject.session.id, ...grepHistory(events, args.pattern, args, { clockKind: labels.clock }) }; }
         finally { observation[Symbol.dispose](); }
       },
     }));
@@ -599,12 +645,69 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (host.proposals) registerProposalTools(scope, { defineTool, jsonOutput, proposals: host.proposals });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
+    // Step 23: the family memory, a store of its own on the host, for group turns only (the
+    // guard refuses both tools in an owner turn; the host accepts them only from a group turn).
+    if (groupTurns && host.groups?.familyNote) {
+      scope.tools.register(defineTool({ name: 'family_memory_note',
+        description: 'Group turns only. Keep one short thing someone in this family group asked you to remember for the family (at most 200 characters). Never your owner\'s memory; shopping and to-do items go to the family lists.',
+        parameters: { text: { type: 'string', required: true } }, output: jsonOutput,
+        execute: (args, exec) => host.groups.familyNote(args.text, exec.signal) }));
+      scope.tools.register(defineTool({ name: 'family_memory_show',
+        description: 'Group turns only. This group\'s family memory (newest first) and your owner\'s note to the family.',
+        parameters: {}, output: jsonOutput, execute: (_args, exec) => host.groups.familyShow(exec.signal) }));
+    }
+  };
+  // Step 23: the first step of every steward turn decides its audience, puts input of another
+  // audience back for the next turn, folds the finished group turns, records the audience on the
+  // host and sets or clears the pause - all before the step runs; any failure rejects the step
+  // and its input is kept and delivered again (7.7.3 item 6).
+  let setupFailures = 0;
+  const pendingFile = config.stateDir ? join(config.stateDir, 'group-setup-pending.json') : undefined;
+  const redeliver = () => {
+    let kept = [];
+    try { kept = pendingFile ? JSON.parse(readFileSync(pendingFile, 'utf8')) : []; } catch { kept = []; }
+    if (!kept.length || !agent || disposed) return;
+    rmSync(pendingFile, { force: true });
+    ctx.agents.withoutInitiator(() => { for (const m of kept) agent.steer(createUserMessage({ content: m.content, source: m.source })); });
+  };
+  const groupStep = async (payload, decision) => {
+    const { keep, back } = groupTurns.split(decision.messages, payload.step);
+    for (const message of [...back].reverse()) payload.agent.inbox.prepend('next-turn', message);
+    if (payload.step !== 1) return { ...decision, messages: keep };
+    const audience = groupTurns.audience();
+    try {
+      foldGroupTurns(payload.agent.session, createUserMessage);
+      if (host.groups?.audience) await host.groups.audience({ turn: String(payload.turn), audience: audience.kind,
+        ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
+        senderRefs: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []) }, payload.signal);
+      if (audience.kind === 'group') groupTurns.pause();
+      else {
+        const pause = groupTurns.pauseRecord();
+        const given = keep.map(m => (m.content ?? []).map(b => b.text ?? '').join('')).join('\n');
+        if (pause && host.groups?.ownerSpokeSince && await host.groups.ownerSpokeSince(pause.at, given, payload.signal)) groupTurns.unpause();
+      }
+      setupFailures = 0;
+      return { ...decision, messages: keep };
+    } catch (error) {
+      setupFailures += 1;
+      ctx.logger.warn('group turn setup failed: ' + String(error?.message ?? error).slice(0, 300));
+      if (pendingFile) {
+        let kept = [];
+        try { kept = JSON.parse(readFileSync(pendingFile, 'utf8')); } catch { kept = []; }
+        writeFileSync(pendingFile, JSON.stringify([...kept, ...keep.map(m => ({ content: m.content, source: m.source }))]), { mode: 0o600 });
+      }
+      groupTurns.current = undefined;
+      if (setupFailures >= 2) await api.setHostError('group_turn_setup_failed: ' + String(error?.message ?? error).slice(0, 300));
+      else setTimeout(redeliver, 30000).unref?.();
+      return { kind: 'reject' };
+    }
   };
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: config.sessionId })
     : await ctx.agents.create({ ...options, sessionId: config.sessionId, meta: { cwd: process.cwd() } });
   agent = handle.agent;
+  resolveAgent();
   // The resumed session's recorded request envelope is NOT rewritten here. Until
   // 2026-11-15 this spot appended a request/header retiring tools the process does
   // not offer; at boot no turn is open, and DSH refuses to load a log with a
@@ -738,6 +841,29 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       source: { kind: labels.todoBrief } });
     return { ...decision, messages: [...decision.messages, brief] };
   });
+  // Step 23: a group turn that ended normally is answered in its group by code: the steward's
+  // last words go to the host (exit check, one message, the latest question's group), then
+  // out through the channel. An owner turn's words never go to a group.
+  if (groupTurns && channels && host.groups) {
+    let last = '';
+    ctx.on('session/event', (session, event) => {
+      if (session !== agent.session) return;
+      if (event.type === 'turn/start') last = '';
+      else if (event.type === 'assistant/message') {
+        const said = (event.data?.message?.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join('').trim();
+        if (said) last = said;
+      } else if (event.type === 'turn/end') {
+        const turn = groupTurns.current, body = last;
+        last = '';
+        if (turn?.audience.kind !== 'group' || !body || event.data?.reason?.kind !== 'completed' || !turn.questions.length) return;
+        const questions = [...turn.questions];
+        void host.groups.reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body })
+          .then(sent => sent?.text ? channels.sendGroup(sent.channel, sent.group_ref, sent.text) : ctx.logger.warn('group reply refused: ' + String(sent?.refused)))
+          .catch(error => ctx.logger.warn('group reply: ' + String(error?.message ?? error).slice(0, 300)));
+      }
+    });
+    setTimeout(redeliver, 1000).unref?.();
+  }
   ctx.on('agent/error', ({ agent: subject, error }) => {
     if (subject !== agent) return;
     completionError = connectionErrorMessage(error, texts.modelCompletion);

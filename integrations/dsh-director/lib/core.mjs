@@ -146,8 +146,10 @@ export class Clock {
  *  `header` (and the `clock` line, when there is a clock). */
 export class ContextInjection {
   constructor(session, runtime, createMessage, { kind = defaultLabels.context, section = defaultLabels.contextSection,
-    header = 'Director context — startup / post-compaction snapshot:\n', clock } = {}) {
-    Object.assign(this, { session, runtime, createMessage, kind, section, header, clock });
+    header = 'Director context — startup / post-compaction snapshot:\n', clock, audience = () => 'owner' } = {}) {
+    // `audience()`: whose turn it is (step 23, design-steward 7.7.6). Only an owner turn gets
+    // the snapshot; a group turn neither gets it nor counts as having had it.
+    Object.assign(this, { session, runtime, createMessage, kind, section, header, clock, audience });
     this.epoch = 0;
     this.injected = undefined;
     this.queued = undefined;
@@ -161,7 +163,7 @@ export class ContextInjection {
     }
   }
   async prepare() {
-    if (this.injected === this.epoch) return;
+    if (this.injected === this.epoch || this.audience() !== 'owner') return;
     await this.runtime.refresh();
     // A clock that fails leaves the snapshot without its line, never without the snapshot:
     // a throw here would leave `injected` unset and throw again on every step.
@@ -180,7 +182,7 @@ export class ContextInjection {
     return message;
   }
   async beforeRequest() {
-    if (this.injected === this.epoch || this.queued?.epoch === this.epoch) return;
+    if (this.injected === this.epoch || this.queued?.epoch === this.epoch || this.audience() !== 'owner') return;
     // Overflow retries do not run pre-step again. Their initial step already
     // committed its system prompt; append the fresh postcompact snapshot now.
     const message = await this.prepare();

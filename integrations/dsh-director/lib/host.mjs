@@ -18,10 +18,12 @@ import { ROOT_ROLES } from './roles.mjs';
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
 export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory',
-  'portfolio', 'handoff', 'proposals', 'channels'];
+  'portfolio', 'handoff', 'proposals', 'channels', 'groups'];
 /** v1.2 (plugin step 12): what each object-shaped capability must implement. */
 const OBJECT_OPS = { attention: ['ask', 'close', 'list'], memory: ['ownerMessage'], portfolio: ['projects', 'project', 'conversation'],
-  proposals: ['propose', 'withdraw'], channels: ['relay', 'bind', 'sourceOf', 'recordDelivery', 'list'] };
+  proposals: ['propose', 'withdraw'], channels: ['relay', 'bind', 'sourceOf', 'recordDelivery', 'list'],
+  // Step 23 (design-steward 7.7): the family group's host side.
+  groups: ['list', 'bind', 'relay', 'reply', 'recent', 'audience', 'ownerSpokeSince', 'familyNote', 'familyShow'] };
 /** The states a work item can be in (aligned with MCP Tasks / A2A task states). */
 export const WORK_STATES = ['working', 'input_required', 'completed', 'failed', 'cancelled', 'unknown'];
 /** States after which nothing of the work item may run again. */
@@ -172,6 +174,7 @@ export const optionalDefaults = Object.freeze({
   handoff: undefined,                  // no handoff channel: handoff is not registered
   proposals: undefined,                // no proposals: propose / withdraw_proposal are not registered
   channels: undefined,                 // no owner chat channels: the ownerChannels service is not provided
+  groups: undefined,                   // no family group: no group path, no family memory tools
 });
 
 /** Whether a work state means nothing of that work may run again. */

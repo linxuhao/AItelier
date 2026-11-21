@@ -67,7 +67,7 @@ export const LOCAL_OWNER = 'owner:local';
 const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
 const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
   + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
-/** One page of a portfolio answer, as the AItelier steward host pages one (steward-host.mjs
+/** One page of a portfolio answer, as the backend adapter's steward host pages one (steward-host.mjs
  *  NODES_CHARS): as many entries as fit while the whole answer stays under this many characters,
  *  and at least one, so a walk always moves forward. */
 export const PAGE_CHARS = 9000;
@@ -182,7 +182,7 @@ export function localHost(options = {}) {
         }
       })) };
     },
-    /** One project, its open work one page at a time (the AItelier arm's shape): in work-item id
+    /** One project, its open work one page at a time (the backend adapter's shape): in work-item id
      *  order, as many as fit under PAGE_CHARS, then nodes_shown.open_next_after to pass back as
      *  open_after (null: there is no more, an empty list included). The cursor is the last id
      *  shown (a keyset), so an item that closes between two pages moves nothing else. */
@@ -287,7 +287,7 @@ export function localHost(options = {}) {
       if (typeof reason !== 'string' || !reason.trim()) return { refused: 'reason_required', reason: 'say why, in your owner\'s terms' };
       const all = await proposalList();
       const stored = { project_id: payload.project_id, title: payload.title, goal: payload.goal, seed_nodes: payload.seed_nodes ?? [] };
-      // The request key is the proposal's digest, as the AItelier arm's (steward-host.mjs): a
+      // The request key is the proposal's digest, as the backend adapter's (steward-host.mjs): a
       // retried call is answered with the proposal it made, not a second open card.
       const requestKey = 'proposal:' + createHash('sha256').update(JSON.stringify({ kind, payload: stored, reason: reason.trim(),
         ...(supersedes !== undefined ? { supersedes } : {}) })).digest('hex').slice(0, 40);

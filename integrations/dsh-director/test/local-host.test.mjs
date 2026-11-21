@@ -696,7 +696,7 @@ test('local host, review 467: the owner\'s commands answer only in the root sess
   events.stop(); await events.done;
 });
 
-test('local host, review 467: steward.md tells a standalone steward to use its owner_commands, and keeps the AItelier phrase', async () => {
+test('local host, review 467: steward.md tells a standalone steward to use its owner_commands, and keeps the chat-channel phrase', async () => {
   const md = await readFile(new URL('../steward.md', import.meta.url), 'utf8');
   assert.match(md, /`同意 proposal <id>` to approve, `拒绝 proposal <id>` to decline/);
   assert.match(md, /send that line back from Slack or WeChat as\s+well as decide on the dashboard/);

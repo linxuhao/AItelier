@@ -1,15 +1,16 @@
 """Every loop that holds a claim across an await must handle cancellation.
 
 The behavioural test next door proves the handler works. It cannot prove the
-handler is actually attached at each of the three real loops — and three copies
-of the same subtle rule is exactly where one gets missed. This walks the source
+handler is actually attached at each real loop — and several copies of the
+same subtle rule is exactly where one gets missed. This walks the source
 instead of trusting that it was wired.
 
 The shape it looks for is "holds a claim across an await": a `try` whose body
 both awaits `runner.execute(...)` and calls `confirm_step`. That is the block
 where a cancellation strands a claim. A bare `await runner.execute(...)` that
-neither confirms nor fails (meta_agent's `_run_step`, which hands the coroutine
-to a caller that owns the loop) is not that shape and is not required to.
+neither confirms nor fails (as the retired butler's `_run_step` did, handing the
+coroutine to a caller that owned the loop) is not that shape and is not
+required to.
 """
 
 import ast

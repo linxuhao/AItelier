@@ -1939,9 +1939,9 @@ def _register_lifecycle_tools(tool):
                                  reason or "stopped via the MCP endpoint")
         except Exception as e:
             return {**echo, "error": f"could not stop it: {e}"}
-        # A run that ended releases its checkout,
-        # a run that is draining keeps it, and the reconciler decides which by
-        # re-reading the engine rather than by trusting the outcome above.
+        # A run that ended releases its checkout, a run that is draining keeps
+        # it, and the reconciler decides which by re-reading the engine rather
+        # than by trusting the outcome above.
         try:
             from core.run_isolation import reconcile_lease_after_stop
             reconcile_lease_after_stop(None, run["id"])

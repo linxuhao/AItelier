@@ -665,17 +665,20 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dic
     operation = operations.get("driver_postcompact_guidance") if isinstance(operations, dict) else None
     selector_advertised = False
     if isinstance(operation, dict):
-        authenticated = True  # _authorized_connection already matched this session driver
+        # The identity half of the decision above is already settled: the first
+        # line of this function called _authorized_connection, which raises
+        # unless driver_whoami answers driver:<the bound id> before anything is
+        # read, and caches the connection it verified. So a "not authenticated"
+        # flag set here would be a literal True and the notice branch it guards
+        # would be text no code path can emit — dead prose in a block a
+        # compacted session reads. The advertisement's shape is the only live
+        # question, and it is the only reason the surviving notice names.
         arguments = operation.get("arguments")
         properties = arguments.get("properties") if isinstance(arguments, dict) else None
         selector = properties.get("standing_only") if isinstance(properties, dict) else None
-        selector_advertised = (
-            authenticated and isinstance(selector, dict) and selector.get("type") == "boolean")
-        if selector_advertised:
-            reason = ""
-        else:
-            reason = ("driver identity not established" if not authenticated
-                      else "server does not advertise the standing_only selector")
+        selector_advertised = isinstance(selector, dict) and selector.get("type") == "boolean"
+        reason = "" if selector_advertised else (
+            "server does not advertise the standing_only selector")
     if selector_advertised:
         standing = _mcp_call(url, headers, "state_graph_read", {
             "action": "driver_postcompact_guidance",

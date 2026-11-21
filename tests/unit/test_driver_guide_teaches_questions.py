@@ -79,3 +79,29 @@ def test_the_driver_inbox_says_the_guard_covers_only_the_admin_and_external_toke
     assert "the server-side credential guard covers the admin and MCP external tokens only" in text
     assert "a driver's own `AITELIER_DRIVER_TOKEN` is not covered" in text
     assert "a hand-off names where the token lives, never its value" in text
+
+
+def test_the_driver_inbox_teaches_the_reader_page_shape():
+    """A driver reading the guide can learn the whole reader contract.
+
+    The served-parameter surface of ``list_driver_messages`` (``after``,
+    ``limit``, ``newest``, ``statuses``) and the two counters the reader adds
+    to the page are what a compacted driver cannot discover from a guide that
+    only names the call, and a wrong default would send every older client's
+    forward-keyset poll somewhere else.
+    """
+    text = _served_text()
+    # The reader parameters, named as parameters (backticked) rather than
+    # incidental prose.
+    for parameter in ("`after`", "`limit`", "`newest`", "`statuses`"):
+        assert parameter in text, f"the guide must name the reader parameter {parameter}"
+    # The two additive counters, and what they count: the whole match, not
+    # the page that was just returned.
+    assert ("`matched_total` counts every delivery the same filters match") in text
+    assert "the whole match, not the page just returned" in text
+    assert ("`has_more` says whether any matched delivery falls outside that page") in text
+    # The default call is still the ascending forward keyset older clients
+    # page with, so the new flags cannot change what they observe.
+    assert ("a call passing neither `newest` nor `statuses` keeps the ascending "
+            "forward-keyset answer older clients rely on") in text, (
+        "the guide must say the unflagged call is still the ascending forward page")

@@ -29,6 +29,7 @@ function fixture({ cache = CACHE, registry = [...CACHE.effective_tools], clock =
     connections: async () => { calls.push(['connections']); return JSON.parse(JSON.stringify(cache)); },
     resyncDue: async hash => { calls.push(['resync', hash]); },
     humanInput: human,
+    writes: ['host_write'],
   };
   const catalog = new StewardCatalog({ host, stateDir: dir, rootSession: 'root', registryNames: () => registry,
     audience: () => turn.audience ?? turn, now: () => clock.t, sleep: async ms => { clock.t += ms; } });
@@ -127,7 +128,7 @@ test('external content: egress tools wait for a person, own writes need one in t
   assert.equal(JSON.parse(readFileSync(join(dir, 'steward-turn.json'), 'utf8')).external, true, 'written before the result goes on');
   assert.match(catalog.refusal(exec('mcp__sw__media__web_search')), /^external_content_seen/);
   assert.equal(catalog.refusal(exec('mcp__sw__media__ocr_image')), undefined, 'egress off: still callable');
-  for (const name of NATIVE_WRITES) assert.match(catalog.refusal(exec(name)), /^external_content_seen/, name);
+  for (const name of [...NATIVE_WRITES, 'host_write']) assert.match(catalog.refusal(exec(name)), /^external_content_seen/, name);
   assert.equal(catalog.refusal(exec('portfolio_projects')), undefined);
   // A person's message mid-turn lets this turn's own writes through, never the egress tools.
   catalog.observe({ type: 'assistant/message', data: {} });

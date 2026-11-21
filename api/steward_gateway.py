@@ -225,6 +225,16 @@ class Upstream:
                     await self.task
 
 
+async def _call_tool(session, raw_name: str, arguments: dict):
+    """tools/call without the client's own output-schema check: the steward is never given
+    an outputSchema (7.8.5), so a result is passed on as the upstream answered it - a text
+    answer from a tool that declares one is not turned into a broken session."""
+    from mcp import types
+    request = types.ClientRequest(types.CallToolRequest(params=types.CallToolRequestParams(name=raw_name,
+                                                                                           arguments=arguments)))
+    return await session.send_request(request, types.CallToolResult)
+
+
 def fingerprint(row) -> tuple:
     return (row["url"], row["auth_kind"], row["header_name"], row["generation"])
 
@@ -437,7 +447,7 @@ class Gateway:
         for attempt in (1, 2):
             upstream = await self.upstream(row)
             try:
-                result = await asyncio.wait_for(upstream.session.call_tool(raw_name, arguments), UPSTREAM_TIMEOUT)
+                result = await asyncio.wait_for(_call_tool(upstream.session, raw_name, arguments), UPSTREAM_TIMEOUT)
                 return result.model_dump(mode="json", by_alias=True, exclude_none=True)
             except McpError as exc:
                 if "terminated" not in str(exc).lower() and "not found" not in str(exc).lower():
@@ -447,6 +457,7 @@ class Gateway:
                 raise
             except Exception as exc:  # noqa: BLE001 - the session itself failed
                 broken = exc
+            logger.info("steward gateway: upstream session of %s failed (%s)", row["conn_id"], type(broken).__name__)
             await self.drop(row["conn_id"])
             if not retry or attempt == 2:
                 raise SessionBroken(type(broken).__name__)

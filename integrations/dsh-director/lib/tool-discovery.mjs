@@ -110,7 +110,9 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
     const role = roleFor(caller?.session?.id);
-    const tools = presentTools(assembly.tools, role);
+    // A host-catalog role whose host gives no catalog (the standalone local host) has
+    // nothing to discover: search_tools and call_tool are not shown to it at all.
+    const tools = presentTools(assembly.tools, role).filter(t => !(role.catalog && !catalog && metaTools.has(t.name)));
     return { ...assembly, tools, sections: presentSections(assembly.sections, role, wording.sectionName, tools.map(t => t.name)) };
   });
   ctx.systemPrompt.section({ name: wording.sectionName, order: 3090, interpolate: false, text: wording.section });

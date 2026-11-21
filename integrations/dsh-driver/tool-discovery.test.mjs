@@ -287,10 +287,9 @@ if (libraries.status === 'unmeasured') {
     const steward = await sectionsFor('steward'), director = await sectionsFor(undefined);
     // This deployment names the discovery section itself (aitelier-texts.mjs).
     const discovery = discoveryTexts.sectionName;
-    for (const name of ['tool:bash', 'tool:jobs', 'mcp:devmcp', 'mcp-resource-servers'])
+    // Without a host catalog (step 24.1a) the steward is shown no discovery tool, so no discovery section.
+    for (const name of ['tool:bash', 'tool:jobs', 'mcp:devmcp', 'mcp-resource-servers', discovery])
       assert.ok(!steward.includes(name), name + ' shown to the steward: ' + steward);
-    // Step 24.1a: the steward presents search_tools (its own catalog), so it reads the discovery section.
-    assert.ok(steward.includes(discovery), 'the discovery section is the steward\'s now');
     assert.ok(steward.includes('aitelier:host-own'), 'the host\'s own section is kept');
     for (const name of [...registered, discovery])
       assert.ok(director.includes(name), name + ' missing for the director: ' + director);
@@ -334,8 +333,10 @@ if (libraries.status === 'unmeasured') {
     }, effective, 'steward', { catalog: id => (id === 'root' ? turn : undefined) });
   });
 
-  test('step 24.1a: a steward without a host catalog finds nothing; a director is unchanged', () => fixture(async ({ ctx, agent, call }) => {
+  test('step 24.1a: a steward without a host catalog finds nothing and is shown no discovery tool', () => fixture(async ({ ctx, agent, call }) => {
     const root = agent('root');
+    const shown = (await ctx.systemPrompt.assemble({ scope: root })).tools.map(t => t.name);
+    assert.ok(!shown.includes('search_tools') && !shown.includes('call_tool'), shown.join(','));
     ctx.tools.register(defineTool({ name: 'mcp__sw__media__web_search', description: 'web search', parameters: {}, output, async execute() { return 'x'; } }));
     assert.deepEqual((await call('search_tools', { query: 'web' }, root)).value.tools, []);
     assert.equal((await call('mcp__sw__media__web_search', {}, root)).isError, true);

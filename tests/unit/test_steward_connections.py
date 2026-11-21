@@ -642,6 +642,9 @@ def test_tools_call_judgement_in_order(world, server, upstream):
         return body_of(rpc(server, world, "tools/call", {"name": name, "arguments": arguments}, **kw))[0]
     ok = call("media__web_search", {"query": "weather"})
     assert json.loads(ok["result"]["content"][0]["text"])["echo"] == {"name": "web_search", "arguments": {"query": "weather"}}
+    # A tool that declares an outputSchema and answers with text only is passed on (the
+    # steward never sees an outputSchema; the gateway does not judge one either).
+    assert "result" in call("media__ocr_image", {"image_file_id": "f"})
     upstream.methods.clear()
     assert call("media__send_message", {"to": "a"})["error"]["data"]["code"] == "tool_not_allowed"
     assert call("media__nope", {})["error"]["data"]["code"] == "tool_not_allowed"
@@ -994,3 +997,74 @@ def test_markers_survive_a_backend_restart_and_tools_list_needs_no_upstream(worl
     assert sc.STREAM_DOWN in _markers(world)
     upstream.app = None  # every upstream gone: tools/list is still answered
     assert rpc(server, world, "tools/list").status_code == 200
+
+
+# --- the real client: a newly allowed tool without a restart --------------------------------------
+
+CLIENT_SCRIPT = r"""
+import { createRequire } from 'node:module';
+import { createInterface } from 'node:readline';
+const require = createRequire('/opt/aitelier-dsh/node_modules/.probe.js');
+const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
+const { default: SystemPrompt } = await import(require.resolve('@deepseek-ai/dsh-system-prompt'));
+const { default: Tools } = await import(require.resolve('@deepseek-ai/dsh-tools'));
+const mcp = await import(require.resolve('@deepseek-ai/dsh-mcp-client'));
+const [url, token] = process.argv.slice(2);
+const ctx = new Context();
+const prompt = ctx.plugin(SystemPrompt); await prompt.await();
+const tools = ctx.plugin(Tools); await tools.await();
+ctx.plugin(mcp, { serverName: 'sw', transport: 'streamable-http', url, headers: { 'X-AItelier-Driver-Token': token },
+  failOnStartupError: false, toolCallTimeoutMs: 30000, reconnect: { maxAttempts: 1000000 } });
+const names = () => ctx.tools.schemas().map(s => s.name).filter(n => n.startsWith('mcp__sw__')).sort();
+const say = value => process.stdout.write(JSON.stringify(value) + '\n');
+for await (const line of createInterface({ input: process.stdin })) {
+  const [command, arg] = JSON.parse(line);
+  if (command === 'wait') {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && JSON.stringify(names()) !== JSON.stringify(arg)) await new Promise(r => setTimeout(r, 50));
+    say({ names: names(), pid: process.pid });
+  } else if (command === 'call') {
+    const result = await ctx.tools.execute({ name: arg, arguments: { query: 'x', image_file_id: 'f' },
+      signal: new AbortController().signal, callId: 'c' + Date.now() });
+    say({ isError: result.isError, error: result.error?.message ?? null });
+  }
+}
+"""
+
+
+def test_a_real_dsh_mcp_client_finds_a_newly_allowed_tool_without_a_restart(world, server, tmp_path):
+    """The installed dsh-mcp-client against this gateway: allowing a tool registers it in
+    the same process (list_changed, then tools/list); taking it back removes it, and a
+    call made in between is refused by the gateway."""
+    node, lib = shutil.which("node"), Path("/opt/aitelier-dsh/node_modules/@deepseek-ai/dsh-mcp-client")
+    if node is None or not lib.exists():
+        pytest.skip("needs node and the installed dsh-mcp-client")
+    ready(world, names=["web_search"])
+    script = tmp_path / "client.mjs"
+    script.write_text(CLIENT_SCRIPT)
+    process = subprocess.Popen([node, str(script), server.url + gw.PATH, world.tokens["steward"]], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def ask(command, arg):
+        process.stdin.write(json.dumps([command, arg]) + "\n")
+        process.stdin.flush()
+        return json.loads(process.stdout.readline())
+
+    try:
+        first = ask("wait", ["mcp__sw__media__web_search"])
+        assert first["names"] == ["mcp__sw__media__web_search"]
+        allow(world, names=["ocr_image"])
+        second = ask("wait", ["mcp__sw__media__ocr_image", "mcp__sw__media__web_search"])
+        assert second["names"] == ["mcp__sw__media__ocr_image", "mcp__sw__media__web_search"]
+        assert second["pid"] == first["pid"], "the same process: no restart"
+        called = ask("call", "mcp__sw__media__ocr_image")
+        assert called["isError"] is False, called
+        execute(world.owner, "steward_connection_tools_set", {"conn_id": "media", "tools": [
+            {"raw_name": "web_search", "allowed": False}]}, allow_write=True)
+        # Refused at once by the gateway, before the client re-lists.
+        refused = body_of(rpc(server, world, "tools/call", {"name": "media__web_search", "arguments": {"query": "x"}}))[0]
+        assert refused["error"]["data"]["code"] == "tool_not_allowed"
+        assert ask("wait", ["mcp__sw__media__ocr_image"])["names"] == ["mcp__sw__media__ocr_image"]
+    finally:
+        process.kill()
+        process.wait(10)

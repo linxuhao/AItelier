@@ -281,6 +281,8 @@ export interface DirectorHost {
    *    effective_hash}`, the same set the host's MCP gateway serves.
    *  - resyncDue: effective tools still missing from the registry a minute later.
    *  - humanInput: whether one input text carries a person's message (synchronous).
+   *  - writes (optional): the names of the host's own writing tools (letters, reminders) that,
+   *    like the plugin's, need a person's message in a turn that read outside content.
    *  The catalog writes no audience of its own: the turn's audience is step 23's (groups.audience,
    *  recorded by the group turns before each turn's first step), which the catalog reads to filter
    *  and the host's MCP gateway reads to judge a private connection's call. */
@@ -288,6 +290,7 @@ export interface DirectorHost {
     connections(signal?: AbortSignal): Promise<{ connections: object[]; effective_tools: string[]; effective_hash: string }>;
     resyncDue(effectiveHash: string, signal?: AbortSignal): Promise<unknown>;
     humanInput(text: string): boolean;
+    writes?: string[];
   };
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):

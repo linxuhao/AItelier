@@ -734,6 +734,8 @@ export function catalogOps(request) {
     resyncDue: (effectiveHash, signal) => request('/api/state/commands/steward_tools_resync_due',
       { effective_hash: effectiveHash }, signal),
     humanInput,
+    // This host's own writing tools (runtime.mjs) and the State writes behind them.
+    writes: ['reply_to_director', 'schedule_set', 'schedule_delete', 'send_director_message', 'send_driver_message'],
   };
 }
 

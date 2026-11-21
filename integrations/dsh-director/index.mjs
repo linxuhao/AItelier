@@ -89,7 +89,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
   // calls its further tools only in the catalog its host gives for the turn; without such a
   // host it finds none.
-  const catalogHost = op('catalog');
+  const catalogHost = host.capabilities.includes('catalog') ? host.catalog : undefined;
   // Its audience is step 23's (groupTurns, below; read only during a step): the group setup
   // records it on the host before each turn's first step, and the host's gateway reads that record.
   const stewardCatalog = catalogHost && roles[rootRole].catalog === 'host' ? new StewardCatalog({ host: catalogHost,

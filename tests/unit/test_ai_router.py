@@ -791,3 +791,30 @@ def test_generate_native_sends_normalized_tool_call_arguments():
     args = sent[1]["tool_calls"][0]["function"]["arguments"]
     assert json.loads(args) == {"unparsed_arguments": _EXTRA_DATA}
     assert history[1]["tool_calls"][0]["function"]["arguments"] == _EXTRA_DATA
+
+
+def test_the_one_refusal_message_shape_is_the_shared_guards(capsys, monkeypatch):
+    """One `[ai_router] refused outgoing body` line, naming the caller.
+
+    The occurrence's second half was silence: the failure had no line anyone
+    could grep. The line is printed by the shared guard, so every writer
+    reports in one shape.
+    """
+    from core import ai_router
+    from core.ai_router import OutgoingBodyTooLarge
+
+    monkeypatch.setattr(ai_router, "OUTGOING_BODY_BOUND_BYTES", 4_000)
+    kwargs = {"model": "m", "messages": [{"role": "user", "content": "z" * 9_000}]}
+    identity = ai_router.body_identity(kwargs, caller="test.caller",
+                                       model_route="flash", session="s1")
+    with pytest.raises(OutgoingBodyTooLarge) as caught:
+        ai_router.refuse_if_body_too_large(kwargs, identity=identity)
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines()
+             if "refused outgoing body" in ln]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line.startswith("[ai_router] refused outgoing body (test.caller, "
+                           "flash, session s1):")
+    assert f"{caught.value.measured_bytes:,} bytes > 4,000 bound" in line
+    assert "largest messages[0]" in line

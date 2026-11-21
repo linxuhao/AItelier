@@ -95,8 +95,7 @@ def test_real_transformed_messages_and_gateway_retain_complete_carry(gateway, ca
 
 
 @pytest.mark.parametrize('driver,error_type', [
-    ('run_driver',RepeatedScopeRefusal), ('meta',ScopeObservationUnavailable),
-    ('pipeline',RepeatedScopeRefusal), ('scheduler',ScopeObservationUnavailable)])
+    ('run_driver',RepeatedScopeRefusal), ('scheduler',ScopeObservationUnavailable)])
 def test_real_driver_does_not_retry_typed_executor_failure(tmp_path, monkeypatch, driver, error_type):
     case=Case(tmp_path,monkeypatch,'native')
     calls=[]
@@ -107,11 +106,6 @@ def test_real_driver_does_not_retry_typed_executor_failure(tmp_path, monkeypatch
     if driver=='run_driver':
         from core.run_driver import _step
         asyncio.run(_step(case.sf,case.db,case.ws,case.run,False,10))
-    elif driver in ('meta','pipeline'):
-        from core.meta_agent import MetaAgent
-        agent=MetaAgent.__new__(MetaAgent);agent.db=case.db;agent.ws=case.ws
-        fn=agent._run_meta_until_checkpoint if driver=='meta'else agent._run_pipeline_until_checkpoint
-        result=asyncio.run(fn(case.run));assert result['status']=='error'
     else:
         from core import scheduler
         monkeypatch.setattr(scheduler,'get_skillflow',lambda:case.sf)

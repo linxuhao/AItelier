@@ -9,13 +9,11 @@ can hold it.
 It is the ordinary product path: the real `AItelierSkillFlow` engine, run
 isolation (no-checkout registration, raw materialisation), the exclusive
 `coding_workspace` admission, closed Git and the RunnerService/SDK checkpoint
-CAS. The ONLY substitute is the model: `_stream_llm` replays a deterministic
-script of tool calls. No run, claim, origin or admission row is forged.
+CAS. No run, claim, origin or admission row is forged.
 
 Requires ``CODING_WORKSPACE_FIXTURE`` (an owned disposable directory); the data
 root lives under it so every record can be archived as evidence.
 """
-import asyncio
 import hashlib
 import json
 import os
@@ -35,8 +33,6 @@ if FIXTURE and "api.dependencies" not in sys.modules:
     _HOME.mkdir(parents=True, exist_ok=True)
     os.environ["AITELIER_HOME"] = str(_HOME)
 RAW = Path(os.environ.get("CODING_WORKSPACE_RAW", "/raw"))
-SCRIPTS: dict[str, list] = {}
-PALETTES: list[dict] = []
 
 
 def git(repo, *args, check=True, env=None):
@@ -66,31 +62,16 @@ def env():
     import skillflow
     from api.main import app
     from api.dependencies import get_db_manager, get_skillflow
-    from core import coding_workspace as cw, meta_agent
-    from core.meta_agent import MetaAgent
+    from core import coding_workspace as cw
 
-    async def scripted(self, messages):
-        PALETTES.append({"session": self.session_id,
-                         "tools": [d["function"]["name"] for d in self._tool_palette()]})
-        turn = SCRIPTS[self.session_id].pop(0)
-        if callable(turn):
-            turn = await turn() if asyncio.iscoroutinefunction(turn) else turn()
-        if isinstance(turn, str):
-            yield {"_type": "text_delta", "content": turn}
-            yield {"_type": "collected", "text": turn, "tool_calls": [], "usage": {}}
-            return
-        calls = [{"id": f"call-{uuid.uuid4().hex[:8]}", "name": n, "args": a} for n, a in turn]
-        yield {"_type": "collected", "text": "", "tool_calls": calls, "usage": {}}
-
-    MetaAgent._stream_llm = scripted
     app.state._test_mode = True
     identity = {"python": sys.version, "skillflow": skillflow.__file__,
                 "skillflow_sha256": hashlib.sha256(Path(skillflow.__file__).read_bytes()).hexdigest(),
                 "skillflow_core_sha256": hashlib.sha256(
                     (Path(skillflow.__file__).parent / "core.py").read_bytes()).hexdigest(),
-                "coding_workspace": cw.__file__, "meta_agent": meta_agent.__file__,
+                "coding_workspace": cw.__file__,
                 "modules": {m: hashlib.sha256(Path(f"/src/{m}").read_bytes()).hexdigest()
-                            for m in ("core/coding_workspace.py", "core/meta_agent.py",
+                            for m in ("core/coding_workspace.py",
                                       "core/closed_git.py", "core/run_resources.py",
                                       "core/skillflow_host.py",
                                       "core/coding_shell.py", "core/run_isolation.py",

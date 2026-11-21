@@ -13,14 +13,12 @@ import subprocess
 import sys
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
 from core import coding_impl_outcome as outcome, repository_executor as executor
 from core import repository_host_launcher as launcher, run_isolation
 from core.db_manager import DBManager
-from core.meta_agent import MetaAgent
 from core.run_driver import summarise_run
 from tests.skillflow.test_coding_impl_gate import _wire
 from tests.code_output_fixture import write_claim_code
@@ -75,7 +73,6 @@ class Rig:
                                                                          registers_generated_pipeline=False, registers_generated_addon=False))
         monkeypatch.setattr(deps, 'get_config_registry', lambda: self.registry)
         self.ws = SimpleNamespace(get_final_path=lambda pid, step, config: self.sf._workspace.get_step_dir(pid, config, step))
-        self.agent = MetaAgent(MagicMock(), self.ws, owner_email='test@local')
         self.calls = 0
         self.identity_change = None
         self.entry_path = tmp/'executor-entry.py'
@@ -221,10 +218,7 @@ async def test_actual_red_candidate_one_implement_and_all_four_complete_consumer
     # Put authoritative outcome after every historical display cap.
     path = rig.ws.get_final_path('p','test','coding_impl')/'test_report.json'
     assert path.read_text().index('coding_outcome') > 8000
-    summaries = [summarise_run(rig.sf, rig.ws, rig.registry, rig.rid),
-                 rig.agent._tool_get_pipeline_result({'run_id':rig.rid}),
-                 await rig.agent._tool_wait_until_checkpoint({'run_id':rig.rid}),
-                 await rig.agent._run_pipeline_until_checkpoint(rig.rid)]
+    summaries = [summarise_run(rig.sf, rig.ws, rig.registry, rig.rid)]
     for result in summaries:
         assert result['status'] == 'candidate_tests_failed', result
         assert result['execution_status'] == 'completed'
@@ -233,7 +227,7 @@ async def test_actual_red_candidate_one_implement_and_all_four_complete_consumer
         assert 'test_total' in result['failure_references'][0]
     # current_node still names a validator on native engines; the actual report decides.
     path.write_text('{corrupt')
-    assert rig.agent._summarize_run_state(rig.rid)['status'] == 'result_evidence_invalid'
+    assert summarise_run(rig.sf, rig.ws, rig.registry, rig.rid)['status'] == 'result_evidence_invalid'
 
 
 @pytest.mark.parametrize('mode', ['exception','skip','disappear','config','profile','entry-drift','mutable-image','missing','corrupt'])
@@ -319,10 +313,7 @@ async def test_all_completed_consumers_refuse_missing_or_contradictory_evidence(
             if variant=='contradictory': report['coding_outcome']['release_passed']=True
             else: report['run_binding']['run_id']='another-run'
             path.write_text(json.dumps(report))
-        summaries=[summarise_run(rig.sf,rig.ws,rig.registry,rig.rid),
-                   rig.agent._tool_get_pipeline_result({'run_id':rig.rid}),
-                   await rig.agent._tool_wait_until_checkpoint({'run_id':rig.rid}),
-                   await rig.agent._run_pipeline_until_checkpoint(rig.rid)]
+        summaries=[summarise_run(rig.sf,rig.ws,rig.registry,rig.rid)]
         assert all(s['status']=='result_evidence_invalid' for s in summaries), summaries
 
 

@@ -952,25 +952,6 @@ def test_mcp_client_discovers_get_receipt_in_tools_list_and_reads_a_real_receipt
     assert [row["criterion_id"] for row in body["evidence"]] == ["behaviour", "review"]
 
 
-@pytest.mark.asyncio
-async def test_internal_driver_uses_same_persistent_contracts(live):
-    from core.meta_agent import MetaAgent, TOOL_DEFINITIONS
-    agent = SimpleNamespace(db=live.db, ws=live.ws, owner_email="driver@local", mode="butler")
-    names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
-    assert names.count("state_graph_help") == names.count("state_graph_read") == names.count("state_graph_write") == 1
-    help_result = await MetaAgent._execute_tool(agent, "state_graph_help", {})
-    assert "start_attempt" in help_result["operations"]
-    result = await MetaAgent._execute_tool(agent, "state_graph_read", {"action": "get_node",
-        "arguments": {"project_id": "game", "node_key": "a"}})
-    assert result["result"]["node"]["goal"] == "Deliver a"
-    launched = await MetaAgent._execute_tool(agent, "state_graph_write", {"action": "start_attempt", "arguments": {
-        "project_id": "game", "node_key": "a", "expected_revision": 1, "workflow": "state_fixture", "request_key": "driver-1"}})
-    assert launched["result"]["run_id"]
-    refused = await MetaAgent._execute_tool(agent, "state_graph_read", {"action": "create_project",
-        "arguments": {"project_id": "unauthorized-through-read", "title": "No"}})
-    assert "error" in refused
-
-
 def test_driver_attachment_is_deduplicated_and_can_resume_after_completion(live, monkeypatch):
     # Test the actual helper, not the fixture's callback spy.
     import importlib.util

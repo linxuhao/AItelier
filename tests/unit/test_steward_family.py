@@ -690,3 +690,32 @@ def test_acceptance_four_a_member_adds_the_owner_checks_in_dm_the_dashboard_remo
     audience(world, senders=(MEMBER,), turn="t3")  # the group asks again
     seen = show(view, turn="t3")["lists"]["shopping"]
     assert [(i["text"], i["done"]) for i in seen] == [("牛奶", True)]
+
+
+def test_director_505_more_than_100_checked_in_30_days_are_counted_not_silently_dropped(world, clock):
+    """Director 505: a read shows at most LIST_LIMITS["done_shown"] (100) checked items of a
+    list, newest first, while a checked item is kept 30 days. 150 checked within 30 days: the
+    newest 100 shown, done_total 150 and done_more 50 say the rest exists (list_show and the
+    dashboard read the same answer)."""
+    ids = []
+    for batch in range(15):
+        ids += [i["item_id"] for i in add(world.steward, [f"物品{batch}-{n}" for n in range(10)], key=f"d{batch}")["items"]]
+        if len(ids) % 50 == 0:
+            check(world.steward, ids[-50:], key=f"k{batch}")
+            clock.moment += timedelta(days=1)
+    assert len(ids) == 150
+    for shown in (show(world.steward), world.owner.lists.list_items(as_owner=True)):
+        assert len(shown["lists"]["shopping"]) == 100 and all(i["done"] for i in shown["lists"]["shopping"])
+        assert {i["item_id"] for i in shown["lists"]["shopping"]} == set(ids[50:])  # the oldest 50 not shown
+        assert shown["done_total"] == {"shopping": 150, "todo": 0}
+        assert shown["done_more"] == {"shopping": 50, "todo": 0}
+    # One list asked for: its counts alone; without the checked items, no counts.
+    assert show(world.steward, list="shopping")["done_total"] == {"shopping": 150}
+    assert "done_total" not in show(world.steward, include_done=False)
+    # A list within the bound: everything shown, done_more 0.
+    world.owner.lists.clear_done("shopping")
+    check(world.steward, [add(world.steward, ["牛奶"], key="last")["items"][0]["item_id"]], key="klast")
+    small = show(world.steward)
+    assert (len(small["lists"]["shopping"]), small["done_total"]["shopping"], small["done_more"]["shopping"]) == (1, 1, 0)
+    from core.state_lists import LIST_LIMITS
+    assert LIST_LIMITS["done_shown"] == 100

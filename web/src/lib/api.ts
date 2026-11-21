@@ -1030,7 +1030,10 @@ export interface FamilyListItem {
   item_id: string; list: FamilyListName; text: string; added_by: string | null; added_by_role: 'owner' | 'member' | 'steward';
   added_via: 'group' | 'owner_dm' | 'dashboard'; added_at: string; done: boolean; done_at: string | null; done_by: string | null;
 }
-export function listFamilyLists(): Promise<{lists: Record<FamilyListName, FamilyListItem[]>}> {
+// At most 100 checked items of a list are shown, newest first; done_total counts a list's checked
+// items and done_more how many of them are not shown (director 505).
+export function listFamilyLists(): Promise<{lists: Record<FamilyListName, FamilyListItem[]>;
+  done_total?: Partial<Record<FamilyListName, number>>; done_more?: Partial<Record<FamilyListName, number>>}> {
   return _get('/api/steward/lists');
 }
 export function addFamilyListItems(list: FamilyListName, items: string[]): Promise<{items: FamilyListItem[]}> {

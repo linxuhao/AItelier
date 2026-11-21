@@ -681,7 +681,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       const turn = () => ({ turn: groupTurns.open()?.turn });
       const list = { type: 'string', enum: ['shopping', 'todo'] };
       scope.tools.register(defineTool({ name: 'list_show',
-        description: 'The family lists (shopping and to-do; or one, with list): each item\'s item_id, text, who added it and when, and whether it is checked. Everyone in the family group can see everything on them, whoever added it.',
+        description: 'The family lists (shopping and to-do; or one, with list): each item\'s item_id, text, who added it and when, and whether it is checked. Every open item, then at most 100 checked items per list, newest first (a checked item is kept 30 days): done_total counts each list\'s checked items, done_more how many are not shown, and done_not_shown says it in words (另有 N 条已勾掉的未显示) - say so rather than call the list complete. Everyone in the family group can see everything on them, whoever added it.',
         parameters: { list }, output: jsonOutput, execute: (args, exec) => host.groups.listShow({ list: args.list }, exec.signal, turn()) }));
       scope.tools.register(defineTool({ name: 'list_add',
         description: 'Add up to 10 items (each at most 100 characters) to the family shopping or to-do list. An item already open on that list is not added twice. Refused withheld when an item names something the family group may not see; list_full at 100 open items.',

@@ -54,6 +54,27 @@ describe('StewardLists', () => {
     langStore.set('en');
   });
 
+  it('director 505: 150 checked within 30 days, 100 shown - the rest is said (另有 50 条已勾掉的未显示), never silently dropped', async () => {
+    const done = Array.from({length: 100}, (_, n) => item('d-' + n, '物品' + n, {done: true, done_at: '2026-11-21T11:00:00Z', done_by: '管家'}));
+    api.listFamilyLists.mockResolvedValue({lists: {shopping: done, todo: []}, done_total: {shopping: 150, todo: 0},
+      done_more: {shopping: 50, todo: 0}});
+    langStore.set('zh-CN');
+    const view = render(StewardLists);
+    await view.findByText('物品0');
+    const shopping = view.container.querySelector('[data-list="shopping"]') as HTMLElement;
+    expect(shopping.querySelectorAll('[data-item]').length).toBe(100);
+    expect(shopping.querySelector('[data-list-more]')?.textContent).toBe('另有 50 条已勾掉的未显示');
+    expect((view.container.querySelector('[data-list="todo"]') as HTMLElement).querySelector('[data-list-more]')).toBeNull();
+    langStore.set('en');
+    await waitFor(() => expect(shopping.querySelector('[data-list-more]')?.textContent).toBe('50 more checked items not shown'));
+  });
+
+  it('director 505: an answer without the counts (an older backend) shows no marker and no throw', async () => {
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    expect(view.container.querySelector('[data-list-more]')).toBeNull();
+  });
+
   it('review F4: more than 10 items at once is refused with a message, nothing is cut and the draft is kept', async () => {
     const view = render(StewardLists);
     await view.findByText('牛奶');

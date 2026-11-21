@@ -9,6 +9,8 @@
   const LISTS: FamilyListName[] = ['shopping', 'todo'];
   const ADD_MAX = 10;
   let lists = $state<Record<FamilyListName, FamilyListItem[]>>({shopping: [], todo: []});
+  // Checked items of a list the read did not show (at most 100 are shown, director 505).
+  let doneMore = $state<Record<FamilyListName, number>>({shopping: 0, todo: 0});
   let loaded = $state(false), error = $state(''), busy = $state(false);
   let drafts = $state<Record<FamilyListName, string>>({shopping: '', todo: ''});
   let alive = true;
@@ -17,6 +19,7 @@
       const result = await listFamilyLists();
       if (!alive) return;
       lists = {shopping: result.lists?.shopping ?? [], todo: result.lists?.todo ?? []}; error = ''; loaded = true;
+      doneMore = {shopping: result.done_more?.shopping ?? 0, todo: result.done_more?.todo ?? 0};
     } catch (e) { if (alive) error = String(e instanceof Error ? e.message : e); }
   }
   async function run(action: () => Promise<unknown>) {
@@ -71,6 +74,7 @@
           </li>
         {/each}
       </ul>
+      {#if doneMore[list] > 0}<p class="more" data-list-more={list}>{t('steward.listDoneMore').replace('{n}', String(doneMore[list]))}</p>{/if}
       <form class="add" onsubmit={(event) => { event.preventDefault(); add(list); }}>
         <input type="text" maxlength="1100" bind:value={drafts[list]} placeholder={t('steward.listAddPlaceholder')}
           aria-label={t('steward.listAdd') + ' ' + t('steward.list.' + list)} data-list-input={list} />
@@ -81,7 +85,7 @@
 </section>
 <style>
   .steward-lists{font-size:13px;}
-  .intro,.empty{color:var(--pico-muted-color);font-size:12px;}
+  .intro,.empty,.more{color:var(--pico-muted-color);font-size:12px;}
   .list{margin:0 0 10px;padding:12px 14px;border:1px solid var(--pico-muted-border-color);border-radius:8px;}
   header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;padding:0;background:none;border:0;}
   header small{color:var(--pico-muted-color);}header button{margin:0 0 0 auto;}

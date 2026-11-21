@@ -101,6 +101,18 @@ test('director 489 (a): an item of an unbound group reads to the model as 曾由
     [undefined, { refused: 'withheld' }, { items: null }]);
 });
 
+test('director 505: checked items past the bound read to the model as 另有 N 条已勾掉的未显示, never a silent cut', async () => {
+  const done = n => Array.from({ length: n }, (_, i) => ({ item_id: `li-${i}`, text: `x${i}`, added_by: '妈妈', done: true, done_by: '业主' }));
+  const tool = recorder({ '/api/state/query/list_list_items': { result: { lists: { shopping: done(100), todo: done(3) },
+    done_total: { shopping: 150, todo: 3 }, done_more: { shopping: 50, todo: 0 } } } });
+  const shown = await groupOps({ request: recorder().request, toolRequest: tool.request }).listShow({}, undefined, { turn: '1' });
+  assert.equal(shown.lists.shopping.length, 100);
+  assert.deepEqual([shown.done_total, shown.done_more], [{ shopping: 150, todo: 3 }, { shopping: 50, todo: 0 }]);
+  assert.deepEqual(shown.done_not_shown, { shopping: '另有 50 条已勾掉的未显示' });
+  // Everything shown: no marker.
+  assert.equal('done_not_shown' in listWhoShown({ lists: { todo: done(3) }, done_total: { todo: 3 }, done_more: { todo: 0 } }), false);
+});
+
 test('the runtime: in a group turn every tool request carries the header, the host\'s requests never; in an owner turn none', async () => {
   const { aitelierHost } = await import('./runtime.mjs');
   const { calls, request } = recorder({ '/api/state/query/project_catalog': { result: { projects: [] } },

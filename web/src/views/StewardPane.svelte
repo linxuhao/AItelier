@@ -8,9 +8,10 @@
   import StewardProfile from './StewardProfile.svelte';
   import StewardSchedules from './StewardSchedules.svelte';
   import StewardChannels from './StewardChannels.svelte';
+  import StewardLists from './StewardLists.svelte';
   // The steward's pane is the ordinary conversation pane of its project, plus
-  // tabs of its own: proposals, every project's open questions, reminders, chat
-  // channels, profile. Only this pane asks where its messages came from (`sources`).
+  // tabs of its own: proposals, every project's open questions, reminders, the family
+  // lists, chat channels, profile. Only this pane asks where its messages came from (`sources`).
   const { projectId, projects = [], status = null, questions = {}, onread = () => {}, onrefresh = () => {}, onanswer }: {
     projectId: string; projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     questions?: Record<string, number>; onread?: () => void; onrefresh?: () => void;
@@ -24,6 +25,7 @@
     {id: 'proposals', label: t('steward.tabProposals')},
     {id: 'questions', label: t('steward.tabQuestions')},
     {id: 'schedules', label: t('steward.tabSchedules')},
+    {id: 'lists', label: t('steward.tabLists')},
     {id: 'channels', label: t('steward.tabChannels')},
     {id: 'profile', label: t('steward.tabProfile')},
   ]);
@@ -42,6 +44,7 @@
     {#if tab === 'proposals'}<StewardProposals onchange={onrefresh} onrevise={revise} />
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />
     {:else if tab === 'schedules'}<StewardSchedules />
+    {:else if tab === 'lists'}<StewardLists />
     {:else if tab === 'channels'}<StewardChannels />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}

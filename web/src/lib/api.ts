@@ -906,9 +906,14 @@ export interface StewardSchedule {
   created_at: string; updated_at: string;
   /** Seconds an enabled row is past its next run (backend); > OVERDUE_AFTER_S means its clock stopped. */
   overdue_seconds?: number;
+  /** Step 25 C11: 'family_group' posts the instruction, as written, into the family group bound
+   *  when the reminder was made (no steward turn); `target_unbound` once that group is unbound. */
+  target?: 'owner' | 'family_group'; target_channel?: OwnerChannelName | null; target_group_ref?: string | null;
+  target_unbound?: boolean;
 }
 export interface StewardScheduleFields {
   title?: string; instruction?: string; schedule?: StewardScheduleSpec; tz?: string; enabled?: boolean;
+  target?: 'owner' | 'family_group'; channel?: OwnerChannelName;
 }
 export function listStewardSchedules(): Promise<StewardSchedule[]> {
   return _get<{schedules?: StewardSchedule[]}>('/api/steward/schedules').then(r => r.schedules ?? []);
@@ -1016,6 +1021,29 @@ export function setFamilyNote(channel: OwnerChannelName, text: string): Promise<
 }
 export function deleteFamilyMemory(channel: OwnerChannelName, entryId?: string): Promise<unknown> {
   return _del('/api/steward/groups/' + encodeURIComponent(channel) + '/family-memory' + (entryId ? '?entry_id=' + encodeURIComponent(entryId) : ''));
+}
+
+// ── The family lists (step 25 C4, design 7.9.5). Owner session only. Everyone in the family
+//    group sees everything on them; adding passes the group's exit check (422 "withheld: <kind>").
+export type FamilyListName = 'shopping' | 'todo';
+export interface FamilyListItem {
+  item_id: string; list: FamilyListName; text: string; added_by: string; added_by_role: 'owner' | 'member' | 'steward';
+  added_via: 'group' | 'owner_dm' | 'dashboard'; added_at: string; done: boolean; done_at: string | null; done_by: string | null;
+}
+export function listFamilyLists(): Promise<{lists: Record<FamilyListName, FamilyListItem[]>}> {
+  return _get('/api/steward/lists');
+}
+export function addFamilyListItems(list: FamilyListName, items: string[]): Promise<{items: FamilyListItem[]}> {
+  return _post('/api/steward/lists/' + encodeURIComponent(list) + '/items', {items});
+}
+export function checkFamilyListItems(itemIds: string[], done: boolean): Promise<unknown> {
+  return _post('/api/steward/lists/check', {item_ids: itemIds, done});
+}
+export function removeFamilyListItem(itemId: string): Promise<unknown> {
+  return _del('/api/steward/lists/items/' + encodeURIComponent(itemId));
+}
+export function clearDoneFamilyListItems(list?: FamilyListName): Promise<{cleared: number}> {
+  return _post('/api/steward/lists/clear-done' + (list ? '?list_name=' + encodeURIComponent(list) : ''));
 }
 
 /** Where a steward-conversation message came from ('in') or was mirrored to ('out'). */

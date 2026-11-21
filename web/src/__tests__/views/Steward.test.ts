@@ -29,6 +29,7 @@ const api = vi.hoisted(() => ({
   stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(),
   listStewardSchedules: vi.fn(), createStewardSchedule: vi.fn(), updateStewardSchedule: vi.fn(),
   deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(), stewardMessageSources: vi.fn(),
+  listOwnerGroups: vi.fn(),
 }));
 // The real module underneath, so ApiError is the class the components check.
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
@@ -584,7 +585,57 @@ describe('reminders', () => {
   const card = (container: HTMLElement, id: string) => container.querySelector(`[data-schedule="${id}"]`) as HTMLElement;
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const form = () => ({onchange: vi.fn(), onclose: vi.fn()});
-  beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); });
+  beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); api.listOwnerGroups.mockResolvedValue({groups: []}); });
+
+  it('step 25 C11: the family group is chosen only while one is bound, and the words go as written', async () => {
+    const p = form();
+    const view = render(StewardScheduleForm, p);
+    const group = () => view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
+    expect(group().disabled).toBe(true);
+    expect(view.getByText('Bind a family group on the Channels tab to send reminders there.')).toBeTruthy();
+    cleanup();
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.createStewardSchedule.mockImplementation(async (fields: object) => schedule({...fields, schedule_id: 'sch-g', version: 1}));
+    const again = render(StewardScheduleForm, p);
+    const pick = again.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(pick.disabled).toBe(false));
+    await fireEvent.click(pick);
+    await fireEvent.input(again.getByLabelText('Title'), {target: {value: '吃药'}});
+    await fireEvent.input(again.getByLabelText('Words posted in the family group'), {target: {value: '该吃药了'}});
+    await fireEvent.click(again.getByLabelText('Once'));
+    await fireEvent.input(again.container.querySelector('[data-schedule-at]') as HTMLInputElement, {target: {value: '2030-01-02T09:30'}});
+    await fireEvent.click(again.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(api.createStewardSchedule).toHaveBeenCalledWith({title: '吃药', instruction: '该吃药了',
+      schedule: {kind: 'once', at: new Date('2030-01-02T09:30').toISOString()}, tz: browserZone, target: 'family_group'}));
+  });
+
+  it('step 25 C11: a 422 withheld says the group may not see it; the list marks group reminders and an unbound group', async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.createStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code: 'withheld', reason: 'private_project: the name or id of a project that is not public'}));
+    const view = render(StewardScheduleForm, form());
+    const pick = view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(pick.disabled).toBe(false));
+    await fireEvent.click(pick);
+    await fireEvent.input(view.getByLabelText('Title'), {target: {value: 't'}});
+    await fireEvent.input(view.getByLabelText('Words posted in the family group'), {target: {value: '看看家庭账本'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Every day at 9:00'}));
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(view.getByRole('alert').textContent).toBe(
+      'The family group may not see this: private_project: the name or id of a project that is not public'));
+    cleanup();
+    api.listStewardSchedules.mockResolvedValue([
+      schedule({schedule_id: 'sch-g', title: '吃药', target: 'family_group', target_unbound: false}),
+      schedule({schedule_id: 'sch-u', title: '倒垃圾', target: 'family_group', target_unbound: true, enabled: false}),
+      schedule({schedule_id: 'sch-o', title: 'Mine'}),
+    ]);
+    const list = render(StewardSchedules);
+    await list.findByText('吃药');
+    expect(card(list.container, 'sch-g').querySelector('[data-target-group]')?.textContent).toBe('To the family group');
+    expect(card(list.container, 'sch-g').querySelector('[data-group-unbound]')).toBeNull();
+    expect(card(list.container, 'sch-u').querySelector('[data-group-unbound]')?.textContent).toBe('Group unbound');
+    expect(card(list.container, 'sch-o').querySelector('[data-target-group]')).toBeNull();
+  });
 
   it('review 337: a reminder past its time by more than five minutes is marked overdue (a stopped clock shows)', async () => {
     api.listStewardSchedules.mockResolvedValue([

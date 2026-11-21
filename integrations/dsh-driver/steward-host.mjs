@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
+import { CLOCK_TAG, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -97,6 +97,8 @@ function privateInboxItem(row) {
     version: row?.version ?? null,
     // An owner message relayed from Slack or WeChat names its channel; a dashboard one has no key.
     ...(row?.source_channel ? { source_channel: row.source_channel } : {}),
+    // ... and, when the channel dated it, when the owner sent it there (UTC).
+    ...(row?.channel_at ? { channel_at: row.channel_at } : {}),
     ...wholeBody(row?.body),
   };
 }
@@ -315,8 +317,15 @@ export function turnWatcher(onFinalText) {
   };
 }
 
-/** What an automatic reply stores: the steward's last words, clipped to what a message holds. */
-export const autoReplyBody = text => (text.length > 8000 ? text.slice(0, 7990) + '\n[…]' : text);
+// System clock lines the steward copied to the start of its last words (message-time 3.6).
+const leadingClockLines = new RegExp('^(?:\\s*' + CLOCK_TAG.replace(/[[\]]/g, '\\$&') + '[^\\n]*)+\\s*');
+/** What an automatic reply stores: the steward's last words without the system clock lines
+ *  it copied to their start, clipped to what a message holds. The same words always give
+ *  the same body, so the reply's key and its channel mirror agree. */
+export const autoReplyBody = text => {
+  const body = text.replace(leadingClockLines, '');
+  return body.length > 8000 ? body.slice(0, 7990) + '\n[…]' : body;
+};
 
 /** A turn that was given an owner message ended with that message still unanswered: what
  *  the steward said last goes to the owner as the answer to the newest such message (the
@@ -326,11 +335,12 @@ export const autoReplyBody = text => (text.length > 8000 ? text.slice(0, 7990) +
  *  retry after a lost answer is State's replay and a second, different text is refused
  *  (idempotency_conflict) instead of becoming a second reply. */
 export async function forwardFinalText({ request, project, me, text, input = '', signal }) {
+  const body = autoReplyBody(text);
+  if (!body) return { forwarded: false, reason: 'only_clock_text' };
   const waiting = (await unansweredOwnerMessages({ request, project, me, signal }))
     .filter(m => input.includes(m.message_id));
   if (!waiting.length) return { forwarded: false };
   const newest = waiting.at(-1);
-  const body = autoReplyBody(text);
   try {
     const result = await request('/api/state/commands/send_user_message', { request_key: `auto-reply:${newest.message_id}`,
       project_id: project, subject: ('Re: ' + (newest.subject ?? '')).slice(0, 200), body, reply_to_message_id: newest.message_id }, signal);

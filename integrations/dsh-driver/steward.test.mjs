@@ -14,7 +14,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, autoReplyBody, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -493,9 +493,11 @@ function privateDeliveries(rows) {
   };
   return { request, calls, rows };
 }
+// The row as list_driver_messages gives it: created_at is the message's, in the backend's own form
+// (it was missing from the server's rows until message time, 2026-11-20).
 const privateRow = (seq, over = {}) => ({ delivery_id: `dlv-${seq}`, message_id: `m-${seq}`, seq,
   target_driver_id: 'drv-home', sender_driver_id: 'drv-plat', subject: `subject ${seq}`, body: `body ${seq}`,
-  created_at: `2026-11-17T10:${String(seq).padStart(2, '0')}:00Z`, status: 'unread', version: 1, ...over });
+  created_at: `2026-11-17T10:${String(seq).padStart(2, '0')}:00.123456+00:00`, status: 'unread', version: 1, ...over });
 
 /** The private inbox reader exactly as the steward is given it: the delivered registered
  *  tool over the delivered adapter operations. */
@@ -522,7 +524,7 @@ test('the private inbox reader: a letter longer than the injected excerpt comes 
   assert.deepEqual({ delivery_id: first.delivery_id, message_id: first.message_id, subject: first.subject,
     sender_driver_id: first.sender_driver_id, created_at: first.created_at, status: first.status, version: first.version },
   { delivery_id: 'dlv-1', message_id: 'm-1', subject: 'subject 1', sender_driver_id: 'drv-plat',
-    created_at: '2026-11-17T10:01:00Z', status: 'unread', version: 1 }, 'the delivery identity and its sender');
+    created_at: '2026-11-17T10:01:00.123456+00:00', status: 'unread', version: 1 }, 'the delivery identity and its sender');
   assert.equal(second.body, 'tiny', 'a short letter is unchanged');
   assert.equal(second.body_chars, 4);
   assert.equal(second.body_truncated, undefined);
@@ -542,6 +544,17 @@ test('the private inbox reader names the chat channel an owner message came from
   const answer = await stewardPrivateInboxTool(state.request).execute({}, toolCall);
   assert.deepEqual(answer.items.map(item => item.source_channel), ['slack', 'wechat', undefined]);
   assert.equal('source_channel' in answer.items[2], false, 'a dashboard message carries no source key');
+});
+
+test('the private inbox reader passes on when the owner sent a channel message, and no key when the channel gave no time', async () => {
+  const state = privateDeliveries([
+    privateRow(1, { sender_driver_id: null, source_channel: 'wechat', channel_at: '2026-11-17T09:58:12+00:00' }),
+    privateRow(2, { sender_driver_id: null, source_channel: 'slack' }), privateRow(3, { sender_driver_id: null })]);
+  const answer = await stewardPrivateInboxTool(state.request).execute({}, toolCall);
+  assert.equal(answer.items[0].channel_at, '2026-11-17T09:58:12+00:00');
+  assert.equal(answer.items[0].created_at, '2026-11-17T10:01:00.123456+00:00', 'created_at stays the backend\'s time');
+  assert.equal('channel_at' in answer.items[1], false, 'an undated channel message: no key');
+  assert.equal('channel_at' in answer.items[2], false, 'a dashboard message: no key');
 });
 
 test('the private inbox reader is the steward\'s own box: a letter addressed to another driver is not in the page, one query, no write', async () => {
@@ -1078,6 +1091,29 @@ test('every owner message gets an answer: the unanswered ones; the last words of
   assert.equal(host.texts.heldWork, stewardTexts.heldWork);
   assert.equal(host.texts.tools.idle_dormant, stewardTexts.idleDormant);
   assert.notEqual(aitelierHost(env(), { request }).texts.heldWork, stewardTexts.heldWork, 'a director keeps its wording');
+});
+
+test('message time 3.6: the system clock lines the steward copied to the start of its last words are not sent', async () => {
+  const clock = '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 周五 11:14+01:00';
+  assert.equal(autoReplyBody(clock + '\n现在是巴黎 11:14。'), '现在是巴黎 11:14。');
+  assert.equal(autoReplyBody(`  ${clock}\n${clock} (after tool)\n\n现在是巴黎 11:14。`), '现在是巴黎 11:14。', 'several lines, blank lines after');
+  const middle = '现在 11:14。\n' + clock + '\n就这样。';
+  assert.equal(autoReplyBody(middle), middle, 'a clock line inside the words is the steward\'s own and stays');
+  assert.equal(autoReplyBody('plain words'), 'plain words', 'words without a clock line are unchanged');
+  const long = clock + '\n' + 'x'.repeat(9000);
+  assert.equal(autoReplyBody(long), 'x'.repeat(7990) + '\n[…]', 'stripped first, then clipped to 8000');
+  assert.equal(autoReplyBody(long), autoReplyBody(long), 'the same words give the same body (one reply key, one mirror)');
+  // Only clock lines: nothing is sent, and State is not even asked.
+  const calls = [];
+  const request = async (path, body) => { calls.push(path); return { messages: [owner('o1', '2026-11-20T10:13:00Z', '现在几点？')], next_cursor: null }; };
+  assert.deepEqual(await forwardFinalText({ request, project: 'aitelier-home', me: 'drv-home', text: clock + '\n' + clock, input: 'o1' }),
+    { forwarded: false, reason: 'only_clock_text' });
+  assert.deepEqual(calls, [], 'no send_user_message, no read');
+  const sent = await forwardFinalText({ request: async (path, body) => (path.endsWith('/list_user_conversation')
+    ? { messages: [owner('o1', '2026-11-20T10:13:00Z', '现在几点？')], next_cursor: null } : (calls.push(body), { result: { message_id: 'r1' } })),
+  project: 'aitelier-home', me: 'drv-home', text: clock + '\n现在是巴黎 11:14。', input: 'o1' });
+  assert.deepEqual(sent, { forwarded: true, reply_to: 'o1', message_id: 'r1' });
+  assert.equal(calls[0].body, '现在是巴黎 11:14。', 'the stored reply carries no clock line');
 });
 
 test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the director\'s are byte-for-byte today\'s', async () => {

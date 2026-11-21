@@ -193,10 +193,13 @@ export interface DirectorHost {
    *  approves or declines it through the host, the host executes the approved version and
    *  delivers each result to the steward through events(). kind: create_project |
    *  start_driver | stop_driver | archive_project | unarchive_project; supersedes names the steward's own open proposal it replaces.
-   *  withdraw takes back the steward's own open proposal, as a record. */
+   *  withdraw takes back the steward's own open proposal, as a record.
+   *  kinds (plugin step 15, optional): the kinds this host can execute; propose offers only
+   *  those (the built-in local host: create_project). Absent: every kind above. */
   proposals?: {
     propose(proposal: { kind: string; payload: object; reason: string; supersedes?: string }, signal?: AbortSignal): Promise<object>;
     withdraw(withdrawal: { id: string; reason: string }, signal?: AbortSignal): Promise<object>;
+    kinds?: string[];
   };
   /** v1.2, design-steward 7.2: the owner's chat channels (Slack, WeChat). Declared, the
    *  director provides the cordis service `ownerChannels` to channel plugins [none: the

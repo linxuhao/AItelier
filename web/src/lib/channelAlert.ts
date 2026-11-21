@@ -10,6 +10,7 @@
  * function will name. Times are the server's; HH:MM is shown in the owner's zone.
  */
 import type {OwnerChannel, OwnerChannelAlertRow, OwnerChannelName} from './api';
+import type {t} from './i18n.svelte';
 
 const MIN = 60_000;
 // The backend's rules (core/state_channels.py: ALERT_AFTER, ALERT_RETRY_AFTER,
@@ -102,7 +103,7 @@ export function ownerTime(iso: string, zone: string): string {
 }
 
 /** The line in words, or '' for none: `tr` is the page's t(). */
-export function channelAlertText(line: ChannelAlertLine, clock: ChannelClock, tr: (key: string) => string): string {
+export function channelAlertText(line: ChannelAlertLine, clock: ChannelClock, tr: typeof t): string {
   if (line.key === 'none') return '';
   const reason = (error: string | null | undefined) => error ?? tr('steward.chanAlert.noReport');
   const fill = (key: string, values: Record<string, string | number>) =>

@@ -166,7 +166,9 @@ def test_projection_redacts_independently_is_bounded_and_never_mutates():
     assert lines[-1] == "[omitted_active_standing=2]"
     payloads = [json.loads(line) for line in lines[:-1]]
     assert len(payloads) == 8
-    assert [payload["delivery_seq"] for payload in payloads] == list(range(1, 9))
+    # The projection carries the NEWEST eight (2026-11-21 revision): ten rows
+    # leave the first two out, and the marker still counts both of them.
+    assert [payload["delivery_seq"] for payload in payloads] == list(range(3, 11))
     assert "must-never-project" not in projection
     assert fake.list_director_messages("beta")["result"]["items"] == before
     assert fake._memory.events["beta"] == before_events

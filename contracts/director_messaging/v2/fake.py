@@ -311,12 +311,24 @@ class InMemoryDirectorMessaging:
                                   "next_after": next_after})
 
     def project_active_standing(self, project_id) -> str:
-        """Render the bounded recovery projection without changing inbox state."""
-        result = self.list_director_messages(
-            project_id, after=0, limit=8, delivery_mode="standing",
-            statuses=["unread", "acknowledged"])["result"]
+        """Render the bounded recovery projection without changing inbox state.
+
+        The read pages FORWARD, so reaching the newest standing rows means
+        walking to the high-water mark and keeping the tail; the budget then
+        drops the oldest kept line first, so the newest row survives."""
+        after, kept, matched_total = 0, [], 0
+        while True:
+            result = self.list_director_messages(
+                project_id, after=after, limit=100, delivery_mode="standing",
+                statuses=["unread", "acknowledged"])["result"]
+            if after == 0:
+                matched_total = result["matched_total"]
+            kept = (kept + result["items"])[-8:]
+            if not result["has_more"] or not result["items"]:
+                break
+            after = result["next_after"]
         lines = []
-        for item in result["items"]:
+        for item in kept:
             message = item["message"]
             delivery = item["delivery"]
             payload = {
@@ -332,10 +344,11 @@ class InMemoryDirectorMessaging:
             }
             lines.append(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")))
-        included = len(lines)
+        available = len(lines)
+        included = available
         while True:
-            omitted = result["matched_total"] - included
-            parts = lines[:included]
+            omitted = matched_total - included
+            parts = lines[available - included:]
             if omitted:
                 parts.append(f"[omitted_active_standing={omitted}]")
             projection = "\n".join(parts)

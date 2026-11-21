@@ -272,8 +272,9 @@ class StateStewardConfirmations:
         from core import state_steward_connections as sc
         from core.state_steward import steward_project
         if audience != "owner":
-            # Group turns and their confirmations arrive with step 23 (7.7) / 24.2.
-            raise StateGraphError("ambiguous_requester: confirmations in a group arrive with group turns")
+            # Confirmations in a group turn (7.8.9's group requester, 7.7.7 exit check, group
+            # wording and budget) are not built yet (24.2).
+            raise StateGraphError("ambiguous_requester: confirmations in a group are not available yet")
         if not isinstance(name, str) or not name.startswith(sc.PUBLIC_PREFIX):
             raise StateGraphError("not_outward: not a connection tool")
         parts = sc.split_name(name[len(sc.PUBLIC_PREFIX):])
@@ -286,6 +287,10 @@ class StateStewardConfirmations:
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn)
             ensure_tables(conn)
+            # The turn's audience is step 23's record (core.state_groups), the one the gateway
+            # judges by; the host's word alone is not enough. No record is not the owner's.
+            if sc.audience_of(conn) != "owner":
+                raise StateGraphError("ambiguous_requester: this turn is not recorded as the owner's")
             requester = requester_of(conn, requester_message_id, home)
             connection = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
             entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)

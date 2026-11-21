@@ -491,7 +491,14 @@ def test_only_an_allowed_outward_tool_of_a_usable_connection(world):
             ask(world, asker, name=name)
     with pytest.raises(StateGraphError, match="ambiguous_requester"):
         execute(world.steward, "create_steward_confirmation", {"name": SEND, "arguments": {}, "requester_message_id": asker,
-                                                               "audience": "group:wechat:room1"}, allow_write=True)
+                                                               "audience": "group"}, allow_write=True)
+    # The host naming the owner is not enough: the turn's audience is step 23's record.
+    execute(world.steward, "set_steward_turn_audience", {"turn": "t2", "audience": "group",
+                                                         "group": {"channel": "wechat", "group_ref": "room1"}},
+            allow_write=True)
+    with pytest.raises(StateGraphError, match="ambiguous_requester"):
+        ask(world, asker, {"to": "a@example.com"})
+    execute(world.steward, "set_steward_turn_audience", {"turn": "t3", "audience": "owner"}, allow_write=True)
     add(world, conn_id="mailpub", label="家庭公共邮箱", url="https://good.example/mcp", auth_kind="header",
         visibility="public", enabled=False)
     with pytest.raises(StateGraphError, match="not_outward"):

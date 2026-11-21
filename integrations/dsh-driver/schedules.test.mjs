@@ -3,7 +3,7 @@
  *  what is due, one durable wake per run, the timer at the next due row, the tools' shapes. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RECHECK_MS, ScheduleTimer, WAKE_MAX, deleteSchedule, fireDue, setSchedule, wakeText } from './schedules.mjs';
+import { GROUP_NOTICE_LATE_S, RECHECK_MS, ScheduleTimer, WAKE_MAX, deleteSchedule, fireDue, setSchedule, wakeText } from './schedules.mjs';
 
 const row = (id, next, extra = {}) => ({ schedule_id: id, version: 1, title: 'T' + id, instruction: '看一眼各项目', schedule: { kind: 'cron', expr: '0 9 * * 1-5' },
   tz: 'Europe/Paris', enabled: true, next_run_at: next, ...extra });
@@ -127,4 +127,157 @@ test('review 340 (b): one row whose fire fails is skipped and logged; the others
   await away.refresh();
   assert.equal(timers.at(-1), RECHECK_MS);
   timer.close(); away.close();
+});
+
+
+// ---- step 25 C11 (design-steward 7.9.4): reminders to the family group --------------------------
+
+/** The fake backend plus post_group_notice: posts once per request_key (a replay is duplicate),
+ *  or answers the refusal the test names. Text and group are the row's. */
+function groupBackend(rows, now, { refuse } = {}) {
+  const { request: base, calls } = backend(rows, now);
+  const posted = new Map();
+  const request = async (path, body) => {
+    if (!path.endsWith('/post_group_notice')) return base(path, body);
+    calls.push(['post_group_notice', body]);
+    if (posted.has(body.request_key)) return { result: { ...posted.get(body.request_key), duplicate: true } };
+    const r = rows.find(x => x.schedule_id === body.schedule_id);
+    const answer = refuse ? { refused: refuse, title: r.title, ...(refuse === 'withheld' ? { reason: 'private_project' } : {}) }
+      : { posted: true, message_id: 'gmsg-' + posted.size, channel: 'wechat', group_ref: 'r1@chatroom', text: r.instruction, title: r.title };
+    posted.set(body.request_key, answer);
+    return { result: answer };
+  };
+  return { request, calls };
+}
+const groupRow = (id, next, extra = {}) => row(id, next, { target: 'family_group', target_channel: 'wechat', target_group_ref: 'r1@chatroom',
+  instruction: '该吃药了', schedule: { kind: 'once', at: next }, ...extra });
+const clockAt = iso => Date.parse(iso);
+
+test('a fired family-group reminder is posted and sent into the group, with no wake; an owner reminder still wakes', async () => {
+  const clock = clockAt('2026-11-18T09:00:05Z');
+  const rows = [groupRow('g', '2026-11-18T09:00:00Z'), row('o', '2026-11-18T09:00:00Z')];
+  const { request, calls } = groupBackend(rows, () => clock);
+  const delivered = [], sent = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, deliver: async (text, id) => delivered.push([id, text]),
+    sendGroup: async (channel, groupRef, text) => (sent.push([channel, groupRef, text]), true), setTimer: () => ({}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.deepEqual(sent, [['wechat', 'r1@chatroom', '该吃药了']]);
+  assert.deepEqual(delivered.map(([id]) => id), ['schedule:o:2026-11-18T09:00:00Z'], 'only the owner reminder wakes the steward');
+  assert.doesNotMatch(delivered[0][1], /该吃药了/, 'the group text is no part of the owner wake');
+  const posts = calls.filter(([action]) => action === 'post_group_notice');
+  assert.deepEqual(posts, [['post_group_notice', { request_key: 'group-notice:g:2026-11-18T09:00:00Z', schedule_id: 'g', due_at: '2026-11-18T09:00:00Z' }]],
+    'only the run names the notice: no text, no group in the call');
+  // A restart (a new clock) fires nothing again: the row moved on.
+  const again = new ScheduleTimer({ request, now: () => clock, deliver: async (text, id) => delivered.push([id, text]),
+    sendGroup: async (...a) => (sent.push(a), true), setTimer: () => ({}), clearTimer: () => {} });
+  await again.refresh();
+  assert.equal(sent.length, 1);
+  timer.close(); again.close();
+});
+
+test('the same notice key is sent once: a replay answered duplicate goes to nobody', async () => {
+  const clock = clockAt('2026-11-18T09:00:05Z');
+  const rows = [groupRow('g', '2026-11-18T09:00:00Z')];
+  const { request } = groupBackend(rows, () => clock);
+  await request('/api/state/commands/post_group_notice', { request_key: 'group-notice:g:2026-11-18T09:00:00Z', schedule_id: 'g', due_at: '2026-11-18T09:00:00Z' });
+  const delivered = [], sent = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, deliver: async (text, id) => delivered.push(id),
+    sendGroup: async (...a) => (sent.push(a), true), setTimer: () => ({}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.deepEqual([sent, delivered], [[], []]);
+  timer.close();
+});
+
+test('a family-group reminder more than 30 minutes late is skipped: nothing posted, one owner wake', async () => {
+  assert.equal(GROUP_NOTICE_LATE_S, 1800);
+  for (const [late, skipped] of [[31 * 60, true], [29 * 60, false]]) {
+    const clock = clockAt('2026-11-18T09:00:00Z') + late * 1000;
+    const rows = [groupRow('g', '2026-11-18T09:00:00Z', { title: '吃药' })];
+    const { request, calls } = groupBackend(rows, () => clock);
+    const delivered = [], sent = [];
+    const timer = new ScheduleTimer({ request, now: () => clock, log: () => {}, deliver: async (text, id) => delivered.push([id, text]),
+      sendGroup: async (...a) => (sent.push(a), true), setTimer: () => ({}), clearTimer: () => {} });
+    await timer.refresh();
+    if (skipped) {
+      assert.deepEqual(sent, []);
+      assert.equal(calls.filter(([a]) => a === 'post_group_notice').length, 0, 'not even posted');
+      assert.deepEqual(delivered.map(([id]) => id), ['group-notice:g:2026-11-18T09:00:00Z:not-sent']);
+      assert.match(delivered[0][1], /群提醒 吃药（g） 晚了 31 分钟，没有发/);
+    } else {
+      assert.equal(sent.length, 1);
+      assert.deepEqual(delivered, []);
+    }
+    timer.close();
+  }
+});
+
+test('each refusal (withheld, group_unbound, group_notice_budget, not_fired) and a failed send: one owner wake, nothing in the group', async () => {
+  for (const refuse of ['withheld', 'group_unbound', 'group_notice_budget', 'group_quota_account', 'not_fired', undefined]) {
+    const clock = clockAt('2026-11-18T09:00:05Z');
+    const rows = [groupRow('g', '2026-11-18T09:00:00Z', { title: '吃药' })];
+    const { request, calls } = groupBackend(rows, () => clock, { refuse });
+    const delivered = [], sent = [];
+    const timer = new ScheduleTimer({ request, now: () => clock, log: () => {}, deliver: async (text, id) => delivered.push([id, text]),
+      // The bridge refuses (e.g. after a WeChat re-login nobody has written in the group yet).
+      sendGroup: async (...a) => { sent.push(a); return false; }, setTimer: () => ({}), clearTimer: () => {} });
+    await timer.refresh();
+    const label = refuse ?? 'send_failed';
+    assert.equal(delivered.length, 1, label);
+    assert.equal(delivered[0][0], 'group-notice:g:2026-11-18T09:00:00Z:not-sent', label);
+    assert.match(delivered[0][1], new RegExp(`群提醒 吃药（g） 没有发：${label}`), label);
+    if (refuse === 'withheld') assert.match(delivered[0][1], /private_project/);
+    assert.equal(sent.length, refuse ? 0 : 1, label + ': a refusal never reaches the bridge');
+    assert.equal(calls.filter(([a]) => a === 'post_group_notice').length, 1, label + ': never retried');
+    // The next look does not try again (the time has passed).
+    await timer.refresh();
+    assert.equal(delivered.length, 1, label);
+    timer.close();
+  }
+  // The backend away: also told, once.
+  const clock = clockAt('2026-11-18T09:00:05Z');
+  const rows = [groupRow('g', '2026-11-18T09:00:00Z')];
+  const { request: base } = groupBackend(rows, () => clock);
+  const request = async (path, body) => { if (path.endsWith('/post_group_notice')) throw new Error('HTTP 502'); return base(path, body); };
+  const delivered = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, log: () => {}, deliver: async (text, id) => delivered.push(text),
+    sendGroup: async () => true, setTimer: () => ({}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /state_unreachable/);
+  timer.close();
+});
+
+test('review F2: no sendGroup, or one that throws, is send_failed - one owner wake each, never counted as sent', async () => {
+  for (const sendGroup of [undefined, async () => { throw new Error('bridge gone'); }]) {
+    const clock = clockAt('2026-11-18T09:00:05Z');
+    const rows = [groupRow('g', '2026-11-18T09:00:00Z', { title: '吃药' })];
+    const { request } = groupBackend(rows, () => clock);
+    const delivered = [];
+    const timer = new ScheduleTimer({ request, now: () => clock, log: () => {}, deliver: async (text, id) => delivered.push([id, text]),
+      sendGroup, setTimer: () => ({}), clearTimer: () => {} });
+    await timer.refresh();
+    assert.deepEqual(delivered.map(([id]) => id), ['group-notice:g:2026-11-18T09:00:00Z:not-sent']);
+    assert.match(delivered[0][1], /send_failed/);
+    timer.close();
+  }
+});
+
+test('review F2: group notices go out before the owner wake, so a failed owner wake drops none of them', async () => {
+  const clock = clockAt('2026-11-18T09:00:05Z');
+  const rows = [row('o', '2026-11-18T09:00:00Z'), groupRow('g', '2026-11-18T09:00:00Z'), groupRow('h', '2026-11-18T09:00:00Z', { instruction: '出门带伞' })];
+  const { request } = groupBackend(rows, () => clock);
+  const sent = [], logs = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, log: l => logs.push(l), deliver: async () => { throw new Error('outbox down'); },
+    sendGroup: async (...a) => (sent.push(a[2]), true), setTimer: () => ({}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.deepEqual(sent.sort(), ['出门带伞', '该吃药了']);
+  assert.ok(logs.some(l => /outbox down/.test(l)), 'the owner wake failure is logged');
+  timer.close();
+});
+
+test('schedule_set carries target and channel to the backend', async () => {
+  const { request, calls } = backend([], () => 0);
+  await setSchedule(request, { title: '吃药', instruction: '该吃药了', schedule: { kind: 'once', at: '2026-11-19T08:00:00Z' }, target: 'family_group', channel: 'wechat' });
+  assert.deepEqual({ ...calls[0][1], request_key: undefined }, { request_key: undefined, title: '吃药', instruction: '该吃药了',
+    schedule: { kind: 'once', at: '2026-11-19T08:00:00Z' }, target: 'family_group', channel: 'wechat' });
 });

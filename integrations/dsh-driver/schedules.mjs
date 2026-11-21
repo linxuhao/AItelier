@@ -5,10 +5,26 @@
  *  only watches the clock: it arms one timer at the earliest due row (and at most a few
  *  minutes ahead, so a change it missed is picked up), fires what is due, and hands the
  *  steward ONE wake for everything that fired - durably, under an id per (row, due time),
- *  so a restart or a replay never wakes it twice for the same run. */
+ *  so a restart or a replay never wakes it twice for the same run.
+ *
+ *  Step 25 C11 (design-steward 7.9.4): a reminder whose target is the family group wakes
+ *  nobody. Once fired, its text - the owner's exact words, taken from the row by the backend,
+ *  never from here - is posted with post_group_notice and sent into the group the way a group
+ *  reply is (`sendGroup`, the bridge's one 10-second queue). One that fired more than 30
+ *  minutes late is skipped. A skip, a refusal (withheld, group_unbound, group_notice_budget,
+ *  group_quota_account, not_fired) or a failed send posts nothing, is never retried (the time
+ *  has passed) and gives the steward ONE owner wake to tell its owner. Group notices go out
+ *  before the owner wake, each on its own, so one failure never drops another. Two windows
+ *  nobody hears of, both a host death (7.9.9 (c)): after the fire commits and before
+ *  post_group_notice (the row has moved on; a restart does not fire it again), and after
+ *  post_group_notice commits and before sendGroup (the stored notice row shows in the group's
+ *  messages though nothing was sent; a replay answers duplicate and sends nothing). */
 
 /** State events about schedules: the runtime's, never a model turn. */
 export const SCHEDULE_EVENTS = new Set(['steward_schedule_changed']);
+/** Step 25 C11 (7.9.4, owner decision 6 of 7.9.10): a family-group reminder that fires more
+ *  than this late is skipped ("该吃药了" three hours late only confuses). */
+export const GROUP_NOTICE_LATE_S = 30 * 60;
 /** The longest the timer sleeps before it looks again (the pump's own cadence). */
 export const RECHECK_MS = 4 * 60 * 1000;
 /** At most this many reminders in one wake; the rest fire on the next look, oldest due first
@@ -27,7 +43,8 @@ const key = what => `${what}:${Date.now().toString(36)}:${(keys++).toString(36)}
 
 /** Create (no schedule_id) or change one reminder. A change needs the version the steward saw. */
 export function setSchedule(request, args, signal) {
-  const fields = Object.fromEntries(['title', 'instruction', 'schedule', 'tz', 'enabled'].filter(k => args[k] !== undefined).map(k => [k, args[k]]));
+  const fields = Object.fromEntries(['title', 'instruction', 'schedule', 'tz', 'enabled', 'target', 'channel']
+    .filter(k => args[k] !== undefined).map(k => [k, args[k]]));
   if (!args.schedule_id) return request('/api/state/commands/create_steward_schedule', { request_key: key('schedule-create'), ...fields }, signal).then(unwrap, refused);
   if (!Number.isInteger(args.expected_version)) return Promise.resolve({ refused: 'expected_version_required', reason: 'read it with schedule_list first' });
   return request('/api/state/commands/update_steward_schedule', { request_key: key('schedule-update'), schedule_id: args.schedule_id,
@@ -62,6 +79,33 @@ export async function fireDue(request, rows, now = Date.now(), signal, max = WAK
   return fired;
 }
 
+const isGroup = fired => fired.schedule?.target === 'family_group';
+
+/** Step 25 C11: post one fired family-group reminder (the host's own request, no header). The
+ *  backend takes the text and the group from the row; the key names the run, so a replay is
+ *  State's (answered duplicate, sent once). */
+export function postGroupNotice(request, fired, signal) {
+  const id = fired.schedule.schedule_id;
+  return request('/api/state/commands/post_group_notice', { request_key: `group-notice:${id}:${fired.due_at}`,
+    schedule_id: id, due_at: fired.due_at }, signal).then(unwrap);
+}
+
+/** What the steward is told about a group reminder that did not go out (the owner's audience). */
+const NOT_SENT = {
+  withheld: '内容里有不能发进群的东西', group_unbound: '记下的那个家庭群已经解绑或换了，这条提醒已停用',
+  group_notice_budget: '这个群这一小时的群提醒已满 6 条', group_quota_account: '这个号这一小时发进群的消息已满',
+  not_fired: '后端说这一次没有触发', send_failed: '桥没有发出去（例如微信重新登录后、群里还没人说话）',
+  state_unreachable: '没连上后端',
+};
+export function groupNoticeText(fired, answer) {
+  const s = fired.schedule;
+  const head = `群提醒 ${s.title}（${s.schedule_id}）`;
+  if (answer.late_seconds !== undefined) return `${head} 晚了 ${minutes(answer.late_seconds)}，没有发（晚了 30 分钟以上的群提醒不发）。请告诉业主。`;
+  const why = NOT_SENT[answer.refused] ?? '没有发出';
+  const kind = answer.reason ? `（${answer.reason}）` : '';
+  return `${head} 没有发：${answer.refused}${kind}，${why}。请告诉业主。`;
+}
+
 const local = (iso, tz) => {
   try { return new Intl.DateTimeFormat('zh-CN', { timeZone: tz, dateStyle: 'short', timeStyle: 'short' }).format(new Date(iso)) + ` (${tz})`; }
   catch { return iso; }
@@ -81,8 +125,11 @@ export function wakeText(fired) {
 
 /** Watches the clock for the steward. `deliver(text, id)` hands a wake over durably. */
 export class ScheduleTimer {
-  constructor({ request, deliver, log = () => {}, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout }) {
-    Object.assign(this, { request, deliver, log, now, setTimer, clearTimer });
+  /** `sendGroup(channel, groupRef, text)` (step 25 C11): the plugin's send into a bound group,
+   *  true when the bridge took it; without it a group reminder is never sent (and the steward
+   *  told). */
+  constructor({ request, deliver, sendGroup, log = () => {}, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout }) {
+    Object.assign(this, { request, deliver, sendGroup, log, now, setTimer, clearTimer });
     this.timer = undefined; this.closed = false; this.running = Promise.resolve();
   }
   /** Look again: fire what is due, then arm the timer at the next due row (or RECHECK_MS). */
@@ -105,13 +152,45 @@ export class ScheduleTimer {
   async #look() {
     const rows = await listSchedules(this.request);
     const fired = await fireDue(this.request, rows, this.now(), undefined, WAKE_MAX, this.log);
-    if (fired.length) {
-      const id = 'schedule:' + fired.map(f => `${f.schedule.schedule_id}:${f.due_at}`).join(',');
-      await this.deliver(wakeText(fired), id);
+    // Group notices first, each isolated: an owner wake that fails never drops one (review F2).
+    for (const notice of fired.filter(isGroup)) {
+      try { await this.#notice(notice); }
+      catch (error) { this.log(`schedule ${notice.schedule.schedule_id}: group reminder failed (${String(error?.message ?? error).slice(0, 200)})`); }
+    }
+    const owner = fired.filter(f => !isGroup(f));
+    if (owner.length) {
+      const id = 'schedule:' + owner.map(f => `${f.schedule.schedule_id}:${f.due_at}`).join(',');
+      await this.deliver(wakeText(owner), id);
     }
     const next = (fired.length ? await listSchedules(this.request) : rows)
       .filter(r => r.enabled && r.next_run_at).map(r => Date.parse(r.next_run_at)).sort((a, b) => a - b)[0];
     return Math.max(1000, Math.min(RECHECK_MS, next === undefined ? RECHECK_MS : next - this.now()));
+  }
+  /** One fired family-group reminder: posted and sent, or one owner wake saying why not. */
+  async #notice(fired) {
+    const run = `group-notice:${fired.schedule.schedule_id}:${fired.due_at}`;
+    const tell = answer => this.deliver(groupNoticeText(fired, answer), run + ':not-sent');
+    if (Number(fired.late_seconds) > GROUP_NOTICE_LATE_S) {
+      this.log(`schedule ${fired.schedule.schedule_id}: group reminder skipped, ${fired.late_seconds}s late`);
+      return tell({ late_seconds: Number(fired.late_seconds) });
+    }
+    let answer;
+    try { answer = await postGroupNotice(this.request, fired); }
+    catch (error) {
+      this.log(`schedule ${fired.schedule.schedule_id}: post_group_notice failed (${String(error?.message ?? error).slice(0, 200)})`);
+      return tell({ refused: 'state_unreachable' });
+    }
+    if (answer?.refused) {
+      this.log(`schedule ${fired.schedule.schedule_id}: group reminder refused ${answer.refused}`);
+      return tell(answer);
+    }
+    // A replay of a run already posted: it went to the bridge the first time.
+    if (answer?.duplicate || !answer?.posted) return;
+    const sent = this.sendGroup ? await Promise.resolve(this.sendGroup(answer.channel, answer.group_ref, answer.text)).catch(() => false) : false;
+    if (sent !== true) {
+      this.log(`schedule ${fired.schedule.schedule_id}: group reminder not sent by the bridge`);
+      return tell({ refused: 'send_failed' });
+    }
   }
   close() { this.closed = true; this.clearTimer(this.timer); }
 }

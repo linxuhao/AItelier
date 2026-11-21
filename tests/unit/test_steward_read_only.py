@@ -161,7 +161,14 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # account, a group @-message, the exit-checked reply, the turn audience) and the family
         # memory tool, accepted only from a group turn (tests/unit/test_steward_groups.py).
         "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
-        "note_family_memory"}
+        "note_family_memory",
+        # Step 25 (design-steward 7.9.4): post_group_notice is ONLY the host's, called in code with
+        # a schedule row that fired (the model has no tool for it: text and group come from the
+        # row) - tests/unit/test_steward_family.py.
+        "post_group_notice",
+        # Step 25 (7.9.5): the family list tools; add and check are accepted from a group turn too
+        # (public-read header + the recorded group audience of the named turn), remove never.
+        "add_list_items", "check_list_items", "remove_list_items"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

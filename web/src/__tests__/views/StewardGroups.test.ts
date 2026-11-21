@@ -44,6 +44,33 @@ describe('StewardGroups', () => {
     } finally { prompt.mockRestore(); }
   });
 
+  it('director 489 (b): a reminder row (kind notice, sender_role null) is the steward\'s notice, never a member nor blank', async () => {
+    const rec = (over: Record<string, unknown>) => ({accepted: 1, sender_ref: null, sender_role: null, sender_label: null, original: null,
+      withheld_reason: null, reply_to: null, answered_by: null, at: '2026-11-21T10:00:00Z', ...over});
+    api.listOwnerGroups.mockResolvedValue({groups: [{...group(), messages: [
+      rec({message_id: 'n1', direction: 'out', kind: 'notice', body: '该吃药了', sender_label: '管家通知'}),
+      rec({message_id: 'q1', direction: 'in', kind: 'question', body: '几点了', sender_ref: 'wxid_m1', sender_role: 'member', sender_label: '成员甲'}),
+      rec({message_id: 'r1', direction: 'out', kind: 'reply', body: '八点'}),
+    ]}]});
+    langStore.set('zh-CN');
+    const view = render(StewardGroups, {channel: 'wechat', bound: true});
+    await waitFor(() => expect(view.container.querySelector('[data-group-bound]')).not.toBeNull());
+    await fireEvent.click(view.getByRole('button', {name: '查看记录'}));
+    const records = await waitFor(() => {
+      const els = [...view.container.querySelectorAll('[data-group-record]')] as HTMLElement[];
+      expect(els.length).toBe(3);
+      return els;
+    });
+    const [n, q, r] = records.map(el => el.textContent ?? '');
+    expect(n).toContain('管家通知:');
+    expect(n).toContain('该吃药了');
+    expect(n).not.toContain('成员');
+    expect(q).toContain('成员甲:');
+    expect(r).toContain('→');
+    expect(r).not.toContain('管家通知');
+    langStore.set('en');
+  });
+
   it('unbinding asks first: declined, nothing is unbound; confirmed, the group is unbound', async () => {
     const view = render(StewardGroups, {channel: 'wechat', bound: true});
     const unbind = await waitFor(() => {

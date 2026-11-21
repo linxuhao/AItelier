@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { createStewardSchedule, previewStewardSchedule, updateStewardSchedule,
-    type StewardSchedule, type StewardScheduleSpec } from '../lib/api';
+  import { onMount, untrack } from 'svelte';
+  import { createStewardSchedule, listOwnerGroups, previewStewardSchedule, updateStewardSchedule,
+    type OwnerChannelName, type StewardSchedule, type StewardScheduleFields, type StewardScheduleSpec } from '../lib/api';
   import { SCHEDULE_PRESETS, SCHEDULE_REFUSALS, browserTimeZone, formatRunAt, fromLocalInput,
     scheduleConflict, scheduleRefusal, toLocalInput } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
@@ -18,12 +18,20 @@
     at = $state(''), expr = $state(''), tz = $state(browserTimeZone()), baseVersion = $state(0);
   let busy = $state(false), error = $state(''), conflict = $state<StewardSchedule | null>(null);
   let preview = $state<string[] | null>(null), previewError = $state('');
+  // Step 25 C11 (design 7.9.4): 「发到：我 / 家庭群」. The family group can be chosen only while one
+  // is bound; with a group on each channel the owner names the channel.
+  let target = $state<'owner' | 'family_group'>('owner'), channel = $state<OwnerChannelName | ''>('');
+  let groups = $state<OwnerChannelName[]>([]);
+  onMount(() => {
+    listOwnerGroups().then(r => { groups = (r.groups ?? []).map(g => g.channel); }).catch(() => { groups = []; });
+  });
   // A new reminder runs on the browser's zone; an edited one keeps the zone it has.
   function fill(source: StewardSchedule) {
     title = source.title; instruction = source.instruction; kind = source.schedule.kind;
     at = source.schedule.kind === 'once' ? toLocalInput(source.schedule.at) : '';
     expr = source.schedule.kind === 'cron' ? source.schedule.expr : '';
     tz = source.tz; baseVersion = source.version;
+    target = source.target ?? 'owner'; channel = source.target_channel ?? '';
   }
   const initial = untrack(() => row);
   if (initial) fill(initial);
@@ -51,7 +59,16 @@
   async function save() {
     if (busy) return;
     busy = true; error = ''; conflict = null;
-    const fields = {title: title.trim(), instruction: instruction.trim(), schedule, tz};
+    const fields: StewardScheduleFields = {title: title.trim(), instruction: instruction.trim(), schedule, tz};
+    // Sent only when it says something: a reminder to the group (created or re-pointed), or one
+    // turned back to the owner. An edit that keeps the target keeps the group it recorded, unless
+    // that group was unbound or another channel's group was chosen: then it is re-pointed to the
+    // group bound now (review F1/F4). A channel no group is bound on now is not sent.
+    const was = initial?.target ?? 'owner';
+    const regroup = !!initial && was === 'family_group' && target === 'family_group'
+      && (!!initial.target_unbound || (!!channel && channel !== (initial.target_channel ?? '')));
+    if (initial ? target !== was || regroup : target === 'family_group') fields.target = target;
+    if (fields.target === 'family_group' && channel && groups.includes(channel)) fields.channel = channel;
     try {
       const saved = initial ? await updateStewardSchedule(initial.schedule_id, baseVersion, fields)
         : await createStewardSchedule(fields);
@@ -70,6 +87,16 @@
     if (!title.trim()) title = t('steward.schedPresetTitle.' + preset.id);
     if (!instruction.trim()) instruction = t('steward.schedPresetInstruction.' + preset.id);
   }
+  // A filling preset's instruction is a request to the steward (send_user_message to the owner),
+  // and a group reminder posts its text word for word: such presets are off while the target is
+  // the group, and pointing the reminder at the group drops that text while it is still exactly
+  // the preset's - words the owner typed or changed stay.
+  const isPresetInstruction = (text: string) =>
+    SCHEDULE_PRESETS.some(p => p.fill && text.trim() === t('steward.schedPresetInstruction.' + p.id));
+  $effect(() => {
+    if (target !== 'family_group') return;
+    untrack(() => { if (isPresetInstruction(instruction)) instruction = ''; });
+  });
   function startFromCurrent() {
     if (!conflict) return;
     fill(conflict); conflict = null;
@@ -78,7 +105,24 @@
 <form class="schedule-form" aria-label={initial ? t('steward.schedEdit') : t('steward.schedNew')}
   onsubmit={(event) => { event.preventDefault(); void save(); }}>
   <label>{t('steward.schedTitle')}<input type="text" maxlength="200" bind:value={title} /></label>
-  <label>{t('steward.schedInstruction')}<textarea rows="3" maxlength="2000" bind:value={instruction}></textarea></label>
+  <fieldset class="kind" data-schedule-target>
+    <legend>{t('steward.schedTarget')}</legend>
+    <label><input type="radio" name="schedule-target" value="owner" bind:group={target} /> {t('steward.schedTargetOwner')}</label>
+    <label><input type="radio" name="schedule-target" value="family_group" bind:group={target}
+      disabled={!groups.length && initial?.target !== 'family_group'} /> {t('steward.schedTargetGroup')}</label>
+    {#if !groups.length}<small class="hint">{t('steward.schedTargetNoGroup')}</small>{/if}
+  </fieldset>
+  {#if target === 'family_group' && groups.length > 1}
+    <label>{t('steward.schedTargetChannel')}<select bind:value={channel} data-schedule-channel>
+      {#each groups as g (g)}<option value={g}>{g}</option>{/each}
+    </select></label>
+  {/if}
+  {#if target === 'family_group'}
+    <label>{t('steward.schedGroupText')}<textarea rows="3" maxlength="500" bind:value={instruction}></textarea></label>
+    <small class="hint">{t('steward.schedGroupTextHelp')}</small>
+  {:else}
+    <label>{t('steward.schedInstruction')}<textarea rows="3" maxlength="2000" bind:value={instruction}></textarea></label>
+  {/if}
   <fieldset class="kind">
     <legend>{t('steward.schedKind')}</legend>
     <label><input type="radio" name="schedule-kind" value="cron" bind:group={kind} /> {t('steward.schedKindCron')}</label>
@@ -88,9 +132,11 @@
     <label>{t('steward.schedExpr')}<input type="text" bind:value={expr} placeholder="0 9 * * 1-5" data-schedule-expr /></label>
     <div class="presets" role="group" aria-label={t('steward.schedPresets')}>
       {#each SCHEDULE_PRESETS as preset (preset.id)}
-        <button type="button" class="outline" onclick={() => usePreset(preset)}>{t('steward.schedPreset.' + preset.id)}</button>
+        <button type="button" class="outline" disabled={!!preset.fill && target === 'family_group'}
+          onclick={() => usePreset(preset)}>{t('steward.schedPreset.' + preset.id)}</button>
       {/each}
     </div>
+    {#if target === 'family_group' && SCHEDULE_PRESETS.some(p => p.fill)}<small class="hint" data-preset-owner-only>{t('steward.schedPresetOwnerOnly')}</small>{/if}
   {:else}
     <label>{t('steward.schedAt')}<input type="datetime-local" bind:value={at} data-schedule-at /></label>
   {/if}
@@ -127,7 +173,7 @@
   .kind{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 6px;}.kind legend{width:100%;}
   .presets,.actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;}
   .presets button,.actions button,.conflict button{width:auto;margin:0;padding:4px 10px;font-size:12px;}
-  .tz{color:var(--pico-muted-color);font-size:12px;margin:0 0 6px;}
+  .tz,.hint{color:var(--pico-muted-color);font-size:12px;margin:0 0 6px;}.hint{display:block;}
   .preview{margin:0 0 8px;padding:8px;border-radius:6px;background:var(--pico-card-sectioning-background-color);}
   .preview ol{margin:4px 0 0;padding-left:20px;}.preview li{list-style:decimal;margin:0;}.preview p{margin:4px 0 0;}
   .conflict{padding:8px;border:1px solid var(--pico-del-color);border-radius:6px;margin:0 0 8px;}

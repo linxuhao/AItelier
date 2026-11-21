@@ -4,7 +4,7 @@
  *  operations map onto the step 23 commands. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stewardOps, groupOps, publicProjectSummary } from './steward-host.mjs';
+import { stewardOps, groupOps, publicProjectSummary, listWhoShown } from './steward-host.mjs';
 
 function recorder(answers = {}) {
   const calls = [];
@@ -56,6 +56,49 @@ test('the group operations are the host\'s own requests; only the family memory 
   assert.deepEqual(tool.calls.map(c => [c.path.split('/').at(-1), c.readAs]), [['note_family_memory', 'public'], ['list_family_memory', 'public']]);
   // Both name the turn they run in (director 477 N1: the backend wants the recorded one).
   assert.deepEqual(tool.calls.map(c => c.body.turn), ['3', '3']);
+});
+
+test('step 25 C4: the four list operations go through the tools\' request, naming the turn they run in', async () => {
+  const host = recorder();
+  const tool = recorder();
+  const ops = groupOps({ request: host.request, toolRequest: (p, b, s) => tool.request(p, b, s, { readAs: 'public' }), project: 'aitelier-home', me: 'drv' });
+  await ops.listShow({ list: 'shopping' }, undefined, { turn: '7' });
+  await ops.listAdd({ list: 'shopping', items: ['牛奶', '鸡蛋'] }, undefined, { turn: '7' });
+  await ops.listCheck({ itemIds: ['li-1'], done: true }, undefined, { turn: '7' });
+  await ops.listRemove({ itemIds: ['li-2'] }, undefined, { turn: '8' });
+  assert.deepEqual(host.calls, []);
+  assert.deepEqual(tool.calls.map(c => [c.path.split('/').at(-1), c.readAs, c.body.turn]), [
+    ['list_list_items', 'public', '7'], ['add_list_items', 'public', '7'], ['check_list_items', 'public', '7'],
+    ['remove_list_items', 'public', undefined]]);
+  assert.deepEqual({ ...tool.calls[1].body, request_key: undefined }, { request_key: undefined, list: 'shopping', items: ['牛奶', '鸡蛋'], turn: '7' });
+  assert.deepEqual({ ...tool.calls[2].body, request_key: undefined }, { request_key: undefined, item_ids: ['li-1'], done: true, turn: '7' });
+  // Each call its own key: the same item can be added again after it was removed.
+  await ops.listAdd({ list: 'shopping', items: ['牛奶', '鸡蛋'] }, undefined, { turn: '7' });
+  assert.notEqual(tool.calls[1].body.request_key, tool.calls.at(-1).body.request_key);
+  // A refusal is an answer the model reads, never a thrown tool error.
+  const refusing = groupOps({ request: host.request, toolRequest: async () => { throw new Error('AItelier: HTTP 422 "withheld: private_project"'); } });
+  assert.equal((await refusing.listAdd({ list: 'todo', items: ['x'] }, undefined, { turn: '1' })).refused, 'state_refused');
+});
+
+test('director 489 (a): an item of an unbound group reads to the model as 曾由一位成员添加 / 勾掉, never blank, never a throw', async () => {
+  const gone = { item_id: 'li-1', text: '牛奶', added_by: null, added_by_role: 'member', done: true, done_by: null };
+  const open = { item_id: 'li-2', text: '鸡蛋', added_by: null, added_by_role: 'member', done: false, done_by: null };
+  const named = { item_id: 'li-3', text: '面包', added_by: '妈妈', added_by_role: 'member', done: true, done_by: '业主' };
+  const tool = recorder({
+    '/api/state/query/list_list_items': { result: { lists: { shopping: [gone, open, named], todo: [] } } },
+    '/api/state/commands/add_list_items': { result: { items: [{ ...open, added: false }] } },
+    '/api/state/commands/check_list_items': { result: { items: [gone], unknown: ['li-x'] } } });
+  const ops = groupOps({ request: recorder().request, toolRequest: tool.request });
+  const shown = await ops.listShow({}, undefined, { turn: '1' });
+  assert.deepEqual(shown.lists.shopping.map(i => [i.text, i.added_by, i.done_by]), [
+    ['牛奶', '曾由一位成员添加', '曾由一位成员勾掉'], ['鸡蛋', '曾由一位成员添加', null], ['面包', '妈妈', '业主']]);
+  assert.deepEqual(shown.lists.todo, []);
+  assert.equal((await ops.listAdd({ list: 'shopping', items: ['鸡蛋'] }, undefined, { turn: '1' })).items[0].added_by, '曾由一位成员添加');
+  const checked = await ops.listCheck({ itemIds: ['li-1', 'li-x'] }, undefined, { turn: '1' });
+  assert.deepEqual([checked.items[0].added_by, checked.items[0].done_by, checked.unknown], ['曾由一位成员添加', '曾由一位成员勾掉', ['li-x']]);
+  // Odd answers pass through untouched.
+  assert.deepEqual([listWhoShown(undefined), listWhoShown({ refused: 'withheld' }), listWhoShown({ items: null })],
+    [undefined, { refused: 'withheld' }, { items: null }]);
 });
 
 test('the runtime: in a group turn every tool request carries the header, the host\'s requests never; in an owner turn none', async () => {

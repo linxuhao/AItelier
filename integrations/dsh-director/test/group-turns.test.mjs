@@ -87,6 +87,26 @@ test('guard: in a group turn only the four tools, at most six calls; anything ne
   assert.equal(g2.guard('portfolio_project'), answerNow);
 });
 
+test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
+  assert.deepEqual([...GROUP_TOOLS].sort(), ['family_memory_note', 'family_memory_show', 'list_add', 'list_check', 'list_show',
+    'portfolio_project', 'portfolio_projects']);
+  for (const name of ['list_show', 'list_add', 'list_check']) {
+    const g = turns();
+    g.split([group('q')], 1);
+    assert.equal(g.guard(name), undefined, name);
+  }
+  const g = turns();
+  g.split([group('q')], 1);
+  assert.equal(g.guard('list_remove'), groupTurnRefusal);
+  assert.match(groupTurnRefusal, /list_show, list_add, list_check/);
+  // After a group turn, before the owner writes: the owner's turn still changes the lists.
+  const o = turns();
+  o.pause();
+  o.split([message('a director letter')], 1);
+  for (const name of ['list_show', 'list_add', 'list_check', 'list_remove']) assert.equal(o.guard(name), undefined, name);
+  assert.equal(o.guard('propose'), pausedRefusal);
+});
+
 test('guard: an unknown audience reads as a group; an owner turn never gets the family memory tools', () => {
   const g = turns();
   assert.equal(g.guard('memory_note'), groupTurnRefusal);

@@ -29,6 +29,7 @@ const api = vi.hoisted(() => ({
   stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(),
   listStewardSchedules: vi.fn(), createStewardSchedule: vi.fn(), updateStewardSchedule: vi.fn(),
   deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(), stewardMessageSources: vi.fn(),
+  listOwnerGroups: vi.fn(),
 }));
 // The real module underneath, so ApiError is the class the components check.
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
@@ -584,7 +585,89 @@ describe('reminders', () => {
   const card = (container: HTMLElement, id: string) => container.querySelector(`[data-schedule="${id}"]`) as HTMLElement;
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const form = () => ({onchange: vi.fn(), onclose: vi.fn()});
-  beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); });
+  beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); api.listOwnerGroups.mockResolvedValue({groups: []}); });
+
+  it('step 25 C11: the family group is chosen only while one is bound, and the words go as written', async () => {
+    const p = form();
+    const view = render(StewardScheduleForm, p);
+    const group = () => view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
+    expect(group().disabled).toBe(true);
+    expect(view.getByText('Bind a family group on the Channels tab to send reminders there.')).toBeTruthy();
+    cleanup();
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.createStewardSchedule.mockImplementation(async (fields: object) => schedule({...fields, schedule_id: 'sch-g', version: 1}));
+    const again = render(StewardScheduleForm, p);
+    const pick = again.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(pick.disabled).toBe(false));
+    await fireEvent.click(pick);
+    await fireEvent.input(again.getByLabelText('Title'), {target: {value: '吃药'}});
+    await fireEvent.input(again.getByLabelText('Words posted in the family group'), {target: {value: '该吃药了'}});
+    await fireEvent.click(again.getByLabelText('Once'));
+    await fireEvent.input(again.container.querySelector('[data-schedule-at]') as HTMLInputElement, {target: {value: '2030-01-02T09:30'}});
+    await fireEvent.click(again.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(api.createStewardSchedule).toHaveBeenCalledWith({title: '吃药', instruction: '该吃药了',
+      schedule: {kind: 'once', at: new Date('2030-01-02T09:30').toISOString()}, tz: browserZone, target: 'family_group'}));
+  });
+
+  it('review F1/F4: editing a group reminder re-points it when its group was unbound or another channel is chosen', async () => {
+    const save = async (row: StewardSchedule, pick?: string) => {
+      api.updateStewardSchedule.mockResolvedValueOnce(row);
+      const view = render(StewardScheduleForm, {...form(), row});
+      await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
+      await new Promise(r => setTimeout(r, 0));
+      if (pick) {
+        const select = await waitFor(() => view.container.querySelector('[data-schedule-channel]') as HTMLSelectElement);
+        await fireEvent.change(select, {target: {value: pick}});
+      }
+      await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+      await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenCalled());
+      const fields = api.updateStewardSchedule.mock.calls.at(-1)[2];
+      cleanup(); api.updateStewardSchedule.mockClear(); api.listOwnerGroups.mockClear();
+      return fields;
+    };
+    const group = {target: 'family_group' as const, target_channel: 'wechat' as const, instruction: '该吃药了'};
+    // Its group unbound, another bound on Slack now: re-pointed there (the old channel is not sent).
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}]});
+    const unbound = await save(schedule({...group, target_unbound: true, enabled: false}));
+    expect(unbound.target).toBe('family_group');
+    expect(unbound.channel).toBeUndefined();
+    // A group on each channel, the other one chosen: target and channel both go.
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}, {channel: 'wechat'}]});
+    const moved = await save(schedule({...group, target_unbound: false}), 'slack');
+    expect([moved.target, moved.channel]).toEqual(['family_group', 'slack']);
+    // Nothing about the group changed: no target, the recorded group is kept.
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    const kept = await save(schedule({...group, target_unbound: false}));
+    expect([kept.target, kept.channel]).toEqual([undefined, undefined]);
+  });
+
+  it('step 25 C11: a 422 withheld says the group may not see it; the list marks group reminders and an unbound group', async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.createStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code: 'withheld', reason: 'private_project: the name or id of a project that is not public'}));
+    const view = render(StewardScheduleForm, form());
+    const pick = view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(pick.disabled).toBe(false));
+    await fireEvent.click(pick);
+    await fireEvent.input(view.getByLabelText('Title'), {target: {value: 't'}});
+    await fireEvent.input(view.getByLabelText('Words posted in the family group'), {target: {value: '看看家庭账本'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Every day at 9:00'}));
+    await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+    await waitFor(() => expect(view.getByRole('alert').textContent).toBe(
+      'The family group may not see this: private_project: the name or id of a project that is not public'));
+    cleanup();
+    api.listStewardSchedules.mockResolvedValue([
+      schedule({schedule_id: 'sch-g', title: '吃药', target: 'family_group', target_unbound: false}),
+      schedule({schedule_id: 'sch-u', title: '倒垃圾', target: 'family_group', target_unbound: true, enabled: false}),
+      schedule({schedule_id: 'sch-o', title: 'Mine'}),
+    ]);
+    const list = render(StewardSchedules);
+    await list.findByText('吃药');
+    expect(card(list.container, 'sch-g').querySelector('[data-target-group]')?.textContent).toBe('To the family group');
+    expect(card(list.container, 'sch-g').querySelector('[data-group-unbound]')).toBeNull();
+    expect(card(list.container, 'sch-u').querySelector('[data-group-unbound]')?.textContent).toBe('Group unbound');
+    expect(card(list.container, 'sch-o').querySelector('[data-target-group]')).toBeNull();
+  });
 
   it('review 337: a reminder past its time by more than five minutes is marked overdue (a stopped clock shows)', async () => {
     api.listStewardSchedules.mockResolvedValue([
@@ -684,6 +767,57 @@ describe('reminders', () => {
     await fireEvent.click(view.getByRole('button', {name: '每日简报 8 点'}));
     expect((view.container.querySelector('input[type="text"]') as HTMLInputElement).value).toBe('每日简报');
     expect((view.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('按简报规则写今天的每日简报，用 send_user_message 发给业主。');
+  });
+
+  // Step 25.2: a group reminder posts its text as written, and the brief preset's text is a
+  // request to the steward - it must never reach the family group.
+  const BRIEF_TEXT = "Write today's daily brief following the brief rules and send it to the owner with send_user_message.";
+  const groupForm = async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    const view = render(StewardScheduleForm, form());
+    const group = view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(group.disabled).toBe(false));
+    return {view, group, owner: view.getByLabelText('Me (the steward reminds me)') as HTMLInputElement,
+      brief: view.getByRole('button', {name: 'Daily brief at 8:00'}) as HTMLButtonElement,
+      text: () => view.container.querySelector('textarea') as HTMLTextAreaElement};
+  };
+  const HINT = 'The daily brief is a request to the steward, so it is for reminders to me only, not the family group.';
+
+  it('step 25.2: while the target is the family group the daily-brief preset is off, with a hint', async () => {
+    const {view, group, owner, brief} = await groupForm();
+    expect(brief.disabled).toBe(false);
+    expect(view.queryByText(HINT)).toBeNull();
+    await fireEvent.click(group);
+    expect(brief.disabled).toBe(true);
+    expect(view.getByText(HINT)).toBeTruthy();
+    // The presets that only set the time stay on.
+    expect((view.getByRole('button', {name: 'Every day at 9:00'}) as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(owner);
+    expect(brief.disabled).toBe(false);
+    expect(view.queryByText(HINT)).toBeNull();
+  });
+
+  it('step 25.2: switching to the family group drops the brief text the preset filled, never text the owner wrote', async () => {
+    const {view, group, owner, brief, text} = await groupForm();
+    await fireEvent.click(brief);
+    expect(text().value).toBe(BRIEF_TEXT);
+    await fireEvent.click(group);
+    expect(view.getByLabelText('Words posted in the family group')).toBe(text());
+    expect(text().value).toBe('');
+    // The title is not posted; it stays. Save waits for the owner's own words.
+    expect((view.getByLabelText('Title') as HTMLInputElement).value).toBe('Daily brief');
+    expect((view.getByRole('button', {name: 'Save'}) as HTMLButtonElement).disabled).toBe(true);
+    // The preset's text changed by the owner is the owner's: it stays.
+    await fireEvent.click(owner);
+    await fireEvent.click(brief);
+    await fireEvent.input(text(), {target: {value: BRIEF_TEXT + ' Keep it short.'}});
+    await fireEvent.click(group);
+    expect(text().value).toBe(BRIEF_TEXT + ' Keep it short.');
+    // And words the owner typed stay too.
+    await fireEvent.click(owner);
+    await fireEvent.input(text(), {target: {value: '该吃药了'}});
+    await fireEvent.click(group);
+    expect(text().value).toBe('该吃药了');
   });
 
   it.each([

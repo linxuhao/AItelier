@@ -262,6 +262,12 @@ def _plan():
         "state_pending_groups": (
             ("INSERT INTO state_pending_groups(channel,room_ref,mention_prefix,code_hash,at) VALUES('wechat',?,?,?,?)"),
             (c("state_pending_groups"), c("state_pending_groups"), c("state_pending_groups"), now)),
+        # Step 25 C4 (core/state_lists.py): one family list item, the canary in its text and names.
+        "state_steward_list_items": (
+            ("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_by_ref,added_by_label,"
+             "added_via,added_at) VALUES(?,'shopping',?,'member',?,?,'group',?)"),
+            (c("state_steward_list_items"), c("state_steward_list_items"), c("state_steward_list_items"),
+             c("state_steward_list_items"), "2999-01-01T00:00:00+00:00")),
     }
 
 

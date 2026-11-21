@@ -34,7 +34,7 @@
                   "private_inbox", "portfolio_inbox_acknowledge", "private_inbox_acknowledge",
                   "propose", "withdraw_proposal", "request_wechat_qr",
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history",
-                  "family_memory_note", "family_memory_show"],
+                  "family_memory_note", "family_memory_show", "list_show", "list_add", "list_check", "list_remove"],
     "presented_only": true,
     "forbidden": ["bash", "read", "write", "edit", "grep", "read_image", "subagent", "subagent_fork", "workflow",
                   "todo_plan", "todo_status", "todo_finish", "todo_templates", "todo_rebind", "todo_begin", "todo_done",

@@ -84,7 +84,9 @@ export const SCHEDULE_PRESETS: readonly {id: string; expr: string; fill?: boolea
 ];
 
 /** The refusal codes the schedule endpoints give with a 422 (each has a steward.schedReason.* text). */
-export const SCHEDULE_REFUSALS = ['invalid_cron', 'too_frequent', 'at_in_past', 'invalid_timezone'];
+export const SCHEDULE_REFUSALS = ['invalid_cron', 'too_frequent', 'at_in_past', 'invalid_timezone',
+  // Step 25 C11: a reminder to the family group.
+  'no_group_bound', 'withheld', 'notice_too_long', 'too_many_group_reminders', 'group_unbound', 'channel_required'];
 
 export function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';

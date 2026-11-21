@@ -201,6 +201,10 @@ export async function openProposals(request, signal) {
 // ---- letters: replying to a director and marking a letter read (owner 2026-11-17) ----
 
 const digest = text => createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+// Step 25 C4: each list tool call is a new intent (the same item may be added again after it was
+// removed), so its key is unique per call; the turn is in it for the reader of the ledger.
+let listKeys = 0;
+const listKey = (what, turn) => `${what}:${turn ?? 'owner'}:${Date.now().toString(36)}:${(listKeys++).toString(36)}`;
 
 /** A delivery addressed to the steward, with what a reply needs: in its project inbox
  *  (`project`, State director messages) or its private driver inbox (`private`). */
@@ -660,6 +664,21 @@ export function publicProjectSummary(summary) {
   return { ...summary, open_work: summary.open_work.map(strip) };
 }
 
+/** Step 25 C4 (design-steward 7.9.5, director 489 (a)): an item whose family group was unbound
+ *  keeps its text and checked state but no longer says who added or checked it (`added_by` /
+ *  `done_by` null). The model reads that as these words, never a blank. */
+export const LIST_FORMER_ADDED = '曾由一位成员添加';
+export const LIST_FORMER_DONE = '曾由一位成员勾掉';
+export function listWhoShown(answer) {
+  if (!answer || typeof answer !== 'object') return answer;
+  const item = i => (i && typeof i === 'object' ? { ...i, added_by: i.added_by ?? LIST_FORMER_ADDED,
+    ...(i.done ? { done_by: i.done_by ?? LIST_FORMER_DONE } : {}) } : i);
+  const items = v => (Array.isArray(v) ? v.map(item) : v);
+  return { ...answer, ...('items' in answer ? { items: items(answer.items) } : {}),
+    ...(answer.lists && typeof answer.lists === 'object'
+      ? { lists: Object.fromEntries(Object.entries(answer.lists).map(([name, v]) => [name, items(v)])) } : {}) };
+}
+
 /** Step 23 (design-steward 7.7): the host side of the family group, over the State commands
  *  and queries of step 23. Every call is the HOST's own (no public-read header) except the two
  *  family memory tools, which go through `toolRequest` - the request a group turn's tools use,
@@ -700,6 +719,21 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     familyNote: (text, signal, { turn } = {}) => toolRequest('/api/state/commands/note_family_memory',
       { request_key: `family:${digest(String(text))}`, text: String(text ?? ''), turn }, signal).then(result, refusedBy),
     familyShow: (signal, { turn } = {}) => toolRequest('/api/state/query/list_family_memory', { turn }, signal).then(result, refusedBy),
+    // Step 25 C4 (design-steward 7.9.5): the family lists, through the request a turn's tools use
+    // (in a group turn it carries the public-read header and must name the recorded turn: the
+    // plugin passes its open turn; in an owner turn the header is absent and `turn` is ignored).
+    // remove is an owner turn's alone (the guard refuses it in a group turn, the backend too).
+    listShow: ({ list } = {}, signal, { turn } = {}) => toolRequest('/api/state/query/list_list_items',
+      { ...(list ? { list } : {}), ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
+    listAdd: ({ list, items }, signal, { turn } = {}) => toolRequest('/api/state/commands/add_list_items',
+      { request_key: listKey('list-add', turn), list, items,
+        ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
+    listCheck: ({ itemIds, done = true }, signal, { turn } = {}) => toolRequest('/api/state/commands/check_list_items',
+      { request_key: listKey('list-check', turn), item_ids: itemIds, done,
+        ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
+    listRemove: ({ itemIds }, signal, { turn } = {}) => toolRequest('/api/state/commands/remove_list_items',
+      { request_key: listKey('list-remove', turn), item_ids: itemIds }, signal)
+      .then(result, refusedBy),
   };
 }
 

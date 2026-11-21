@@ -77,6 +77,9 @@
       <header>
         <strong>{row.title}</strong>
         {#if row.updated_by === 'steward'}<span class="mark" data-steward-edited>{t('steward.schedStewardEdited')}</span>{/if}
+        <!-- Step 25 C11: posted as written into the family group; marked once that group is unbound. -->
+        {#if row.target === 'family_group'}<span class="mark group" data-target-group>{t('steward.schedToGroup')}</span>{/if}
+        {#if row.target === 'family_group' && row.target_unbound}<span class="mark overdue" data-group-unbound>{t('steward.schedGroupUnbound')}</span>{/if}
         <!-- Review 337: a stopped scheduler must not look healthy. Past its time by more than
              five minutes (the steward's clock fires within seconds and re-looks every 4 min). -->
         {#if on && (row.overdue_seconds ?? 0) > 300}<span class="mark overdue" data-overdue>{t('steward.schedOverdue').replace('{minutes}', String(Math.round((row.overdue_seconds ?? 0) / 60)))}</span>{/if}
@@ -95,7 +98,7 @@
         <dt>{t('steward.schedNext')}</dt><dd data-next>{formatRunAt(row.next_run_at, row.tz)}</dd>
         <dt>{t('steward.schedLast')}</dt><dd data-last>{formatRunAt(row.last_run_at, row.tz)}</dd>
         <dt>{t('steward.schedCreatedBy')}</dt><dd data-created-by>{t('steward.by.' + row.created_by)}</dd>
-        <dt>{t('steward.schedInstruction')}</dt><dd>{row.instruction}</dd>
+        <dt>{row.target === 'family_group' ? t('steward.schedGroupText') : t('steward.schedInstruction')}</dt><dd>{row.instruction}</dd>
       </dl>
       <div class="actions">
         <button type="button" class="outline" onclick={() => { editing = row; notice = ''; }}>{t('steward.schedEdit')}</button>
@@ -114,6 +117,7 @@
   header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 6px;padding:0;background:none;border:0;}
   .mark{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);}
   .mark.overdue{background:var(--pico-del-color, #c62828);color:#fff;}
+  .mark.group{background:var(--pico-secondary-background, #546e7a);color:#fff;}
   .switch{margin:0 0 0 auto;font-size:12px;display:flex;gap:6px;align-items:center;}.switch input{margin:0;}
   .when{margin:0 0 6px;}.when small{color:var(--pico-muted-color);}
   dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;margin:0 0 8px;}

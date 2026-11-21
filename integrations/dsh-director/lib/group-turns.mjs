@@ -21,16 +21,17 @@ import { withoutLeadingClockLines } from './core.mjs';
 
 export const GROUP_SOURCE = 'dsh-director-group';
 export const FOLD_SOURCE = 'dsh-director-group-fold';
-/** What a group turn may call (7.7.5): the public portfolio reads and the family memory. Any
- *  tool added later is refused in a group turn by default. */
+/** What a group turn may call (7.7.5): the public portfolio reads, the family memory and (step
+ *  25 C4, 7.9.5, owner 2026-11-21) the family lists' show, add and check - never list_remove.
+ *  Any tool added later is refused in a group turn by default. */
 export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfolio_project', 'family_memory_note',
-  'family_memory_show']));
+  'family_memory_show', 'list_show', 'list_add', 'list_check']));
 /** The family memory is for group turns only (7.7.8a, platform director 420). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project and the family memory tools; your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools and list_show, list_add, list_check; your last words are your reply to the group';
 export const familyRefusal = 'family memory is for group turns only';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';
 export const answerNow = 'answer now';

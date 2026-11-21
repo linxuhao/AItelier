@@ -642,6 +642,18 @@ describe('reminders', () => {
     expect(view.container.querySelector('[data-schedule-tz]')?.textContent).toBe(browserZone);
   });
 
+  it('an 08:00 daily reminder that is not a brief is not labelled as the daily brief', async () => {
+    // The brief preset shares its expression with any reminder set for 08:00 every day.
+    api.listStewardSchedules.mockResolvedValue([schedule({title: 'Take the pills', schedule: {kind: 'cron', expr: '0 8 * * *'}}),
+      schedule({schedule_id: 'sch-2', title: 'Daily', schedule: {kind: 'cron', expr: '0 9 * * *'}})]);
+    const view = render(StewardSchedules);
+    await view.findByText('Take the pills');
+    const when = card(view.container, 'sch-1').querySelector('[data-schedule-when]')?.textContent ?? '';
+    expect(when).toContain('0 8 * * *');
+    expect(when).not.toContain('Daily brief');
+    expect(card(view.container, 'sch-2').querySelector('[data-schedule-when]')?.textContent).toContain('Every day at 9:00');
+  });
+
   // Step 25 C5 (design 7.9.3): the daily brief is a preset that also fills the title and the
   // instruction - only where they are still empty; what goes in the brief is steward.md's rule.
   it('the daily-brief preset fills 08:00 daily, the title and the instruction', async () => {

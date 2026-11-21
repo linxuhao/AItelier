@@ -261,14 +261,13 @@ export interface DirectorHost {
  *  - reportStatus (optional): a channel's status changed - connected or not, a detail line
  *    (at most 300 characters), and while a login needs a scan its QR as an SVG document
  *    (`qrSvg`, a login token: shown to the owner, never logged). Called only on a change;
- *    {refused: code} when the host will not take it. Its answer may say since when the channel
- *    is down (`down_since`), how many alerts this outage has had (`alert_attempts`), and that a
- *    recovery notice is owed (`up_due`, for the outage that began at `alerted_since`).
- *  - claimAlert (optional, with reportStatus): may the channel-down alert (`down`) or recovery
- *    notice (`up`) about `channel`'s outage go now? {channel, kind, down_since, detail, via,
- *    attempt, up_at?} - `via` is the channel to send it through - or {held: 'quiet'|'early',
- *    retry_at} / {held: 'no_channel'}, or {} when it never will. Called by code, never a model.
- *  - recordAlert (optional): how the claimed alert's send went: ok, or the channel's `error`. */
+ *    {refused: code} when the host will not take it.
+ *  - dueAlerts (optional, with claimAlert and recordAlert): the channel-down alerts (`down`) and
+ *    recovery notices (`up`) due now, {due: [{channel, kind, down_since, attempt}]} - a read.
+ *  - claimAlert: may this one go now? {granted: true, via, to, minutes, detail} - `via` is the
+ *    channel to send it through, `to` its bound account - or {granted: false}. Called by code,
+ *    never a model.
+ *  - recordAlert: how the granted alert's send went: ok, or the channel's `error`. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
       Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
@@ -285,10 +284,11 @@ export interface DirectorHost {
       signal?: AbortSignal): Promise<{ store_text: boolean }>;
     reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
       Promise<object>;
+    dueAlerts?(signal?: AbortSignal): Promise<{ due: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; down_since: string; attempt: number }[] }>;
     claimAlert?(claim: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; attempt: number }, signal?: AbortSignal):
       Promise<object>;
-    recordAlert?(outcome: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; via: 'slack' | 'wechat'; attempt: number;
-      error?: string }, signal?: AbortSignal): Promise<object>;
+    recordAlert?(outcome: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; attempt: number; error?: string },
+      signal?: AbortSignal): Promise<object>;
   };
   /** Extend the loaded role table (e.g. forbid backend writes to workers) [unchanged].
    *  Synchronous; the result is validated (roles.json rules plus per-role

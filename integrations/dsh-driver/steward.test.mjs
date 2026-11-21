@@ -258,8 +258,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
-  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'list', 'recordAlert', 'recordDelivery', 'relay',
-    'reportStatus', 'sourceOf']);
+  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
+    'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
@@ -904,31 +904,30 @@ test('chat channels: a status change is one report_channel_status, each under it
   await assert.rejects(channels.reportStatus({ channel: 'slack', connected: true }), /HTTP 503/);
 });
 
-test('channel-down alert (step 25 C12): one claim and one record per outage and attempt, under keys a restart derives the same way', async () => {
+test('channel-down alert (step 25 C12): a read of what is due, then one claim and one record per outage, kind and attempt', async () => {
   const calls = [];
-  let answer = { result: { channel: 'wechat', kind: 'down', down_since: 'D', detail: 'x', via: 'slack', attempt: 1 } };
+  let answer = { result: { due: [{ channel: 'wechat', kind: 'down', down_since: 'D', attempt: 1 }] } };
   const request = async (path, body) => { calls.push([path, body]); if (answer instanceof Error) throw answer; return answer; };
   const channels = channelOps(request);
+  assert.deepEqual(await channels.dueAlerts(), answer.result);
+  answer = { result: { granted: true, via: 'slack', to: 'U1', minutes: 12, detail: 'x' } };
   assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 }), answer.result);
-  answer = { result: { held: 'no_channel' } };
-  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'up', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 }), { held: 'no_channel' });
-  answer = { result: {} };
-  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 2 }), {});
+  answer = { result: { granted: false } };
+  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'up', downSince: '2026-11-21T10:00:00+00:00', attempt: 2 }), { granted: false });
   answer = { result: { recorded: true, channel: 'wechat', kind: 'down' } };
-  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', via: 'slack', attempt: 1 });
-  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', via: 'slack', attempt: 2,
+  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 });
+  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 2,
     error: '409 recipient_unknown ' + 'e'.repeat(400) });
   assert.deepEqual(calls, [
+    ['/api/state/query/due_channel_alerts', {}],
     ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat', kind: 'down',
-      down_since: '2026-11-21T10:00:00+00:00' }],
-    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:up:2026-11-21T10:00:00+00:00:1', channel: 'wechat', kind: 'up',
-      down_since: '2026-11-21T10:00:00+00:00' }],
-    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:down:2026-11-21T10:00:00+00:00:2', channel: 'wechat', kind: 'down',
-      down_since: '2026-11-21T10:00:00+00:00' }],
+      down_since: '2026-11-21T10:00:00+00:00', attempt: 1 }],
+    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:up:2026-11-21T10:00:00+00:00:2', channel: 'wechat', kind: 'up',
+      down_since: '2026-11-21T10:00:00+00:00', attempt: 2 }],
     ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat',
-      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', via: 'slack', ok: true }],
+      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', attempt: 1, ok: true }],
     ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:2', channel: 'wechat',
-      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', via: 'slack', ok: false, error: ('409 recipient_unknown ' + 'e'.repeat(400)).slice(0, 300) }]]);
+      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', attempt: 2, ok: false, error: ('409 recipient_unknown ' + 'e'.repeat(400)).slice(0, 300) }]]);
   answer = Object.assign(new Error('AItelier /api/state/commands/claim_channel_alert: HTTP 403 "steward_role_required"'), { status: 403 });
   await assert.rejects(channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: 'D', attempt: 1 }), /HTTP 403/);
 });

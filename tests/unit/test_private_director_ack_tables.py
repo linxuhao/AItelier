@@ -46,7 +46,9 @@ STEWARD_SCHEDULE_PRIVATE={'state_steward_schedules'}
 # channel sources are PRIVATE, each with its own canary as well.
 CHANNEL_PRIVATE={'state_owner_channels','state_owner_channel_codes','state_message_sources',
                  'state_owner_channel_status','state_owner_channel_bind_attempts',
-                 'state_owner_channel_login_requests'}
+                 'state_owner_channel_login_requests',
+                 # Step 25: the channel-down alert ledger.
+                 'state_channel_alerts'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 # Both history rows replay a pre-policy source out of the git object store, so
 # they need a checkout WITH history, not a docker daemon.

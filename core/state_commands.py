@@ -1287,6 +1287,7 @@ class ClaimChannelAlert(Project):
     channel: _CHANNEL
     kind: Literal["down", "up"]
     down_since: str = Field(min_length=1, max_length=64)
+    attempt: int = Field(strict=True, ge=1, le=2)
 
 
 class RecordChannelAlert(Project):
@@ -1294,7 +1295,7 @@ class RecordChannelAlert(Project):
     channel: _CHANNEL
     kind: Literal["down", "up"]
     down_since: str = Field(min_length=1, max_length=64)
-    via: _CHANNEL
+    attempt: int = Field(strict=True, ge=1, le=2)
     ok: bool = Field(strict=True)
     # Cut to core.state_channels.ALERT_ERROR_MAX by the service.
     error: str | None = Field(default=None, min_length=1, max_length=2000)
@@ -1346,6 +1347,7 @@ READ_REQUESTS = {
     "list_steward_schedules": ListStewardSchedules,
     "list_owner_channels": Empty, "message_sources": MessageSources,
     "list_owner_channel_login_requests": Empty,
+    "due_channel_alerts": Empty,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1427,6 +1429,8 @@ WRITER_ONLY_READS = frozenset({
     "list_owner_channels", "message_sources",
     # Step 19: the owner's pending requests for a new WeChat login QR. A private table.
     "list_owner_channel_login_requests",
+    # Step 25: the channel alerts due now, from the channel status and the alert ledger. Private tables.
+    "due_channel_alerts",
 })
 
 
@@ -1863,6 +1867,7 @@ def _handlers(service) -> dict:
         "list_owner_channels": service.channels.list_owner_channels,
         "message_sources": service.channels.message_sources,
         "list_owner_channel_login_requests": service.channels.list_login_requests,
+        "due_channel_alerts": service.channels.due_channel_alerts,
         "complete_owner_channel_login_request": service.channels.complete_login_request,
         "claim_channel_alert": service.channels.claim_channel_alert,
         "record_channel_alert": service.channels.record_channel_alert,
@@ -1954,9 +1959,10 @@ def _driver_defaults(service, action, arguments):
 # the WeChat bridge answered to the owner's request for a new login QR: {requested} or
 # {refused, retry_after_s?}, never the QR.
 # claim_channel_alert and record_channel_alert (design-steward 7.9.2) are called only by
-# the host's code after its status poll, never by the model (no steward tool maps onto
-# them): the backend decides whether a channel-down alert is due and through which bound,
-# connected channel; the host sends its fixed text and records how that went.
+# the host's code after its status poll and its read of due_channel_alerts, never by the
+# model (no steward tool maps onto them): the backend judges again whether a channel alert
+# is due and through which bound, connected channel; the host sends its fixed text and
+# records how that went.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",

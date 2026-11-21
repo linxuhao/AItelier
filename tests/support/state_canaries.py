@@ -219,6 +219,11 @@ def _plan():
             ("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) "
              "VALUES('wechat',0,?,?,?)"),
             (c("state_owner_channel_status"), c("state_owner_channel_status"), now)),
+        # A channel-down alert's ledger row (step 25): the canary as the channel's error.
+        "state_channel_alerts": (
+            ("INSERT INTO state_channel_alerts(channel,kind,down_since,state,attempt,via,claimed_at,finished_at,"
+             "error) VALUES('wechat','down',?,'failed',1,'slack',?,?,?)"),
+            (now, now, now, c("state_channel_alerts"))),
         # The owner's request for a new WeChat login QR: the canary as its id, its
         # requester and its result; dated ahead so it stays pending (listed) all test long.
         "state_owner_channel_login_requests": (

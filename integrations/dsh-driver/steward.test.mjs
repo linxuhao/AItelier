@@ -1607,6 +1607,8 @@ test('step 22: relay_answer is the steward\'s alone and takes only owner_message
   const at = source.indexOf("name: 'relay_answer'");
   assert.ok(at > 0, 'registered by the adapter');
   assert.match(source.slice(at, at + 900), /parameters: \{ owner_message_id: \{ type: 'string', required: true \} \}/);
+  // A tool's request: in a group turn it carries the public-read header, so State refuses it.
+  assert.match(source.slice(at, at + 900), /relayAnswer\(\{ request: toolRequest, /);
   // Inside the steward-only block of setup(), after the director's state_read.
   const block = source.lastIndexOf('if (steward) {', at);
   assert.ok(block > source.indexOf("name: 'state_read'") && source.indexOf('\n      }\n', block) > at, 'registered for the steward only');

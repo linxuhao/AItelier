@@ -421,6 +421,34 @@ def test_only_the_steward_relays(world):
             execute(service, "sync_owner_questions", {"project_id": HOME}, allow_write=True)
 
 
+def test_a_family_group_message_or_a_group_turn_never_relays(world):
+    """Step 22 is the owner's 1:1 channel only: a family group message (step 23, stored in
+    state_group_messages) is no owner channel message, and a group turn's request (the
+    public-read header) may neither push nor relay."""
+    ask(world, world.alpha, "alpha", "q1", "问题一")
+    sync(world)
+    code = ledger(world)[0]["code_no"]
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,mention_prefix,bound_at) "
+                     "VALUES('wechat','room-1','@管家',?)", (world.clock["now"].isoformat(),))
+        conn.commit()
+    posted = execute(world.steward, "relay_group_message", {
+        "request_key": "g-1", "channel": "wechat", "group_ref": "room-1", "sender_ref": WX,
+        "channel_message_ref": "wxg-1", "body": f"Q{code} 用 A", "channel_at": world.clock["now"].isoformat()},
+        allow_write=True)
+    assert posted.get("message_id", "").startswith("gmsg-"), posted
+    refused(lambda: relay(world, posted["message_id"]), "not_from_channel")
+    source = channel_message(world, f"Q{code} 好", "wx-1")
+    group_turn = StateService(world.db, actor=world.steward.actor, driver_id=world.steward.driver_id,
+                              project_read_trusted=True, public_view=True)
+    refused(lambda: execute(group_turn, "relay_owner_answer", {"project_id": HOME, "request_key": "x",
+                                                               "source_message_id": source}, allow_write=True),
+            "public_view_read_only")
+    refused(lambda: execute(group_turn, "sync_owner_questions", {"project_id": HOME}, allow_write=True),
+            "public_view_read_only")
+    assert ledger(world)[0]["closed_at"] is None and open_questions(world, "alpha")
+
+
 @pytest.mark.parametrize("body, codes", [
     ("Q12用A", [12]), ("Q12、Q13 都同意", [12, 13]), ("Ｑ１２ 用方案 A", [12]), ("q12 好", [12]),
     ("  Q12, Q13/Q14，Q15 都行", [12, 13, 14, 15]), ("Q12 同意合并\nQ13 不要合并", [12, 13]),

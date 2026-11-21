@@ -91,6 +91,12 @@ APPROVAL_PHRASE_NOTE = "授权类问题也只认「Q编号 你的话」；批准
 # design's earlier drafts must NOT be put here. Set both from the measurement:
 WECHAT_QUOTE_SEPARATOR: str | None = None   # the separator line, exactly as measured
 WECHAT_QUOTE_BEFORE_OWN_WORDS: bool | None = None  # True: quote, separator, owner's words
+# Today no WeChat quote reaches this rule (director 515, condition 2): a WeChat quote reply is
+# an app message (raw type 49, appmsg type 57), and wechaty-puppet-neo 0.1.1, the bridge's
+# pinned puppet, passes on only raw type 1 (native/src/lib.rs incoming_text); the bridge then
+# relays only 1:1 text (integrations/wechat-bridge/bridge.mjs isOwnerCandidate). Its event has
+# no field marking a quote, so there is nothing to refuse on. A puppet or bridge that starts
+# passing quotes must add such a marker, or this measurement, before that change ships.
 
 _CODE = r"[Qq](0|[1-9][0-9]*)(?![0-9])"
 _CODES = re.compile(rf"{_CODE}(?:[\s、,，/]*{_CODE})*")

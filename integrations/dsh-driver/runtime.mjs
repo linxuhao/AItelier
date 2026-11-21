@@ -722,10 +722,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         }));
         // Step 22 (design-steward 7.6.5): the model decides only that a chat message answers a
         // pushed question; the backend reads the codes, copies the words and writes the receipt.
+        // Owner turns only: a group turn's guard refuses it (GROUP_TOOLS), and its request
+        // carries the public-read header, which refuses every step 22 write (step 23).
         scope.tools.register(defineTool({ name: 'relay_answer',
           description: 'Your owner answered a question your host pushed to their chat (a line starting with a code like Q12, or a message of codes alone): pass that message\'s id. Your host finds the codes, sends your owner\'s words unchanged to each director who asked, and confirms to your owner. A message that asks about a question (Q12 是什么意思？) is not an answer: do not relay it.',
           parameters: { owner_message_id: { type: 'string', required: true } }, output: json,
-          execute: (args, exec) => relayAnswer({ request, project, ownerMessageId: args.owner_message_id, mirror: ownerMessageSent, signal: exec.signal }),
+          execute: (args, exec) => relayAnswer({ request: toolRequest, project, ownerMessageId: args.owner_message_id, mirror: ownerMessageSent, signal: exec.signal }),
         }));
       }
       scope.tools.register(defineTool({ name: 'send_user_message',

@@ -14,7 +14,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -118,7 +118,7 @@ async function world(t, run, { stubborn = false, modelError = false } = {}) {
         { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'res-root',
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000 } }] },
     ]));
-    const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
+    const environment = withoutHostWiring(process.env);
     const launch = mode => {
       output = '';
       proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment, ...(stubborn ? { RES_TEST_STUBBORN: '1' } : {}), ...(modelError ? { RES_TEST_MODEL_ERROR: '1' } : {}),

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, symlink } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DSH_PACKAGE, pinnedDshVersion, resolveDshEntry, resolveDshLibraries, measuredEntryForTest, withoutCallerMode,
-  dshEntryCandidates, installRoot, packageRoot, executionModeKeys } from './dsh-entry.mjs';
+  withoutHostWiring, hostWiringKeys, dshEntryCandidates, installRoot, packageRoot, executionModeKeys } from './dsh-entry.mjs';
 
 const PINNED = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).dependencies[DSH_PACKAGE];
 
@@ -263,6 +263,25 @@ test('withoutCallerMode drops exactly the mode the invoking shell decided', () =
   assert.equal(environment.AITELIER_DSH_ENTRY, '/entry');
   assert.equal(environment.PATH, '/bin');
   assert.equal(caller.AITELIER_DSH_EXECUTION, 'host', 'the caller environment was mutated');
+});
+
+test('withoutHostWiring drops the deployment wiring a fixture answers itself', () => {
+  // The literals are the deployment's own (core/dsh_todo_hooks.py CLI_ENV + the shape the
+  // supervisor hands a resident driver), not this module's table: a key added here but not
+  // there would be a fixture that inherits something it did not ask for.
+  const caller = { DSH_TODO_HOOKS: 'core.dsh_todo_hooks', DSH_TODO_HOOKS_PATH: '/checkout', DSH_TODO_TEMPLATES: '/checkout/todo_templates',
+    AITELIER_DRIVER_TOKEN: 'secret', AITELIER_DRIVER_ID: 'dsh-x', AITELIER_DSH_STATE_DIR: '/state', AITELIER_TODO_PYTHON: '/python',
+    AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access',
+    DSH_HOME: '/fixture/home', PATH: '/bin', HOME: '/home/x' };
+  const environment = withoutHostWiring(caller);
+  for (const key of ['DSH_TODO_HOOKS', 'DSH_TODO_HOOKS_PATH', 'DSH_TODO_TEMPLATES'])
+    assert.ok(!Object.hasOwn(environment, key), `${key} survived into a fixture driver`);
+  for (const key of Object.keys(caller).filter(k => k.startsWith('AITELIER_')))
+    assert.ok(!Object.hasOwn(environment, key), `${key} survived into a fixture driver`);
+  assert.deepEqual(Object.keys(environment).sort(), ['DSH_HOME', 'HOME', 'PATH'], 'the rest of the caller environment must survive: '
+    + 'a fixture that drops PATH cannot find node, and one that drops DSH_HOME writes into the developer home');
+  assert.equal(caller.DSH_TODO_HOOKS, 'core.dsh_todo_hooks', 'the caller environment was mutated');
+  assert.deepEqual(hostWiringKeys.slice().sort(), ['DSH_TODO_HOOKS', 'DSH_TODO_HOOKS_PATH', 'DSH_TODO_TEMPLATES']);
 });
 
 test('measuredEntryForTest gives every pinned-DSH site one honest shape', async () => {

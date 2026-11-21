@@ -19,7 +19,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
+import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
 
 const PROVIDER = String.raw`
@@ -163,7 +163,7 @@ test('real pinned DSH, two boots: a standalone steward - the owner answers, appr
           dormantCompactMinTokens: 0, rootRole: 'steward', memory: { userId: 'owner', root: memRoot }, projectsDir } },
         { id: 's15-probe', name: join(directory, 's15-command-probe.mjs'), config: { dir: cmdDir, session: 's15-root' } }] },
     ]));
-    const environment = Object.fromEntries(Object.entries(withoutCallerMode(process.env)).filter(([k]) => !k.startsWith('AITELIER_')));
+    const environment = withoutHostWiring(process.env);
     const launch = boot => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
         DSH_HOME: join(directory, 'home'), S15_TEST_DSH_ENTRY: entry, S15_TEST_BOOT: boot, S15_TEST_URL: `http://127.0.0.1:${server.address().port}` } });

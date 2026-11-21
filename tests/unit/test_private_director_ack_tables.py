@@ -54,6 +54,12 @@ GROUP_PRIVATE={'state_owner_groups','state_group_messages','state_group_members'
                'state_family_note','state_steward_turn_audience','state_pending_groups'}
 # Step 25 C4: the family lists (core/state_lists.py) are PRIVATE, with a canary.
 LIST_PRIVATE={'state_steward_list_items'}
+# Step 24.1a: the steward's own MCP connections - addresses, the owner's ticks, tool
+# definitions, the served hash, restart markers and records, the call ledger - are
+# PRIVATE, each with its own canary (the turn audience is step 23's, above).
+CONNECTION_PRIVATE={'state_steward_connections','state_steward_connection_tools',
+                    'state_steward_tools_served','state_steward_restart_due','state_steward_restart_done',
+                    'state_steward_tool_calls'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 # Both history rows replay a pre-policy source out of the git object store, so
 # they need a checkout WITH history, not a docker daemon.
@@ -86,11 +92,11 @@ def old_sets():
            "worktree mounted without the shared repository has no objects)")
 def test_policy_adds_only_two_private_ack_tables_and_preserves_public_set():
     old=old_sets()
-    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE|GROUP_PRIVATE|LIST_PRIVATE
+    assert set(PRIVATE_STATE_TABLES)-old['PRIVATE_STATE_TABLES']==TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE|GROUP_PRIVATE|LIST_PRIVATE|CONNECTION_PRIVATE
     assert not old['PRIVATE_STATE_TABLES']-set(PRIVATE_STATE_TABLES)
     assert set(PUBLIC_STATE_TABLES)-old['PUBLIC_STATE_TABLES']==P3_PUBLIC|ARCHIVE_PUBLIC
     assert not old['PUBLIC_STATE_TABLES']-set(PUBLIC_STATE_TABLES)
-    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE|GROUP_PRIVATE|LIST_PRIVATE) & set(PUBLIC_STATE_TABLES)
+    assert not (TABLES|P3_PRIVATE|BUNDLE_STORE_PRIVATE|CONTEXT_PROTECTION_PRIVATE|STEWARD_PRIVATE|STEWARD_SCHEDULE_PRIVATE|CHANNEL_PRIVATE|GROUP_PRIVATE|LIST_PRIVATE|CONNECTION_PRIVATE) & set(PUBLIC_STATE_TABLES)
 
 def stored_director_event(service,project_id,event_type,delivery_id):
     """The one stored state_events row of this type for this delivery, payload decoded."""

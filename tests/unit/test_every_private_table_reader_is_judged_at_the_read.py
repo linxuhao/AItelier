@@ -710,10 +710,16 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # owner's channel list and QR route, and the steward's completion command. Step 25 adds
 # the channel-down alert ledger: the due-alerts query, the owner's channel list with
 # status, and the steward's claim and record commands.
+# Step 24.1a adds the steward's connection tables and step 23's turn audience the gateway
+# reads: both connection queries, the owner's connection routes, the steward host's two
+# writes, the turn audience write and the gateway itself.
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
                   "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
                   "state_owner_channel_status", "state_owner_channel_bind_attempts",
-                  "state_owner_channel_login_requests", "state_channel_alerts")
+                  "state_owner_channel_login_requests", "state_channel_alerts",
+                  "state_steward_connections", "state_steward_connection_tools", "state_steward_turn_audience",
+                  "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
+                  "state_steward_tool_calls")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -755,6 +761,11 @@ def _steward_calls(svc):
         "list_login_requests": lambda: svc.channels.list_login_requests(),
         "execute due_channel_alerts": lambda: execute(svc, "due_channel_alerts", {}),
         "due_channel_alerts": lambda: svc.channels.due_channel_alerts(),
+        "execute list_steward_connections": lambda: execute(svc, "list_steward_connections", {}),
+        "execute list_steward_connection_tools": lambda: execute(svc, "list_steward_connection_tools",
+                                                                 {"conn_id": C.STEWARD_CONNECTION}),
+        "list_connections": lambda: svc.steward_connections.list_connections(),
+        "list_connection_tools": lambda: svc.steward_connections.list_connection_tools(C.STEWARD_CONNECTION),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -855,6 +866,24 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
+            ("POST", "/api/state/query/list_steward_connections", {}),
+            ("POST", "/api/state/query/list_steward_connection_tools", {"conn_id": C.STEWARD_CONNECTION}),
+            ("GET", "/api/steward/connections", None),
+            ("GET", f"/api/steward/connections/{C.STEWARD_CONNECTION}/tools", None),
+            ("POST", "/api/steward/connections", {"conn_id": C.STEWARD_CONNECTION, "label": "x",
+                                                  "url": "https://example.com/mcp"}),
+            ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/tools",
+             {"tools": [{"raw_name": "tool", "allowed": True}]}),
+            ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/secret", {"value": "v"}),
+            ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/probe", None),
+            ("DELETE", f"/api/steward/connections/{C.STEWARD_CONNECTION}", None),
+            ("POST", "/api/state/commands/set_steward_turn_audience",
+             {"project_id": steward_project(), "turn": "t", "audience": "owner"}),
+            ("POST", "/api/state/commands/steward_tools_resync_due", {"effective_hash": "a" * 64}),
+            ("POST", "/api/state/commands/steward_connection_refresh", {"conn_id": C.STEWARD_CONNECTION}),
+            # The gateway answers on its own port alone (director 487); a loopback Host.
+            ("POST", "http://127.0.0.1:4445/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            ("GET", "http://127.0.0.1:4445/api/steward/mcp", None),
         ]
         results = {}
         try:
@@ -890,6 +919,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
                 == [(C.canary("state_owner_channel_login_requests"), "pending")]
             assert [tuple(r) for r in conn.execute("SELECT state, error FROM state_channel_alerts")] \
                 == [("failed", C.canary("state_channel_alerts"))]
+            assert [tuple(r) for r in conn.execute("SELECT conn_id, enabled, generation FROM state_steward_connections")] \
+                == [(C.STEWARD_CONNECTION, 0, 1)]
+            assert [tuple(r) for r in conn.execute("SELECT allowed FROM state_steward_connection_tools")] == [(0,)]
 
 
 def _trusted_db(anonymous):

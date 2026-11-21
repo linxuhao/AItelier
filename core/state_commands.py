@@ -1317,6 +1317,42 @@ class CompleteOwnerChannelLoginRequest(Project):
     result: dict[str, Any]
 
 
+# Step 24.1a: the steward's own MCP connections (core.state_steward_connections,
+# design-steward 7.8.4). The five steward_connection_* writes are the owner session's
+# alone (the service checks); the steward's host writes the resync marker, and the
+# steward may re-read a registered connection (refresh). The turn audience the gateway
+# judges a private connection by is step 23's (set_steward_turn_audience, below).
+class StewardConnectionUpsert(Request):
+    conn_id: str = Field(min_length=1, max_length=40, description="^[a-z][a-z0-9]{1,19}$; fixed once added")
+    label: str = Field(min_length=1, max_length=40)
+    url: str = Field(min_length=1, max_length=500)
+    auth_kind: Literal["none", "header", "oauth"] = "none"
+    header_name: str | None = Field(default=None, min_length=1, max_length=64)
+    visibility: Literal["private", "public"] = "private"
+    enabled: bool = False
+
+
+class StewardConnectionRef(Request):
+    conn_id: str = Field(min_length=1, max_length=40)
+
+
+class StewardConnectionToolsSet(Request):
+    conn_id: str = Field(min_length=1, max_length=40)
+    tools: list[dict[str, Any]] = Field(min_length=1, max_length=500, description=(
+        "[{raw_name, allowed?, outward?, egress?, blocked_args?, daily_cap?, schema_sha256?}]; a field left out "
+        "is unchanged; allowed=true needs the schema_sha256 that was shown (else definition_changed)"))
+
+
+class StewardConnectionSecretSet(Request):
+    conn_id: str = Field(min_length=1, max_length=40)
+    # Written to the connection's secret file, never to State; null or "" clears it.
+    value: str | None = Field(default=None, max_length=8192)
+
+
+class StewardToolsResyncDue(Request):
+    effective_hash: str = Field(min_length=64, max_length=64)
+
+
 class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
@@ -1453,6 +1489,7 @@ READ_REQUESTS = {
     "due_channel_alerts": Empty,
     "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": ListFamilyMemory,
     "list_list_items": ListListItems,
+    "list_steward_connections": Empty, "list_steward_connection_tools": StewardConnectionRef,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1541,6 +1578,8 @@ WRITER_ONLY_READS = frozenset({
     "list_owner_groups", "list_group_recent", "list_family_memory",
     # Step 25 C4: the family lists. A private table.
     "list_list_items",
+    # Step 24.1a: the steward's connections and their tools. Private tables.
+    "list_steward_connections", "list_steward_connection_tools",
 })
 
 
@@ -1613,6 +1652,11 @@ WRITE_REQUESTS = {
     "note_family_memory": NoteFamilyMemory,
     "post_group_notice": PostGroupNotice,
     "add_list_items": AddListItems, "check_list_items": CheckListItems, "remove_list_items": RemoveListItems,
+    "steward_connection_upsert": StewardConnectionUpsert, "steward_connection_delete": StewardConnectionRef,
+    "steward_connection_tools_set": StewardConnectionToolsSet,
+    "steward_connection_secret_set": StewardConnectionSecretSet,
+    "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
+    "steward_tools_resync_due": StewardToolsResyncDue,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1999,6 +2043,15 @@ def _handlers(service) -> dict:
         "add_list_items": service.lists.add_items,
         "check_list_items": service.lists.check_items,
         "remove_list_items": service.lists.remove_items,
+        "list_steward_connections": service.steward_connections.list_connections,
+        "list_steward_connection_tools": service.steward_connections.list_connection_tools,
+        "steward_connection_upsert": service.steward_connections.upsert,
+        "steward_connection_delete": service.steward_connections.delete,
+        "steward_connection_tools_set": service.steward_connections.tools_set,
+        "steward_connection_secret_set": service.steward_connections.secret_set,
+        "steward_connection_probe": service.steward_connections.probe,
+        "steward_connection_refresh": service.steward_connections.refresh,
+        "steward_tools_resync_due": service.steward_connections.tools_resync_due,
     }
 
 
@@ -2098,6 +2151,12 @@ def _driver_defaults(service, action, arguments):
 # this is. note_family_memory is the model's family memory tool, accepted only from a group
 # turn: the public-read header plus a recorded group audience of the turn the request names
 # (core.state_groups).
+# Step 24.1a (design-steward 7.8.5): steward_tools_resync_due is called by the steward's
+# HOST code, never its model - a fallback-restart marker when the host's registry still
+# lacks effective tools a minute later. The gateway judges a private connection's call by
+# the turn audience step 23's set_steward_turn_audience recorded. steward_connection_refresh
+# re-reads one REGISTERED connection's tool list (discovery fields only: never allowed,
+# outward, visibility or enabled); the steward cannot change its connections otherwise.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -2114,6 +2173,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "complete_owner_channel_login_request", "claim_channel_alert", "record_channel_alert",
     "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
     "note_family_memory",
+    "steward_tools_resync_due", "steward_connection_refresh",
     # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).

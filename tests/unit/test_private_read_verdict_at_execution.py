@@ -76,6 +76,9 @@ _ARGS = {
     "list_family_memory": {"turn": "1"},
     # Step 25 C4: the family lists (core/state_lists.py), the steward's read in an owner turn.
     "list_list_items": {},
+    # Step 24.1a: the steward's connections and one connection's tools.
+    "list_steward_connections": {},
+    "list_steward_connection_tools": {"conn_id": C.STEWARD_CONNECTION},
 }
 
 
@@ -122,7 +125,9 @@ _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules",
                        # Step 23: the steward's host reads its groups and a group's recent exchanges.
                        "list_owner_groups", "list_group_recent",
                        # Step 25 C4: the family lists (the steward, the owner's session, a group turn).
-                       "list_list_items"}
+                       "list_list_items",
+                       # Step 24.1a: the connection reads answer the owner's session or the steward.
+                       "list_steward_connections", "list_steward_connection_tools"}
 
 
 def _family_reader(steward):

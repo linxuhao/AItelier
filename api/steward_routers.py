@@ -19,11 +19,16 @@ Chat channels (step 19, design-steward 7.2): the owner issues a binding code, un
 picks the default channel and asks for a new WeChat login QR here (owner session only);
 the binding list and the messages' sources are the owner's (the steward reads them
 through its State queries).
+
+The steward's own MCP connections (step 24.1a, design-steward 7.8.10): the owner adds,
+changes and deletes connections, ticks their tools, sets a header secret (written to a
+file, never answered back) and reads a connection's tools here (owner session only);
+the steward reaches them only through its gateway (api/steward_gateway.py).
 """
 import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -444,3 +449,84 @@ def remove_list_item(item_id: str, service=Depends(get_service)):
 def clear_done_list_items(list_name: ListName | None = None, service=Depends(get_service)):
     _owner(service)
     return _group_call(lambda: service.lists.clear_done(list_name))
+# --- the steward's own MCP connections (step 24.1a) ----------------------------------------
+
+class ConnectionUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conn_id: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=40)
+    url: str = Field(min_length=1, max_length=500)
+    auth_kind: Literal["none", "header", "oauth"] = "none"
+    header_name: str | None = Field(default=None, min_length=1, max_length=64)
+    visibility: Literal["private", "public"] = "private"
+    enabled: bool = False
+
+
+class ConnectionTools(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tools: list[dict] = Field(min_length=1, max_length=500)
+
+
+class ConnectionSecret(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str | None = Field(default=None, max_length=8192)
+
+
+def _connection_call(call, *args, **kwargs):
+    """One owner call; a refusal keeps its code."""
+    try:
+        return call(*args, **kwargs)
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
+
+
+@router.get("/connections", dependencies=[Depends(authz.require_reader)])
+def list_connections(service=Depends(get_service)):
+    """Every connection (never a secret), the effective tool set the gateway serves and the
+    fallback-restart state (design-steward 7.8.10)."""
+    _owner(service)
+    return _connection_call(service.steward_connections.list_connections)
+
+
+@router.post("/connections", dependencies=[Depends(authz.require_writer)])
+def upsert_connection(body: ConnectionUpsert, service=Depends(get_service)):
+    _owner(service)
+    return _connection_call(service.steward_connections.upsert, body.conn_id, body.label, body.url,
+                            auth_kind=body.auth_kind, visibility=body.visibility, enabled=body.enabled,
+                            header_name=body.header_name)
+
+
+@router.delete("/connections/{conn_id}", dependencies=[Depends(authz.require_writer)])
+def delete_connection(conn_id: str, service=Depends(get_service)):
+    _owner(service)
+    return _connection_call(service.steward_connections.delete, conn_id)
+
+
+@router.get("/connections/{conn_id}/tools", dependencies=[Depends(authz.require_reader)])
+def connection_tools(conn_id: str, service=Depends(get_service)):
+    _owner(service)
+    return _connection_call(service.steward_connections.list_connection_tools, conn_id)
+
+
+@router.put("/connections/{conn_id}/tools", dependencies=[Depends(authz.require_writer)])
+def set_connection_tools(conn_id: str, body: ConnectionTools, service=Depends(get_service)):
+    _owner(service)
+    return _connection_call(service.steward_connections.tools_set, conn_id, body.tools)
+
+
+@router.put("/connections/{conn_id}/secret", dependencies=[Depends(authz.require_writer)])
+def set_connection_secret(conn_id: str, body: ConnectionSecret, service=Depends(get_service)):
+    """The fixed header's value: written to the connection's secret file, never answered back."""
+    _owner(service)
+    return _connection_call(service.steward_connections.secret_set, conn_id, body.value)
+
+
+@router.post("/connections/{conn_id}/probe", dependencies=[Depends(authz.require_writer)])
+async def probe_connection(conn_id: str, request: Request, service=Depends(get_service)):
+    """Read the connection's tools now (through the gateway's upstream session)."""
+    _owner(service)
+    from api.steward_gateway import gateway
+    gateway(request.app)
+    return await asyncio.to_thread(_connection_call, service.steward_connections.probe, conn_id)

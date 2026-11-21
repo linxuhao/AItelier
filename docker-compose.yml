@@ -57,6 +57,15 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      # Step 24.1a (design-steward 7.8.4): the host's own addresses (LAN, tailnet;
+      # docker gateways are reserved without them) no steward connection may resolve
+      # to. Set in .env; see .env.example.
+      AITELIER_STEWARD_HOST_ADDRESSES: "${AITELIER_STEWARD_HOST_ADDRESSES:-}"
+      # Step 24.1a (design-steward 7.8.5, director 487): the steward's MCP gateway
+      # (/api/steward/mcp) is served ONLY on this second listener, which the backend
+      # opens in its own process; 4444 answers 404 for it. Published below on the
+      # host's loopback alone - the DSH host's steward dials 127.0.0.1:4445.
+      AITELIER_STEWARD_GATEWAY_PORT: "4445"
       # MCP Host allowlist is operator-configurable; `:*` is FastMCP's official
       # wildcard-port form, so the public bare host and explicit ports pass.
       AITELIER_MCP_ALLOWED_HOSTS: "${AITELIER_MCP_ALLOWED_HOSTS:-aitelier.linxuhao.app,aitelier.linxuhao.app:*}"
@@ -141,6 +150,10 @@ services:
       # container silently mounted the empty default dir (the recorded
       # AITELIER_MCP_URL two-meanings trap, re-created).
       - ${AITELIER_SECRETS_DIR:-${HOME}/.aitelier-secrets}:/run/aitelier-secrets:ro
+      # Step 24.1a (design-steward 7.8.3): the steward's connection secrets (a fixed
+      # header's value), one 0600 file per connection, written by the backend alone.
+      # Read-write and mounted into NO other container (not dev_mcp, not aitelier-zg).
+      - ${AITELIER_STEWARD_SECRETS_HOST_DIR:-${HOME}/.local/share/aitelier/steward-mcp-secrets}:/run/aitelier-steward-secrets
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,
       # so this mount can't shadow it — served via AITELIER_WEB_DIST). A plain
       # `docker compose up -d --build` deploys frontend changes; no anonymous
@@ -158,6 +171,10 @@ services:
       # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
       # would let any LAN client reach the backend directly, bypassing Cloudflare.
       - "127.0.0.1:4444:4444"
+      # The steward's gateway (AITELIER_STEWARD_GATEWAY_PORT above): loopback ONLY,
+      # never a LAN or tailnet address - no container and no other machine reaches
+      # it through the host.
+      - "127.0.0.1:4445:4445"
     restart: unless-stopped
     # Both of these exist because this backend is reachable from the public
     # internet, where the callers are strangers and the cost of a request is

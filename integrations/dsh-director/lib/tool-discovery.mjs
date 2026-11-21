@@ -47,11 +47,14 @@ export function presentSections(sections, role, discoverySection, shown = role?.
 /** Why `role` may not run this call, or undefined. Refused: every tool the role
  *  forbids, and - for a tool listed in `allowed_actions` - any call whose `action`
  *  argument is not on that tool's list (a missing or non-string action included).
- *  `notes` adds the adapter's reason for one tool. */
-export function refusal(role, exec) {
-  // A presented_only role (the steward) has exactly its presented tools: any other name,
-  // called directly or through a transport, is refused.
-  if (role.presented_only && !role.presented.includes(exec.name)) return `${exec.name} is not available to this role`;
+ *  `notes` adds the adapter's reason for one tool. `catalog` is the turn's host
+ *  catalog (a Set of names) for a role with `catalog: "host"`. */
+export function refusal(role, exec, catalog) {
+  // A presented_only role (the steward) has exactly its presented tools, and - with a
+  // host catalog - the names in this turn's catalog: any other name, called directly or
+  // through a transport, is refused.
+  if (role.presented_only && !role.presented.includes(exec.name) && !(role.catalog && catalog?.has(exec.name)))
+    return `${exec.name} is not available to this role`;
   const actions = role.allowed_actions?.[exec.name];
   if (!role.forbidden.includes(exec.name) && !(actions && !actions.includes(exec.arguments?.action))) return undefined;
   const note = role.notes?.[exec.name];
@@ -81,12 +84,25 @@ export const defaultDiscoveryTexts = Object.freeze({
   searchDescription: 'Find available tools by name or description and return their parameter schemas (default 5, maximum 10). Includes the less-used native tools that are not listed and every deferred MCP capability. Use call_tool to invoke a result. The catalog follows live MCP updates and your own agent scope.',
 });
 
-export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {} }) {
+/** `catalog(sessionId)` (step 24.1a, design-steward 7.8.7): for a role with
+ *  `catalog: "host"`, the Set of tool names this turn may find and call beyond the
+ *  presented ones (undefined: none yet). Such a role searches only its catalog, and on
+ *  its host a call from a session that is not its root - a missing session included,
+ *  which roleOf would read as a worker - is refused for search, call and any MCP tool. */
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {}, catalog }) {
   const wording = { ...defaultDiscoveryTexts, ...Object.fromEntries(Object.entries(texts).filter(([, v]) => v !== undefined)) };
   const roleFor = sessionId => roles[roleOf(sessionId, rootSession, rootRole)];
+  const hostCatalog = roles[rootRole]?.catalog === 'host';
+  const catalogFor = sessionId => (sessionId === rootSession ? catalog?.(sessionId) : undefined) ?? new Set();
   // Keyed on the caller's session, not on a prompt. A global guard covers both
   // call_tool targets and a direct call of the (merely unlisted) name.
-  ctx.tools.guard(exec => refusal(roleFor(exec.agent?.session?.id), exec));
+  ctx.tools.guard(exec => {
+    const session = exec.agent?.session?.id;
+    if (hostCatalog && session !== rootSession && (metaTools.has(exec.name) || exec.name.startsWith('mcp__')))
+      return `${exec.name} is not available outside the ${rootRole}'s own session`;
+    const role = roleFor(session);
+    return refusal(role, exec, role.catalog ? catalogFor(session) : undefined);
+  });
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
@@ -94,7 +110,9 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
     const role = roleFor(caller?.session?.id);
-    const tools = presentTools(assembly.tools, role);
+    // A host-catalog role whose host gives no catalog (the standalone local host) has
+    // nothing to discover: search_tools and call_tool are not shown to it at all.
+    const tools = presentTools(assembly.tools, role).filter(t => !(role.catalog && !catalog && metaTools.has(t.name)));
     return { ...assembly, tools, sections: presentSections(assembly.sections, role, wording.sectionName, tools.map(t => t.name)) };
   });
   ctx.systemPrompt.section({ name: wording.sectionName, order: 3090, interpolate: false, text: wording.section });
@@ -103,7 +121,15 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     parameters: { query: { type: 'string', required: true }, limit: { type: 'integer', description: '1–10; defaults to 5' } },
     output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     isConcurrencySafe: () => true,
-    async execute({ query, limit }, exec) { return searchTools(ctx.tools.schemas(exec.agent), query, limit); },
+    async execute({ query, limit }, exec) {
+      const session = exec.agent?.session?.id;
+      const schemas = ctx.tools.schemas(exec.agent);
+      if (!roleFor(session).catalog) return searchTools(schemas, query, limit);
+      // A host-catalog role finds only this turn's catalog: never an unlisted native tool,
+      // another connection, or a connection this conversation may not use.
+      const allowed = catalogFor(session);
+      return searchTools(schemas.filter(s => allowed.has(s.name)), query, limit);
+    },
   }));
   const outcomes = new Map();
   ctx.tools.register(defineTool({ name: 'call_tool',

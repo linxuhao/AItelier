@@ -1,0 +1,161 @@
+/** Step 24.1a (design-steward 7.8.7, 7.8.8): the steward's per-turn catalog, the
+ *  connection cache, the registry check and the external-content mark (lib/catalog.mjs),
+ *  without DSH. The discovery integration against the real harness is in
+ *  integrations/dsh-driver/tool-discovery.test.mjs. */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { StewardCatalog, NATIVE_WRITES } from '../lib/catalog.mjs';
+
+const CACHE = {
+  connections: [
+    { conn_id: 'mailme', visibility: 'private', usable: true, tools: [
+      { name: 'mcp__sw__mailme__search_messages', egress: false }] },
+    { conn_id: 'media', visibility: 'public', usable: true, tools: [
+      { name: 'mcp__sw__media__web_search', egress: true }, { name: 'mcp__sw__media__ocr_image', egress: false }] },
+  ],
+  effective_tools: ['mcp__sw__mailme__search_messages', 'mcp__sw__media__ocr_image', 'mcp__sw__media__web_search'],
+  effective_hash: 'a'.repeat(64),
+};
+const human = text => text.startsWith('OWNER:');
+const userMessage = text => ({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
+
+function fixture({ cache = CACHE, registry = [...CACHE.effective_tools], clock = { t: 1000 }, stateDir, turn = { kind: 'owner' } } = {}) {
+  const calls = [];
+  const dir = stateDir ?? mkdtempSync(join(tmpdir(), 'catalog-'));
+  const host = {
+    connections: async () => { calls.push(['connections']); return JSON.parse(JSON.stringify(cache)); },
+    resyncDue: async hash => { calls.push(['resync', hash]); },
+    humanInput: human,
+    writes: ['host_write'],
+  };
+  const catalog = new StewardCatalog({ host, stateDir: dir, rootSession: 'root', registryNames: () => registry,
+    audience: () => turn.audience ?? turn, now: () => clock.t, sleep: async ms => { clock.t += ms; } });
+  return { catalog, calls, registry, clock, dir, turn };
+}
+const exec = (name, session = 'root') => ({ name, arguments: {}, agent: session === undefined ? undefined : { session: { id: session } } });
+
+test('the catalog: an owner turn sees private and public, any other audience public only, nothing without a cache', async () => {
+  const turn = { audience: { kind: 'owner' } };
+  const { catalog } = fixture({ turn });
+  assert.equal(catalog.catalog('root'), undefined, 'no cache yet: nothing');
+  await catalog.preStep();
+  assert.deepEqual([...catalog.catalog('root')].sort(), CACHE.effective_tools);
+  assert.equal(catalog.catalog('child'), undefined, 'only the root session has a catalog');
+  turn.audience = { kind: 'group', channel: 'wechat', group_ref: 'room1' };
+  assert.deepEqual([...catalog.catalog('root')].sort(), ['mcp__sw__media__ocr_image', 'mcp__sw__media__web_search']);
+  for (const unreadable of [{ kind: 'group', unknown: true }, undefined, { kind: 'something-unknown' }]) {
+    turn.audience = unreadable;
+    assert.ok(!catalog.catalog('root').has('mcp__sw__mailme__search_messages'), 'an audience it cannot read is a group');
+  }
+  const throwing = new StewardCatalog({ host: { connections: async () => CACHE, resyncDue: async () => {}, humanInput: human },
+    stateDir: mkdtempSync(join(tmpdir(), 'catalog-')), rootSession: 'root', registryNames: () => CACHE.effective_tools,
+    audience: () => { throw new Error('not yet'); } });
+  await throwing.preStep();
+  assert.deepEqual([...throwing.catalog('root')].sort(), ['mcp__sw__media__ocr_image', 'mcp__sw__media__web_search'],
+    'an audience read that throws is not the owner\'s');
+  const none = new StewardCatalog({ host: { connections: async () => CACHE, resyncDue: async () => {}, humanInput: human },
+    stateDir: mkdtempSync(join(tmpdir(), 'catalog-')), rootSession: 'root', registryNames: () => CACHE.effective_tools });
+  await none.preStep();
+  assert.ok(!none.catalog('root').has('mcp__sw__mailme__search_messages'), 'no audience given: public only');
+});
+
+test('the catalog knows only what the cache knows: a registered name it has not read is refused', async () => {
+  const registry = [...CACHE.effective_tools, 'mcp__sw__media__generate_image'];
+  const { catalog } = fixture({ registry });
+  await catalog.preStep();
+  assert.ok(!catalog.catalog('root').has('mcp__sw__media__generate_image'));
+  catalog.markExternal();
+  assert.match(catalog.refusal(exec('mcp__sw__media__generate_image')), /^external_content_seen/,
+    'and a name without its egress fact counts as egress');
+});
+
+test('the catalog writes no audience of its own: it is step 23\'s record (groups.audience)', async () => {
+  const { catalog, calls } = fixture();
+  catalog.observe({ type: 'turn/start', seq: 7 });
+  await catalog.preStep();
+  catalog.observe({ type: 'turn/start', seq: 9 });
+  await catalog.preStep();
+  assert.deepEqual(calls.map(c => c[0]).filter(kind => kind !== 'connections'), [], 'only the cache is read');
+});
+
+test('the cache is read again after 30 seconds or when the registry names change', async () => {
+  const { catalog, calls, registry, clock } = fixture();
+  await catalog.preStep();
+  await catalog.preStep();
+  assert.equal(calls.filter(c => c[0] === 'connections').length, 1);
+  clock.t += 30000;
+  await catalog.preStep();
+  assert.equal(calls.filter(c => c[0] === 'connections').length, 2);
+  registry.pop();  // a tool deregistered by a notification: read now, not in 30 s
+  await catalog.preStep();
+  assert.equal(calls.filter(c => c[0] === 'connections').length, 3);
+});
+
+test('missing effective tools: one wait per hash, then one resync a minute later; arriving names cancel it', async () => {
+  const registry = CACHE.effective_tools.slice(0, 2);
+  const { catalog, calls, clock } = fixture({ registry });
+  const start = clock.t;
+  await catalog.preStep();
+  assert.ok(clock.t - start <= 3000 && clock.t - start >= 2750, 'waited at most 3 s');
+  const waited = clock.t;
+  await catalog.preStep();
+  assert.equal(clock.t, waited, 'the same hash is waited for once');
+  clock.t += 59000;
+  await catalog.preStep();
+  assert.deepEqual(calls.filter(c => c[0] === 'resync'), []);
+  clock.t += 2000;
+  await catalog.preStep();
+  await catalog.preStep();
+  assert.deepEqual(calls.filter(c => c[0] === 'resync'), [['resync', CACHE.effective_hash]]);
+  // The names arrive: nothing more is asked.
+  const fresh = fixture({ registry: CACHE.effective_tools.slice(0, 2) });
+  await fresh.catalog.preStep();
+  fresh.registry.push(CACHE.effective_tools[2]);
+  fresh.clock.t += 61000;
+  await fresh.catalog.preStep();
+  assert.deepEqual(fresh.calls.filter(c => c[0] === 'resync'), []);
+});
+
+test('external content: egress tools wait for a person, own writes need one in the turn', async () => {
+  const { catalog, dir } = fixture();
+  await catalog.preStep();
+  assert.equal(catalog.refusal(exec('mcp__sw__media__web_search')), undefined, 'nothing read yet');
+  catalog.observe({ type: 'turn/start', seq: 1 });
+  catalog.markExternal();
+  assert.equal(JSON.parse(readFileSync(join(dir, 'steward-turn.json'), 'utf8')).external, true, 'written before the result goes on');
+  assert.match(catalog.refusal(exec('mcp__sw__media__web_search')), /^external_content_seen/);
+  assert.equal(catalog.refusal(exec('mcp__sw__media__ocr_image')), undefined, 'egress off: still callable');
+  for (const name of [...NATIVE_WRITES, 'host_write']) assert.match(catalog.refusal(exec(name)), /^external_content_seen/, name);
+  assert.equal(catalog.refusal(exec('portfolio_projects')), undefined);
+  // A person's message mid-turn lets this turn's own writes through, never the egress tools.
+  catalog.observe({ type: 'assistant/message', data: {} });
+  catalog.observe(userMessage('OWNER: please tell the director'));
+  assert.equal(catalog.refusal(exec('handoff')), undefined);
+  assert.equal(catalog.externalSeen, true);
+  assert.match(catalog.refusal(exec('mcp__sw__media__web_search')), /^external_content_seen/);
+  // A turn a person's message opens clears the mark.
+  catalog.observe({ type: 'turn/start', seq: 2 });
+  assert.match(catalog.refusal(exec('handoff')), /^external_content_seen/, 'a new turn without a person: still marked');
+  catalog.observe(userMessage('director letter text'));
+  assert.ok(catalog.refusal(exec('handoff')));
+  catalog.observe({ type: 'turn/start', seq: 3 });
+  catalog.observe(userMessage('OWNER: now look it up'));
+  assert.equal(catalog.externalSeen, false);
+  assert.equal(catalog.refusal(exec('mcp__sw__media__web_search')), undefined);
+  assert.equal(catalog.refusal(exec('mcp__sw__media__web_search', 'child')), undefined, 'non-root sessions are refused by discovery');
+});
+
+test('the mark survives a restart; a record that cannot be read counts as marked', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'catalog-'));
+  assert.equal(fixture({ stateDir: dir }).catalog.externalSeen, false, 'no record: nothing read');
+  const { catalog } = fixture({ stateDir: dir });
+  catalog.markExternal();
+  assert.equal(fixture({ stateDir: dir }).catalog.externalSeen, true);
+  writeFileSync(join(dir, 'steward-turn.json'), '{not json');
+  assert.equal(fixture({ stateDir: dir }).catalog.externalSeen, true);
+  writeFileSync(join(dir, 'steward-turn.json'), '{"external": "no"}');
+  assert.equal(fixture({ stateDir: dir }).catalog.externalSeen, true);
+});

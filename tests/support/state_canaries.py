@@ -42,6 +42,7 @@ STEWARD_PROPOSAL = "proposal-canary"
 STEWARD_MEMORY_REQUEST = "memreq-canary"
 STEWARD_SCHEDULE = "sch-canary"
 CHANNEL_MESSAGE = "message-source-canary"
+STEWARD_CONNECTION = "canaryconn"
 
 
 def canary(table: str) -> str:
@@ -268,6 +269,37 @@ def _plan():
              "added_via,added_at) VALUES(?,'shopping',?,'member',?,?,'group',?)"),
             (c("state_steward_list_items"), c("state_steward_list_items"), c("state_steward_list_items"),
              c("state_steward_list_items"), "2999-01-01T00:00:00+00:00")),
+        # Step 24.1a: one of the steward's connections (the canary in its name, address and
+        # the server's instructions; off, so no gateway serves it), one tool of it (the
+        # canary in its definition), the served hash, a restart marker, a restart record and
+        # a line of the call ledger (the turn audience's canary is step 23's, above).
+        "state_steward_connections": (
+            ("INSERT INTO state_steward_connections(conn_id,conn_uid,label,url,auth_kind,header_name,visibility,"
+             "enabled,generation,config_version,auth_identity,created_at,updated_at,last_probe_at,last_error,"
+             "instructions,last_change) VALUES(?,?,?,?,'none',NULL,'private',0,1,1,NULL,?,?,NULL,NULL,?,'dashboard')"),
+            (STEWARD_CONNECTION, c("state_steward_connections"), c("state_steward_connections")[:40],
+             "https://%s.example/mcp" % c("state_steward_connections").lower(), now, now, c("state_steward_connections"))),
+        "state_steward_connection_tools": (
+            ("INSERT INTO state_steward_connection_tools(conn_id,raw_name,gw_name,definition_json,schema_sha256,"
+             "allowed,allowed_sha256,outward,egress,blocked_args,daily_cap,first_seen_at,last_seen_at) "
+             "VALUES(?,'tool','tool',?,'0',0,NULL,1,1,'[]',NULL,?,?)"),
+            (STEWARD_CONNECTION, '{"description": "%s", "inputSchema": {"type": "object"}, "name": "tool"}'
+             % c("state_steward_connection_tools"), now, now)),
+        "state_steward_tools_served": (
+            "INSERT INTO state_steward_tools_served(driver_id,effective_hash,served_at) VALUES(?,?,?)",
+            (c("state_steward_tools_served"), c("state_steward_tools_served"), now)),
+        "state_steward_restart_due": (
+            "INSERT INTO state_steward_restart_due(driver_id,reason,effective_hash,due_at,created_at) VALUES(?,?,?,?,?)",
+            (c("state_steward_restart_due"), c("state_steward_restart_due"), c("state_steward_restart_due"),
+             "2999-01-01T00:00:00.000000Z", now)),
+        "state_steward_restart_done": (
+            "INSERT INTO state_steward_restart_done(driver_id,reasons_json,restarted_at,error) VALUES(?,?,?,?)",
+            (c("state_steward_restart_done"), '[{"reason": "%s", "effective_hash": "x"}]' % c("state_steward_restart_done"),
+             "2999-01-01T00:00:00.000000Z", c("state_steward_restart_done"))),
+        "state_steward_tool_calls": (
+            ("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error,is_error) "
+             "VALUES(?,'tool',?,'2999-01-01',?,0)"),
+            (STEWARD_CONNECTION, now, c("state_steward_tool_calls"))),
     }
 
 

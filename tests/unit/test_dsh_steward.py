@@ -144,9 +144,50 @@ def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_
     strip = lambda patches: [p for p in patches if p.get("id") != "compaction-basic" and "insert" not in p]
     assert strip(steward_patch) == strip(director_patch)
     extras = {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp", "mcp-pwmcp"}
-    assert ([e for e in next(p for p in steward_patch if "insert" in p)["insert"]]
+    # Step 24.1a (design-steward 7.8.18): the steward's inserts are the director's without
+    # those five, plus ONE fixed entry for the backend's gateway (its own connections).
+    steward_inserts = next(p for p in steward_patch if "insert" in p)["insert"]
+    assert ([e for e in steward_inserts if e["id"] != "mcp-sw"]
             == [e for e in next(p for p in director_patch if "insert" in p)["insert"]
                 if e["id"] not in extras])
+    assert [e["config"] for e in steward_inserts if e["id"] == "mcp-sw"] == [{
+        "serverName": "sw", "transport": "streamable-http", "url": "http://127.0.0.1:4445/api/steward/mcp",
+        "headers": {"X-AItelier-Driver-Token": "process.env.AITELIER_DRIVER_TOKEN"},
+        "failOnStartupError": False, "toolCallTimeoutMs": 180000, "reconnect": {"maxAttempts": 1000000}}]
+    assert "mcp-sw" not in _inserted_ids(director_patch)
+    raw = (runtime.root / steward["driver_id"] / "home" / "profiles" / "driver" / "cordis.patch.yml").read_text()
+    assert "!!js process.env.AITELIER_DRIVER_TOKEN" in raw and "__DRIVER_TOKEN__" not in raw
+
+
+def test_the_steward_profile_does_not_change_when_its_connections_do(runtime, roles_file, monkeypatch, tmp_path):
+    """Step 24.1a: adding or deleting a connection never touches the steward's profile
+    (the gateway announces list_changed instead); a director's profile is unchanged by it."""
+    from core.state_service import StateService
+    from core.state_steward_connections import StateStewardConnections
+    monkeypatch.setenv("AITELIER_STEWARD_SECRETS_DIR", str(tmp_path / "secrets"))
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    profile = lambda row: (runtime.root / row["driver_id"] / "home" / "profiles" / "driver" / "cordis.patch.yml")
+    runtime._environment(steward)
+    runtime._environment(director)
+    before = profile(steward).read_bytes(), profile(director).read_bytes()
+    owner = StateService(runtime.db, actor="owner:o@example.com", project_read_trusted=True)
+    import core.state_steward_connections as sc
+    import socket
+
+    def resolve(host, port):
+        if host != "mcp_server":
+            raise socket.gaierror(host)
+        return [(2, 1, 6, "", ("172.30.0.5", 0))]
+    monkeypatch.setattr(sc, "RESOLVER", resolve)
+    owner.steward_connections.upsert("media", "Media", "http://mcp_server:9003/mcp", visibility="public")
+    runtime._environment(steward)
+    runtime._environment(director)
+    owner.steward_connections.delete("media")
+    runtime._environment(steward)
+    runtime._environment(director)
+    assert (profile(steward).read_bytes(), profile(director).read_bytes()) == before
+    assert isinstance(owner.steward_connections, StateStewardConnections)
 
 
 def test_steward_profile_loads_a_chat_channel_plugin_only_when_its_secrets_exist(runtime, roles_file, monkeypatch, tmp_path):

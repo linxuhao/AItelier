@@ -99,11 +99,11 @@ if (libraries.status === 'unmeasured') {
     if (libraries.mismatches.length) t.diagnostic(describeDeclinedToMeasure(libraries.pinned, libraries.mismatches));
   });
 
-  async function fixture(body, roles = effective, rootRole = undefined) {
+  async function fixture(body, roles = effective, rootRole = undefined, options = {}) {
     const ctx = new Context();
     const prompt = ctx.plugin(SystemPrompt); await prompt.await();
     const tools = ctx.plugin(Tools); await tools.await();
-    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles, ...(rootRole ? { rootRole } : {}) });
+    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles, ...(rootRole ? { rootRole } : {}), ...options });
     let scopeOwner;
     const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
     const scopes = [];
@@ -288,6 +288,7 @@ if (libraries.status === 'unmeasured') {
     const steward = await sectionsFor('steward'), director = await sectionsFor(undefined);
     // This deployment names the discovery section itself (aitelier-texts.mjs).
     const discovery = discoveryTexts.sectionName;
+    // Without a host catalog (step 24.1a) the steward is shown no discovery tool, so no discovery section.
     for (const name of ['tool:bash', 'tool:jobs', 'mcp:devmcp', 'mcp-resource-servers', discovery])
       assert.ok(!steward.includes(name), name + ' shown to the steward: ' + steward);
     assert.ok(steward.includes('aitelier:host-own'), 'the host\'s own section is kept');
@@ -302,4 +303,43 @@ if (libraries.status === 'unmeasured') {
     assert.equal((await call('call_tool', { name: 'mcp__aitelier__record_evidence', arguments: {} }, child)).isError, false);
     assert.equal((await call('mcp__aitelier__state_graph_write', { action: 'verify_node' }, child)).isError, false);
   }, table));
+
+  test('step 24.1a: a steward root searches and calls only its turn catalog; other sessions get no MCP tool', () => {
+    let turn = new Set(['mcp__sw__media__web_search']);
+    return fixture(async ({ ctx, agent, call }) => {
+      const root = agent('root'), child = agent('child');
+      for (const name of ['bash', 'mcp__sw__media__web_search', 'mcp__sw__mailme__search_messages', 'mcp__devmcp__shell'])
+        ctx.tools.register(defineTool({ name, description: 'tool ' + name + ' search mail web', parameters: {}, output, async execute() { return name; } }));
+      const found = (await call('search_tools', { query: 'search', limit: 10 }, root)).value.tools.map(t => t.name);
+      assert.deepEqual(found, ['mcp__sw__media__web_search'], 'never bash, another connection, or the director\'s MCP');
+      assert.equal((await call('call_tool', { name: 'mcp__sw__media__web_search', arguments: {} }, root)).isError, false);
+      assert.equal((await call('mcp__sw__media__web_search', {}, root)).isError, false);
+      for (const name of ['mcp__sw__mailme__search_messages', 'bash', 'mcp__devmcp__shell']) {
+        assert.equal((await call('call_tool', { name, arguments: {} }, root)).isError, true, name);
+        assert.equal((await call(name, {}, root)).isError, true, name);
+      }
+      // The catalog is the turn's: a group turn without the private connection's tool.
+      turn = new Set();
+      assert.equal((await call('mcp__sw__media__web_search', {}, root)).isError, true);
+      assert.deepEqual((await call('search_tools', { query: 'search' }, root)).value.tools, []);
+      turn = new Set(['mcp__sw__media__web_search']);
+      // A session that is not the steward's root (or none) never reaches an MCP tool or the transports.
+      for (const name of ['mcp__sw__media__web_search', 'search_tools', 'call_tool'])
+        assert.equal((await call(name, name === 'search_tools' ? { query: 'x' } : name === 'call_tool' ? { name: 'bash', arguments: {} } : {}, child)).isError, true, name);
+      assert.equal((await ctx.tools.execute({ name: 'mcp__sw__media__web_search', arguments: {}, signal: new AbortController().signal, callId: 'no-agent' })).isError, true);
+      // The request's tool list is the same whatever the catalog holds.
+      const before = (await ctx.systemPrompt.assemble({ scope: root })).tools;
+      turn = new Set(['mcp__sw__media__web_search', 'mcp__sw__mailme__search_messages']);
+      assert.deepEqual((await ctx.systemPrompt.assemble({ scope: root })).tools, before);
+    }, effective, 'steward', { catalog: id => (id === 'root' ? turn : undefined) });
+  });
+
+  test('step 24.1a: a steward without a host catalog finds nothing and is shown no discovery tool', () => fixture(async ({ ctx, agent, call }) => {
+    const root = agent('root');
+    const shown = (await ctx.systemPrompt.assemble({ scope: root })).tools.map(t => t.name);
+    assert.ok(!shown.includes('search_tools') && !shown.includes('call_tool'), shown.join(','));
+    ctx.tools.register(defineTool({ name: 'mcp__sw__media__web_search', description: 'web search', parameters: {}, output, async execute() { return 'x'; } }));
+    assert.deepEqual((await call('search_tools', { query: 'web' }, root)).value.tools, []);
+    assert.equal((await call('mcp__sw__media__web_search', {}, root)).isError, true);
+  }, effective, 'steward'));
 }

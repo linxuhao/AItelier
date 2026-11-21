@@ -44,13 +44,29 @@ EXEMPT = {
                      "and cannot be expected to go red"),
 }
 
+# Write actions whose request names NO project at all: the steward's global connection
+# registry (step 24.1a, design-steward 7.8.4) and its host's fallback-marker write (the
+# turn audience is step 23's set_steward_turn_audience, which names the steward's project). The mutation "this action opens the project it touched" has
+# no project to open for them (mutation_gate finds none and fires 0 times), so they
+# are outside the gate; `test_a_projectless_action_names_no_project` pins that their
+# request models carry no project-naming field, so a field added later puts the action
+# back in the gate.
+PROJECTLESS = {action: "the request names no project: the steward's connection registry and its host's "
+                       "marker write are global, so no project can be opened by the mutation"
+               for action in ("steward_connection_upsert", "steward_connection_delete",
+                              "steward_connection_tools_set", "steward_connection_secret_set",
+                              "steward_connection_probe", "steward_connection_refresh",
+                              "steward_tools_resync_due")}
+_PROJECT_FIELDS = {"project_id", "sender_project_id", "target_project_id", "attempt_id", "delivery_id",
+                   "node_key", "driver_id"}
+
 MAX_FILES_PER_ACTION = 4   # smallest exercising files first, for tractability
 TIMEOUT_SECONDS = 240
 
 
 def _covered_actions():
     """DERIVED, not written: every write action minus the named exemptions."""
-    return sorted(set(WRITE_REQUESTS) - set(EXEMPT))
+    return sorted(set(WRITE_REQUESTS) - set(EXEMPT) - set(PROJECTLESS))
 
 
 _SCOPE_MODULE_NAMES = ("test_state_project_privacy.py",
@@ -165,6 +181,13 @@ def test_a_write_action_that_opens_the_project_goes_red(action):
     assert rc != 0, (
         f"mutation making '{action}' open the project ran GREEN over {names}: no test "
         f"notices '{action}' opening a project. {report}")
+
+
+def test_a_projectless_action_names_no_project():
+    assert set(PROJECTLESS) <= set(WRITE_REQUESTS)
+    for action in PROJECTLESS:
+        assert not set(WRITE_REQUESTS[action].model_fields) & _PROJECT_FIELDS, (
+            f"'{action}' names a project now: take it out of PROJECTLESS so the gate covers it")
 
 
 def test_the_exemption_is_named_justified_and_inside_the_table():

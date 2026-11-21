@@ -278,6 +278,25 @@ export interface DirectorHost {
  *    through, `to` its bound account - or {granted: false}. A granted claim asked again
  *    answers the first grant, whatever its `exclude`. Called by code, never a model.
  *  - recordAlert: how the granted alert's send went: ok, or the channel's `error`. */
+  /** Step 24.1a (design-steward 7.8.7, 7.8.8): the steward's own catalog. Declared, a root
+   *  role with `catalog: "host"` finds and calls its further tools only in this turn's
+   *  catalog (lib/catalog.mjs); undeclared, it finds none.
+   *  - connections: the connection cache - `{connections: [{conn_id, visibility, usable,
+   *    tools: [{name, egress, outward, ...}]}], effective_tools: [public names],
+   *    effective_hash}`, the same set the host's MCP gateway serves.
+   *  - resyncDue: effective tools still missing from the registry a minute later.
+   *  - humanInput: whether one input text carries a person's message (synchronous).
+   *  - writes (optional): the names of the host's own writing tools (letters, reminders) that,
+   *    like the plugin's, need a person's message in a turn that read outside content.
+   *  The catalog writes no audience of its own: the turn's audience is step 23's (groups.audience,
+   *  recorded by the group turns before each turn's first step), which the catalog reads to filter
+   *  and the host's MCP gateway reads to judge a private connection's call. */
+  catalog?: {
+    connections(signal?: AbortSignal): Promise<{ connections: object[]; effective_tools: string[]; effective_hash: string }>;
+    resyncDue(effectiveHash: string, signal?: AbortSignal): Promise<unknown>;
+    humanInput(text: string): boolean;
+    writes?: string[];
+  };
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
       Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';

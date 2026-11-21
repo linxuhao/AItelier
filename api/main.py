@@ -46,6 +46,7 @@ from api.admin_routers import router as admin_router
 from api.driver_routers import router as driver_router
 from api.dsh_driver_routers import router as dsh_driver_router
 from api.steward_routers import router as steward_router
+from api.steward_gateway import router as steward_gateway_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
@@ -88,7 +89,10 @@ async def lifespan(app: FastAPI):
     if getattr(app.state, "_test_mode", False):
         # The MCP session manager still runs: it starts no backend, and a test app
         # that mounts the endpoint but cannot answer a single call would make the
-        # suite green on an endpoint nobody could use.
+        # suite green on an endpoint nobody could use. The same for the steward
+        # gateway's own listener (only with AITELIER_STEWARD_GATEWAY_PORT set).
+        from api.steward_gateway import start_listener as _steward_listen, stop_listener as _steward_unlisten
+        _steward_listener = await _steward_listen(app)
         try:
             async with _mcp_endpoint.open().session_manager.run():
                 try:
@@ -96,6 +100,7 @@ async def lifespan(app: FastAPI):
                 finally:
                     _mcp_endpoint.close()
         finally:
+            await _steward_unlisten(app, _steward_listener)
             _disarm_loop_stack_watchdog(_loop_stack_watchdog)
         return
 
@@ -311,6 +316,18 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 - never block startup on this
         import logging as _logging
         _logging.getLogger(__name__).exception("Steward proposal recovery at startup failed")
+    # Step 24.1a: the steward's gateway - its hooks, the check at startup and every 30 s
+    # (design-steward 7.8.5); without a DSH host (development, tests) the fallback
+    # restart markers are executed here every 10 s (core.dsh_driver.fallback_restart).
+    from api.steward_gateway import gateway as _steward_gateway
+    from api.steward_gateway import start_listener as _steward_listen, stop_listener as _steward_unlisten
+    _steward_gateway(app).start(periodic=True)
+    # Its own listener (4445, published on the host's loopback only; director 487).
+    _steward_listener = await _steward_listen(app)
+    _restart_task = None
+    if not dsh_runtime.external_host:
+        from core.dsh_driver import fallback_restart_loop
+        _restart_task = _asyncio.create_task(fallback_restart_loop(dsh_runtime))
     print("DPE APScheduler started. skillflow NotificationBus → SSE bridge active.")
     # The MCP sub-app is MOUNTED, and a mounted app's own lifespan is never run by
     # the parent — its only job is `session_manager.run()`, so without this every
@@ -325,6 +342,12 @@ async def lifespan(app: FastAPI):
     finally:
         # Stop admission and settle owned maintenance on every lifespan exit.
         try:
+            if _restart_task is not None:
+                _restart_task.cancel()
+                # Its CancelledError (or the error it died of) is returned, not raised.
+                await _asyncio.gather(_restart_task, return_exceptions=True)
+            await _steward_unlisten(app, _steward_listener)
+            await _steward_gateway(app).stop()
             await dsh_runtime.close()
             if hasattr(app.state, "scheduler") and app.state.scheduler:
                 app.state.scheduler.shutdown(wait=True)
@@ -504,6 +527,7 @@ app.include_router(admin_router)
 app.include_router(driver_router)
 app.include_router(dsh_driver_router)
 app.include_router(steward_router)
+app.include_router(steward_gateway_router)
 app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)
@@ -683,6 +707,12 @@ async def write_gate(request: Request, call_next):
     if not code:
         return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)
+
+
+# Step 24.1a (director 487): the steward's gateway answers on its own listener alone
+# and that listener serves nothing else. Added last, so it is the outermost middleware.
+from api.steward_gateway import PortGuard as _StewardPortGuard
+app.add_middleware(_StewardPortGuard)
 
 
 # The godot harness an AUTHORED repository gate imports at run time. That gate's

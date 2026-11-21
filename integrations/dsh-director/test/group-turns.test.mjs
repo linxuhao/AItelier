@@ -73,9 +73,13 @@ test('audience: a group turn merges at most five questions of its group', () => 
   assert.equal(g.current.questions.length, 5);
 });
 
-test('guard: in a group turn only the four tools, at most six calls; anything new is refused', () => {
+test('guard: in a group turn only the group tools, at most six calls; anything new is refused', () => {
   // Each name as a turn's first call (every call counts, so a 7th refused call would read answerNow).
-  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'a_tool_added_next_year']) {
+  // The deferred MCP tools are named here on purpose (step 24.1a): the guard is an allowlist over
+  // every tool the scope presents, so search_tools/call_tool are refused by name in a group turn
+  // and no connection the gateway serves can be reached through them there.
+  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'search_tools', 'call_tool',
+    'a_tool_added_next_year']) {
     const g = turns();
     g.split([group('q')], 1);
     assert.equal(g.guard(name), groupTurnRefusal, name);

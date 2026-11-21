@@ -168,7 +168,11 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "post_group_notice",
         # Step 25 (7.9.5): the family list tools; add and check are accepted from a group turn too
         # (public-read header + the recorded group audience of the named turn), remove never.
-        "add_list_items", "check_list_items", "remove_list_items"}
+        "add_list_items", "check_list_items", "remove_list_items",
+        # Step 24.1a (design-steward 7.8.5, 7.8.18): the host writes a fallback-restart marker;
+        # the steward re-reads one registered connection's tools (discovery fields only). The
+        # gateway judges private connections by step 23's turn audience, above.
+        "steward_tools_resync_due", "steward_connection_refresh"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS
@@ -536,6 +540,10 @@ def _klass(path):
         return "state"
     if re.fullmatch(r"/api/dsh-drivers/\{project_id\}/(completion|heartbeat|activity)", path):
         return "runtime"
+    # Step 24.1a: the steward's MCP gateway passes the write gate and judges every method
+    # itself (tests/unit/test_steward_connections.py).
+    if path == "/api/steward/mcp":
+        return "gateway"
     return "other"
 
 
@@ -580,6 +588,13 @@ def test_every_write_route_with_a_steward_token(world, client):
             else:
                 assert r.status_code == 200, (template, r.text)
             continue
+        if klass == "gateway":
+            # Past this gate; the gateway's own check refuses a caller it does not admit
+            # (here the test client's Host, not loopback) with its own 403. It answers
+            # on its own port alone (director 487).
+            r = client.request(method, "http://testserver:4445" + template, json={}, headers=headers)
+            assert r.status_code == 403 and r.json() == {"detail": "steward_gateway_forbidden"}, (method, r.text)
+            continue
         if klass == "runtime":
             endpoint = template.rsplit("/", 1)[1]
             r = client.request(method, _fill(template, HOME), json=RUNTIME_BODIES[endpoint], headers=headers)
@@ -618,7 +633,7 @@ def test_the_same_enumeration_with_an_ordinary_driver_token_is_unchanged(world, 
             for token in (world.tokens["director"], owner_cli):
                 assert authz.write_denial_reason(_request(method, path, token)) is None, (method, path)
             steward = authz.write_denial_reason(_request(method, path, world.tokens["steward"]))
-            expected = None if _klass(template) == "state" or (
+            expected = None if _klass(template) in ("state", "gateway") or (
                 _klass(template) == "runtime" and project == HOME) else authz.STEWARD_READ_ONLY
             assert steward == expected, (method, path, steward)
         # GET/HEAD are never narrowed.

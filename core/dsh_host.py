@@ -14,7 +14,7 @@ import re
 import signal
 import time
 
-from core.dsh_driver import DshDrivers
+from core.dsh_driver import DshDrivers, fallback_restart
 
 # How long a child must stay up before its start counts as a successful one.
 #
@@ -547,6 +547,21 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                                 time.monotonic() - child["started"],
                                                 supervisor_stopped=True)
                         else:
+                            # Step 24.1a (design-steward 7.8.10a): a due fallback-restart
+                            # marker is executed here, by the spawner. The stop is this
+                            # supervisor's own (not a crash, not a failed start); the row
+                            # stays enabled, so the recovery start below brings the
+                            # driver back when its backoff allows.
+                            if await fallback_restart(runtime, row, then_start=False):
+                                spawned_at.pop(project, None)
+                                served.discard(project)
+                                child = children.pop(project, None)
+                                if child is not None:
+                                    record_exit(runtime, row, child,
+                                                time.monotonic() - child["started"],
+                                                supervisor_stopped=True)
+                                publish(runtime, row)
+                                continue
                             now = time.monotonic()
                             watching = children.get(project)
                             if watching is not None and row.get("phase") in SERVING_PHASES:

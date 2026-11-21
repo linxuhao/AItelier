@@ -115,6 +115,24 @@ test('snapshot: no injection in a group turn, and it is still owed to the next o
   assert.match(JSON.stringify(await injection.prepare()), /PROFILE/);
 });
 
+test('snapshot: a new turn reads no audience until its first step is set up - never the previous owner turn\'s (7.7.3 hook order)', async () => {
+  const g = turns();
+  const injection = new ContextInjection({ snapshotEvents: () => [], append: () => {} }, { refresh: async () => {}, render: () => 'PROFILE' },
+    input => ({ ...input, id: 'snap' }), { audience: () => g.audience().kind });
+  g.turnOpened(1);
+  g.split([message('OWNER')], 1, 1);
+  injection.epoch = 1; // a compaction after the owner turn: the snapshot is owed again
+  // Turn 2 opens (DSH's turn/start); its first step is a group question. Were the snapshot hook
+  // to run before the audience is fixed, it would still read nothing it may inject into:
+  g.turnOpened(2);
+  assert.equal(await injection.prepare(), undefined, 'no snapshot before the audience is fixed');
+  g.split([group('Q')], 1, 2);
+  assert.equal(await injection.prepare(), undefined, 'none in the group turn');
+  g.turnOpened(3);
+  g.split([message('OWNER_AGAIN')], 1, 3);
+  assert.match(JSON.stringify(await injection.prepare()), /PROFILE/, 'still owed to the next owner turn');
+});
+
 const ev = (type, data = {}) => ({ type, data });
 const script = list => list.map((e, seq) => ({ ...e, seq, time: 0 }));
 

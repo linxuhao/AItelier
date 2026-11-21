@@ -124,12 +124,18 @@ async function run(t, { steward, mode = 'tool' }) {
       if (name === 'record_channel_delivery') return send({ message_id: body.message_id, recorded: true });
       if (name === 'report_channel_status') return send({ recorded: true, channel: body.channel, connected: body.connected, at: 't' });
       if (name === 'complete_owner_channel_login_request') return send({ request_id: body.request_id, status: 'done' });
+      // Step 22: the push mode's backend has one push due, once.
+      if (name === 'sync_owner_questions' && mode === 'push') {
+        const first = seen.commands.filter(([n]) => n === 'sync_owner_questions').length === 1;
+        return send({ result: { default_channel: 'slack', unmirrored: [], messages: first
+          ? [{ message_id: 'm-push-1', body: '【待你回答】1 个新问题。\n\nQ7 · 武侠存档\n问：\n｜PUSH_QUESTION_TEXT' }] : [] } });
+      }
       return send({ detail: 'unexpected ' + name }, 422);
     }
     if (url.startsWith('/api/state/query/')) {
       const name = url.slice('/api/state/query/'.length);
       seen.queries.push([name, body]);
-      if (name === 'list_owner_channels') return send({ default_channel: mode === 'ask' ? 'slack' : null, channels: [
+      if (name === 'list_owner_channels') return send({ default_channel: ['ask', 'push'].includes(mode) ? 'slack' : null, channels: [
         { channel: 'slack', bound: true, sender_ref: 'U-OWNER', bound_at: 't', revoked_at: null, is_default: false },
         { channel: 'wechat', bound: false, sender_ref: null, bound_at: null, revoked_at: null, is_default: false }] });
       // The owner's relayed message, answered once the steward sent anything.
@@ -268,6 +274,21 @@ test('real pinned DSH, the steward: a question asked with ask_owner is an unprom
         { text: 'CONTEXT_TEXT the release is ready.\n\nQUESTION_TEXT may I deploy?\n同意 proposal p-1', options: { to: 'U-OWNER' } }]);
     assert.deepEqual(command('record_channel_delivery').map(({ request_key, ...rest }) => [request_key, rest]),
       [['delivery:m-out-1:slack', { message_id: 'm-out-1', channel: 'slack', channel_message_ref: 'slack-out-ts' }]]);
+  } finally { await r.close(); }
+});
+
+test('real pinned DSH, the steward (step 22): the push clock runs in events(), and each push goes to the default channel and is recorded, no model turn', { timeout: 120000 }, async (t) => {
+  const r = await run(t, { steward: true, mode: 'push' });
+  if (!r) return;
+  const { seen } = r;
+  try {
+    const command = name => seen.commands.filter(([n]) => n === name).map(([, body]) => body);
+    await r.until('the push was never recorded as delivered', () => command('record_channel_delivery').some(b => b.message_id === 'm-push-1'));
+    assert.deepEqual(command('sync_owner_questions')[0], {}, 'the backend decides what is due');
+    assert.deepEqual(seen.sends.filter(s => s.text.includes('PUSH_QUESTION_TEXT')),
+      [{ text: '【待你回答】1 个新问题。\n\nQ7 · 武侠存档\n问：\n｜PUSH_QUESTION_TEXT', options: { to: 'U-OWNER' } }], 'unprompted: the default channel');
+    assert.deepEqual(command('record_channel_delivery').filter(b => b.message_id === 'm-push-1').map(({ request_key }) => request_key),
+      ['delivery:m-push-1:slack']);
   } finally { await r.close(); }
 });
 

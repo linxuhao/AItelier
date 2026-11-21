@@ -684,6 +684,21 @@ test('channelText: a short text goes as written; a blank line beats a line end, 
   assert.equal(cut, ['结论：都好了。', '', '平台', '- ' + '一处修好的缺陷，'.repeat(5)].join('\n') + MORE);
 });
 
+test('channelText (step 22): a single pushed question over 600 characters keeps its code line first; only the tail is cut', () => {
+  // The push the backend writes for one long question (core/state_owner_questions.py): the code
+  // line, the question behind ｜, its background behind ｜. Alone in its message, it is cut by
+  // the channel's own rule - never its first line, so the owner can still answer by its code.
+  const question = Array.from({ length: 30 }, (_, i) => `｜第 ${i + 1} 段：这是一个很长的问题说明，需要业主仔细看完再决定。`).join('\n');
+  const push = `Q12 · 武侠存档\n问：\n${question}\n背景：\n｜${'背景'.repeat(90)}`;
+  assert.ok(Array.from(push).length > CHANNEL_LIMITS.mirrorChars);
+  for (const channel of CHANNEL_NAMES) {
+    const sent = channelText(channel, push);
+    assert.ok(sent.endsWith(MORE) && Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, channel);
+    assert.equal(sent.split('\n')[0], 'Q12 · 武侠存档', 'the code line stays first');
+    assert.equal(sent.split('\n')[2], '｜第 1 段：这是一个很长的问题说明，需要业主仔细看完再决定。', 'the ｜ lines are not flattened');
+  }
+});
+
 test('channelText: a long line is cut after a sentence end, never inside a number, version, reference or URL', () => {
   const paragraph = '这是一句完整的话。'.repeat(200);
   const cut = channelText('slack', paragraph, 100);

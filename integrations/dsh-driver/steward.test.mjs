@@ -14,7 +14,8 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, relayAnswer, OwnerQuestionsTimer, PUSH_SUBJECT,
+  RECEIPT_SUBJECT, RELAY_REFUSALS, openThreads as openThreadsOf } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
@@ -49,8 +50,8 @@ test('the steward is an optional role: loaded from roles.json, absent is fine, i
 test('presented_only: the steward has exactly its presented tools; everything else is refused, however it is called', () => {
   const steward = aitelierRoles(table).steward;
   assert.deepEqual(steward.presented, [...table.steward.presented, 'send_user_message', 'reply_to_director',
-    'schedule_list', 'schedule_set', 'schedule_delete'],
-    'the adapter adds only the owner message and the letter reply');
+    'schedule_list', 'schedule_set', 'schedule_delete', 'relay_answer'],
+    'the adapter adds only the owner message, the letter reply, the reminders and the answer relay');
   assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
   // The inbox reader is the steward's own and nobody else's.
   assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
@@ -1203,4 +1204,113 @@ test('owner channel login requests (step 19): each pending request asks the chan
   const out = await processChannelLoginRequests({ request, login: async () => { throw new Error('boom'); }, log: line => logged.push(line) });
   assert.deepEqual(out, { pending: 3, done: 0 });
   assert.ok(logged.some(line => /q1: boom/.test(line)) && logged.some(line => /q1: result not written/.test(line)));
+});
+
+// ---- step 22 (design-steward 7.6): pushed questions, the push clock, the answer relay ----
+
+const push = (id, at, body) => ({ ...mine(id, at, body), subject: PUSH_SUBJECT });
+const receiptRow = (id, at, body, reply) => ({ ...mine(id, at, body, reply), subject: RECEIPT_SUBJECT });
+
+test('step 22: a push answers no owner message - it stays unanswered, auto-reply and held work as before - and neither push nor receipt joins memory', async () => {
+  const conversation = [owner('o1', '2026-11-20T10:00:00Z', '帮我看看武侠'), push('p1', '2026-11-20T10:01:00Z', '【待你回答】1 个新问题。')];
+  const sent = [];
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    sent.push(body); return { result: { message_id: 'r1' } };
+  };
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['o1'], 'the push after it does not answer it');
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }), { request });
+  assert.deepEqual(await host.heldWork(), [{ node_key: 'owner message o1' }]);
+  assert.deepEqual(await forwardFinalText({ ...base, text: '在看了', input: 'o1' }), { forwarded: true, reply_to: 'o1', message_id: 'r1' });
+  // The receipt of a relayed answer IS a reply to the owner's message...
+  conversation.push(owner('o2', '2026-11-20T10:02:00Z', 'Q12 用 A'), receiptRow('c1', '2026-11-20T10:02:30Z', '已转达 Q12', 'o2'));
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the receipt answers it');
+  // ...but neither it nor the push is the steward's own words: no memory turn carries them.
+  const turns = conversationTurns(conversation, 'drv-home');
+  const texts = [...turns.values()].flat().map(part => part.text);
+  assert.ok(!texts.some(t => t.includes('【待你回答】') || t.includes('已转达')), JSON.stringify(texts));
+  assert.deepEqual([...turns.keys()], ['o1', 'o2']);
+});
+
+test('step 22: relay_answer passes one message id, sends the code-built receipt as the reply and mirrors it there; a refusal is an answer', async () => {
+  const calls = [], mirrored = [];
+  let refuse;
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path.endsWith('/relay_owner_answer')) {
+      if (refuse) { const error = new Error(`AItelier ${path}: HTTP 422 "${refuse}: nope"`); error.status = 422; throw error; }
+      return { result: { source_message_id: body.source_message_id, results: [{ code: 'Q12', outcome: 'relayed' }],
+        receipt: '已转达 Q12 → 武侠存档：用 A 吗？\n授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。' } };
+    }
+    if (path.endsWith('/send_user_message')) return { result: { message_id: 'rcpt-1' } };
+    throw new Error('unexpected ' + path);
+  };
+  const mirror = async (...args) => { mirrored.push(args); return { mirrored: true }; };
+  const out = await relayAnswer({ request, project: 'aitelier-home', ownerMessageId: 'o9', mirror });
+  assert.deepEqual(calls[0], ['/api/state/commands/relay_owner_answer', { request_key: 'relay-answer:o9', source_message_id: 'o9' }]);
+  assert.deepEqual(calls[1], ['/api/state/commands/send_user_message', { request_key: 'relay-receipt:o9', project_id: 'aitelier-home',
+    subject: RECEIPT_SUBJECT, body: '已转达 Q12 → 武侠存档：用 A 吗？\n授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。',
+    reply_to_message_id: 'o9' }]);
+  assert.deepEqual(mirrored, [['rcpt-1', calls[1][1].body, 'o9']], 'back to the channel the owner wrote from');
+  assert.equal(calls[1][1].body.split('\n').at(-1), '授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。');
+  assert.deepEqual(out, { source_message_id: 'o9', results: [{ code: 'Q12', outcome: 'relayed' }], receipt_message_id: 'rcpt-1' });
+  for (const code of ['not_from_channel', 'no_recipients', 'channel_sender_not_bound']) {
+    refuse = code;
+    assert.deepEqual(await relayAnswer({ request, project: 'aitelier-home', ownerMessageId: 'o9', mirror }), { refused: code });
+  }
+  assert.ok(RELAY_REFUSALS.has('no_code') && RELAY_REFUSALS.has('not_from_channel') && RELAY_REFUSALS.has('no_recipients'));
+  refuse = 'steward_role_required';
+  await assert.rejects(relayAnswer({ request, project: 'aitelier-home', ownerMessageId: 'o9', mirror }), /steward_role_required/);
+  assert.deepEqual(await relayAnswer({ request, project: 'aitelier-home', ownerMessageId: ' ', mirror }).then(r => r.refused), 'invalid_request');
+});
+
+test('step 22: relay_answer is the steward\'s alone and takes only owner_message_id', () => {
+  const source = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  const at = source.indexOf("name: 'relay_answer'");
+  assert.ok(at > 0, 'registered by the adapter');
+  assert.match(source.slice(at, at + 900), /parameters: \{ owner_message_id: \{ type: 'string', required: true \} \}/);
+  // Inside the steward-only block of setup(), after the director's state_read.
+  const block = source.lastIndexOf('if (steward) {', at);
+  assert.ok(block > source.indexOf("name: 'state_read'") && source.indexOf('\n      }\n', block) > at, 'registered for the steward only');
+  assert.ok(!aitelierRoles(table).director.presented.includes('relay_answer'));
+});
+
+test('step 22: the push clock awaits each mirror in order, hands back unmirrored pushes, and never throws', async () => {
+  const order = [], logs = [];
+  let answer = { result: { default_channel: 'wechat', messages: [{ message_id: 'm1', body: '【待你回答】' }, { message_id: 'm2', body: '【待你回答】（续）' }],
+    unmirrored: [{ message_id: 'm0', body: 'older' }] } };
+  const request = async (path, body) => { order.push(['request', path, body]); if (answer instanceof Error) throw answer; return answer; };
+  let release;
+  const mirror = (id, body) => new Promise(resolve => { order.push(['mirror', id, body]); release = resolve; });
+  const timer = new OwnerQuestionsTimer({ request, mirror, log: line => logs.push(line), setTimer: () => ({}), clearTimer: () => {} });
+  const looking = timer.tick();
+  assert.equal(timer.tick(), looking, 'a look still running is the answer to a second call');
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(order.map(o => o[1]), ['/api/state/commands/sync_owner_questions', 'm1'], 'the second mirror waits for the first');
+  release(); await new Promise(r => setImmediate(r));
+  release(); await new Promise(r => setImmediate(r));
+  release(); await looking;
+  assert.deepEqual(order.slice(1).map(o => o[1]), ['m1', 'm2', 'm0']);
+  assert.deepEqual(order[0][2], {}, 'the backend decides everything; the host sends no clock or zone');
+  answer = new Error('backend down');
+  await timer.tick();
+  assert.match(logs[0], /owner questions: backend down/);
+  let armed;
+  const started = new OwnerQuestionsTimer({ request, mirror, setTimer: (fn, ms) => { armed = ms; return { unref() {} }; }, clearTimer: () => {} }).start();
+  assert.equal(armed, 60000);
+  started.close();
+  assert.equal(await started.tick(), undefined, 'closed: no look');
+});
+
+test('step 22: the snapshot layer 2 lists the pushed questions still waiting, from data', async () => {
+  const request = async path => {
+    if (path.endsWith('/list_user_conversation')) return { messages: [], next_cursor: null };
+    if (path.endsWith('/list_pushed_owner_questions')) return { result: { questions: [{ code: 'Q12', project_id: 'wuxia',
+      project_title: '武侠存档', question: '用 A 吗？', pushed_at: '2026-11-20T10:00:00+00:00', reminders_sent: 1 }] } };
+    throw new Error('unexpected ' + path);
+  };
+  const threads = await openThreadsOf({ request, project: 'aitelier-home', me: 'drv-home', stateDir: mkdtempSync(join(tmpdir(), 'steward-state-')) });
+  assert.deepEqual(threads.pushed_owner_questions, [{ code: 'Q12', project_id: 'wuxia', project_title: '武侠存档', question: '用 A 吗？',
+    pushed_at: '2026-11-20T10:00:00+00:00', reminders_sent: 1 }]);
 });

@@ -64,8 +64,9 @@ SEED_FILE = "seed_input.md"
 # the dashboard) instead of only inside one chat session.
 #
 # Anything that drives such a run itself must stop: the poller and an inline
-# driver race for the same claim, and the inline one loses silently — see
-# `core/meta_agent.py:_tool_drive_pipeline`, which now watches instead.
+# driver race for the same claim, and the inline one loses silently — which is
+# why `_tool_drive_pipeline` (was in the retired core/meta_agent.py) watched
+# instead of driving.
 GEN_HINTS = {
     "scheduler_owned": True,
     "seed_file": SEED_FILE,

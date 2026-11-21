@@ -66,8 +66,8 @@ def _existing_repo_code_path(project_id: str,
     A row can hold BOTH answers, and then `repo_path` wins. `run_launcher`
     overwrites a caller-supplied `repo_type="existing"` with `"none"` when the
     config declares `repo_mode: none`, and keeps the `repo_path` — which is
-    exactly what the `against_project` path produces (`api/mcp_router.py`,
-    `core/meta_agent.py:_tool_start_config_run`): a run that emits no code of its
+    exactly what the `against_project` path produces (`api/mcp_router.py`; also
+    `_tool_start_config_run` in the retired core/meta_agent.py): a run that emits no code of its
     own but reads a real repository it was pointed at. Testing `repo_type` first
     answered False for those and took the repo away. A recorded path is a
     positive statement about where the code IS; `repo_type='none'` only says this

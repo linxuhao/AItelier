@@ -7,8 +7,9 @@ AItelier has two classes of config and only one of them moves on its own:
   checkpoint and waits for a person.
 * `scheduler_owned: false` — the poller never touches it (code_review,
   coding_task, meta_conversation, and **every generated `gen_*` pipeline**).
-  The chat butler drives these inline; anything else that merely *starts* one
-  has started a run that nobody will ever advance.
+  The chat butler (the retired core/meta_agent.py) used to drive these inline;
+  anything else that merely *starts* one has started a run that nobody will
+  ever advance.
 
 That second case is why this module exists. `run_pipeline` over MCP started
 butler-owned runs and left them at `running` forever — verified live: a
@@ -20,16 +21,16 @@ MCP surface is generated pipelines, that was the entire interesting class.
 
 The driver can answer checkpoints itself. That is what a test-drive needs — the
 generate → drive → observe → fix loop cannot stop for a human on every lap — and
-it is what the butler's own `drive_pipeline` already does.
+it is what the butler's own `drive_pipeline` did (retired with core/meta_agent.py).
 
 It is also a real bypass: checkpoints exist because someone wanted to look
 (DPE's design review, the novel pipeline's CP#1/CP#2). A caller that wants those
 honoured passes `auto_approve=False` and answers each one deliberately. The
 choice is the caller's and the tool that exposes it says so in its first line.
 
-NOTE: `core/meta_agent.py:_tool_drive_pipeline` implements the same step loop.
-This module is the extraction; the butler should adopt it rather than keep a
-second copy, but that edit is deliberately not made here.
+History: `_tool_drive_pipeline` in the retired core/meta_agent.py implemented
+the same step loop; this module was its extraction. With the butler gone this
+is the only copy.
 """
 
 from __future__ import annotations

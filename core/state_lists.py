@@ -138,7 +138,8 @@ class StateLists:
     # The request ledger (driver_inbox_requests) keeps a list result WITHOUT its who
     # (added_by / done_by): a member's name must not outlive the unbind that forgot it there
     # (review D2). A replay returns the stored answer with who read from the item now - the
-    # same name a list read would show, null once forgotten or the item is gone.
+    # same name a list read would show (done_by only where that answer says done), null once
+    # forgotten or the item is gone.
     _WHO = ("added_by", "done_by")
 
     def _keyed(self, conn, operation, request_key, request_hash):
@@ -146,7 +147,7 @@ class StateLists:
         for item in (replay or {}).get("items", ()):
             row = conn.execute("SELECT * FROM state_steward_list_items WHERE item_id=?", (item["item_id"],)).fetchone()
             now = self._item(conn, row) if row is not None else {}
-            item.update({who: now.get(who) for who in self._WHO})
+            item.update(added_by=now.get("added_by"), done_by=now.get("done_by") if item.get("done") else None)
         return replay
 
     def _record(self, conn, operation, request_key, request_hash, result):

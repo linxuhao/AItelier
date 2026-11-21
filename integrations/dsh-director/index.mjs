@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
+import { StewardCatalog } from './lib/catalog.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
 import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
@@ -85,9 +86,34 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const promptDir = dirname(config.rolesFile);
   const runtimeSkill = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
+  // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
+  // calls its further tools only in the catalog its host gives for the turn; without such a
+  // host it finds none.
+  const catalogHost = op('catalog');
+  // Its audience is step 23's (groupTurns, below; read only during a step): the group setup
+  // records it on the host before each turn's first step, and the host's gateway reads that record.
+  const stewardCatalog = catalogHost && roles[rootRole].catalog === 'host' ? new StewardCatalog({ host: catalogHost,
+    stateDir: config.stateDir, rootSession: config.sessionId, log: line => ctx.logger.warn(line),
+    audience: () => groupTurns?.audience(),
+    registryNames: () => ctx.tools.schemas().map(schema => schema.name) }) : undefined;
   installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles,
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
-      searchDescription: texts.tools.search_tools } });
+      searchDescription: texts.tools.search_tools },
+    ...(stewardCatalog ? { catalog: sessionId => stewardCatalog.catalog(sessionId) } : {}) });
+  if (stewardCatalog) {
+    // External content (7.8.8): the guard reads only the cache and the turn record; a
+    // connection tool's result marks the turn before the result is released.
+    ctx.tools.guard(exec => stewardCatalog.refusal(exec));
+    ctx.on('tools/post-execute', async (exec, result, next) => {
+      if (exec.agent?.session?.id === config.sessionId && stewardCatalog.isConnectionTool(exec.name)) stewardCatalog.markExternal();
+      return next();
+    });
+    ctx.on('session/event', (session, event) => { if (session?.id === config.sessionId) stewardCatalog.observe(event); });
+    ctx.on('agent/pre-step', async (payload, next) => {
+      if (payload?.agent?.session?.id === config.sessionId) await stewardCatalog.preStep(payload.signal);
+      return next();
+    });
+  }
   // The worker protocol reaches every native child and never the director (whose
   // prompt is a root-scope section in setup). A caller-less assembly gets neither.
   ctx.systemPrompt.section({ name: labels.sectionPrefix + ':worker-protocol', order: 12, interpolate: false, text: context => {
@@ -335,7 +361,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
-    isDisposed: () => disposed };
+    isDisposed: () => disposed,
+    // Step 24.1a: true while the steward's turn record is marked external (lib/catalog.mjs):
+    // the host marks the letters it writes then.
+    externalContent: () => stewardCatalog?.externalSeen === true };
   // A getter, not a copy: the agent exists only after create/resume below.
   Object.defineProperty(api, 'agent', { get: () => agent, enumerable: true });
   // Host-scoped additions of the host first (they precede the plan tools in every

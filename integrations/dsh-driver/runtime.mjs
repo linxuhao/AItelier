@@ -17,7 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, forwardFinalText, openProposals, openThreads, recordAutoReply, replyToLetter, stewardHostTexts, stewardOps,
+import { autoReplyBody, catalogOps, forwardFinalText, openProposals, openThreads, recordAutoReply, replyToLetter, stewardHostTexts, stewardOps,
   syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -538,10 +538,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 19: the director's ownerMessageSent, kept from install() for attention.ask (the
   // steward's questions are its messages to its owner too).
   let mirrorOwnerMessage;
+  // Step 24.1a: the plugin's "this turn read outside content" (api.externalContent), kept from install().
+  let externalContent = () => false;
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups'] : [])],
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -567,9 +569,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     /** The effective table: roles.json plus AItelier's State additions. */
     roles: table => aitelierRoles(table),
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
-    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf }) {
+    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf,
+      externalContent: external }) {
       if (steward) mirrorOwnerMessage = ownerMessageSent;
       if (typeof audienceOf === 'function') turnAudience = audienceOf;
+      if (steward && external) externalContent = external;
       const require = createRequire(env.AITELIER_DSH_ENTRY);
       ({ installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent')));
       const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
@@ -710,7 +714,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         scope.tools.register(defineTool({ name: 'reply_to_director',
           description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox (mark them read with private_inbox_acknowledge, in the answer or once you are done with it). delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
           parameters: { inbox, delivery_id: { type: 'string', required: true }, text: { type: 'string', required: true } }, output: json,
-          execute: (args, exec) => replyToLetter({ request: toolRequest, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal }),
+          execute: (args, exec) => replyToLetter({ request: toolRequest, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal,
+            external: externalContent() }),
         }));
       }
       scope.tools.register(defineTool({ name: 'send_user_message',
@@ -993,7 +998,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a
   // director's host does not have them (implemented-but-undeclared is refused).
   if (steward) Object.assign(host, stewardOps({ request: (...args) => toolRequest(...args), rawRequest: (...args) => request(...args),
-    project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR, groupTurn }));
+    project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR, groupTurn, externalContent: () => externalContent() }),
+  // Step 24.1a: the steward's own catalog (its connections through the backend's gateway).
+  { catalog: catalogOps((...args) => request(...args)) });
   return host;
 }
 

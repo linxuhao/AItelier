@@ -14,7 +14,8 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
-  turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
+  turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, EXTERNAL_CONTENT_LINE,
+  humanInput, catalogOps } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
@@ -56,12 +57,19 @@ test('presented_only: the steward has exactly its presented tools; everything el
   // The inbox reader is the steward's own and nobody else's.
   assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
   assert.equal(refusal(steward, exec('portfolio_inbox')), undefined);
-  for (const name of ['bash', 'read', 'write', 'edit', 'grep', 'subagent', 'call_tool', 'search_tools', 'state_read', 'todo_plan',
-    'project_work', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'web_fetch', 'some_new_tool'])
+  // Step 24.1a: search_tools and call_tool are presented (they reach only the host's catalog).
+  assert.ok(steward.presented.includes('search_tools') && steward.presented.includes('call_tool'));
+  assert.equal(steward.catalog, 'host');
+  for (const name of ['bash', 'read', 'write', 'edit', 'grep', 'subagent', 'state_read', 'todo_plan',
+    'project_work', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'web_fetch', 'some_new_tool',
+    'mcp__sw__media__web_search'])
     assert.equal(refusal(steward, exec(name)), `${name} is not available to this role`, name);
   for (const name of steward.presented) assert.equal(refusal(steward, exec(name)), undefined, name);
   const registered = ['bash', 'memory_search', 'memory_read', 'portfolio_projects', 'portfolio_inbox', 'handoff', 'send_user_message', 'call_tool'].map(name => ({ name }));
-  assert.deepEqual(presentTools(registered, steward).map(t => t.name), ['memory_search', 'memory_read', 'portfolio_projects', 'portfolio_inbox', 'handoff', 'send_user_message']);
+  assert.deepEqual(presentTools(registered, steward).map(t => t.name), ['memory_search', 'memory_read', 'portfolio_projects', 'portfolio_inbox', 'handoff', 'send_user_message', 'call_tool']);
+  // A name in the turn's host catalog passes; without one, or another name, is refused.
+  assert.equal(refusal(steward, exec('mcp__sw__media__web_search'), new Set(['mcp__sw__media__web_search'])), undefined);
+  assert.equal(refusal(steward, exec('bash'), new Set(['mcp__sw__media__web_search'])), 'bash is not available to this role');
   // The director and the worker are untouched by the steward's closed set.
   const effective = aitelierRoles(table);
   assert.equal(refusal(effective.director, exec('some_new_tool')), undefined);
@@ -81,9 +89,10 @@ test('presented_only: the steward is shown no guidance for tools it cannot call'
     'mcp-resource-servers', 'mcp:agentmcp', 'mcp:devmcp', 'mcp:zvec', discovery, 'deployment:persona-suffix'];
   const sections = names.map(name => ({ name, text: name }));
   const steward = effective.steward;
+  // Step 24.1a: search_tools is presented now (its own catalog), so the discovery section stays.
   assert.deepEqual(presentSections(sections, steward, discovery, steward.presented).map(s => s.name),
     ['deployment:persona-prefix', 'dsh-director:driver-runtime', 'aitelier:steward-snapshot', 'tool:idle_dormant',
-      'tool:idle_dormant:detail', 'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
+      'tool:idle_dormant:detail', discovery, 'deployment:persona-suffix'], 'only its own and the host\'s sections, and the sections of tools it has');
   // Judged against the tools the request actually lists, not the role table: a presented
   // tool missing from this request loses its section too.
   assert.ok(!presentSections(sections, steward, discovery, ['memory_search']).some(s => s.name === 'tool:idle_dormant'));
@@ -96,6 +105,9 @@ test('presented_only: the steward is shown no guidance for tools it cannot call'
   assert.ok(!one.includes('mcp:devmcp') && !one.includes('mcp:zvec') && !one.includes('mcp-resource-servers'));
   assert.ok(presentSections(sections, steward, discovery, ['read_mcp_resource']).some(s => s.name === 'mcp-resource-servers'));
   assert.equal(presentSections(undefined, steward, discovery), undefined, 'an assembly without sections is passed through');
+  // Step 24.1a: the gateway's own server section never reaches the steward (no tool of it is shown).
+  assert.ok(!presentSections([...sections, { name: 'mcp:sw', text: 'x' }], steward, discovery, steward.presented)
+    .some(s => s.name === 'mcp:sw'));
 });
 
 const summaryNode = (i, status, extra = {}) => ({ node_key: `d.n${String(i).padStart(4, '0')}`, title: '很长的标题'.repeat(36), status,
@@ -257,7 +269,9 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
-  assert.deepEqual(steward.capabilities.slice(-6), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups']);
+  assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
+  // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience is groups.audience).
+  assert.deepEqual(Object.keys(steward.catalog).sort(), ['connections', 'humanInput', 'resyncDue']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
@@ -269,7 +283,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(director.config.memory, undefined);
   assert.equal(director.config.permissionPreset, 'danger-full-access');
   assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention']);
-  for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups']) assert.equal(director[op], undefined, op);
+  for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']) assert.equal(director[op], undefined, op);
   assert.doesNotThrow(() => validateHost(director));
   // A root role the table does not have is refused when the host is loaded.
   const rolesFile = join(mkdtempSync(join(tmpdir(), 'roles-')), 'roles.json');
@@ -1156,6 +1170,42 @@ test('letters (owner 2026-11-17): a reply goes back to the sender in either inbo
   assert.equal((await replyToLetter({ ...base, inbox: 'email', deliveryId: 'd-proj', text: 'x' })).refused, 'unknown_inbox');
   assert.equal((await replyToLetter({ ...base, inbox: 'project', deliveryId: 'd-proj', text: ' ' })).refused, 'empty_text');
   assert.equal(writes.length, 2);
+});
+
+test('step 24.1a: a letter written while the turn read outside content starts with the code-set marker line', async () => {
+  const { writes, base } = letters();
+  await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted', external: true });
+  assert.equal(writes[0][1].body, EXTERNAL_CONTENT_LINE + '\n\nnoted');
+  await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted again' });
+  assert.equal(writes[1][1].body, 'noted again', 'unmarked turns write exactly what was said');
+  // The handoff: the same line, before the owner's quoted words.
+  const sent = [];
+  let external = true;
+  const ops = stewardOps({ me: 'drv-home', project: 'aitelier-home', externalContent: () => external, request: async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { result: { messages: [{ message_id: 'u1', sender_kind: 'user',
+      created_at: '2026-11-21T10:00:00Z', body: 'please pass this on' }] } };
+    sent.push(body); return { result: { message: { message_id: 'm' }, deliveries: [] } };
+  } });
+  await ops.handoff({ projectId: 'aitelier', text: 'from the owner', citesUserMessageId: 'u1' });
+  assert.ok(sent[0].body.startsWith(EXTERNAL_CONTENT_LINE + '\n\nfrom the owner'));
+  external = false;
+  await ops.handoff({ projectId: 'beta', text: 'from the owner', citesUserMessageId: 'u1' });
+  assert.ok(sent[1].body.startsWith('from the owner'));
+});
+
+test('step 24.1a: a person\'s message is read from the wake\'s structure, never matched as text; the catalog ops are two State calls (the turn audience is groups.audience)', async () => {
+  const wake = payload => 'AItelier runtime event:\n' + JSON.stringify(payload);
+  assert.equal(humanInput(wake({ events: [], driver_inbox: [{ sender_kind: 'user', body: 'hi' }] })), true);
+  assert.equal(humanInput(wake({ events: [], driver_inbox: [{ sender_kind: 'driver', body: '"sender_kind":"user"' }] })), false);
+  assert.equal(humanInput('Pending project inbox:\n{"driver_inbox":[{"sender_kind":"user"}]}'), false);
+  assert.equal(humanInput(wake({ project_inbox: { items: [{ body: 'x' }] } })), false);
+  assert.equal(humanInput('AItelier runtime event:\n{broken'), false);
+  const calls = [];
+  const ops = catalogOps(async (path, body) => { calls.push([path, body]); return { result: { connections: [], effective_tools: [], effective_hash: 'h' } }; });
+  assert.deepEqual(await ops.connections(), { connections: [], effective_tools: [], effective_hash: 'h' });
+  await ops.resyncDue('a'.repeat(64));
+  assert.deepEqual(calls, [['/api/state/query/list_steward_connections', {}],
+    ['/api/state/commands/steward_tools_resync_due', { effective_hash: 'a'.repeat(64) }]]);
 });
 
 test('a refused reply is not reported as sent: a 200 with a code inside the result is a refusal in either inbox', async () => {

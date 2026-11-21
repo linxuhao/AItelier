@@ -603,7 +603,9 @@ def test_a_bound_owner_message_lands_like_a_dashboard_message_with_its_source(wo
     assert list(sources) == [out["message_id"]], "no row = dashboard"
     assert sources[out["message_id"]] == {"direction": "in", "channel": "slack", "sender_ref": SLACK_USER,
                                           "channel_message_ref": "slack-ts-1",
-                                          "at": sources[out["message_id"]]["at"], "error": None}
+                                          "at": sources[out["message_id"]]["at"], "error": None,
+                                          "channel_at": sources[out["message_id"]]["channel_at"]}
+    assert sources[out["message_id"]]["channel_at"] is not None, "relay() dates the message: its time is kept"
     assert execute(world.steward, "message_sources", {"message_ids": [out["message_id"]]})["sources"]
 
 
@@ -631,8 +633,82 @@ def test_the_steward_is_woken_with_each_owner_messages_channel_and_a_dashboard_m
         # Only the channel's name, never the account or the platform's message ref; a
         # dashboard message keeps the plain row shape.
         assert set(by_id[dashboard["message_id"]]) == BASE_ROW_KEYS
-        assert set(by_id[slack["message_id"]]) == BASE_ROW_KEYS | {"source_channel"}
+        assert set(by_id[slack["message_id"]]) == BASE_ROW_KEYS | {"source_channel", "channel_at"}
         assert SLACK_USER not in json.dumps(rows) and "slack-ts-1" not in json.dumps(rows)
+
+
+def _source_row(world, message_id):
+    with world.db.get_connection() as conn:
+        return dict(conn.execute("SELECT * FROM state_message_sources WHERE message_id=?", (message_id,)).fetchone())
+
+
+def _inbox_row(world, message_id):
+    return next(row for row in execute(world.steward, "list_driver_messages", {})["messages"]
+                if row["message_id"] == message_id)
+
+
+def test_an_owner_messages_channel_time_is_stored_in_utc_and_reaches_the_steward(world):
+    """Message time (2026-11-20): the channel's own send time was parsed for the approval
+    bounds and thrown away; it is now kept, in UTC, next to the backend's own time."""
+    bind(world)
+    out = relay(world, "hello", "ts-1", channel_at="2026-11-20T11:14:05+01:00")
+    assert _source_row(world, out["message_id"])["channel_at"] == "2026-11-20T10:14:05+00:00"
+    row = _inbox_row(world, out["message_id"])
+    assert row["channel_at"] == "2026-11-20T10:14:05+00:00"
+    [message] = [m for m in conversation(world) if m["message_id"] == out["message_id"]]
+    assert row["created_at"] == message["created_at"] != row["channel_at"], \
+        "created_at stays the backend's time, never the channel's"
+    sources = execute(world.owner, "message_sources", {"message_ids": [out["message_id"]]})["sources"]
+    assert sources[out["message_id"]]["channel_at"] == "2026-11-20T10:14:05+00:00"
+
+
+def test_an_undated_channel_message_has_no_channel_time_and_its_row_no_key(world):
+    bind(world)
+    out = relay(world, "hello", "ts-1", channel_at=None)
+    assert _source_row(world, out["message_id"])["channel_at"] is None
+    assert "channel_at" not in _inbox_row(world, out["message_id"])
+    assert execute(world.owner, "message_sources",
+                   {"message_ids": [out["message_id"]]})["sources"][out["message_id"]]["channel_at"] is None
+
+
+def test_a_channel_time_far_ahead_is_not_stored_and_a_late_one_is(world, caplog):
+    """A channel clock more than CHANNEL_AT_MAX_AHEAD fast is not a send time; a message
+    that arrives hours after it was sent is exactly what the time is for."""
+    bind(world)
+    now = state_channels._now()
+    with caplog.at_level(logging.WARNING, logger="core.state_channels"):
+        ahead = relay(world, "from the future", "ts-1", channel_at=(now + timedelta(minutes=3)).isoformat())
+    assert _source_row(world, ahead["message_id"])["channel_at"] is None
+    assert "channel_at" not in _inbox_row(world, ahead["message_id"])
+    assert "channel_at not stored" in caplog.text
+    near = relay(world, "a skewed but usable clock", "ts-2", channel_at=(now + timedelta(minutes=1)).isoformat())
+    assert _source_row(world, near["message_id"])["channel_at"] is not None
+    late_at = now - timedelta(hours=3)
+    late = relay(world, "sent three hours ago", "ts-3", channel_at=late_at.isoformat())
+    assert _source_row(world, late["message_id"])["channel_at"] == late_at.isoformat()
+    assert state_channels.CHANNEL_AT_MAX_AHEAD is not state_channels.APPROVAL_CLOCK_SKEW
+
+
+def test_the_channel_time_column_is_added_to_an_existing_table_once(tmp_path):
+    """A database whose source table predates channel_at gains the column; starting
+    again does not try to add it twice."""
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE state_message_sources (message_id TEXT PRIMARY KEY, direction TEXT NOT NULL, "
+                 "channel TEXT NOT NULL, sender_ref TEXT, channel_message_ref TEXT, at TEXT NOT NULL, error TEXT)")
+    conn.execute("INSERT INTO state_message_sources VALUES('m-old','in','slack','U1','ts-0','2026-11-01T00:00:00+00:00',NULL)")
+    conn.commit()
+    conn.close()
+    db = StateDatabase(str(path))
+    for _ in range(2):
+        StateService(db, actor="fixture", project_read_trusted=True)
+    conn = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(state_message_sources)")]
+        assert columns.count("channel_at") == 1
+        assert conn.execute("SELECT channel_at FROM state_message_sources WHERE message_id='m-old'").fetchone() == (None,)
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("code_channel", ["slack", "wechat"])

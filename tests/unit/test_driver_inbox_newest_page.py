@@ -48,11 +48,11 @@ ROWS = 7
 
 # The inbox row as its callers already receive it (pinned as a literal in
 # tests/unit/test_driver_inbox_answer_citation.py): `d.*` plus the message's
-# readable columns, nothing else.
+# readable columns and the message's created_at, nothing else.
 BASE_ROW_KEYS = {
     "delivery_id", "message_id", "target_driver_id", "seq", "status", "version",
     "thread_id", "sender_driver_id", "project_id", "kind", "delivery_mode",
-    "subject", "body", "refs_json"}
+    "subject", "body", "refs_json", "created_at"}
 
 BASE_RESPONSE_KEYS = {"driver_id", "messages", "next_after", "truncated"}
 

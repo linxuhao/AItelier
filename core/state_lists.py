@@ -18,7 +18,10 @@ hit is refused `withheld` with its kind, so nothing on a list can make a group r
 withheld later. Unbinding the family group keeps every item and forgets who of that group
 added or checked it (forget_group_senders, director 489 (a)): an item's `added_by` / `done_by`
 is then null, which each reader shows as 「曾由一位成员添加」 / 「曾由一位成员勾掉」 (the
-dashboard's i18n, the host's list tools for the model). The bounds are LIST_LIMITS. No write emits a State event (nothing wakes
+dashboard's i18n, the host's list tools for the model). Re-checking a checked item changes
+nothing, so it never fills in a who the unbind forgot; a keyed request's result is kept in the
+request ledger without `added_by` / `done_by`, and its replay reads them from the item now
+(review D1, D2). The bounds are LIST_LIMITS. No write emits a State event (nothing wakes
 anyone, 7.7.7). The table is private (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
@@ -132,11 +135,26 @@ class StateLists:
                 "done_by": self._label(conn, row["done_by_role"], row["done_by_ref"], row["done_by_label"])
                 if row["done_at"] is not None else None}
 
+    # The request ledger (driver_inbox_requests) keeps a list result WITHOUT its who
+    # (added_by / done_by): a member's name must not outlive the unbind that forgot it there
+    # (review D2). A replay returns the stored answer with who read from the item now - the
+    # same name a list read would show, null once forgotten or the item is gone.
+    _WHO = ("added_by", "done_by")
+
     def _keyed(self, conn, operation, request_key, request_hash):
-        return self.steward._replay(conn, operation, request_key, request_hash) if request_key else None
+        replay = self.steward._replay(conn, operation, request_key, request_hash) if request_key else None
+        for item in (replay or {}).get("items", ()):
+            row = conn.execute("SELECT * FROM state_steward_list_items WHERE item_id=?", (item["item_id"],)).fetchone()
+            now = self._item(conn, row) if row is not None else {}
+            item.update({who: now.get(who) for who in self._WHO})
+        return replay
 
     def _record(self, conn, operation, request_key, request_hash, result):
-        return self.steward._record(conn, operation, request_key, request_hash, result) if request_key else result
+        if request_key:
+            stored = {**result, "items": [{**i, **dict.fromkeys(self._WHO)} for i in result["items"]]} \
+                if "items" in result else result
+            self.steward._record(conn, operation, request_key, request_hash, stored)
+        return result
 
     # ---------------------------------------------------------------- reads
     @writer_only_read("list_list_items")
@@ -228,9 +246,12 @@ class StateLists:
             changed, unknown = [], []
             for item_id in ids:
                 if done:
+                    # Re-checking a checked item changes nothing: who checked it is set only by
+                    # the check that set done_at (never fills a who an unbind forgot, review D1).
                     hit = conn.execute("UPDATE state_steward_list_items SET done_at=COALESCE(done_at,?),"
-                                       "done_by_role=COALESCE(done_by_role,?),done_by_ref=CASE WHEN done_at IS NULL "
-                                       "THEN ? ELSE done_by_ref END,done_by_label=COALESCE(done_by_label,?) "
+                                       "done_by_role=CASE WHEN done_at IS NULL THEN ? ELSE done_by_role END,"
+                                       "done_by_ref=CASE WHEN done_at IS NULL THEN ? ELSE done_by_ref END,"
+                                       "done_by_label=CASE WHEN done_at IS NULL THEN ? ELSE done_by_label END "
                                        "WHERE item_id=? AND deleted_at IS NULL",
                                        (moment.isoformat(), role, ref, label, item_id)).rowcount
                 else:

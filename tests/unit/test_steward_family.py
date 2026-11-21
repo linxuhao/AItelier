@@ -12,6 +12,7 @@ The schedules' clock (core.state_steward._now) and the channels' clock
 (core.state_channels._now, the group module's) are one clock here."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -571,6 +572,89 @@ def test_director_489_a_unbinding_keeps_the_lists_and_forgets_who_added_or_check
     audience(world, senders=(MEMBER,), turn="t3")
     again = {i["text"]: i for i in show(view, turn="t3")["lists"]["shopping"]}
     assert (again["牛奶"]["added_by"], again["牛奶"]["done_by"], again["鸡蛋"]["added_by"]) == (None, None, None)
+
+
+def _member_checked_milk_then_unbound(world):
+    bound_group(world)
+    ask(world, "m1", "@管家 加牛奶")
+    audience(world, senders=(MEMBER,), turn="t1")
+    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    view = lists_view(world)
+    milk = add(view, ["牛奶"], turn="t1")["items"][0]["item_id"]
+    check(view, [milk], turn="t1")
+    world.owner.groups.unbind_owner_group("wechat")
+    return view, milk
+
+
+def test_review_d1_rechecking_an_item_after_unbind_never_names_someone_who_did_not_check_it(world, clock):
+    """A re-check of an already-checked item changes nothing: after the unbind forgot who
+    checked 牛奶, neither the owner (dashboard, owner turn) nor a new member after a rebinding
+    becomes its 「done_by」 - it stays null (「曾由一位成员勾掉」)."""
+    view, milk = _member_checked_milk_then_unbound(world)
+    whole = ("SELECT done_at, done_by_role, done_by_ref, done_by_label, added_by_ref, added_by_label "
+             "FROM state_steward_list_items WHERE item_id=?")
+    before = rows(world, whole, (milk,))
+    assert before[0][1:] == ("member", None, None, None, None)
+    clock.moment += timedelta(minutes=5)
+    assert world.owner.lists.check_items([milk], as_owner=True)["items"][0]["done_by"] is None
+    assert check(world.steward, [milk], key="k-owner-turn")["items"][0]["done_by"] is None
+    assert rows(world, whole, (milk,)) == before
+    # A new member, named, after the group is bound again.
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": ROOM,
+                                                "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
+            allow_write=True)
+    ask(world, "m2", "@管家 牛奶买了", sender=MEMBER2)
+    audience(world, senders=(MEMBER2,), turn="t2")
+    world.owner.groups.name_group_member("wechat", MEMBER2, "爸爸")
+    assert check(view, [milk], key="k-new-member", turn="t2")["items"][0]["done_by"] is None
+    assert rows(world, whole, (milk,)) == before
+    for shown in (show(view, turn="t2")["lists"]["shopping"], world.owner.lists.list_items(as_owner=True)["lists"]["shopping"]):
+        assert [(i["text"], i["done"], i["done_by"]) for i in shown] == [("牛奶", True, None)]
+    # Unchecking and checking again is a new check, by its caller.
+    world.owner.lists.check_items([milk], done=False, as_owner=True)
+    assert check(view, [milk], key="k-again", turn="t2")["items"][0]["done_by"] == "爸爸"
+
+
+def test_review_d2_the_request_ledger_keeps_no_members_name_and_a_replay_shows_the_current_who(world, clock):
+    """A keyed list request's stored result carries no added_by / done_by: after the unbind no
+    driver_inbox_requests row of a list command holds the member's name; a replay of the same
+    key returns the original answer with who read from the item now."""
+    bound_group(world)
+    ask(world, "m1", "@管家 加牛奶和鸡蛋")
+    audience(world, senders=(MEMBER,), turn="t1")
+    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    view = lists_view(world)
+    first = add(view, ["牛奶", "鸡蛋"], turn="t1")
+    assert [i["added_by"] for i in first["items"]] == ["妈妈", "妈妈"]
+    milk = first["items"][0]["item_id"]
+    checked = check(view, [milk], turn="t1")
+    assert checked["items"][0]["done_by"] == "妈妈"
+    # A replay before the unbind: the same answer.
+    assert add(view, ["牛奶", "鸡蛋"], turn="t1") == first
+    assert check(view, [milk], turn="t1") == checked
+    world.owner.groups.name_group_member("wechat", MEMBER, "妈咪")  # a rename shows on replay too
+    assert [i["added_by"] for i in add(view, ["牛奶", "鸡蛋"], turn="t1")["items"]] == ["妈咪", "妈咪"]
+    world.owner.groups.unbind_owner_group("wechat")
+    ledger = rows(world, "SELECT operation, result_json FROM driver_inbox_requests WHERE operation IN "
+                         "('add_list_items','check_list_items','remove_list_items')")
+    assert {r[0] for r in ledger} == {"add_list_items", "check_list_items"}
+    for _, stored in ledger:
+        text = json.dumps(json.loads(stored), ensure_ascii=False)  # stored ASCII-escaped
+        assert "妈妈" not in text and "妈咪" not in text and MEMBER not in text, text
+    # A replay after the unbind (the group bound again, the same member asks again with the
+    # same key) answers as before, with nobody's name.
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": ROOM,
+                                                "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
+            allow_write=True)
+    ask(world, "m2", "@管家 加牛奶和鸡蛋")
+    audience(world, senders=(MEMBER,), turn="t3")
+    again = add(view, ["牛奶", "鸡蛋"], turn="t3")
+    assert [(i["item_id"], i["text"], i["added"], i["added_by"]) for i in again["items"]] == [
+        (i["item_id"], i["text"], i["added"], None) for i in first["items"]]
+    rechecked = check(view, [milk], turn="t3")
+    assert (rechecked["items"][0]["done"], rechecked["items"][0]["done_by"]) == (True, None)
 
 
 def test_acceptance_four_a_member_adds_the_owner_checks_in_dm_the_dashboard_removes(world, clock):

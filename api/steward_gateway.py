@@ -32,8 +32,11 @@ of `tools/call`, which reads step 23's turn audience record (`set_steward_turn_a
 core.state_groups; core.state_steward_connections.audience_of). A request here carries
 no turn (design-steward 7.7.8a): the check relies on the steward's host recording each
 turn's audience before that turn's first step runs (a failed record rejects the step),
-and no record reads as not the owner's (fail closed). `tools/call` is judged in order - connection usable, tool allowed and unchanged, private connection
-only in an `owner` turn, no blocked argument (at any depth), daily cap, outward tools
+and no record reads as not the owner's (fail closed). `tools/call` is judged in order -
+connection usable, tool allowed and unchanged, private connection only in an `owner`
+turn, no blocked argument (at any depth; on a public connection also no `url` / `*_url`
+key anywhere in the arguments unless the owner unblocked that path), daily cap, outward
+tools
 need a confirmation (24.1b; until then refused) - and, in the same write transaction,
 a pending ledger row is reserved (so two concurrent calls never both pass the last
 unit of a cap); then forwarded, and the row completed.
@@ -667,7 +670,9 @@ class Gateway:
                     return "tool_not_allowed", None, None, None
                 if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
                     return "not_visible_in_this_turn", None, None, None
-                if sc.blocked_present(arguments, entry["blocked_args"]):
+                if sc.blocked_present(arguments, entry["blocked_args"]) or (
+                        row["visibility"] == "public"
+                        and sc.url_argument_present(arguments, sc.unblocked_url_paths(entry))):
                     return "argument_blocked", None, None, None
                 if entry["outward"]:
                     if entry["daily_cap"] is not None and sc.calls_today(conn, conn_id, entry["raw_name"]) >= entry["daily_cap"]:

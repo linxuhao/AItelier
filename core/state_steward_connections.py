@@ -197,10 +197,12 @@ def sha256_text(text: str) -> str:
 
 
 URL_WALK_DEPTH = 12
+ARG_SCAN_DEPTH = 32  # the argument scan refuses a call nested deeper than this...
+ARG_SCAN_NODES = 10000  # ...or holding more values than this
 
 
 def _is_url_name(key) -> bool:
-    return isinstance(key, str) and (key == "url" or key.endswith("_url"))
+    return isinstance(key, str) and (key.lower() == "url" or key.lower().endswith("_url"))
 
 
 def _pointer_key(key: str) -> str:
@@ -214,7 +216,8 @@ def _url_params(schema: dict) -> list[str]:
     array (`pages/*/url`). It walks `properties`, `items` / `prefixItems`, `anyOf` /
     `oneOf` / `allOf` and local `$ref`s (`#/$defs/...`, `#/definitions/...`); a
     parameter named only by `additionalProperties` / `patternProperties` has no fixed
-    name and is not found here (the owner can still block it by hand)."""
+    name and is not found here (nor one past URL_WALK_DEPTH or behind a cyclic `$ref`);
+    on a public connection the gateway's `url_argument_present` refuses those."""
     root = schema if isinstance(schema, dict) else {}
     found: set[str] = set()
 
@@ -270,6 +273,36 @@ def blocked_present(arguments, blocked: list[str]) -> bool:
             return any(present(item, rest) for item in value)
         return False
     return any(present(arguments, path.split("/")) for path in blocked if isinstance(path, str) and path)
+
+
+def unblocked_url_paths(entry) -> set[str]:
+    """The url paths the owner unblocked on a tool: its schema's url parameters
+    (`_url_params`) that are not in its `blocked_args`. A public tool gets all of them
+    blocked when it first appears, when its connection turns public and when a changed
+    definition adds one, so one missing from `blocked_args` is one the owner removed."""
+    return set(_url_params(entry["tool"].get("inputSchema"))) - set(entry["blocked_args"])
+
+
+def url_argument_present(arguments, unblocked: set[str]) -> bool:
+    """The public connection's fail-closed check, on the arguments themselves: whether
+    any key named `url` or `*_url` (any case), at any depth of dicts and lists, sits at
+    a path (`_url_params`' shape) the owner has not unblocked. Arguments nested deeper
+    than ARG_SCAN_DEPTH or holding more than ARG_SCAN_NODES values count as present."""
+    stack, seen = [(arguments, [])], 0
+    while stack:
+        value, path = stack.pop()
+        seen += 1
+        if seen > ARG_SCAN_NODES or len(path) > ARG_SCAN_DEPTH:
+            return True
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                here = path + [_pointer_key(str(key))]
+                if _is_url_name(key) and "/".join(here) not in unblocked:
+                    return True
+                stack.append((sub, here))
+        elif isinstance(value, list):
+            stack.extend((sub, path + ["*"]) for sub in value)
+    return False
 
 
 # ---------------------------------------------------------------- secrets
@@ -945,8 +978,8 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
         before = current_hash(conn)
         for raw, (text, definition) in parsed.items():
             digest = sha256_text(text)
-            old = conn.execute("SELECT schema_sha256 FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
-                               (conn_id, raw)).fetchone()
+            old = conn.execute("SELECT definition_json,blocked_args FROM state_steward_connection_tools "
+                               "WHERE conn_id=? AND raw_name=?", (conn_id, raw)).fetchone()
             if old is None:
                 annotations = definition.get("annotations") or {}
                 outward = 0 if annotations.get("readOnlyHint") is True else 1
@@ -957,8 +990,13 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
                              (conn_id, raw, gw_name(conn_id, raw), text, digest, outward, json.dumps(blocked),
                               moment, moment))
             else:
+                blocked = set(json.loads(old["blocked_args"]))
+                if row["visibility"] == "public":  # a url parameter the changed definition adds is blocked
+                    blocked |= set(_url_params(definition["inputSchema"])) - set(
+                        _url_params(json.loads(old["definition_json"]).get("inputSchema")))
                 conn.execute("UPDATE state_steward_connection_tools SET definition_json=?, schema_sha256=?, "
-                             "last_seen_at=? WHERE conn_id=? AND raw_name=?", (text, digest, moment, conn_id, raw))
+                             "blocked_args=?, last_seen_at=? WHERE conn_id=? AND raw_name=?",
+                             (text, digest, json.dumps(sorted(blocked)), moment, conn_id, raw))
         for (raw,) in conn.execute("SELECT raw_name FROM state_steward_connection_tools WHERE conn_id=?",
                                    (conn_id,)).fetchall():
             if raw not in parsed:

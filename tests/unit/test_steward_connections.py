@@ -338,6 +338,29 @@ NESTED = {"name": "crawl", "description": "Crawl pages", "annotations": {"readOn
         "loop": {"$ref": "#/properties/loop"}}}}
 
 
+RECURSIVE = {"name": "tree", "description": "Walk a tree", "annotations": {"readOnlyHint": True}, "inputSchema": {
+    "type": "object", "$defs": {"Node": {"type": "object", "properties": {
+        "child": {"$ref": "#/$defs/Node"}, "link_url": {"type": "string"}, "name": {"type": "string"}}}},
+    "properties": {"root": {"$ref": "#/$defs/Node"}}}}
+MAPS = {"name": "fetch_with", "description": "Fetch with headers", "annotations": {"readOnlyHint": True}, "inputSchema": {
+    "type": "object", "properties": {"query": {"type": "string"},
+                                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                                     "extra": {"type": "object", "patternProperties": {"^x_": {}}}}}}
+
+
+def nest(levels, leaf):
+    for _ in range(levels):
+        leaf = {"a": leaf}
+    return leaf
+
+
+def deep_tool(levels):
+    node = {"type": "object", "properties": {"url": {"type": "string"}}}
+    for _ in range(levels):
+        node = {"type": "object", "properties": {"a": node}}
+    return {"name": "deep", "description": "Deep", "annotations": {"readOnlyHint": True}, "inputSchema": node}
+
+
 def test_url_parameters_are_found_at_any_depth():
     assert sc._url_params(NESTED["inputSchema"]) == [
         "either/source_url", "hook/callback_url", "pages/*/page_url", "target/a~1b_url", "target/url"]
@@ -1042,6 +1065,83 @@ def test_a_nested_blocked_argument_is_refused_by_the_gateway(world, server, upst
         assert call(arguments)["error"]["data"]["code"] == "argument_blocked", arguments
     assert "tools/call" not in upstream.methods
     assert "result" in call({"query": "q", "target": {"depth": 1}, "pages": [{}]})
+
+
+def test_a_public_connection_refuses_every_url_named_argument_the_schema_walk_misses(world, server, upstream):
+    add(world)
+    upstream.tools = json.loads(json.dumps(TOOLS + [RECURSIVE, MAPS, deep_tool(15)]))  # what a session lists again
+    discover(world, tools=TOOLS + [RECURSIVE, MAPS, deep_tool(15)])
+    allow(world, names=["web_search", "tree", "fetch_with", "deep"])
+    call = lambda name, arguments: body_of(rpc(server, world, "tools/call", {"name": f"media__{name}",
+                                                                             "arguments": arguments}))[0]
+    for name, arguments in (("tree", {"root": {"child": {"link_url": "http://x"}}}),  # a cyclic $ref
+                            ("tree", {"root": {"child": {"child": {"LINK_URL": "http://x"}}}}),
+                            ("deep", nest(15, {"url": "http://x"})),  # past the schema walk's depth
+                            ("fetch_with", {"headers": {"Callback_URL": "http://x"}}),  # additionalProperties
+                            ("fetch_with", {"extra": {"x_url": "http://x"}}),  # patternProperties
+                            ("fetch_with", {"query": "q", "more": [{"URL": "http://x"}]}),  # undeclared, in a list
+                            ("web_search", {"query": "x", "image_url": "http://x"}),
+                            ("web_search", {"query": nest(40, "x")})):  # past the argument scan's bound
+        assert call(name, arguments)["error"]["data"]["code"] == "argument_blocked", (name, arguments)
+    assert "tools/call" not in upstream.methods
+    # No url-named key: passes (a url in a value is not a url argument).
+    for name, arguments in (("web_search", {"query": "url http://x"}), ("tree", {"root": {"child": {"name": "url"}}}),
+                            ("fetch_with", {"headers": {"Accept": "url"}, "extra": {"x_urls": "x"}}),
+                            ("deep", nest(15, {"b": "url"}))):
+        assert "result" in call(name, arguments), (name, arguments)
+
+
+def test_an_owner_unblocked_url_path_passes_and_only_that_path(world, server, upstream):
+    add(world)
+    upstream.tools = json.loads(json.dumps(TOOLS + [NESTED]))  # what a session lists again
+    discover(world, tools=TOOLS + [NESTED])
+    allow(world, names=["ocr_image", "crawl"])
+    execute(world.owner, "steward_connection_tools_set", {"conn_id": "media", "tools": [
+        {"raw_name": "ocr_image", "blocked_args": []},
+        {"raw_name": "crawl", "blocked_args": [p for p in sc._url_params(NESTED["inputSchema"])
+                                               if p != "pages/*/page_url"]}]}, allow_write=True)
+    call = lambda name, arguments: body_of(rpc(server, world, "tools/call", {"name": f"media__{name}",
+                                                                             "arguments": arguments}))[0]
+    assert "result" in call("ocr_image", {"image_url": "http://x"})
+    assert "result" in call("crawl", {"pages": [{"page_url": "http://x"}, {}]})
+    upstream.methods.clear()
+    for name, arguments in (("crawl", {"target": {"url": "http://x"}}), ("crawl", {"page_url": "http://x"}),
+                            ("crawl", {"pages": [{"page_url": "http://x", "more": {"url": "http://y"}}]}),
+                            ("ocr_image", {"image_url": "http://x", "Image_URL": "http://y"})):
+        assert call(name, arguments)["error"]["data"]["code"] == "argument_blocked", (name, arguments)
+    assert "tools/call" not in upstream.methods
+
+
+def test_a_private_connection_is_not_scanned_for_url_arguments(world, server, upstream):
+    add(world, visibility="private")
+    upstream.tools = json.loads(json.dumps(TOOLS + [RECURSIVE]))  # what a session lists again
+    discover(world, tools=TOOLS + [RECURSIVE])
+    allow(world, names=["web_search", "tree"])
+    execute(world.steward, "set_steward_turn_audience", {"turn": "t1", "audience": "owner"}, allow_write=True)
+    call = lambda name, arguments: body_of(rpc(server, world, "tools/call", {"name": f"media__{name}",
+                                                                             "arguments": arguments}))[0]
+    for name, arguments in (("web_search", {"query": "x", "image_url": "http://x"}),
+                            ("tree", {"root": {"child": {"link_url": "http://x"}}}),
+                            ("web_search", {"query": nest(40, "x")})):
+        assert "result" in call(name, arguments), (name, arguments)
+
+
+def test_a_changed_definition_on_a_public_connection_blocks_its_new_url_parameters(world):
+    assert sc._url_params({"type": "object", "properties": {"Image_URL": {}, "URL": {}, "urls": {}}}) == ["Image_URL", "URL"]
+    add(world)
+    add(world, conn_id="home", visibility="private")
+    discover(world)
+    discover(world, "home")
+    blocked = lambda conn_id="media": {t["raw_name"]: t["blocked_args"] for t in execute(
+        world.owner, "list_steward_connection_tools", {"conn_id": conn_id})["tools"]}
+    execute(world.owner, "steward_connection_tools_set", {"conn_id": "media", "tools": [
+        {"raw_name": "ocr_image", "blocked_args": []}]}, allow_write=True)  # the owner unblocks image_url
+    changed = json.loads(json.dumps(TOOLS))
+    changed[1]["inputSchema"]["properties"]["mask_url"] = {"type": "string"}
+    discover(world, tools=changed)
+    discover(world, "home", tools=changed)
+    assert blocked()["ocr_image"] == ["mask_url"]  # the new one blocked, the owner's unblock kept
+    assert blocked("home")["ocr_image"] == []
 
 
 def test_a_renamed_tool_leaves_the_gateways_list(world, server, upstream):

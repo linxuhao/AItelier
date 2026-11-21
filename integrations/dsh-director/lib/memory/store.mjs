@@ -592,7 +592,9 @@ export class MemoryStore {
   // ---------------------------------------------------------------- writes
 
   /** One owner/steward turn (design 3.3 写入来源): entry ids derive from the turn id and
-   *  the message's position, so a replay writes nothing twice. Resolves once on disk. */
+   *  the message's position, so a replay writes nothing twice. A message's `channel` (the
+   *  chat channel an owner message came from, design 7.2 source) is kept on its entry; a
+   *  message without one has no such key. Resolves once on disk. */
   recordTurn(turnId, messages) {
     if (typeof turnId !== 'string' || !ENTRY_ID.test('t-' + turnId)) throw new Error('memory: turn id must be letters, digits, . _ : -');
     const at = this.now();
@@ -603,7 +605,8 @@ export class MemoryStore {
       // default the position.
       const id = `t-${turnId}-${m.part ?? i}`;
       if (!ENTRY_ID.test(id)) throw new Error('memory: message part must be letters, digits, . _ : -');
-      return { id, at: m.at ?? at, role: m.role, source: 'conversation', text: String(m.text), batch: turnId };
+      return { id, at: m.at ?? at, role: m.role, ...(typeof m.channel === 'string' && m.channel ? { channel: m.channel } : {}),
+        source: 'conversation', text: String(m.text), batch: turnId };
     }).filter(e => e.text.trim());
     return this.#writeEntries(entries, `turn ${turnId} (runtime)`);
   }
@@ -620,7 +623,7 @@ export class MemoryStore {
     }
     const ordered = [...turns.values()].map(rows => rows.sort((a, b) => (a.at > b.at ? 1 : a.at < b.at ? -1 : a.id.localeCompare(b.id))))
       .sort((a, b) => (a[0].at > b[0].at ? 1 : a[0].at < b[0].at ? -1 : 0)).slice(-n)
-      .map(rows => rows.map(e => `[${e.at}] ${e.role}: ${e.text}`).join('\n'));
+      .map(rows => rows.map(e => `[${e.at}] ${e.role}${e.channel ? ` (${e.channel})` : ''}: ${e.text}`).join('\n'));
     while (ordered.length > 1 && ordered.join('\n\n').length > maxChars) ordered.shift();
     if (ordered.length === 1 && ordered[0].length > maxChars) ordered[0] = '[…earlier part of this turn cut]\n' + ordered[0].slice(-maxChars);
     return ordered;
@@ -1152,7 +1155,8 @@ export class MemoryStore {
   }
 
   #readable(e) {
-    return { id: e.id, at: e.at, role: e.role, source: e.source, text: e.text, ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
+    return { id: e.id, at: e.at, role: e.role, ...(e.channel ? { channel: e.channel } : {}), source: e.source, text: e.text,
+      ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
   }
 
   /** grep's items, newest first, at most k: `{hit, entry}` for a log line (the entry as the

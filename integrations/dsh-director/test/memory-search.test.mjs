@@ -75,6 +75,8 @@ test('1: line shapes: roles, a note, the date-only mark, → 见, the remote lin
   assert.equal(formatLine({ id: 'n-1', at, role: 'steward', source: 'note', text: 'z' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 管家（笔记） {n-1}: z');
   assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { dateOnly: true }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}（日期命中）: x');
   assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { see: 'grep' }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: → 见 grep');
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', channel: 'wechat', text: 'x' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 业主（wechat） {t-1-o}: x',
+    'an entry relayed from a chat channel names it after the role');
   assert.equal(formatLine({ at, role: 'remote', text: 'fact' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 远端: fact');
   assert.equal(formatLine({ role: 'remote', text: 'fact' }, 'UTC'), '[时间不明] 远端: fact');
   assert.equal(formatProfileLine(3, 'likes tea'), '[档案 第 3 行] likes tea');

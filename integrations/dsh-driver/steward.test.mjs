@@ -255,11 +255,17 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.throws(() => validateHost({ ...director, config: { ...director.config, rootRole: 'worker' } }), /rootRole must be one of director, steward/);
 });
 
-/** A fake State: one conversation (newest first, paged) and the writes it was sent. */
-function fakeState(messages, { pageSize } = {}) {
-  const sent = [], reads = [];
+/** A fake State: one conversation (newest first, paged), the inbound source rows of its
+ *  messages, and the writes it was sent. */
+function fakeState(messages, { pageSize, sources = {} } = {}) {
+  const sent = [], reads = [], sourceReads = [];
   const request = async (path, body) => {
     reads.push(path);
+    if (path === '/api/state/query/message_sources') {
+      sourceReads.push(body.message_ids);
+      if (sources.fail) throw new Error('AItelier message_sources: HTTP 503');
+      return { result: { sources: Object.fromEntries(body.message_ids.filter(id => sources[id]).map(id => [id, sources[id]])) } };
+    }
     if (path === '/api/state/query/list_user_conversation') {
       if (body.project_id !== 'aitelier-home') return { messages: [], next_cursor: null };
       const newest = [...messages].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -274,7 +280,7 @@ function fakeState(messages, { pageSize } = {}) {
     }
     throw new Error('unexpected ' + path);
   };
-  return { request, sent, reads };
+  return { request, sent, reads, sourceReads };
 }
 const owner = (id, at, body) => ({ message_id: id, created_at: at, sender_kind: 'user', sender_driver_id: null, body, segments: [], reply_to_message_id: null });
 const mine = (id, at, body, reply) => ({ message_id: id, created_at: at, sender_kind: 'driver', sender_driver_id: 'drv-home', body, segments: [], reply_to_message_id: reply ?? null });
@@ -323,7 +329,41 @@ test('sync pages back only until it meets an owner message memory already has', 
   conversation.push(owner('o5', '2026-11-17T10:05:00Z', 'msg 5'));
   state.reads.length = 0;
   assert.deepEqual(await sync(), { written: 1 });
-  assert.equal(state.reads.length, 1, 'the newest page already holds a known owner message: one read');
+  assert.deepEqual(state.reads, ['/api/state/query/list_user_conversation', '/api/state/query/message_sources'],
+    'the newest page already holds a known owner message: one page read, then the new message\'s source');
+  assert.deepEqual(state.sourceReads.at(-1), ['o5'], 'only the owner message memory does not have yet is looked up');
+  await store.close();
+});
+
+test('sync: an owner message relayed from a chat channel is remembered with its channel; a dashboard one has none', async () => {
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  const conversation = [owner('o1', '2026-11-20T12:48:00Z', '从 slack 问一句'), mine('s1', '2026-11-20T12:49:00Z', '好的', 'o1'),
+    owner('o2', '2026-11-20T12:50:00Z', '从面板问一句')];
+  const sources = { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1' },
+    s1: { direction: 'out', channel: 'slack', channel_message_ref: 'ts-2' } };
+  const state = fakeState(conversation, { sources });
+  assert.deepEqual(await syncConversation({ request: state.request, project: 'aitelier-home', me: 'drv-home', memory: store }), { written: 3 });
+  assert.deepEqual(state.sourceReads, [['o2', 'o1']], 'one sources read, owner messages only');
+  const read = await store.read(['t-o1-o', 't-o1-s1', 't-o2-o']);
+  assert.deepEqual(read.entries.map(e => [e.id, e.channel]), [['t-o1-o', 'slack'], ['t-o1-s1', undefined], ['t-o2-o', undefined]]);
+  assert.equal('channel' in read.entries[2], false, 'a dashboard message carries no channel key');
+  assert.match((await store.search('slack')).grep.text, /\] 业主（slack） \{t-o1-o\}: 从 slack 问一句/);
+  assert.match((await store.search('面板')).grep.text, /\] 业主 \{t-o2-o\}: 从面板问一句/, 'a dashboard line is as before');
+  assert.equal(store.recentTurns().join('\n\n').split('\n')[0], '[2026-11-20T12:48:00Z] owner (slack): 从 slack 问一句');
+  assert.doesNotMatch(JSON.stringify(read) + store.recentTurns().join(''), /U0OWNER|ts-1|ts-2/, 'only the channel name, never the account or message ref');
+  await store.close();
+});
+
+test('sync: a failed sources read writes nothing, so no message is remembered without its channel; the next sync writes it', async () => {
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  const sources = { fail: true, o1: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1' } };
+  const state = fakeState([owner('o1', '2026-11-20T12:48:00Z', 'from wechat')], { sources });
+  const sync = () => syncConversation({ request: state.request, project: 'aitelier-home', me: 'drv-home', memory: store });
+  await assert.rejects(sync(), /message_sources/);
+  assert.equal(store.known('t-o1-o'), false);
+  sources.fail = false;
+  assert.deepEqual(await sync(), { written: 1 });
+  assert.equal((await store.read(['t-o1-o'])).entries[0].channel, 'wechat');
   await store.close();
 });
 

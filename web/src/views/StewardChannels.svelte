@@ -3,6 +3,7 @@
   import { createOwnerChannelCode, listOwnerChannels, requestOwnerChannelQr, setDefaultOwnerChannel, unbindOwnerChannel,
     type OwnerChannel, type OwnerChannelLoginRequest, type OwnerChannelName } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
+  import { channelAlertLine, channelAlertText } from '../lib/steward';
   import ConfirmDialog from './ConfirmDialog.svelte';
   // The owner's chat channels (design 7.2): who is bound on Slack / WeChat, the
   // one-time bind code, unbind, and where the steward's unprompted messages go.
@@ -20,6 +21,8 @@
   // only for QR_ON_ITS_WAY_MS after the bridge took the request (its 30 s QR wait and a
   // status report): a QR that came and went, or an attempt that failed at once, leaves the
   // status line alone to say why there is no QR.
+  // A channel that is down shows its down-alert line (design 7.9.2): when and where the
+  // host alerted the owner, why it could not, or that no other channel can carry it.
   const QR_FEEDBACK_MS = 10 * 60_000, QR_ON_ITS_WAY_MS = 60_000;
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
   const BIND_POLL_MS = 5000, OFFLINE_POLL_MS = 15000;
@@ -145,6 +148,7 @@
     {#each CHANNELS as channel (channel)}
       {@const r = row(channel)}
       {@const live = codes[channel]}
+      {@const alert = channelAlertLine(r, rows, now)}
       <article class="channel" data-channel={channel} data-bound={r.bound ? '1' : '0'}>
         <header>
           <strong>{t('steward.chan.' + channel)}</strong>
@@ -155,6 +159,7 @@
           {/if}
         </header>
         {#if r.status?.detail}<p class="detail" data-channel-detail>{r.status.detail}</p>{/if}
+        {#if alert}<p class="alert" data-channel-alert={alert.key}>{channelAlertText(alert, t)}</p>{/if}
         {#if r.qr_svg}
           <figure class="qr" data-channel-qr>
             <!-- The QR is a reported SVG: only ever an <img> data URL (no script, no external
@@ -218,4 +223,5 @@
   .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}
   .default{display:block;margin:12px 0 0;font-size:13px;}.default select{margin:4px 0 0;font-size:13px;}
   .notice{color:var(--pico-primary);}.error{color:var(--pico-del-color);}
+  .alert{margin:0 0 6px;overflow-wrap:anywhere;}
 </style>

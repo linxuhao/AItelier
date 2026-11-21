@@ -1083,10 +1083,13 @@ def test_the_hosts_status_report_reaches_the_owners_list_and_only_there(world):
     assert all(c["status"] is None and c["qr_svg"] is None
                for c in world.owner.channels.list_owner_channels(with_status=True)["channels"]), "nothing reported"
     out = report(world, "s1", detail="scan needed", qr_svg=QR)
-    assert out == {"recorded": True, "channel": "wechat", "connected": False, "at": out["at"]}
+    assert out == {"recorded": True, "channel": "wechat", "connected": False, "at": out["at"],
+                   "down_since": out["at"], "up_due": False, "alerted_since": None, "alert_attempts": 0}
     assert report(world, "s1", detail="scan needed", qr_svg=QR) == out, "a replay"
     listed = {c["channel"]: c for c in world.owner.channels.list_owner_channels(with_status=True)["channels"]}
-    assert listed["wechat"]["status"] == {"connected": False, "detail": "scan needed", "at": out["at"]}
+    assert listed["wechat"]["status"] == {"connected": False, "detail": "scan needed", "at": out["at"],
+                                          "down_since": out["at"], "alerted_at": None, "alert_via": None,
+                                          "alert_error": None}
     assert listed["wechat"]["qr_svg"] == QR
     assert listed["slack"]["status"] is None and listed["slack"]["qr_svg"] is None
     # A later report replaces the row: logged in, the QR is gone.

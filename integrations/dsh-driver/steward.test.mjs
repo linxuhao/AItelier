@@ -17,6 +17,7 @@ import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConve
   turnWatcher, forwardFinalText, stewardTexts, INBOX_LIMITS, channelOps, refusalCode } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
+import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
 
 const text = readFileSync(new URL('../dsh-director/roles.json', import.meta.url), 'utf8');
@@ -203,6 +204,27 @@ test('the steward prompt names the tools it has: both inbox readers where it exp
       assert.ok(table.steward.presented.includes(name), `steward.md names ${name}, which the steward is not presented`);
 });
 
+test('the steward prompt holds the daily brief\'s rules (step 25 C5): one short message, its order, counts only, read-only', () => {
+  // Design-steward 7.9.3: what a brief carries lives here, not in the reminder row, so a new
+  // capability changes this paragraph once and every brief reminder already made follows it.
+  const md = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  const rule = md.split('\n\n').find(part => part.startsWith('Daily brief:'));
+  assert.ok(rule, 'steward.md has the daily-brief paragraph');
+  const flat = rule.replace(/\s+/g, ' ');
+  // The host's own tool names (send_user_message, schedule_list) never appear in a plugin file
+  // (plugin-boundary.test.mjs): the paragraph names them by what they are.
+  for (const words of ['ONE message through your message tool', 'at most 500 characters', "today's reminders (your reminder list)",
+    'progress or are stuck (portfolio_projects)', 'the number only, never the questions', 'connected tools (calendar, mail) last',
+    'send only 今天没有要你处理的事', 'more than 3 hours', '今早的简报没发成（晚了 N 小时）', 'sends no mail, writes no calendar entry',
+    'confirms nothing for anyone', 'no weather'])
+    assert.ok(flat.includes(words), `the daily-brief paragraph lacks: ${words}`);
+  // The order the owner reads it in: reminders, projects, questions, letters.
+  const at = words => flat.indexOf(words);
+  assert.ok(at('reminder list') < at('portfolio_projects') && at('portfolio_projects') < at('questions wait') && at('questions wait') < at("director's letter"));
+  // Within a chat message: 500 leaves room under the 600 a channel shows (CHANNEL_LIMITS.mirrorChars).
+  assert.equal(CHANNEL_LIMITS.mirrorChars, 600);
+});
+
 test('the steward prompt bounds EVERY message to the owner for a phone chat, not only the unprompted ones', () => {
   const md = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
   // Owner, 2026-11-20: "管家的回复尽量精简，微信和slack对超长信息的显示都不friendly" - a 1604-character
@@ -236,7 +258,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
-  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'codeCheck', 'list', 'recordDelivery', 'relay', 'reportStatus', 'sourceOf']);
+  assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'list', 'recordAlert', 'recordDelivery', 'relay',
+    'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');
@@ -795,6 +818,35 @@ test('chat channels: a status change is one report_channel_status, each under it
   assert.deepEqual(await channels.reportStatus({ channel: 'wechat', connected: false, qrSvg: '<svg onload="x"></svg>' }), { refused: 'qr_svg_refused' });
   answer = Object.assign(new Error('AItelier /api/state/commands/report_channel_status: HTTP 503'), { status: 503 });
   await assert.rejects(channels.reportStatus({ channel: 'slack', connected: true }), /HTTP 503/);
+});
+
+test('channel-down alert (step 25 C12): one claim and one record per outage and attempt, under keys a restart derives the same way', async () => {
+  const calls = [];
+  let answer = { result: { channel: 'wechat', kind: 'down', down_since: 'D', detail: 'x', via: 'slack', attempt: 1 } };
+  const request = async (path, body) => { calls.push([path, body]); if (answer instanceof Error) throw answer; return answer; };
+  const channels = channelOps(request);
+  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 }), answer.result);
+  answer = { result: { held: 'no_channel' } };
+  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'up', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 }), { held: 'no_channel' });
+  answer = { result: {} };
+  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 2 }), {});
+  answer = { result: { recorded: true, channel: 'wechat', kind: 'down' } };
+  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', via: 'slack', attempt: 1 });
+  await channels.recordAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', via: 'slack', attempt: 2,
+    error: '409 recipient_unknown ' + 'e'.repeat(400) });
+  assert.deepEqual(calls, [
+    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat', kind: 'down',
+      down_since: '2026-11-21T10:00:00+00:00' }],
+    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:up:2026-11-21T10:00:00+00:00:1', channel: 'wechat', kind: 'up',
+      down_since: '2026-11-21T10:00:00+00:00' }],
+    ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:down:2026-11-21T10:00:00+00:00:2', channel: 'wechat', kind: 'down',
+      down_since: '2026-11-21T10:00:00+00:00' }],
+    ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat',
+      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', via: 'slack', ok: true }],
+    ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:2', channel: 'wechat',
+      kind: 'down', down_since: '2026-11-21T10:00:00+00:00', via: 'slack', ok: false, error: ('409 recipient_unknown ' + 'e'.repeat(400)).slice(0, 300) }]]);
+  answer = Object.assign(new Error('AItelier /api/state/commands/claim_channel_alert: HTTP 403 "steward_role_required"'), { status: 403 });
+  await assert.rejects(channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: 'D', attempt: 1 }), /HTTP 403/);
 });
 
 test('owner memory requests (step 14): each kind runs against the store as the owner; results go back; an unwritten result runs again', async () => {

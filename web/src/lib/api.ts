@@ -933,8 +933,11 @@ export type OwnerChannelName = 'slack' | 'wechat';
 export interface OwnerChannel {
   channel: OwnerChannelName; bound: boolean; sender_ref: string | null;
   bound_at: string | null; revoked_at: string | null; is_default: boolean | number;
-  /** What the steward's host last reported for this channel (and when); null when it reported nothing. */
-  status?: {connected: boolean; detail?: string | null; at?: string} | null;
+  /** What the steward's host last reported for this channel (and when); null when it reported nothing.
+   *  While it is down: since when, and this outage's down alert (design 7.9.2) - delivered
+   *  (alerted_at, alert_via) or failed (alert_error too); all null otherwise. */
+  status?: {connected: boolean; detail?: string | null; at?: string; down_since?: string | null;
+    alerted_at?: string | null; alert_via?: OwnerChannelName | null; alert_error?: string | null} | null;
   /** While a WeChat login needs a scan: its QR as an SVG document (the backend checked it). */
   qr_svg?: string | null;
   /** The newest request for a new login QR on this channel (WeChat only), or null. */

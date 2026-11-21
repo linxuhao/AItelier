@@ -8,7 +8,8 @@
  */
 import {
   ApiError, createStewardMemoryRequest, stewardMemoryRequest,
-  type DriverStatusResponse, type StewardImpact, type StewardMemoryKind, type StewardSchedule,
+  type DriverStatusResponse, type OwnerChannel, type OwnerChannelName, type StewardImpact, type StewardMemoryKind,
+  type StewardSchedule,
 } from './api';
 
 export const STEWARD_PROJECT_ID = 'aitelier-home';
@@ -71,13 +72,17 @@ export async function runMemoryRequest(
 
 // ── Scheduled reminders (plugin step 16) ──
 
-/** One-click cron expressions; the owner can still write any 5-field expression. */
-export const SCHEDULE_PRESETS = [
+/** One-click cron expressions; the owner can still write any 5-field expression. A preset
+ *  with `fill` also fills the title and instruction when they are empty, from the texts
+ *  steward.schedPresetTitle.<id> / steward.schedPresetInstruction.<id> (design 7.9.3: the daily
+ *  brief - what goes into it is steward.md's rule, not the reminder's). */
+export const SCHEDULE_PRESETS: readonly {id: string; expr: string; fill?: boolean}[] = [
   {id: 'daily', expr: '0 9 * * *'},
   {id: 'weekdays', expr: '0 9 * * 1-5'},
   {id: 'monday', expr: '0 9 * * 1'},
   {id: 'monthly', expr: '0 9 1 * *'},
-] as const;
+  {id: 'brief', expr: '0 8 * * *', fill: true},
+];
 
 /** The refusal codes the schedule endpoints give with a 422 (each has a steward.schedReason.* text). */
 export const SCHEDULE_REFUSALS = ['invalid_cron', 'too_frequent', 'at_in_past', 'invalid_timezone'];
@@ -122,4 +127,38 @@ export function scheduleRefusal(error: unknown): {code: string; reason: string} 
   const detail = error.detail as {code?: unknown; reason?: unknown} | null;
   return detail && typeof detail === 'object' && typeof detail.code === 'string'
     ? {code: detail.code, reason: typeof detail.reason === 'string' ? detail.reason : ''} : null;
+}
+
+// ── Channel-down alert (plugin step 25, design 7.9.2) ──
+
+/** How long a channel is down before the host alerts the owner on another channel. */
+export const CHANNEL_ALERT_AFTER_MS = 10 * 60_000;
+
+export type ChannelAlertLine =
+  | {key: 'alerted'; minutes: number; at: string; via: OwnerChannelName}
+  | {key: 'failed'; minutes: number; error: string}
+  | {key: 'noChannel'; minutes: number};
+
+/** The alert line of a channel that is down (null when there is none to show): its down alert
+ *  went out (when, through which channel), failed (why), or - down past the alert delay with no
+ *  alert - there is no other bound, connected channel to send it through. A channel not bound
+ *  or not configured is never alerted about. */
+export function channelAlertLine(row: OwnerChannel, rows: OwnerChannel[], now: number): ChannelAlertLine | null {
+  const status = row.status;
+  if (!status || status.connected || !status.down_since || !row.bound) return null;
+  const minutes = Math.max(0, Math.floor((now - Date.parse(status.down_since)) / 60_000));
+  if (status.alert_error) return {key: 'failed', minutes, error: status.alert_error};
+  if (status.alerted_at && status.alert_via) return {key: 'alerted', minutes, at: status.alerted_at, via: status.alert_via};
+  if ((status.detail ?? '').startsWith('not configured') || now - Date.parse(status.down_since) < CHANNEL_ALERT_AFTER_MS) return null;
+  const other = rows.some(r => r.channel !== row.channel && r.bound && !r.revoked_at && r.status?.connected);
+  return other ? null : {key: 'noChannel', minutes};
+}
+
+/** The alert line in words: `tr` is the page's t(). */
+export function channelAlertText(line: ChannelAlertLine, tr: (key: string) => string): string {
+  if (line.key === 'failed') return tr('steward.chanAlertFailed').replace('{reason}', line.error);
+  if (line.key === 'noChannel') return tr('steward.chanAlertNoChannel');
+  const time = new Date(line.at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  return tr('steward.chanAlerted').replace('{minutes}', String(line.minutes)).replace('{time}', time)
+    .replace('{via}', tr('steward.chan.' + line.via));
 }

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -760,6 +761,7 @@ def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STAND
                 "delivery_seq": delivery["delivery_seq"],
                 "status": delivery["status"],
                 "version": delivery["version"],
+                "created_at": message["created_at"],
                 "subject": _redact(message["subject"]),
                 "body_excerpt": _redact(message["body"])[:320],
             }
@@ -867,6 +869,7 @@ def build_context() -> str:
 project_id={PROJECT_ID} (fixed project isolation)
 driver_note_revision={note.get('revision', 'unknown')}
 state_event_cursor={overview.get('event_seq', 'unknown')}
+context_built_at_utc={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} (run date -u for the current time)
 state_driver_guide_sha256={_sha256(guide)} chars={len(guide)} source={help_payload.get('driver_resource', 'state_graph_help')}
 
 ## Current driver note ENTRY INDEX (current rules; bodies fetched by address)

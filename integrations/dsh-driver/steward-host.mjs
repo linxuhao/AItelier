@@ -109,6 +109,15 @@ function privateInboxItem(row) {
   };
 }
 
+/** Step 22 (design-steward 7.6): the subjects of the steward's messages its HOST writes in
+ *  code - the push of the directors' open questions (written by the backend's
+ *  sync_owner_questions) and the receipt of a relayed answer. Neither is the steward's own
+ *  words: neither joins a memory turn, and a push answers no owner message (it is written
+ *  without one, so it must not mark the owner's earlier messages answered). */
+export const PUSH_SUBJECT = '待答问题', RECEIPT_SUBJECT = '转达回执';
+const hostWritten = m => m.sender_kind === 'driver' && (m.subject === PUSH_SUBJECT || m.subject === RECEIPT_SUBJECT);
+const isPush = m => m.sender_kind === 'driver' && m.subject === PUSH_SUBJECT;
+
 /** A message as its owner reads it: the body, then each block's text. */
 export const textOf = message => [message.body, ...(message.segments ?? []).map(s => s.text)]
   .filter(t => typeof t === 'string' && t.trim()).join('\n\n');
@@ -126,6 +135,7 @@ export function conversationTurns(messages, me, sources = {}) {
   const turns = new Map();
   let current;
   for (const m of [...messages].sort(older)) {
+    if (hostWritten(m)) continue;
     if (m.sender_kind === 'user') {
       current = m.message_id;
       const source = sources[m.message_id];
@@ -317,6 +327,8 @@ export async function unansweredOwnerMessages({ request, project, me, signal }) 
   const newest = [...((listed.result ?? listed).messages ?? [])].sort(older).reverse();
   const unanswered = [];
   for (const m of newest) {
+    // A push is written by the host with no owner message in view: it answers nothing.
+    if (isPush(m)) continue;
     if (m.sender_kind === 'driver' && m.sender_driver_id === me) break;
     if (m.sender_kind === 'user') unanswered.push(m);
   }
@@ -450,6 +462,12 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
     if (sourcesUnread) threads.unanswered_sources_unread = { error: sourcesUnread,
       note: 'the channel lookup failed: a message here without a channel was not looked up, so it is not evidence it came from the dashboard' };
   } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
+  // Step 22: the directors' questions your host pushed to your owner and still open (code,
+  // project, first line, when pushed, reminders sent), read from the ledger each snapshot.
+  try {
+    const listed = await request('/api/state/query/list_pushed_owner_questions', {}, signal);
+    threads.pushed_owner_questions = (listed.result ?? listed).questions ?? [];
+  } catch (error) { threads.pushed_owner_questions = { error: String(error?.message ?? error).slice(0, 200) }; }
   try {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
@@ -598,6 +616,80 @@ export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'inval
  *  sender's message with a colliding ref is its own request, judged on its own. A status report is called only
  *  on a change (the plugin's ownerChannels), so each gets its own key: a status that comes
  *  back later is a new report, not a replay of the first. Its detail and QR are never logged. */
+/** Step 22 (design-steward 7.6): what relay_owner_answer refuses with. A refusal goes back to
+ *  the tool as {refused: code}; anything else (a 5xx, the network, an auth failure) is thrown. */
+export const RELAY_REFUSALS = new Set(['not_from_channel', 'no_code', 'no_recipients', 'channel_sender_not_bound',
+  'code_sent_to_bound_account', 'invalid_request']);
+/** How often the host asks the backend for due pushes, reminders and notices. */
+export const OWNER_QUESTIONS_MS = 60 * 1000;
+
+/** The steward's relay_answer tool: ONE owner message id. The backend reads the codes from
+ *  that message, copies its words unchanged into each named question's conversation and
+ *  composes the receipt; the host then sends the receipt as the steward's reply to that
+ *  message and mirrors it back to the channel it came from (`mirror` is ownerMessageSent).
+ *  The request keys derive from the message id, so a retry is State's replay. */
+export async function relayAnswer({ request, project, ownerMessageId, mirror, signal }) {
+  if (typeof ownerMessageId !== 'string' || !ownerMessageId.trim())
+    return { refused: 'invalid_request', reason: 'owner_message_id must name the chat message your owner sent' };
+  let answer;
+  try {
+    const response = await request('/api/state/commands/relay_owner_answer', { request_key: `relay-answer:${ownerMessageId}`,
+      source_message_id: ownerMessageId }, signal);
+    answer = response?.result ?? response ?? {};
+  } catch (error) {
+    const code = refusalCode(error);
+    if (RELAY_REFUSALS.has(code)) return { refused: code };
+    throw error;
+  }
+  let receipt;
+  if (typeof answer.receipt === 'string' && answer.receipt) {
+    try {
+      const sent = await request('/api/state/commands/send_user_message', { request_key: `relay-receipt:${ownerMessageId}`,
+        project_id: project, subject: RECEIPT_SUBJECT, body: answer.receipt, reply_to_message_id: ownerMessageId }, signal);
+      receipt = (sent?.result ?? sent)?.message_id;
+    } catch (error) {
+      // The same receipt key with other words: the receipt for this message already went out.
+      if (!/idempotency_conflict/.test(String(error?.message ?? error))) throw error;
+    }
+    if (receipt && mirror) await mirror(receipt, answer.receipt, ownerMessageId);
+  }
+  const { receipt: _text, ...rest } = answer;
+  return { ...rest, ...(receipt ? { receipt_message_id: receipt } : {}) };
+}
+
+/** The steward's push clock (design-steward 7.6.2): every OWNER_QUESTIONS_MS it asks the
+ *  backend for what is due (sync_owner_questions writes the messages and their ledger rows
+ *  in one transaction) and mirrors each message - and each one written earlier but never
+ *  mirrored - to the owner's default channel, awaited, one at a time. No model turn. */
+export class OwnerQuestionsTimer {
+  constructor({ request, mirror, log = () => {}, intervalMs = OWNER_QUESTIONS_MS, setTimer = setInterval, clearTimer = clearInterval }) {
+    Object.assign(this, { request, mirror, log, intervalMs, setTimer, clearTimer });
+    this.timer = undefined; this.running = undefined; this.closed = false;
+  }
+  /** One look; a look still running is the answer to a second call. Never throws. */
+  tick() {
+    if (this.closed) return Promise.resolve();
+    this.running ??= (async () => {
+      const response = await this.request('/api/state/commands/sync_owner_questions', {});
+      const out = response?.result ?? response ?? {};
+      for (const message of [...(out.messages ?? []), ...(out.unmirrored ?? [])]) {
+        if (this.closed) break;
+        await this.mirror(message.message_id, message.body);
+      }
+      return out;
+    })().catch(error => { this.log('owner questions: ' + String(error?.message ?? error).slice(0, 300)); })
+      .finally(() => { this.running = undefined; });
+    return this.running;
+  }
+  start() {
+    if (this.timer || this.closed) return this;
+    this.timer = this.setTimer(() => void this.tick(), this.intervalMs);
+    this.timer?.unref?.();
+    return this;
+  }
+  close() { this.closed = true; this.clearTimer(this.timer); this.timer = undefined; }
+}
+
 export function channelOps(request) {
   const refused = error => {
     const code = refusalCode(error);

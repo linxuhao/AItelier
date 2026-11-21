@@ -17,8 +17,8 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, catalogOps, forwardFinalText, openProposals, openThreads, recordAutoReply, replyToLetter, stewardHostTexts, stewardOps,
-  syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
+import { autoReplyBody, catalogOps, forwardFinalText, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer, replyToLetter,
+  stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -535,6 +535,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const toolRequest = (path, body, signal) => request(path, body, signal, groupTurn() ? { readAs: 'public' } : undefined);
   // Step 16: the steward's reminder clock (created in events(), refreshed by the tools).
   let scheduleTimer;
+  // Step 22: the clock that pushes the directors' open questions to the owner's channel.
+  let questionsTimer;
   // Step 19: the director's ownerMessageSent, kept from install() for attention.ask (the
   // steward's questions are its messages to its owner too).
   let mirrorOwnerMessage;
@@ -718,6 +720,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (args, exec) => replyToLetter({ request: toolRequest, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal,
             external: externalContent() }),
         }));
+        // Step 22 (design-steward 7.6.5): the model decides only that a chat message answers a
+        // pushed question; the backend reads the codes, copies the words and writes the receipt.
+        scope.tools.register(defineTool({ name: 'relay_answer',
+          description: 'Your owner answered a question your host pushed to their chat (a line starting with a code like Q12, or a message of codes alone): pass that message\'s id. Your host finds the codes, sends your owner\'s words unchanged to each director who asked, and confirms to your owner. A message that asks about a question (Q12 是什么意思？) is not an answer: do not relay it.',
+          parameters: { owner_message_id: { type: 'string', required: true } }, output: json,
+          execute: (args, exec) => relayAnswer({ request, project, ownerMessageId: args.owner_message_id, mirror: ownerMessageSent, signal: exec.signal }),
+        }));
       }
       scope.tools.register(defineTool({ name: 'send_user_message',
         description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
@@ -883,6 +892,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         scheduleTimer = new ScheduleTimer({ request, log: line => ctx.logger.warn(line),
           deliver: (text, id) => notify(text, { id }), sendGroup: typeof groupSend === 'function' ? groupSend : undefined });
         await scheduleTimer.refresh();
+        // Step 22: the push clock; each look awaits its mirrors (design-steward 7.6.2).
+        questionsTimer = new OwnerQuestionsTimer({ request, mirror: (id, body) => ownerMessageSent(id, body),
+          log: line => ctx.logger.warn(line) }).start();
+        void questionsTimer.tick();
       }
       // Every owner message gets an answer: when a turn ends with the owner still waiting,
       // the steward's last words go to them as the reply (owner 2026-11-17).
@@ -996,7 +1009,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       }
       await ctx.sessionPersistence.flush();
       if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();
-      return { done: runtime.pump(), stop: () => { scheduleTimer?.close(); runtime.close(); } };
+      return { done: runtime.pump(), stop: () => { scheduleTimer?.close(); questionsTimer?.close(); runtime.close(); } };
     },
   };
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a

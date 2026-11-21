@@ -817,3 +817,42 @@ def test_the_host_cancels_a_confirmation_whose_text_did_not_arrive(world):
     with pytest.raises(StateNotFound):
         execute(world.steward, "cancel_steward_confirmation", {"code": "K0000"}, allow_write=True)
     assert "cancel_steward_confirmation" in STEWARD_WRITE_ACTIONS
+
+
+def test_a_rebound_channel_never_confirms_the_old_accounts_code(world, monkeypatch):
+    """The owner binds the channel to another account (bind_owner_channel replaces its
+    sender): the new account's exact `确认 <code>` / `取消 <code>` for a code the old account
+    asked is an ordinary message, and the code stays pending."""
+    mail_ready(world)
+    bind_slack(world, monkeypatch)
+    code = ask(world, relay(world, "send it", "m1")["message_id"])["code"]
+    again = world.owner.channels.issue_code("slack")["code"]
+    execute(world.steward, "bind_owner_channel", {"request_key": "bind-slack-again", "channel": "slack",
+                                                  "sender_ref": "U0NEW", "code": again}, allow_write=True)
+    with pytest.raises(StateGraphError, match="channel_sender_not_bound"):
+        relay(world, "still me", "old1")
+    assert "confirmation" not in relay(world, f"确认 {code}", "n1", sender="U0NEW")
+    assert "confirmation" not in relay(world, f"取消 {code}", "n2", sender="U0NEW")
+    assert status_of(world, code) == "pending"
+
+
+def test_the_requester_is_judged_on_the_message_itself_before_any_row_naming_it(world):
+    """A dashboard row naming a message does not make it a person's: the steward's own
+    message, a driver's message on the user channel, a message off the user channel (a
+    system notice) and a message of another project are no requester."""
+    mail_ready(world)
+    sent = execute(world.steward, "send_user_message", {"request_key": "s1", "project_id": HOME, "subject": "x",
+                                                        "body": "hello"}, allow_write=True)["message_id"]
+    now = state_channels._now().isoformat()
+    insert = ("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,kind,delivery_mode,"
+              "subject,body,refs_json,created_at,audience,channel) VALUES(?,?,?,?,?,'transient','x','y','[]',?,?,?)")
+    with world.db.get_connection() as conn:
+        conn.execute(insert, ("driver-1", "driver-1", "drv-someone", HOME, "note", now, "user", "user"))
+        conn.execute(insert, ("notice-1", "notice-1", None, HOME, "lease_notice", now, "driver", None))
+        conn.execute(insert, ("elsewhere-1", "elsewhere-1", None, "another-project", "note", now, "user", "user"))
+        for message_id in (sent, "driver-1", "notice-1", "elsewhere-1"):
+            conn.execute("INSERT INTO state_steward_dashboard_messages VALUES(?,?)", (message_id, now))
+        conn.commit()
+    for message_id in (sent, "driver-1", "notice-1", "elsewhere-1"):
+        with pytest.raises(StateGraphError, match="no_requester"):
+            ask(world, message_id)

@@ -2,7 +2,7 @@
  *  gate, design §9 MF5), plus its own two tools and its once-only inbox. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
@@ -380,6 +380,41 @@ test('local host, step 15: a proposal a crash left executing is settled at the n
   assert.equal(stored['p-2'].status, 'failed');
   assert.match(stored['p-2'].result.reason, /interrupted/);
   assert.deepEqual((await readdir(projectsDir)).filter(n => n.includes('creating')), [], 'the half-built directory is removed');
+});
+
+test('local host, step 15: a decision is announced before it is final - a wake that could not be written is delivered at the next start', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const host = localHost({ root, ...required, projectsDir, pollMs: 60000 });
+  const payload = id => ({ project_id: id, title: id, goal: 'g', seed_nodes: [] });
+  for (const id of ['gamma', 'delta', 'eps']) await host.proposals.propose({ kind: 'create_project', payload: payload(id), reason: 'r' });
+  // The wake files cannot be written (a directory where each one's tmp file goes).
+  await mkdir(join(root, 'inbox', 'proposal-p-1-done.json.tmp'), { recursive: true });
+  await mkdir(join(root, 'inbox', 'proposal-p-2-declined.json.tmp'), { recursive: true });
+  const commands = fakeCommands();
+  const events = await host.events(commandApi(commands));
+  await assert.rejects(commands.run('approve', ' p-1'));
+  await assert.rejects(commands.run('decline', ' p-2 no'));
+  events.stop(); await events.done;
+  const before = JSON.parse(await readFile(join(root, 'proposals.json'), 'utf8'));
+  assert.deepEqual([before['p-1'].status, before['p-2'].status], ['executing', 'open'], 'no decision is final before its wake file');
+  await rm(join(root, 'inbox', 'proposal-p-1-done.json.tmp'), { recursive: true });
+  await rm(join(root, 'inbox', 'proposal-p-2-declined.json.tmp'), { recursive: true });
+  // The next start settles the approval from its project and announces it; the decline is given again.
+  const again = fakeCommands();
+  const api = commandApi(again);
+  const restarted = await localHost({ root, ...required, projectsDir, pollMs: 60000 }).events(api);
+  assert.equal(api.notified.length, 1, 'the next start announced the approval');
+  const woke = JSON.parse(api.notified[0].slice(api.notified[0].indexOf('\n') + 1));
+  assert.deepEqual([woke.proposal_id, woke.status, woke.result.project_id], ['p-1', 'done', 'gamma']);
+  assert.equal((await again.run('decline', ' p-2 no')).kind, 'success');
+  // A project that cannot be put in place (a dangling link at its name) fails and leaves nothing half-built.
+  await symlink(join(root, 'nowhere'), join(projectsDir, 'eps'));
+  const failed = await again.run('approve', ' p-3');
+  assert.equal(failed.kind, 'error'); assert.match(failed.text, /create_failed/);
+  assert.deepEqual((await readdir(projectsDir)).filter(n => n.includes('creating')), []);
+  restarted.stop(); await restarted.done;
+  const stored = JSON.parse(await readFile(join(root, 'proposals.json'), 'utf8'));
+  assert.deepEqual([stored['p-1'].status, stored['p-2'].status, stored['p-3'].status], ['done', 'declined', 'failed']);
 });
 
 test('local host, step 15: /profile shows the profile and its file; /purge asks for the confirmation word, then purges', async () => {

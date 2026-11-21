@@ -251,8 +251,11 @@ export function localHost(options = {}) {
       const result = await createProject(id, proposal.payload);
       all[id] = { ...all[id], status: result.error ? 'failed' : 'done', result };
     }
-    await writeJson(files.proposals, all);
+    // The wake file first, as /answer does: a crash before the final status leaves the
+    // proposal open (decline) or executing (recovered and announced at the next start);
+    // at worst the steward hears the result twice, never not at all.
     await wakeSteward(all[id]);
+    await writeJson(files.proposals, all);
     return all[id];
   });
   /** A proposal a crash left executing: done when its project is there and names it, else failed. */
@@ -265,8 +268,8 @@ export function localHost(options = {}) {
         ? { ...proposal, status: 'done', result: { project_id: id, root: join(projectsDir, id), recovered: true } }
         : { ...proposal, status: 'failed', result: { error: 'interrupted', reason: 'the run was interrupted; propose it again' } };
       await rm(join(projectsDir, `.${id}.creating-${proposal.id}`), { recursive: true, force: true }).catch(() => {});
-      await writeJson(files.proposals, all);
       await wakeSteward(all[proposal.id]);
+      await writeJson(files.proposals, all);
     }
   });
 

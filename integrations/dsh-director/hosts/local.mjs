@@ -68,6 +68,10 @@ export const LOCAL_OWNER = 'owner:local';
 const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
 const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
   + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
+/** With memory: memory_forget refuses here (no_owner_channel - a DSH command carries no owner
+ *  message to cite), so the steward sends its owner to the commands that forget and restore. */
+const STEWARD_MEMORY_COMMANDS = '; they forget one memory entry with /forget <id> [reason] and bring it back with /restore <id>.'
+  + ' When memory_forget refuses with no_owner_channel, give them /forget <id> [reason] instead';
 /** One page of a portfolio answer, as the backend adapter's steward host pages one (steward-host.mjs
  *  NODES_CHARS): as many entries as fit while the whole answer stays under this many characters,
  *  and at least one, so a walk always moves forward. */
@@ -75,7 +79,16 @@ export const PAGE_CHARS = 9000;
 /** Open questions shown in portfolio.project: the newest, with their total. */
 export const OPEN_QUESTIONS_SHOWN = 20;
 /** A proposal whose request_key comes again in one of these states answers the retry with
- *  itself; after a decline, a failure or a withdrawal the same proposal makes a new card. */
+ *  itself; after a decline, a failure or a withdrawal the same proposal makes a new card.
+ *  Director 472 accepted this difference from steward-host.mjs, within these bounds:
+ *  - steward-host replays a key whatever the status, because there the backend executes
+ *    proposals and a replay must never execute twice; here the host executes create_project
+ *    itself, and declined/failed/withdrawn let the same body make a new card, so the recovery
+ *    advice "propose it again" works after a failure;
+ *  - the key is a digest of kind, the stored payload, the trimmed reason and supersedes: a retry
+ *    replays only when it repeats the same reason and supersedes verbatim; any change is a new card;
+ *  - the two answers stay distinct: { proposed: false, duplicate: true, proposal_id, status }
+ *    for a replay, { proposed: true, proposal_id, status: 'open' } for a new card. */
 const REPLAYED = new Set(['open', 'executing', 'done', 'superseded']);
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** A local project id is a directory name: the backend's key rule, so a project keeps its id elsewhere. */
@@ -305,6 +318,9 @@ export function localHost(options = {}) {
       if (supersedes !== undefined && own(all, supersedes)?.status !== 'open') return { refused: 'not_open', reason: `${supersedes} is not an open proposal` };
       // A number is never given twice: the last one given is kept apart from proposals.json
       // (written first), so a proposal deleted from it by hand does not free its id.
+      // Director 472: because the seq file is written before proposals.json, a proposals.json
+      // write that fails burns that number - the next proposal skips it, never reuses it.
+      // Accepted: a gap in the numbers is harmless, a reused id is not.
       const numbers = Object.keys(all).map(key => /^p-(\d+)$/.exec(key)?.[1]).filter(Boolean).map(Number);
       const last = Math.max(0, Number((await readJson(files.proposalSeq, {})).last) || 0, ...numbers);
       const id = 'p-' + (last + 1);
@@ -399,7 +415,7 @@ export function localHost(options = {}) {
       let notes = '';
       try { notes = await readFile(files.notes, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       return JSON.stringify({ work: await items(), notes, ...(role === 'steward' ? { owner_commands: STEWARD_OWNER_COMMANDS
-        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + '.' } : {}) });
+        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + (options.memory ? STEWARD_MEMORY_COMMANDS : '') + '.' } : {}) });
     },
     async progress(body) {
       await mkdir(root, { recursive: true });

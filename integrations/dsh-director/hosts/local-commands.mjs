@@ -134,7 +134,11 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         const result = await memory.forget([id], { reason, by: OWNER });
         if (result.refused) return refusal(`Not forgotten ${id}`, result);
         if (result.unknown?.includes(id)) return fail(`Not forgotten ${id}: unknown_id - your memory has no entry ${id}`);
-        if (result.already?.includes(id)) return fail(`Not forgotten ${id}: already_forgotten - /restore ${id} brings it back`);
+        // A purged id is still on the store's forgotten records (flagged purged), so forget calls
+        // it `already`; only one still on the restorable list may be offered /restore.
+        if (result.already?.includes(id)) return memory.forgottenList().some(r => r.id === id)
+          ? fail(`Not forgotten ${id}: already_forgotten - /restore ${id} brings it back`)
+          : fail(`Not forgotten ${id}: purged - it was removed for good and cannot be restored`);
         const told = await tell(`The owner forgot memory entry ${id} with /forget (reason: ${reason}); it is out of search and reads until they /restore it.`);
         return ok(`Forgotten ${id}: it is out of search and reads; /restore ${id} brings it back, /purge ${id} removes it for good (${result.note}; remote: ${result.remote_forget}).${told}`);
       } },

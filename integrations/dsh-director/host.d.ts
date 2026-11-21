@@ -262,11 +262,16 @@ export interface DirectorHost {
  *    (at most 300 characters), and while a login needs a scan its QR as an SVG document
  *    (`qrSvg`, a login token: shown to the owner, never logged). Called only on a change;
  *    {refused: code} when the host will not take it.
- *  - dueAlerts (optional, with claimAlert and recordAlert): the channel-down alerts (`down`) and
- *    recovery notices (`up`) due now, {due: [{channel, kind, down_since, attempt}]} - a read.
- *  - claimAlert: may this one go now? {granted: true, via, to, minutes, detail} - `via` is the
- *    channel to send it through, `to` its bound account - or {granted: false}. Called by code,
- *    never a model.
+ *  - dueAlerts, claimAlert, recordAlert (optional, all three or none - the plugin checks each
+ *    with typeof and runs no alert without all three; not in the required channels set): the
+ *    channel-down alert (design-steward 7.9.2), the AItelier host's only.
+ *  - dueAlerts: the channel-down alerts (`down`) and recovery notices (`up`) due now,
+ *    {due: [{channel, kind, down_since, attempt}]} - a read.
+ *  - claimAlert: may this one go now? `exclude` names the channels the plugin cannot send
+ *    through now (not registered, or their current reading not accepted), never chosen as
+ *    `via`. {granted: true, via, to, minutes, detail} - `via` is the channel to send it
+ *    through, `to` its bound account - or {granted: false}. A granted claim asked again
+ *    answers the first grant, whatever its `exclude`. Called by code, never a model.
  *  - recordAlert: how the granted alert's send went: ok, or the channel's `error`. */
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
@@ -285,7 +290,8 @@ export interface DirectorHost {
     reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
       Promise<object>;
     dueAlerts?(signal?: AbortSignal): Promise<{ due: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; down_since: string; attempt: number }[] }>;
-    claimAlert?(claim: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; attempt: number }, signal?: AbortSignal):
+    claimAlert?(claim: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; attempt: number;
+      exclude?: ('slack' | 'wechat')[] }, signal?: AbortSignal):
       Promise<object>;
     recordAlert?(outcome: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; downSince: string; attempt: number; error?: string },
       signal?: AbortSignal): Promise<object>;

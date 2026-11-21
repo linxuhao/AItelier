@@ -911,7 +911,8 @@ test('channel-down alert (step 25 C12): a read of what is due, then one claim an
   const channels = channelOps(request);
   assert.deepEqual(await channels.dueAlerts(), answer.result);
   answer = { result: { granted: true, via: 'slack', to: 'U1', minutes: 12, detail: 'x' } };
-  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 1 }), answer.result);
+  assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'down', downSince: '2026-11-21T10:00:00+00:00', attempt: 1,
+    exclude: ['wechat'] }), answer.result);
   answer = { result: { granted: false } };
   assert.deepEqual(await channels.claimAlert({ channel: 'wechat', kind: 'up', downSince: '2026-11-21T10:00:00+00:00', attempt: 2 }), { granted: false });
   answer = { result: { recorded: true, channel: 'wechat', kind: 'down' } };
@@ -921,9 +922,10 @@ test('channel-down alert (step 25 C12): a read of what is due, then one claim an
   assert.deepEqual(calls, [
     ['/api/state/query/due_channel_alerts', {}],
     ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat', kind: 'down',
-      down_since: '2026-11-21T10:00:00+00:00', attempt: 1 }],
+      down_since: '2026-11-21T10:00:00+00:00', attempt: 1, exclude: ['wechat'] }],
+    // The exclude is never in the key: a granted claim asked again with another one is State's replay.
     ['/api/state/commands/claim_channel_alert', { request_key: 'channel-alert:wechat:up:2026-11-21T10:00:00+00:00:2', channel: 'wechat', kind: 'up',
-      down_since: '2026-11-21T10:00:00+00:00', attempt: 2 }],
+      down_since: '2026-11-21T10:00:00+00:00', attempt: 2, exclude: [] }],
     ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:1', channel: 'wechat',
       kind: 'down', down_since: '2026-11-21T10:00:00+00:00', attempt: 1, ok: true }],
     ['/api/state/commands/record_channel_alert', { request_key: 'channel-alert-result:wechat:down:2026-11-21T10:00:00+00:00:2', channel: 'wechat',

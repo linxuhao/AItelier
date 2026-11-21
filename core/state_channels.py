@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS state_channel_alerts (
  via TEXT NOT NULL CHECK(via IN ('slack','wechat')),
  claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT,
  PRIMARY KEY(channel, kind, down_since));
+-- The ledger only grows; the due function asks each round for a channel's delivered down
+-- alerts within ALERT_DOWN_EVERY and for what it last told the owner.
+CREATE INDEX IF NOT EXISTS state_channel_alerts_state
+ ON state_channel_alerts(channel, kind, state, finished_at);
 CREATE TABLE IF NOT EXISTS state_owner_channels (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
  sender_ref TEXT CHECK(sender_ref IS NULL OR sender_ref<>''),
@@ -306,19 +310,21 @@ def _usable(status, binding):
             and status is not None and status["live"] and not (status["detail"] or "").startswith("not configured"))
 
 
-def _via(channel, statuses, bindings):
-    """Another channel bound to the owner, live and connected, the default first; or None."""
-    others = [c for c in CHANNELS if c != channel and bindings.get(c) is not None
+def _via(channel, statuses, bindings, exclude=()):
+    """Another channel bound to the owner, live and connected, the default first; or None.
+    Never one in `exclude` (the channels the host cannot send through now)."""
+    others = [c for c in CHANNELS if c != channel and c not in exclude and bindings.get(c) is not None
               and bindings[c]["sender_ref"] is not None and bindings[c]["revoked_at"] is None
               and statuses.get(c) is not None and statuses[c]["live"] and statuses[c]["connected"]]
     others.sort(key=lambda c: (not bindings[c]["is_default"], c))
     return others[0] if others else None
 
 
-def due_alerts(statuses, bindings, ledger, moment):
+def due_alerts(statuses, bindings, ledger, moment, exclude=()):
     """The channel alerts due at `moment`: [{channel, kind, down_since, attempt, via}]. A
     pure function of the status rows and bindings (by channel), the alert ledger's rows and
-    the time - nothing about an alert lives anywhere else (design-steward 7.9.2)."""
+    the time - nothing about an alert lives anywhere else (design-steward 7.9.2). `exclude`
+    (a claim's) only narrows the channels a `via` is chosen from."""
     if quiet_until(moment) is not None:
         return []
     due = []
@@ -326,7 +332,7 @@ def due_alerts(statuses, bindings, ledger, moment):
         status, binding = statuses.get(channel), bindings.get(channel)
         if not _usable(status, binding):
             continue
-        via = _via(channel, statuses, bindings)
+        via = _via(channel, statuses, bindings, exclude)
         if via is None:
             continue
         rows = [r for r in ledger if r["channel"] == channel]
@@ -1161,16 +1167,23 @@ class StateChannels:
             due = due_alerts(*_alert_facts(conn), moment)
         return {"due": [{k: d[k] for k in ("channel", "kind", "down_since", "attempt")} for d in due]}
 
-    def claim_channel_alert(self, project_id, request_key, channel, kind, down_since, attempt):
+    def claim_channel_alert(self, project_id, request_key, channel, kind, down_since, attempt, exclude=()):
         """The steward's host, in code: may it send this alert now? Judged again here, in one
-        transaction, by due_alerts: due with this very outage and attempt - the ledger row is
-        claimed and the answer is {granted: true, via, to, minutes, detail}, the same for the
-        same request_key; otherwise {granted: false} and nothing is written, not even the
-        request record, so the same key may be granted once it is due."""
+        transaction, by due_alerts: due with this very outage and attempt, through a `via`
+        not in `exclude` (the channels the host cannot send through now: not registered there,
+        or their current reading not accepted here) - the ledger row is claimed and the answer
+        is {granted: true, via, to, minutes, detail}, the same for the same request_key;
+        otherwise {granted: false} and nothing is written, not even the request record, so the
+        same key may be granted once it is due. The request's digest is [channel, kind,
+        down_since, attempt] only: a granted claim asked again with another `exclude` answers
+        its first grant (that row is already claimed through that via)."""
         if channel not in CHANNELS:
             raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
         if kind not in ALERT_KINDS or attempt not in range(1, ALERT_ATTEMPTS + 1):
             raise StateGraphError("invalid_request: kind is down or up, attempt 1 or 2")
+        exclude = tuple(exclude or ())
+        if any(c not in CHANNELS for c in exclude):
+            raise StateGraphError(f"invalid_channel: exclude names only {', '.join(CHANNELS)}")
         request_hash = _hash([channel, kind, down_since, attempt])
         moment = _now()
         with self.store.transaction(write=True) as conn:
@@ -1179,7 +1192,7 @@ class StateChannels:
             if replay is not None:
                 return replay
             statuses, bindings, ledger = _alert_facts(conn)
-            due = [d for d in due_alerts(statuses, bindings, ledger, moment)
+            due = [d for d in due_alerts(statuses, bindings, ledger, moment, exclude)
                    if (d["channel"], d["kind"], d["down_since"], d["attempt"]) == (channel, kind, down_since, attempt)]
             if not due:
                 return {"granted": False}

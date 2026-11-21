@@ -1288,6 +1288,8 @@ class ClaimChannelAlert(Project):
     kind: Literal["down", "up"]
     down_since: str = Field(min_length=1, max_length=64)
     attempt: int = Field(strict=True, ge=1, le=2)
+    # The channels the host cannot send through now; never the `via`. Not in the request digest.
+    exclude: list[_CHANNEL] = Field(default_factory=list, max_length=2)
 
 
 class RecordChannelAlert(Project):

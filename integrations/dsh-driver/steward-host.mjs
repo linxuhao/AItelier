@@ -605,10 +605,13 @@ export function channelOps(request) {
     // The channel-down alert (design-steward 7.9.2), called by the plugin's code after a status
     // poll, never by the model: what is due (a read - it writes nothing), may this one go now
     // and through which channel, and how its send went. One key per outage, kind and attempt:
-    // a granted claim asked again is State's replay, an ungranted one leaves no record.
+    // a granted claim asked again is State's replay (its `exclude` - the channels the plugin
+    // cannot send through now - is not in the key, so the replay is the first grant), an
+    // ungranted one leaves no record.
     dueAlerts: signal => request('/api/state/query/due_channel_alerts', {}, signal).then(r => r?.result ?? r),
-    claimAlert: ({ channel, kind, downSince, attempt }, signal) => request('/api/state/commands/claim_channel_alert', {
-      request_key: `channel-alert:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt }, signal)
+    claimAlert: ({ channel, kind, downSince, attempt, exclude }, signal) => request('/api/state/commands/claim_channel_alert', {
+      request_key: `channel-alert:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt,
+      exclude: Array.isArray(exclude) ? exclude : [] }, signal)
       .then(answered, refused),
     recordAlert: ({ channel, kind, downSince, attempt, error }, signal) => request('/api/state/commands/record_channel_alert', {
       request_key: `channel-alert-result:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt,

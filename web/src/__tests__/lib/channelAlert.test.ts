@@ -74,7 +74,7 @@ describe('a down channel', () => {
 
   it('8: due and nobody claimed it', () => {
     expect(words(downFor(30, {alert_due: {kind: 'down', attempt: 1}})))
-      .toBe('The alert is due but the steward\'s host has not claimed it (is the host stopped?)');
+      .toBe('The alert is due; the steward\'s host did not claim it this round');
   });
 
   it('9: waiting - the latest of ten minutes in, six hours after the last delivered one, 30 minutes after a failed first', () => {
@@ -191,6 +191,11 @@ describe('the clock and the zone', () => {
     try {
       expect(words(downFor(30, {alert_down: ledger({finished_at: ago(20)})}))).toBe('断开 30 分钟，11:40 已在 Slack 告警');
       expect(words(downFor(4))).toBe('断开 4 分钟，12:06 仍断就告警');
+      // 460 F7: due, and the host did not claim it this round - its via not registered there, a
+      // reading not taken, or the host stopped; the card does not tell these apart (7.9.9 (a)).
+      expect(words(downFor(30, {alert_due: {kind: 'down', attempt: 1}}))).toBe('该告警了，宿主这一轮没有认领');
+      expect(words({last_told: {kind: 'down', down_since: ago(90), at: ago(80)}, up_since: ago(5), alert_due: {kind: 'up', attempt: 1}}))
+        .toBe('该发恢复通知了，宿主这一轮没有认领');
     } finally { langStore.set('en'); }
   });
 });

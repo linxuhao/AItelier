@@ -1,4 +1,4 @@
-"""Step 25 C12: the channel-down alert (design-steward 7.9.2, r44g).
+"""Step 25 C12: the channel-down alert (design-steward 7.9.2, r44l).
 
 The status row holds facts only: connected, detail, down_since (this outage's start),
 up_since (the last real reconnect) and live (whether the last reading was a real one; the
@@ -6,8 +6,8 @@ three placeholders - "bridge not reached yet", "connecting", "channel plugin sto
 not). Each outage has at most one ledger row per kind in state_channel_alerts, keyed
 (channel, kind, down_since): claimed / sent / failed, attempt 1 or 2. Which alert is due is
 one pure function of the facts, the bindings, the ledger and the time (due_alerts): the host
-reads it (due_channel_alerts), claims an item (claim_channel_alert: judged again, granted or
-{granted: false} with nothing written) and records how the send went (record_channel_alert:
+reads it (due_channel_alerts), claims an item (claim_channel_alert: judged again, never through
+a channel the host names in `exclude`, granted or {granted: false} with nothing written) and records how the send went (record_channel_alert:
 only that outage's row, only while it is that attempt's claim).
 The clock is state_channels._now; the owner's zone is Europe/Paris."""
 from __future__ import annotations
@@ -67,10 +67,11 @@ def alerts(world, monkeypatch):  # noqa: F811 (the imported fixture)
     def due(service=None):
         return execute(service or world.steward, "due_channel_alerts", {})["due"]
 
-    def claim(channel, kind, down_since, attempt=1, service=None):
+    def claim(channel, kind, down_since, attempt=1, service=None, exclude=()):
         return execute(service or world.steward, "claim_channel_alert",
                        {"request_key": f"channel-alert:{channel}:{kind}:{down_since}:{attempt}", "project_id": HOME,
-                        "channel": channel, "kind": kind, "down_since": down_since, "attempt": attempt},
+                        "channel": channel, "kind": kind, "down_since": down_since, "attempt": attempt,
+                        "exclude": list(exclude)},
                        allow_write=True)
 
     def record(channel, kind, down_since, attempt=1, error=None, service=None):
@@ -184,6 +185,16 @@ def test_the_ledger_refuses_an_outage_without_its_start(alerts):
     with alerts.world.db.get_connection() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO state_channel_alerts(channel,kind,down_since,state,attempt,via,claimed_at) "
                      "VALUES('wechat','down',NULL,'claimed',1,'slack','t')")
+
+
+def test_the_ledger_is_indexed_for_the_due_functions_two_questions(alerts):
+    # The ledger only grows; each round asks for delivered down alerts within 6 hours and for
+    # what the owner was last told, per channel (r44h).
+    with alerts.world.db.get_connection() as conn:
+        columns = [r["name"] for r in conn.execute("PRAGMA index_info(state_channel_alerts_state)")]
+        notnull = {r["name"]: r["notnull"] for r in conn.execute("PRAGMA table_info(state_channel_alerts)")}
+    assert columns == ["channel", "kind", "state", "finished_at"]
+    assert notnull["down_since"] == 1
 
 
 def test_connected_reported_again_moves_neither_clock(alerts):
@@ -351,6 +362,36 @@ def test_a_claim_must_name_the_due_outage_kind_and_attempt(alerts):
         assert a.claim(*wrong) == {"granted": False}, wrong
     assert a.ledger() == [] and a.ledger("slack") == []
     assert a.claim("wechat", "down", since)["granted"] is True
+
+
+def test_a_claim_never_goes_through_a_channel_the_host_excludes_and_spends_nothing_when_none_is_left(alerts):
+    # 458 F3: the host's check before a send - a channel it has not registered, or whose
+    # current reading the backend did not accept, is never the via; a refusal spends no attempt.
+    a = alerts
+    since = down(a)
+    a.clock.advance(10 * MIN)
+    before = a.requests()
+    assert a.claim("wechat", "down", since, exclude=["slack"]) == {"granted": False}
+    assert a.requests() == before and a.ledger() == [], "no request record, no ledger row, no attempt"
+    assert a.due() == [item("wechat", "down", since)], "still due at the same attempt"
+    # Excluding the channel the alert is about changes nothing: it is never its own via anyway.
+    granted = a.claim("wechat", "down", since, exclude=["wechat"])
+    assert (granted["granted"], granted["via"]) == (True, "slack")
+    with pytest.raises(state_channels.StateGraphError, match="exclude"):
+        a.claim("wechat", "down", since, exclude=["telegram"])
+
+
+def test_a_granted_claim_asked_again_with_another_exclude_answers_its_first_grant(alerts):
+    # 460 F6: the digest is [channel, kind, down_since, attempt]; the exclude only narrows the
+    # first judgment. The grant whose answer was lost is asked again after the via's reading was
+    # refused: the same grant, the same via (that row is already claimed through it).
+    a = alerts
+    since = down(a)
+    a.clock.advance(10 * MIN)
+    first = a.claim("wechat", "down", since)
+    assert first["granted"] is True and first["via"] == "slack"
+    assert a.claim("wechat", "down", since, exclude=["slack"]) == first
+    assert [(r["state"], r["via"], r["attempt"]) for r in a.ledger()] == [("claimed", "slack", 1)]
 
 
 def test_a_record_replay_answers_the_same_and_settles_nothing_twice(alerts):
@@ -725,6 +766,7 @@ def test_the_hosts_request_keys_and_fields_are_these(alerts):
     real contract. A change on either side reds here."""
     host = (Path(__file__).resolve().parents[2] / "integrations/dsh-driver/steward-host.mjs").read_text(encoding="utf-8")
     assert "request('/api/state/query/due_channel_alerts', {}, signal)" in host
-    assert "`channel-alert:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt" in host
+    assert re.search(r"`channel-alert:\$\{channel\}:\$\{kind\}:\$\{downSince\}:\$\{attempt\}`, channel, kind, "
+                     r"down_since: downSince, attempt,\s+exclude: Array\.isArray\(exclude\) \? exclude : \[\]", host)
     assert re.search(r"`channel-alert-result:\$\{channel\}:\$\{kind\}:\$\{downSince\}:\$\{attempt\}`, channel, kind, "
                      r"down_since: downSince, attempt,\s+ok: !error", host)

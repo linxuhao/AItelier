@@ -43,6 +43,11 @@ ENTRY_INDEX_LABEL = "current entries"
 MAX_STANDING_CONTEXT_CHARS = 3_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
+# The recovery projection never carries more than eight standing rows, and the
+# paged reader pages FORWARD from a delivery cursor, so reaching the NEWEST rows
+# means walking pages: 100 is that reader's own page ceiling.
+MAX_STANDING_ROWS = 8
+STANDING_PAGE_LIMIT = 100
 PENDING_DIR_NAME = "project-handoff-pending"
 MARKER_VERSION = 3
 MARKER_PENDING = "pending"
@@ -563,6 +568,73 @@ def _authorized_connection() -> tuple[str, dict[str, str]]:
     return _VERIFIED_CONNECTION
 
 
+def _standing_page(url: str, headers: dict[str, str], after: int) -> dict[str, Any]:
+    """One forward page of active standing deliveries, from ``after``."""
+    return _mcp_call(url, headers, "state_graph_read", {
+        "action": "list_director_messages",
+        "arguments": {
+            "project_id": PROJECT_ID,
+            "after": after,
+            "limit": STANDING_PAGE_LIMIT,
+            "delivery_mode": "standing",
+            "statuses": ["unread", "acknowledged"],
+        },
+    })
+
+
+def _newest_standing_envelope(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    """The NEWEST standing deliveries, not the first page of them.
+
+    ``list_director_messages`` pages FORWARD from a delivery cursor, so its first
+    page holds the OLDEST matching rows: a single ``limit=8`` read is exactly how
+    a later standing notice stayed invisible to a compacted session once eight
+    were already pending. This walk drains the forward pages and keeps the TAIL,
+    the same shape ``core/director_messaging._newest_rows`` gives the host's own
+    projections: ``matched_total`` comes from the page whose ``after`` was 0, so
+    it still counts every matched row, and only the last ``MAX_STANDING_ROWS``
+    rows are retained, so memory stays bounded however long the inbox is.
+
+    The walk stops when the host reports no further row, an empty page, or a
+    cursor that did not move - a host that cannot be paged past answers with the
+    newest rows actually reached instead of spinning. Any transport, schema or
+    shape doubt stays fail-closed: every page goes through the same bounded
+    request helper, and a failure raises ``SourceUnavailable`` so
+    ``build_context`` renders its recovery block rather than an exception.
+    """
+    kept: list[Any] = []
+    schema: Any = None
+    matched_total: Any = None
+    after = 0
+    while True:
+        envelope = _standing_page(url, headers, after)
+        result = envelope.get("result") if isinstance(envelope, dict) else None
+        if not isinstance(result, dict):
+            raise SourceUnavailable("director inbox result missing")
+        if result.get("project_id") != PROJECT_ID:
+            raise SourceUnavailable("director inbox project mismatch")
+        items = result.get("items")
+        has_more = result.get("has_more")
+        next_after = result.get("next_after")
+        if (not isinstance(items, list) or len(items) > STANDING_PAGE_LIMIT
+                or not isinstance(has_more, bool) or type(next_after) is not int):
+            raise SourceUnavailable("director inbox page invalid")
+        if after == 0:
+            schema = envelope.get("schema")
+            # The cursor-0 page counts every matched row; the later pages count
+            # only what their own cursor still reaches, so the marker arithmetic
+            # must not take its total from them.
+            matched_total = result.get("matched_total")
+            if type(matched_total) is not int or matched_total < len(items):
+                raise SourceUnavailable("director inbox result invalid")
+        kept = (kept + items)[-MAX_STANDING_ROWS:]
+        if not has_more or not items or next_after <= after:
+            break
+        after = next_after
+    return {"schema": schema, "result": {
+        "project_id": PROJECT_ID, "items": kept, "matched_total": matched_total,
+        "has_more": False, "next_after": after}}
+
+
 def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str]:
     url, headers = _authorized_connection()
     note = _mcp_call(url, headers, "state_graph_read", {
@@ -574,16 +646,7 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dic
         "action": "project_overview", "arguments": {"project_id": PROJECT_ID},
     })
     guide = _mcp_call(url, headers, "state_graph_help", {})
-    standing = _mcp_call(url, headers, "state_graph_read", {
-        "action": "list_director_messages",
-        "arguments": {
-            "project_id": PROJECT_ID,
-            "after": 0,
-            "limit": 8,
-            "delivery_mode": "standing",
-            "statuses": ["unread", "acknowledged"],
-        },
-    })
+    standing = _newest_standing_envelope(url, headers)
     # Owner standing-only selection: the private aggregate is called ONLY when
     # the server advertises the typed standing_only selector AND the baseline
     # identity check establishes the caller. Anything else falls back to the
@@ -632,16 +695,19 @@ def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STAND
         # rows to 3000 chars, and reported how many active notices it could not
         # include. The hook must show that count too. Its own omission marker can
         # push the projection past the hard cap, so whole producer-delimited rows
-        # are dropped (the newest first, the same tail the producer trims) and the
-        # exact local removal count is carried into the reported omission. Rows
-        # are never truncated: every line stays a complete serialized row.
+        # are dropped from the OLD end: producer rows arrive in ascending delivery
+        # order, so keeping the newest suffix keeps the rules a compacted session
+        # has not worked under yet - and the producer drops from this same end.
+        # The exact local removal count is carried into the reported omission, so
+        # the marker still accounts for every row the producer matched. Rows are
+        # never truncated: every line stays a complete serialized row.
         rows = projection.split("\n") if projection else []
         if len(rows) != envelope["included"]:
             raise SourceUnavailable("private guidance row count mismatch")
         included = len(rows)
 
         while True:
-            parts = rows[:included]
+            parts = rows[len(rows) - included:]
             parts.append(f"[omitted_active_standing={omitted + len(rows) - included}]")
             rendered = "\n".join(parts)
             if len(rendered) <= limit or included <= 0:
@@ -657,7 +723,7 @@ def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STAND
         raise SourceUnavailable("director inbox project mismatch")
     items = result.get("items")
     matched_total = result.get("matched_total")
-    if (not isinstance(items, list) or len(items) > 8
+    if (not isinstance(items, list) or len(items) > MAX_STANDING_ROWS
             or type(matched_total) is not int or matched_total < len(items)):
         raise SourceUnavailable("director inbox result invalid")
     lines: list[str] = []
@@ -689,12 +755,15 @@ def _active_standing_projection(envelope: dict[str, Any], limit: int = MAX_STAND
                                 separators=(",", ":")))
     included = len(lines)
     while True:
+        # The rows reached here are the NEWEST window of the inbox, in ascending
+        # delivery order, so the budget gives way at the OLD end: the newest row
+        # is the last one dropped, exactly as the host's own projection trims.
         omitted = matched_total - included
-        parts = lines[:included]
+        parts = lines[len(lines) - included:]
         if omitted:
             parts.append(f"[omitted_active_standing={omitted}]")
         projection = "\n".join(parts)
-        if len(projection) <= limit:
+        if len(projection) <= limit or included <= 0:
             return projection
         included -= 1
 

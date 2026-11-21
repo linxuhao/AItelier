@@ -667,6 +667,117 @@ class TestTheThinkingOffKeysCannotKillAStep:
         assert len(seen) == 1, "a thinking-ON role must not get the retry"
 
 
+class TestARefusedInjectedParameterIsDroppedByName:
+    """The mirror image of the thinking-off guard, and the arm that killed a step.
+
+    Measured on the worker route (iss-357ac3514c684371): the driver builds the
+    gateway with `enable_thinking=True` (api/dsh_driver_routers.py), so the
+    thinking-off guard above — gated on `not self.enable_thinking` — can never
+    fire. The pool endpoint refused the `thinking` this gateway itself injected
+    with a 400; `litellm.BadRequestError` is in neither FAILOVER_EXCEPTIONS nor
+    RETRYABLE_EXCEPTIONS, so the step died, and because the SSE response had
+    already been opened the client saw only "Unexpected end of JSON input".
+
+    The fix is not "retry a thinking-ON role on any 400" — that would silently
+    turn a reviewer into a non-reasoning one, which
+    `test_a_role_that_WANTS_thinking_is_never_downgraded` pins. It is: read
+    what the refusal NAMES, and drop exactly that key.
+
+    Three arms, one assertion each: a named key is dropped and the turn
+    succeeds, the drop is EXACTLY that key, and it is bounded to one retry.
+    """
+
+    #: The recorded shape of the upstream answer: a 400 that names the argument
+    #: it will not accept. `thinking` is the key the enable branch injects.
+    REFUSAL = ("litellm.BadRequestError: OpenAIException - Unrecognized "
+               "request argument supplied: thinking")
+
+    def _gw(self, **kw):
+        from core.ai_router import AIGateway
+        return AIGateway("deepseek/deepseek-v4-flash", **kw)
+
+    def _stub(self, gw, *errors):
+        """Stub transport: raise each of `errors` in order, then answer.
+
+        Returns the kwargs of every attempt, COPIED — the gateway mutates one
+        dict in place across attempts, so a reference would let the retry
+        rewrite what the first attempt actually sent.
+        """
+        seen = []
+
+        def _bounded(kwargs):
+            seen.append({k: (dict(v) if isinstance(v, dict) else v)
+                         for k, v in kwargs.items()})
+            if len(seen) <= len(errors):
+                raise errors[len(seen) - 1]
+            return _Resp()
+
+        class _Resp:
+            choices = [type("C", (), {"message": type("M", (), {
+                "content": "ok", "tool_calls": None})()})()]
+            usage = None
+
+        gw._completion_bounded = _bounded
+        gw._extract_usage = lambda r: {}
+        return seen
+
+    def test_a_named_refusal_drops_that_key_and_the_turn_succeeds(self, capsys):
+        """The recorded failure end to end: the step must live."""
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        seen = self._stub(gw, litellm.exceptions.BadRequestError(
+            self.REFUSAL, "m", "p"))
+        response = gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert response is not None, "the turn must not die on OUR OWN parameter"
+        assert len(seen) == 2, "it must retry once, in place, not raise"
+        assert "thinking" in seen[0]["extra_body"], (
+            "the first attempt must really have carried the refused key, or "
+            "the retry proves nothing")
+        assert "thinking" not in seen[1].get("extra_body", {}), (
+            "the retry must not carry the key the endpoint refused")
+        assert "thinking" not in seen[1], "nor as a top-level key"
+        out = capsys.readouterr().out
+        assert "extra_body.thinking" in out, "the dropped key must be printed"
+        assert gw.active_model in out, "and WHICH endpoint refused it"
+
+    def test_exactly_the_named_key_goes(self):
+        """A reasoning role keeps the effort it was not refused for — dropping
+        the whole envelope would degrade it just as silently as refusing it."""
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        seen = self._stub(gw, litellm.exceptions.BadRequestError(
+            self.REFUSAL, "m", "p"))
+        gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert seen[1]["extra_body"] == {
+            k: v for k, v in seen[0]["extra_body"].items() if k != "thinking"}, (
+        "exactly the named key goes; every other injected key stays")
+        assert {k: v for k, v in seen[0].items() if k != "extra_body"} == {
+            k: v for k, v in seen[1].items() if k != "extra_body"}, (
+        "nothing outside extra_body may move either")
+
+    def test_the_named_drop_is_bounded_to_one_retry(self):
+        """A second refusal on the same key means the key was not the story."""
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        refusal = litellm.exceptions.BadRequestError(self.REFUSAL, "m", "p")
+        seen = self._stub(gw, refusal, refusal)
+        with pytest.raises(Exception):
+            gw._complete_prebuilt(
+                gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 2, "one drop, one retry — never a loop"
+        assert gw._dropped_injected_param == "thinking"
+
+    def test_a_400_naming_nothing_we_injected_still_raises(self):
+        """`top_k` is the caller's/provider's business, not ours: no retry."""
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        seen = self._stub(gw, litellm.exceptions.BadRequestError(
+            "Unrecognized request argument supplied: top_k", "m", "p"))
+        with pytest.raises(Exception):
+            gw._complete_prebuilt(
+                gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 1, "not our parameter, not our retry"
+        assert gw._dropped_injected_param is None
+
+
 class TestFailoverNeverRevisitsADeadEndpoint:
     """A route may name one endpoint twice on purpose.
 

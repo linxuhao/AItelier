@@ -87,6 +87,16 @@
     if (!title.trim()) title = t('steward.schedPresetTitle.' + preset.id);
     if (!instruction.trim()) instruction = t('steward.schedPresetInstruction.' + preset.id);
   }
+  // A filling preset's instruction is a request to the steward (send_user_message to the owner),
+  // and a group reminder posts its text word for word: such presets are off while the target is
+  // the group, and pointing the reminder at the group drops that text while it is still exactly
+  // the preset's - words the owner typed or changed stay.
+  const isPresetInstruction = (text: string) =>
+    SCHEDULE_PRESETS.some(p => p.fill && text.trim() === t('steward.schedPresetInstruction.' + p.id));
+  $effect(() => {
+    if (target !== 'family_group') return;
+    untrack(() => { if (isPresetInstruction(instruction)) instruction = ''; });
+  });
   function startFromCurrent() {
     if (!conflict) return;
     fill(conflict); conflict = null;
@@ -122,9 +132,11 @@
     <label>{t('steward.schedExpr')}<input type="text" bind:value={expr} placeholder="0 9 * * 1-5" data-schedule-expr /></label>
     <div class="presets" role="group" aria-label={t('steward.schedPresets')}>
       {#each SCHEDULE_PRESETS as preset (preset.id)}
-        <button type="button" class="outline" onclick={() => usePreset(preset)}>{t('steward.schedPreset.' + preset.id)}</button>
+        <button type="button" class="outline" disabled={!!preset.fill && target === 'family_group'}
+          onclick={() => usePreset(preset)}>{t('steward.schedPreset.' + preset.id)}</button>
       {/each}
     </div>
+    {#if target === 'family_group' && SCHEDULE_PRESETS.some(p => p.fill)}<small class="hint" data-preset-owner-only>{t('steward.schedPresetOwnerOnly')}</small>{/if}
   {:else}
     <label>{t('steward.schedAt')}<input type="datetime-local" bind:value={at} data-schedule-at /></label>
   {/if}

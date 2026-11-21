@@ -1002,6 +1002,11 @@ class StateSteward:
         if len(instruction) > GROUP_NOTICE_CHARS:
             raise ScheduleInvalid("notice_too_long", f"a family group reminder is at most {GROUP_NOTICE_CHARS} "
                                                      "characters: it is posted as written")
+        # The daily-brief preset's instruction (every language of it) asks the steward to
+        # send_user_message: words for the steward, which the group would get verbatim.
+        if "send_user_message" in instruction:
+            raise ScheduleInvalid("withheld", "steward_instruction: an instruction for the steward (it names "
+                                              "send_user_message), not words for the family group")
         if self.groups is None:
             raise ScheduleInvalid("no_group_bound", "no family group is available here")
         from core import state_groups

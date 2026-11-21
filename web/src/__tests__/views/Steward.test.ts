@@ -769,6 +769,57 @@ describe('reminders', () => {
     expect((view.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('按简报规则写今天的每日简报，用 send_user_message 发给业主。');
   });
 
+  // Step 25.2: a group reminder posts its text as written, and the brief preset's text is a
+  // request to the steward - it must never reach the family group.
+  const BRIEF_TEXT = "Write today's daily brief following the brief rules and send it to the owner with send_user_message.";
+  const groupForm = async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    const view = render(StewardScheduleForm, form());
+    const group = view.getByLabelText('The family group') as HTMLInputElement;
+    await waitFor(() => expect(group.disabled).toBe(false));
+    return {view, group, owner: view.getByLabelText('Me (the steward reminds me)') as HTMLInputElement,
+      brief: view.getByRole('button', {name: 'Daily brief at 8:00'}) as HTMLButtonElement,
+      text: () => view.container.querySelector('textarea') as HTMLTextAreaElement};
+  };
+  const HINT = 'The daily brief is a request to the steward, so it is for reminders to me only, not the family group.';
+
+  it('step 25.2: while the target is the family group the daily-brief preset is off, with a hint', async () => {
+    const {view, group, owner, brief} = await groupForm();
+    expect(brief.disabled).toBe(false);
+    expect(view.queryByText(HINT)).toBeNull();
+    await fireEvent.click(group);
+    expect(brief.disabled).toBe(true);
+    expect(view.getByText(HINT)).toBeTruthy();
+    // The presets that only set the time stay on.
+    expect((view.getByRole('button', {name: 'Every day at 9:00'}) as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(owner);
+    expect(brief.disabled).toBe(false);
+    expect(view.queryByText(HINT)).toBeNull();
+  });
+
+  it('step 25.2: switching to the family group drops the brief text the preset filled, never text the owner wrote', async () => {
+    const {view, group, owner, brief, text} = await groupForm();
+    await fireEvent.click(brief);
+    expect(text().value).toBe(BRIEF_TEXT);
+    await fireEvent.click(group);
+    expect(view.getByLabelText('Words posted in the family group')).toBe(text());
+    expect(text().value).toBe('');
+    // The title is not posted; it stays. Save waits for the owner's own words.
+    expect((view.getByLabelText('Title') as HTMLInputElement).value).toBe('Daily brief');
+    expect((view.getByRole('button', {name: 'Save'}) as HTMLButtonElement).disabled).toBe(true);
+    // The preset's text changed by the owner is the owner's: it stays.
+    await fireEvent.click(owner);
+    await fireEvent.click(brief);
+    await fireEvent.input(text(), {target: {value: BRIEF_TEXT + ' Keep it short.'}});
+    await fireEvent.click(group);
+    expect(text().value).toBe(BRIEF_TEXT + ' Keep it short.');
+    // And words the owner typed stay too.
+    await fireEvent.click(owner);
+    await fireEvent.input(text(), {target: {value: '该吃药了'}});
+    await fireEvent.click(group);
+    expect(text().value).toBe('该吃药了');
+  });
+
   it.each([
     ['too_frequent', 'Runs less than 15 minutes apart'],
     ['invalid_cron', 'Invalid cron expression'],

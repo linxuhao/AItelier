@@ -129,6 +129,23 @@ def test_a_group_reminder_records_the_binding_and_is_bounded(world, clock):
     refused(lambda: group_reminder(world, key="21st"), "too_many_group_reminders")
 
 
+def test_the_daily_brief_instruction_is_refused_for_the_group_in_any_language(world, clock, client):
+    """The dashboard's brief preset fills a request to the steward; posted to the group it would
+    go out word for word (defense in depth behind the form)."""
+    bound_group(world)
+    for i, text in enumerate(["Write today's daily brief following the brief rules and send it to the owner "
+                              "with send_user_message.", "按简报规则写今天的每日简报，用 send_user_message 发给业主。"]):
+        with pytest.raises(StateGraphError) as caught:
+            group_reminder(world, text, key=f"brief{i}")
+        assert str(caught.value).startswith("withheld: steward_instruction"), str(caught.value)
+    ok = group_reminder(world, "该吃药了", key="pills")
+    change = client.put(f"/api/steward/schedules/{ok['schedule_id']}", headers=OWNER_HEADERS,
+                        json={"expected_version": ok["version"],
+                              "instruction": "按简报规则写今天的每日简报，用 send_user_message 发给业主。"})
+    assert change.status_code == 422 and change.json()["detail"]["code"] == "withheld", change.text
+    assert "steward_instruction" in change.json()["detail"]["reason"]
+
+
 def test_create_and_change_with_a_private_project_name_are_withheld_on_the_tool_and_the_dashboard(
         world, clock, projects, client):
     bound_group(world)

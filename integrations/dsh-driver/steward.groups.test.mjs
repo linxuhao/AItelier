@@ -60,7 +60,8 @@ test('the runtime: in a group turn every tool request carries the header, the ho
   const { aitelierHost } = await import('./runtime.mjs');
   const { calls, request } = recorder({ '/api/state/query/project_catalog': { result: { projects: [] } },
     '/api/state/query/list_projects': { result: [] }, '/api/dsh-drivers': { projects: {} },
-    '/api/state/query/list_owner_groups': { result: { groups: [] } } });
+    '/api/state/query/list_owner_groups': { result: { groups: [] } },
+    '/api/state/query/list_user_questions': { result: { questions: [{ segment_id: 'q1', message_id: 'm1', text: 'may I?' }] } } });
   const host = aitelierHost({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DRIVER_ID: 'drv',
     AITELIER_DSH_SESSION: 's', AITELIER_DSH_PROVIDER: 'p', AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp', AITELIER_DSH_ENTRY: '/x' },
   { request });
@@ -69,6 +70,14 @@ test('the runtime: in a group turn every tool request carries the header, the ho
   await host.portfolio.projects();
   await host.groups.list();
   assert.deepEqual(calls.map(c => [c.path, c.readAs]), [['/api/state/query/project_catalog', 'public'], ['/api/state/query/list_owner_groups', undefined]]);
+  // ask_owner and close_question are tools too (7.7.5 second layer): a guard slip still
+  // reaches State as an anonymous reader, refused public_view_read_only.
+  calls.length = 0;
+  await host.attention.ask({ id: 'q1', text: 'may I?' });
+  await host.attention.close({ id: 'q1', reason: 'done' });
+  await host.attention.list();
+  assert.deepEqual(calls.map(c => c.path.split('/').at(-1)), ['send_user_message', 'list_user_questions', 'withdraw_user_question', 'list_user_questions']);
+  assert.deepEqual(calls.filter(c => c.readAs !== 'public').map(c => c.path), []);
 });
 
 test('after a group turn the adapter\'s own writes wait for the owner too; the guard refuses its tools in a group turn', async () => {

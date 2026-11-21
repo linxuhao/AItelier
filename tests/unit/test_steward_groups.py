@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -244,6 +245,7 @@ def projects(world):
     writer.store.create_project("wuxia-myth", "武虾传奇")
     writer.open_project("wuxia-myth")
     writer.store.create_project("secret-plan", "家庭账本")
+    writer.store.create_project("menu", "菜谱")
     writer.store.create_project("aitelier", "AItelier")
     return writer
 
@@ -258,6 +260,9 @@ def test_exit_check_arm_one_a_body_with_a_code_a_private_project_and_a_path_send
     sent = reply(world, question["message_id"], body)
     assert sent["withheld"] is True
     assert sent["text"] == "「爸爸在忙什么」\n" + state_groups.WITHHELD_TEXT
+    # The sentence the group gets is, byte for byte, the one steward.md tells the model to use.
+    steward_md = (Path(__file__).resolve().parents[2] / "integrations/dsh-director/steward.md").read_text(encoding="utf-8")
+    assert "「" + state_groups.WITHHELD_TEXT + "」" in steward_md
     assert rows(world, "SELECT body, original, withheld_reason FROM state_group_messages WHERE direction='out' "
                        "AND kind='reply'") == [(sent["text"], body, "live_code")]
     # The code that leaked into a reply is not secret any more: retired.
@@ -275,10 +280,10 @@ def test_exit_check_arm_two_a_body_with_only_a_public_project_id_goes_out_as_wri
 
 @pytest.mark.parametrize("body,reason", [
     ("在做 secret-plan", "private_project"), ("在弄家庭账本", "private_project"), ("SECRET-PLAN 呢", "private_project"),
-    ("路径 /app/core", "host_path"), ("在 /tmp/x 里", "host_path")])
+    ("最近在弄菜谱", "private_project"), ("路径 /app/core", "host_path"), ("在 /tmp/x 里", "host_path")])
 def test_each_shape_alone_is_withheld(world, projects, body, reason):
     bound_group(world)
-    question = ask(world, "m1", "家庭账本是什么")  # a word the question used is NOT exempt
+    question = ask(world, "m1", "家庭账本和菜谱是什么")  # a word the question used is NOT exempt (two characters too)
     assert reply(world, question["message_id"], body)["withheld"] is True
     assert rows(world, "SELECT withheld_reason FROM state_group_messages WHERE kind='reply'") == [(reason,)]
 
@@ -391,6 +396,22 @@ def test_family_memory_in_a_group_turn_takes_group_and_author_from_the_record(wo
     assert rows(world, "SELECT COUNT(*) FROM state_family_note") == [(0,)]
 
 
+def test_family_memory_in_a_merged_turn_of_several_askers_names_nobody(world):
+    bound_group(world)
+    ask(world, "m1")
+    ask(world, "m2", sender=MEMBER2)
+    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    audience(world, senders=(MEMBER, MEMBER2))
+    noted = execute(family_view(world), "note_family_memory", {"request_key": "k1", "text": "周六去外婆家"},
+                    allow_write=True)
+    assert noted["added_by"] is None
+    assert rows(world, "SELECT added_by_ref FROM state_family_memory") == [(None,)]
+    # The same asker twice is still that one person.
+    audience(world, senders=(MEMBER, MEMBER))
+    assert execute(family_view(world), "note_family_memory", {"request_key": "k2", "text": "周日在家"},
+                   allow_write=True)["added_by"] == "妈妈"
+
+
 def test_the_family_note_is_the_owners_route_alone(world, client):
     bound_group(world)
     steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
@@ -427,8 +448,12 @@ def test_the_owner_picks_the_one_pending_group_and_never_one_of_two(world, monke
                             allow_write=True), "pending_owner_pick")
     with pytest.raises(StateConflict):
         world.owner.groups.pick_pending_group("wechat", ROOM)
+    # Only rooms the bridge reported in the last 10 minutes count: ROOM2's report ages out.
     with world.db.get_connection() as conn:
-        conn.execute("DELETE FROM state_pending_groups WHERE room_ref=?", (ROOM2,))
+        conn.execute("UPDATE state_pending_groups SET at=? WHERE room_ref=?",
+                     ((state_channels._now() - timedelta(minutes=11)).isoformat(), ROOM2))
         conn.commit()
+    with pytest.raises(StateNotFound):
+        world.owner.groups.pick_pending_group("wechat", ROOM2)
     picked = world.owner.groups.pick_pending_group("wechat", ROOM)
     assert picked["bound"] is True and picked["group_ref"] == ROOM

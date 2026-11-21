@@ -1,11 +1,14 @@
 /** Step 23 press witness, plugin half (design-steward 7.7.16 end; platform director 418 end and
  *  420 Q3): the steward in a real pinned DSH with a fixture model whose every request body is
  *  recorded at the request boundary. One run:
- *    owner turn 1 -> group turn 1 (writes a unique MARKER into family memory) -> an idle
- *    compaction right after it (before any fold) -> group turn 2 -> owner turn 2.
+ *    owner turn 1 -> group turn 1 (writes a unique MARKER into family memory; its step 2 crosses
+ *    the compaction threshold, so DSH compacts IN the group turn) -> an idle compaction right
+ *    after it (before any fold) -> group turn 2 -> owner turn 2.
  *  Arm one: no request of owner turn 2 carries a byte of the marker or of group turn 1's text.
- *  Arm two: the compaction request and the checkpoint it leaves carry neither.
- *  Snapshot: group turn 2 (after the compaction) is not given the snapshot; owner turn 2 is.
+ *  Arm two: neither compaction request, nor the checkpoint either leaves, carries them (the
+ *  fixture's checkpoint echoes every user text it was given, so a leak would show).
+ *  Snapshot: the rest of group turn 1 after its compaction, and group turn 2, are not given the
+ *  snapshot; owner turn 2 is.
  *  Also: the guard refuses memory_note in a group turn and family_memory_show in an owner turn,
  *  and the host records the audience of every turn before its first step. */
 import { test } from 'node:test';
@@ -43,7 +46,11 @@ export function apply(ctx) {
       const asked = options.messages.slice(lastAssistant + 1).filter(m => m.role === 'user').map(textOf).join('\n')
         || [...options.messages].reverse().filter(m => m.role === 'user').slice(0, 3).map(textOf).join('\n');
       let block;
-      if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: nothing in flight.' };
+      // The checkpoint echoes the markers it was given (every capitalised token and the family
+      // marker): a marker a compaction request carried shows in it, and it stays smaller than
+      // what it replaces.
+      if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: ' + [...new Set(options.messages.filter(m => m.role !== 'system')
+        .map(m => JSON.stringify(m)).join(' ').match(/FAMILY-[0-9a-f-]{36}|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+/g) ?? [])].join(' ') };
       else if (!options.tools?.length || options.sessionId !== 'stw-root') block = { type: 'text', text: 'Fixture session' };
       else if (last?.role === 'tool') block = { type: 'text', text: asked.includes('GROUP_ONE_QUESTION') ? 'GROUP_ONE_ANSWER' : 'Done.' };
       else if (asked.includes('GROUP_ONE_QUESTION')) block = first('g1', () => tool('g1', 'family_memory_note', { text: process.env.STW_TEST_MARKER }));
@@ -54,7 +61,9 @@ export function apply(ctx) {
       if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
       else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
       yield { type: 'block-end', index: 0, block };
-      yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20 } };
+      // Group turn 1's first step reports a prompt at the threshold (64000 x 0.5): its second step
+      // starts with a pressure compaction, in the group turn.
+      yield { type: 'usage', usage: { inputTokens: block.id === 'g1' ? 32000 : 100, outputTokens: 20 } };
       yield { type: 'finish', reason: { kind: block.type === 'text' ? 'stop' : 'tool-calls' } };
     }
   }
@@ -162,8 +171,10 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true }, { id: 'tool-result-pruner', disabled: true },
-      // The steward's own compaction policy shape (core/dsh_driver.py), retaining nothing.
-      { id: 'compaction-basic', config: { thresholdRatio: 0.5, retainTokens: 0 } },
+      // The steward's own compaction policy shape (core/dsh_driver.py), retaining nothing; the
+      // headroom fits the fixture's 64000-token window (the default 65536 leaves no pressure
+      // budget, so no pressure compaction would ever run).
+      { id: 'compaction-basic', config: { thresholdRatio: 0.5, retainTokens: 0, headroomTokens: 1024 } },
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
       { insert: [{ id: 'fixture', name: join(directory, 'provider.mjs') },
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
@@ -196,21 +207,32 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
       assert.ok(!r.body.includes('GROUP_TWO_QUESTION'), 'owner turn 2 carries group turn 2');
     }
     assert.ok(turns(3)[0].body.includes('A family-group turn ran here'), 'the fold line stands where the group turns were');
-    // Arm two: the idle compaction right after group turn 1 (before any fold).
+    // Arm two: the pressure compaction in the middle of group turn 1 (its step 2, the CURRENT
+    // group turn's messages on the surface) and the idle compaction right after it (before any fold).
+    const midTurn = root_.filter(r => r.purpose === 'compaction' && r.phase === 1);
+    assert.ok(midTurn.length, 'no compaction ran inside group turn 1\n' + output.slice(-3000));
     assert.deepEqual(marks['/test/compacted'], { compacted: true });
     const compactions = root_.filter(r => r.purpose === 'compaction');
-    assert.ok(compactions.length, 'a compaction request was made');
+    assert.ok(compactions.some(r => r.phase === 2), 'the idle compaction made no request');
     for (const r of compactions) {
       assert.ok(!r.body.includes(MARKER) && !r.body.includes(escaped), 'the compaction request carries the family marker');
       assert.ok(!r.body.includes('GROUP_ONE_QUESTION'), 'the compaction request carries the group question');
     }
-    for (const e of events.filter(e => e.type === 'compaction/summary' || (e.type === 'user/message' && /compact/.test(e.data?.source?.kind ?? ''))))
+    assert.ok(midTurn[0].body.includes('A family-group turn ran here'), 'the mid-turn compaction request has no fold line in place of the group turn');
+    assert.ok(midTurn[0].body.includes('RECENT_TURN_MARKER_99'), 'the fixture checkpoint echoes what it is given (owner turn 1 is in it)');
+    const checkpoints = events.filter(e => e.type === 'compaction/summary' || (e.type === 'user/message' && /compact/.test(e.data?.source?.kind ?? '')));
+    assert.ok(checkpoints.some(e => JSON.stringify(e).includes('Checkpoint: ')), 'no checkpoint was recorded');
+    for (const e of checkpoints)
       assert.ok(!JSON.stringify(e).includes(MARKER) && !JSON.stringify(e).includes('GROUP_ONE_QUESTION'), 'the checkpoint carries group text');
-    // Snapshot: not given to group turn 2 (after the compaction), given to owner turn 2.
+    // Snapshot (the host's own injection, source dsh-director-context): not in the rest of group
+    // turn 1 after its compaction, not in group turn 2 (after the idle one); in owner turn 2.
+    const SNAPSHOT = '"kind":"dsh-director-context"';
+    const afterMid = root_.slice(root_.indexOf(midTurn[0]) + 1).filter(r => r.phase === 1 && r.purpose !== 'compaction');
+    assert.ok(afterMid.length, 'group turn 1 made no request after its compaction');
+    for (const r of afterMid) assert.ok(!r.body.includes(SNAPSHOT), 'group turn 1 was given the snapshot after its compaction');
     assert.ok(turns(2).length, 'group turn 2 made requests');
-    for (const r of turns(2)) assert.ok(!r.body.includes('RECENT_TURN_MARKER_99'), 'group turn 2 was given the snapshot: '
-      + r.body.slice(Math.max(0, r.body.indexOf('RECENT_TURN_MARKER_99') - 1500), r.body.indexOf('RECENT_TURN_MARKER_99') + 200));
-    assert.ok(turns(3)[0].body.includes('RECENT_TURN_MARKER_99'), 'owner turn 2 was not given the snapshot');
+    for (const r of turns(2)) assert.ok(!r.body.includes(SNAPSHOT), 'group turn 2 was given the snapshot');
+    assert.ok(turns(3)[0].body.includes(SNAPSHOT) && turns(3)[0].body.includes('RECENT_TURN_MARKER_99'), 'owner turn 2 was not given the snapshot');
     // The guard, both ways.
     assert.match(resultOf('g2'), /group turn: only portfolio_projects/);
     assert.match(resultOf('o2'), /family memory is for group turns only/);
@@ -219,6 +241,212 @@ test('real pinned DSH: a group turn never reaches the owner\'s next turn, a comp
     assert.deepEqual(audiences[1].group, { channel: 'wechat', group_ref: 'r1' });
     assert.deepEqual(audiences[1].senderRefs, ['wxid_m1']);
     assert.doesNotMatch(output, /SessionPersistenceCorruptionError|stored log is corrupt/);
+  } finally {
+    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// ---- the same in the AItelier adapter (runtime.mjs) over a recording State server ----------
+// Design-steward 7.7.16 (plugin and adapter: "every State request a tool makes in a group turn
+// carries the public-read header"; "a group turn's last words go only through post_group_reply,
+// never forwardFinalText"; "grep_chat_history finds nothing a group turn said"); director 418
+// item 4 ("one real group-turn request"). The State is a fake HTTP server that records each
+// request's path, body and X-AItelier-Read-As, and answers a read that carries the header the
+// way the backend answers an anonymous reader for a private project (403, the PUBLIC_READS
+// refusal). A group message reaches the steward through a WeChat-shaped channel plugin.
+const ADAPTER_PROVIDER = String.raw`
+import { createRequire } from 'node:module';
+const require = createRequire(process.env.AITELIER_DSH_ENTRY);
+const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
+export const name = 'fixture-group-adapter-provider';
+export const inject = ['llm'];
+const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
+export function apply(ctx) {
+  const done = new Set();
+  const once = (key, make) => done.has(key) ? undefined : (done.add(key), make());
+  class FixtureAdapter extends LlmAdapter {
+    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 64000 }, defaultMaxTokens: 1024 }; }
+    async *stream(options) {
+      const all = JSON.stringify(options.messages);
+      await fetch(process.env.AITELIER_URL + '/test/model', { method: 'POST', body: JSON.stringify({ session: options.sessionId,
+        purpose: options.purpose ?? null, body: all }) }).catch(() => {});
+      const last = options.messages.at(-1);
+      let block;
+      if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== 'grp-root') block = { type: 'text', text: 'Fixture.' };
+      else if (last?.role === 'tool' && last.toolCallId === 'g1') block = { type: 'text', text: 'GROUP_ADAPTER_ANSWER' };
+      else if (last?.role === 'tool' && last.toolCallId === 'o1') block = once('o2', () => tool('o2', 'grep_chat_history', { pattern: 'GROUP_Q_ADAPT[E]R', regex: true }));
+      else if (last?.role === 'tool' && last.toolCallId === 'o2') block = once('o3', () => tool('o3', 'grep_chat_history', { pattern: 'm-owner-[2]', regex: true }));
+      else if (last?.role === 'tool' && last.toolCallId === 'o3') block = { type: 'text', text: 'OWNER_ADAPTER_ANSWER' };
+      else if (all.includes('GROUP_Q_ADAPTER') && !done.has('g1')) block = once('g1', () => tool('g1', 'portfolio_project', { project_id: 'family-ledger' }));
+      else if (all.includes('m-owner-2') && !done.has('o1')) block = once('o1', () => tool('o1', 'portfolio_project', { project_id: 'family-ledger' }));
+      block ??= { type: 'text', text: 'Done.' };
+      yield { type: 'block-start', index: 0, blockType: block.type };
+      if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
+      else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+      yield { type: 'block-end', index: 0, block };
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 10 } };
+      yield { type: 'finish', reason: { kind: block.type === 'text' ? 'stop' : 'tool-calls' } };
+    }
+  }
+  ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
+  ctx.on('session/event', (session, event) => {
+    if (session.id === 'grp-root' && ['tool/result', 'turn/end'].includes(event.type))
+      void fetch(process.env.AITELIER_URL + '/test/event', { method: 'POST', body: JSON.stringify(event) }).catch(() => {});
+  });
+}
+`;
+
+// A WeChat-shaped channel plugin: one family member's @-message in the bound group.
+const GROUP_CHANNEL = String.raw`
+export const name = 'fixture-group-channel';
+export const inject = ['ownerChannels'];
+const post = (path, body) => fetch(process.env.AITELIER_URL + path, { method: 'POST', body: JSON.stringify(body) }).catch(() => {});
+export function apply(ctx) {
+  ctx.on('dispose', ctx.ownerChannels.register({ name: 'wechat', status: () => ({ connected: true }),
+    async send(text, options) { await post('/test/send', { text, options }); return {}; },
+    async sendGroup(room, text) { await post('/test/group-send', { room, text }); return { ref: 'g-out' }; },
+    async setRooms(rooms) { await post('/test/rooms', rooms); } }));
+  void (async () => {
+    await post('/test/inbound', await ctx.ownerChannels.inbound({ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'gm-1',
+      text: '@管家 GROUP_Q_ADAPTER m-owner-1 武侠项目怎样', at: new Date().toISOString(), conversationRef: 'r1@chatroom' }));
+  })();
+}
+`;
+
+test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry the public-read header and its words go only to the group; the owner turn\'s do not', { timeout: 180000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const directory = await mkdtemp(join(homedir(), 'dsh-group-adapter-'));
+  const seen = { state: [], model: [], events: [], groupSends: [], inbound: [] };
+  let output = '', proc, parked, woke = false, ownerAt;
+  const PRIVATE = '{"detail":"This State DAG record is not available."}';
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString();
+    const body = raw ? JSON.parse(raw) : {};
+    const send = (value, status = 200) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(typeof value === 'string' ? value : JSON.stringify(value)); };
+    const url = req.url, readAs = req.headers['x-aitelier-read-as'];
+    if (url === '/test/model') { seen.model.push(body); return send({}); }
+    if (url === '/test/event') { seen.events.push(body); return send({}); }
+    if (url === '/test/group-send') { seen.groupSends.push(body); return send({}); }
+    if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
+    if (url.startsWith('/test/')) return send({});
+    seen.state.push({ path: url, body, readAs });
+    if (url === '/api/drivers/me') return send({ driver_id: 'drv-grp' });
+    if (url === '/api/state/schema') return send({ operations: {} });
+    if (url.endsWith('/context')) return send({ project_id: 'aitelier-home', driver_id: 'drv-grp', event_seq: 1, nodes: [],
+      project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'fixture', runtime_skill: 'fixture' });
+    if (url.endsWith('/activity') || url.endsWith('/heartbeat')) return send({ ok: true });
+    if (url === '/api/state/query/wait_for_state_change') {
+      // The owner's message arrives once the group's reply went out; until then (and after) it parks.
+      if (woke) return;
+      parked = () => { woke = true; ownerAt = new Date().toISOString();
+        send({ events: [{ seq: 2, event_type: 'user_message_created', payload: { message_id: 'm-owner-2' } }], next_after: 2 }); };
+      if (seen.state.some(s => s.path.endsWith('/post_group_reply'))) parked();
+      return;
+    }
+    // The backend's answer to a public-read request for a private project: the anonymous refusal.
+    if (readAs !== undefined && ['/api/state/query/project_overview', '/api/state/query/list_issues'].includes(url)) return send(PRIVATE, 403);
+    if (url.startsWith('/api/state/commands/')) {
+      const name = url.slice('/api/state/commands/'.length);
+      if (name === 'relay_group_message') return send({ result: { message_id: 'gq1', sender_role: 'member', sender_label: '成员甲' } });
+      if (name === 'set_steward_turn_audience') return send({ result: { recorded: true } });
+      if (name === 'post_group_reply') {
+        setTimeout(() => parked?.(), 200);
+        return send({ result: { message_id: 'go1', channel: 'wechat', group_ref: 'r1@chatroom', text: '「武侠项目怎样」\n' + body.body, withheld: false } });
+      }
+      if (name === 'send_user_message') return send({ message_id: 'm-out-' + seen.state.length, project_id: 'aitelier-home' });
+      if (name === 'report_channel_status') return send({ recorded: true });
+      if (name === 'record_channel_delivery') return send({ recorded: true });
+      if (name === 'complete_steward_memory_request') return send({});
+      return send({ detail: 'unexpected ' + name }, 422);
+    }
+    if (url.startsWith('/api/state/query/')) {
+      const name = url.slice('/api/state/query/'.length);
+      if (name === 'list_owner_groups') return send({ result: { owner_refs: { wechat: 'wxid_owner' },
+        groups: [{ channel: 'wechat', group_ref: 'r1@chatroom', label: '家庭群', mention_prefix: '@管家' }] } });
+      if (name === 'list_group_recent') return send({ result: { recent: [] } });
+      if (name === 'list_owner_channels') return send({ default_channel: null, channels: [
+        { channel: 'wechat', bound: true, sender_ref: 'wxid_owner', bound_at: 't', revoked_at: null, is_default: false }] });
+      // m-owner-1 waits unanswered all along (its id is in the family member's text);
+      // m-owner-2 is the owner's message that opens the owner turn.
+      if (name === 'list_user_conversation') return send({ messages: [
+        { message_id: 'm-owner-1', sender_kind: 'user', sender_driver_id: null, created_at: '2026-11-21T00:00:00Z', subject: 'first',
+          body: 'an earlier question', segments: [], reply_to_message_id: null },
+        ...(woke ? [{ message_id: 'm-owner-2', sender_kind: 'user', sender_driver_id: null, created_at: ownerAt, subject: 'second',
+          body: 'OWNER_BODY', segments: [], reply_to_message_id: null }] : [])], next_cursor: null });
+      if (name === 'project_overview') return send({ result: { project: { project_id: body.project_id }, counts: {}, nodes: [] } });
+      if (name === 'list_issues') return send({ result: { issues: [] } });
+      return send({ result: {} });
+    }
+    send({ detail: url }, 404);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const profile = join(directory, 'home/profiles/driver');
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(directory, 'provider.mjs'), ADAPTER_PROVIDER);
+    await writeFile(join(directory, 'channel.mjs'), GROUP_CHANNEL);
+    await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
+      { id: 'hmr', disabled: true },
+      ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
+      { insert: [{ id: 'fixture', name: join(directory, 'provider.mjs') },
+        { id: 'dsh-director', name: join(here, '../dsh-director/index.mjs') },
+        { id: 'aitelier-driver', name: join(here, 'runtime.mjs') },
+        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') }] },
+    ]));
+    const token = join(directory, 'token');
+    await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
+      DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
+      AITELIER_DRIVER_ID: 'drv-grp', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'grp-root',
+      AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+    proc.stdout.on('data', chunk => output += chunk);
+    proc.stderr.on('data', chunk => output += chunk);
+    const until = async (what, met, ms = 90000) => {
+      const deadline = Date.now() + ms;
+      while (!met() && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 100));
+      assert.ok(met(), what + '\n' + JSON.stringify(seen.state.map(s => [s.path, s.readAs])).slice(0, 3000) + '\n' + output.slice(-3000));
+    };
+    const commands = name => seen.state.filter(s => s.path === '/api/state/commands/' + name);
+    const resultOf = id => JSON.stringify(seen.events.find(e => e.type === 'tool/result' && e.data.message.toolCallId === id)?.data.message ?? null);
+    await until('the owner turn never ended', () => resultOf('o3') !== 'null'
+      && seen.events.filter(e => e.type === 'turn/end').length >= 2);
+    await until('the owner turn\'s automatic reply was never sent', () => commands('send_user_message').some(s => s.body.request_key === 'auto-reply:m-owner-2'));
+    assert.deepEqual(seen.inbound, [{ accepted: true }]);
+    // The one real group-turn request: portfolio_project of a private project, with the header,
+    // answered the anonymous refusal; the tool shows only "not found". The owner turn's read
+    // of the same project carries no header.
+    const overviews = seen.state.filter(s => s.path === '/api/state/query/project_overview' && s.body.project_id === 'family-ledger');
+    assert.deepEqual(overviews.map(s => s.readAs), ['public', undefined]);
+    assert.match(resultOf('g1'), /not_found/);
+    assert.doesNotMatch(resultOf('o1'), /not_found/);
+    // The host's own requests never carry it, in the group turn or out of it.
+    for (const name of ['relay_group_message', 'set_steward_turn_audience', 'post_group_reply'])
+      assert.ok(commands(name).length && commands(name).every(s => s.readAs === undefined), name);
+    assert.ok(seen.state.filter(s => s.path.endsWith('/list_owner_groups')).every(s => s.readAs === undefined));
+    assert.deepEqual(commands('set_steward_turn_audience').map(s => s.body.audience).slice(0, 2), ['group', 'owner']);
+    // The group turn's last words went to its group once, through post_group_reply ...
+    assert.deepEqual(commands('post_group_reply').map(s => [s.body.question_id, s.body.body]), [['gq1', 'GROUP_ADAPTER_ANSWER']]);
+    assert.deepEqual(seen.groupSends, [{ room: 'r1@chatroom', text: '「武侠项目怎样」\nGROUP_ADAPTER_ANSWER' }]);
+    // ... and never to the owner: m-owner-1 was in the group turn's input and unanswered, and no
+    // automatic reply answered it. The owner turn's last words did answer m-owner-2.
+    assert.deepEqual(commands('send_user_message').map(s => [s.body.request_key, s.body.body]), [['auto-reply:m-owner-2', 'OWNER_ADAPTER_ANSWER']]);
+    assert.ok(!seen.groupSends.some(s => s.text.includes('OWNER_ADAPTER_ANSWER')));
+    // grep_chat_history in the owner turn: nothing the group turn said; the owner turn's own words.
+    // (A regex, so the search does not find its own call.)
+    const grepped = id => JSON.parse(JSON.parse(resultOf(id)).content[0].text);
+    assert.deepEqual(grepped('o2').matches, []);
+    assert.ok(grepped('o3').matches.length > 0, resultOf('o3'));
+    // The owner turn's requests carry no byte of the group turn.
+    const ownerTurn = seen.model.filter(m => m.session === 'grp-root' && m.body.includes('m-owner-2'));
+    assert.ok(ownerTurn.length && ownerTurn.every(m => !m.body.includes('GROUP_Q_ADAPTER') && !m.body.includes('GROUP_ADAPTER_ANSWER')));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

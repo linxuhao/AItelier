@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, GROUP_TOOLS, PAUSED_TOOLS, groupTurnRefusal, familyRefusal, pausedRefusal,
-  answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans } from '../lib/group-turns.mjs';
+  answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup } from '../lib/group-turns.mjs';
 import { GROUP_LIMITS, CHANNEL_LIMITS, createOwnerChannels, channelReplies } from '../lib/channels.mjs';
 import { ContextInjection } from '../lib/core.mjs';
 
@@ -115,6 +115,128 @@ test('snapshot: no injection in a group turn, and it is still owed to the next o
   assert.match(JSON.stringify(await injection.prepare()), /PROFILE/);
 });
 
+const ev = (type, data = {}) => ({ type, data });
+const script = list => list.map((e, seq) => ({ ...e, seq, time: 0 }));
+
+// DSH's inbox as the plugin uses it: `next-turn` holds one queued turn per message.
+function fakeInbox(queued = []) {
+  const nextTurn = [...queued];
+  return { get nextTurn() { return [...nextTurn]; }, list: nextTurn,
+    append: (target, m) => { assert.equal(target, 'next-turn'); nextTurn.push(m); },
+    prepend: (target, m) => { assert.equal(target, 'next-turn'); nextTurn.unshift(m); },
+    splice: (target, at, count, inserted) => { assert.equal(target, 'next-turn'); return nextTurn.splice(at, count, ...inserted); },
+    claimTurn: () => nextTurn.shift() };
+}
+const texts = list => list.map(m => m.content[0].text);
+
+test('put back: owner input a group turn put back opens the very next turn, whatever the family keeps asking (7.7.3 item 3)', () => {
+  const g = turns(), inbox = fakeInbox();
+  g.split([group('Q1')], 1);
+  // Step 2: the owner writes; step 3: a family member follows up; step 4: the owner again.
+  for (const [step, input] of [[2, message('OWNER_A')], [3, group('FOLLOW_UP')], [4, message('OWNER_B')]])
+    putBack(inbox, g.split([input], step).back, g);
+  assert.deepEqual(texts(inbox.list), ['OWNER_A', 'OWNER_B', 'FOLLOW_UP']);
+  // The next turn claims the queued head - and a new question that arrived meanwhile: the owner's turn.
+  const next = g.split([group('NEW_Q'), inbox.claimTurn()], 1);
+  assert.equal(g.audience().kind, 'owner');
+  assert.deepEqual(texts(next.keep), ['OWNER_A']);
+  putBack(inbox, next.back, g);
+  assert.deepEqual(texts(inbox.list), ['OWNER_B', 'FOLLOW_UP', 'NEW_Q']);
+  // Kept across a restart (a new object over the same directory), and cleared once served.
+  const again = new GroupTurns({ stateDir: dirname(g.waitingFile), limits: GROUP_LIMITS });
+  again.split([group('Q9'), inbox.claimTurn()], 1);
+  assert.equal(again.audience().kind, 'owner');
+  assert.deepEqual([...again.waiting], []);
+  // Fresh owner input that meets a group question on a first step still waits one group turn only.
+  const fresh = message('OWNER_C');
+  putBack(inbox, again.split([group('Q10'), fresh], 1).back, again);
+  assert.equal(inbox.list[0], fresh);
+});
+
+test('restart: a group question still in the inbox opens a group turn; the owner\'s message is the next turn', () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'group-restart-'));
+  const persisted = group('LEFT_IN_INBOX'), owner = message('OWNER_AFTER_RESTART'), inbox = fakeInbox();
+  const g = new GroupTurns({ stateDir, limits: GROUP_LIMITS });
+  putBack(inbox, g.split([persisted, owner], 1).back, g);
+  assert.equal(g.audience().kind, 'group');
+  assert.deepEqual(texts(inbox.list), ['OWNER_AFTER_RESTART']);
+  g.split([inbox.claimTurn()], 1);
+  assert.equal(g.audience().kind, 'owner');
+});
+
+test('restart in the middle of a group turn: the guard still reads the group from the session log', async () => {
+  const events = script([ev('turn/start'), ev('user/message', group('MID_TURN', 'r1', 'q-mid')),
+    ev('assistant/message', { message: { id: 'a', content: [{ type: 'tool-call', id: 't', name: 'portfolio_projects' }] } }),
+    ev('tool/result', { message: { id: 't' } })]);
+  const g = turns();
+  const setup = createGroupSetup({ turns: g, groups: {}, createUserMessage: m => m, fold: () => 0 });
+  const payload = { step: 2, turn: 7, agent: { inbox: fakeInbox(), session: { snapshotEvents: () => events } } };
+  // The step after the restart claims only an owner message: it goes back, the turn stays the group's.
+  const decision = await setup.step(payload, { kind: 'enter', messages: [message('OWNER_MID')] });
+  assert.deepEqual(decision.messages, []);
+  assert.equal(g.audience().kind, 'group');
+  assert.deepEqual(g.current.questions, ['q-mid']);
+  assert.equal(g.current.calls, 1);
+  assert.equal(g.guard('memory_note'), groupTurnRefusal);
+  assert.deepEqual(texts(payload.agent.inbox.list), ['OWNER_MID']);
+});
+
+// The first step's setup (7.7.3 item 6): a fake host and agent around createGroupSetup.
+function setupWorld({ fold = () => 0, audience = async () => ({ recorded: true }), ownerSpokeSince } = {}) {
+  const stateDir = mkdtempSync(join(tmpdir(), 'group-setup-'));
+  const g = new GroupTurns({ stateDir, limits: GROUP_LIMITS });
+  const calls = { audience: [], steered: [], errors: [], cleared: 0 };
+  const host = { audience: async (a, s) => { calls.audience.push(a); return audience(a, s); },
+    ...(ownerSpokeSince ? { ownerSpokeSince } : {}) };
+  const pendingFile = join(stateDir, 'group-setup-pending.json');
+  const setup = createGroupSetup({ turns: g, groups: host, pendingFile, retryMs: 30, fold: (...a) => fold(...a),
+    createUserMessage: m => ({ ...m, id: 'redelivered-' + ++ids, role: 'user' }), steer: list => calls.steered.push(...list),
+    setHostError: async e => { calls.errors.push(e); }, clearHostError: async () => { calls.cleared += 1; } });
+  const payload = (turn, step = 1) => ({ step, turn, agent: { inbox: fakeInbox(), session: { snapshotEvents: () => [] } } });
+  return { g, calls, setup, payload, pendingFile };
+}
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('setup: a failing fold rejects the step, keeps its input, delivers it again; a second failure is group_turn_setup_failed', async () => {
+  let failing = true;
+  const w = setupWorld({ fold: () => { if (failing) throw new Error('replace refused'); return 0; } });
+  const q = group('KEPT_QUESTION');
+  assert.deepEqual(await w.setup.step(w.payload(1), { kind: 'enter', messages: [q] }), { kind: 'reject' });
+  assert.deepEqual(JSON.parse(readFileSync(w.pendingFile, 'utf8')).map(m => m.content[0].text), ['KEPT_QUESTION']);
+  assert.equal(w.g.current, undefined);
+  assert.deepEqual(w.calls.audience, [], 'nothing reached the host before the fold');
+  await sleep(80);
+  assert.deepEqual(texts(w.calls.steered), ['KEPT_QUESTION']);
+  assert.equal(w.calls.steered[0].source.group_ref, 'r1');
+  assert.ok(!existsSync(w.pendingFile));
+  // The redelivered question fails again: reported, not retried.
+  assert.deepEqual(await w.setup.step(w.payload(2), { kind: 'enter', messages: [w.calls.steered[0]] }), { kind: 'reject' });
+  assert.match(w.calls.errors.join(), /^group_turn_setup_failed: replace refused/);
+  await sleep(80);
+  assert.equal(w.calls.steered.length, 1);
+  // The next first step that works clears the error and delivers what was kept.
+  failing = false;
+  const owner = message('OWNER_LATER');
+  assert.deepEqual((await w.setup.step(w.payload(3), { kind: 'enter', messages: [owner] })).messages, [owner]);
+  assert.equal(w.calls.cleared, 1);
+  assert.deepEqual(texts(w.calls.steered), ['KEPT_QUESTION', 'KEPT_QUESTION']);
+});
+
+test('setup: a failed audience write is handled like a failed fold; a failed pause check never rejects the owner\'s turn', async () => {
+  const w = setupWorld({ audience: async () => { throw new Error('HTTP 503'); } });
+  assert.deepEqual(await w.setup.step(w.payload(1), { kind: 'enter', messages: [group('Q')] }), { kind: 'reject' });
+  assert.ok(existsSync(w.pendingFile));
+  assert.ok(!existsSync(w.g.pauseFile), 'no pause recorded for a turn that did not run');
+  const spoke = setupWorld({ ownerSpokeSince: async () => { throw new Error('backend hiccup'); } });
+  spoke.g.pause();
+  const owner = message('OWNER');
+  const decision = await spoke.setup.step(spoke.payload(1), { kind: 'enter', messages: [owner] });
+  assert.equal(decision.kind, 'enter');
+  assert.deepEqual(decision.messages, [owner]);
+  assert.ok(spoke.g.paused(), 'the pause stays in effect');
+  assert.deepEqual(spoke.calls.audience.map(a => a.audience), ['owner']);
+});
+
 // A session double with the parts the fold uses: the log, the surface, and append with a
 // positional replace that checks what DSH checks (earlier, present, every node cited).
 function fakeSession(events) {
@@ -132,8 +254,6 @@ function fakeSession(events) {
     },
   };
 }
-const ev = (type, data = {}) => ({ type, data });
-const script = list => list.map((e, seq) => ({ ...e, seq, time: 0 }));
 
 test('fold: each finished group turn becomes one line; the system prompt, checkpoints and owner turns stay', () => {
   const session = fakeSession(script([

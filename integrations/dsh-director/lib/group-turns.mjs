@@ -15,7 +15,7 @@
  *  - the COMPACTION FILTER: a compaction request never carries a group turn's messages;
  *  - grep_chat_history skips group turns (`withoutGroupTurns`).
  *  Nothing here names a backend; the host's `groups` operations do the backend side. */
-import { readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const GROUP_SOURCE = 'dsh-director-group';
@@ -51,13 +51,15 @@ export function turnSpans(events) {
   const spans = [];
   let open;
   for (const event of events) {
-    if (event.type === 'turn/start') { open = { start: event.seq, audience: { kind: 'owner' }, questions: 0 }; spans.push(open); }
+    if (event.type === 'turn/start') { open = { start: event.seq, audience: { kind: 'owner' }, questions: 0, questionIds: [], calls: 0 }; spans.push(open); }
     else if (event.type === 'turn/end' && open) { open.end = event.seq; open = undefined; }
     else if (event.type === 'user/message' && open && isGroup(event.data)) {
       const source = event.data.source;
       if (open.audience.kind !== 'group') open.audience = { kind: 'group', channel: source.channel, group_ref: source.group_ref, label: source.group_label };
       open.questions += (source.question_ids ?? []).length;
-    }
+      open.questionIds.push(...(source.question_ids ?? []));
+    } else if (event.type === 'assistant/message' && open)
+      open.calls += (event.data?.message?.content ?? []).filter(block => block?.type === 'tool-call').length;
   }
   return spans;
 }
@@ -131,7 +133,37 @@ export class GroupTurns {
     Object.assign(this, { limits, log });
     this.pausedTools = new Set([...PAUSED_TOOLS, ...pausedTools]);
     this.pauseFile = stateDir ? join(stateDir, 'group-pause.json') : undefined;
+    // The owner input a group turn put back (message ids): it opens the very next turn, so the
+    // owner waits at most one group turn (7.7.3 item 3, risk (e)). Kept on disk for a restart.
+    this.waitingFile = stateDir ? join(stateDir, 'group-owner-waiting.json') : undefined;
+    this.waiting = new Set();
+    try { if (this.waitingFile && existsSync(this.waitingFile)) this.waiting = new Set(JSON.parse(readFileSync(this.waitingFile, 'utf8'))); }
+    catch { this.waiting = new Set(); }
     this.current = undefined;
+  }
+
+  /** Owner input `id` was put back by a group turn (or redelivered after a failed setup). */
+  wait(id) {
+    if (id === undefined || this.waiting.has(id)) return;
+    this.waiting.add(id);
+    while (this.waiting.size > 50) this.waiting.delete(this.waiting.values().next().value);
+    this.saveWaiting();
+  }
+  saveWaiting() {
+    if (!this.waitingFile) return;
+    const temporary = this.waitingFile + '.tmp';
+    writeFileSync(temporary, JSON.stringify([...this.waiting]), { mode: 0o600 });
+    renameSync(temporary, this.waitingFile);
+  }
+
+  /** A restart in the middle of a turn: its audience, questions and calls so far, from the
+   *  session log (the group tag is persisted with the turn's messages), never from memory. */
+  resume(events) {
+    const open = turnSpans(events).findLast(span => span.end === undefined);
+    if (!open) return false;
+    this.current = { audience: open.audience, calls: open.calls, merged: open.questionIds.length, ownerWaiting: false,
+      questions: [...open.questionIds] };
+    return true;
   }
 
   /** Whose turn it is now; unknown reads as a group (fail closed: the narrower rules). */
@@ -140,15 +172,22 @@ export class GroupTurns {
   /** Split one step's claimed messages: what this turn keeps and what goes back (in order). */
   split(messages, step) {
     if (step === 1 || !this.current) {
-      const first = messages.find(isGroup);
+      // Owner input a group turn put back opens this turn, whatever else came with it.
+      const waited = messages.some(m => !isGroup(m) && !isNeutral(m) && this.waiting.has(m.id));
+      const first = waited ? undefined : messages.find(isGroup);
       const audience = first ? { kind: 'group', channel: first.source.channel, group_ref: first.source.group_ref,
         label: first.source.group_label } : { kind: 'owner' };
       this.current = { audience, calls: 0, merged: 0, ownerWaiting: false, questions: [] };
     }
     const turn = this.current, keep = [], back = [];
+    let served = false;
     for (const message of messages) {
       if (isNeutral(message)) { keep.push(message); continue; }
-      if (turn.audience.kind === 'owner') { (isGroup(message) ? back : keep).push(message); continue; }
+      if (turn.audience.kind === 'owner') {
+        if (isGroup(message)) back.push(message);
+        else { keep.push(message); served = this.waiting.delete(message.id) || served; }
+        continue;
+      }
       const same = isGroup(message) && message.source.group_ref === turn.audience.group_ref
         && message.source.channel === turn.audience.channel;
       if (!same) { if (!isGroup(message)) turn.ownerWaiting = true; back.push(message); continue; }
@@ -158,6 +197,7 @@ export class GroupTurns {
       turn.questions.push(...(message.source.question_ids ?? []));
       keep.push(message);
     }
+    if (served) this.saveWaiting();
     return { keep, back };
   }
 
@@ -190,4 +230,82 @@ export class GroupTurns {
     renameSync(temporary, this.pauseFile);
   }
   unpause() { if (this.pauseFile) rmSync(this.pauseFile, { force: true }); }
+}
+
+/** Puts input of another audience back for a later turn (7.7.3 item 2). DSH opens one turn per
+ *  queued `next-turn` message, so owner input goes right after the owner input already waiting
+ *  (it opens the very next turn, in its own order) and a group question to the end (in arrival
+ *  order): the owner waits at most one group turn, however many questions keep coming. */
+export function putBack(inbox, messages, turns) {
+  for (const message of messages) {
+    if (isGroup(message)) { inbox.append('next-turn', message); continue; }
+    const queued = inbox.nextTurn ?? [];
+    let at = 0;
+    while (at < queued.length && turns.waiting.has(queued[at]?.id)) at += 1;
+    inbox.splice('next-turn', at, 0, [message]);
+    turns.wait(message.id);
+  }
+}
+
+const short = error => String(error?.message ?? error).slice(0, 300);
+
+/** The first step of every steward turn (7.7.3 items 2, 5, 6): decide its audience, put input of
+ *  another audience back, fold the finished group turns, record the audience on the host and
+ *  set or clear the pause - all before the step runs. Any failure rejects the step; its input is
+ *  kept in `pendingFile` and delivered again after `retryMs`; a second failure in a row is
+ *  reported as the host error group_turn_setup_failed (cleared, and what was kept delivered,
+ *  by the next first step that succeeds). */
+export function createGroupSetup({ turns, groups, createUserMessage, pendingFile, canSteer = () => true, steer,
+  setHostError = async () => {}, clearHostError = async () => {}, log = () => {}, retryMs = 30000, fold = foldGroupTurns }) {
+  let failures = 0, reported = false;
+  const pending = () => {
+    try { return pendingFile ? JSON.parse(readFileSync(pendingFile, 'utf8')) : []; } catch { return []; }
+  };
+  const redeliver = () => {
+    const kept = pending();
+    if (!kept.length || !canSteer()) return 0;
+    rmSync(pendingFile, { force: true });
+    const messages = kept.map(m => createUserMessage({ content: m.content, source: m.source }));
+    for (const message of messages) if (!isGroup(message) && !isNeutral(message)) turns.wait(message.id);
+    steer(messages);
+    return messages.length;
+  };
+  async function step(payload, decision) {
+    if (payload.step !== 1 && !turns.current) turns.resume(payload.agent.session.snapshotEvents());
+    const { keep, back } = turns.split(decision.messages, payload.step);
+    putBack(payload.agent.inbox, back, turns);
+    if (payload.step !== 1) return { ...decision, messages: keep };
+    const audience = turns.audience();
+    try {
+      fold(payload.agent.session, createUserMessage);
+      if (groups?.audience) await groups.audience({ turn: String(payload.turn), audience: audience.kind,
+        ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
+        senderRefs: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []) }, payload.signal);
+      if (audience.kind === 'group') turns.pause();
+      else {
+        const pause = turns.pauseRecord();
+        const given = keep.map(m => (m.content ?? []).map(b => b.text ?? '').join('')).join('\n');
+        // A failed read leaves the pause in effect: it fails closed for the pause, never for
+        // the owner's turn.
+        if (pause && groups?.ownerSpokeSince && await groups.ownerSpokeSince(pause.at, given, payload.signal)
+          .catch(error => { log('group pause check failed: ' + short(error)); return false; })) turns.unpause();
+      }
+      const recovered = failures > 0;
+      failures = 0;
+      if (recovered) {
+        redeliver();
+        if (reported) { reported = false; await clearHostError(); }
+      }
+      return { ...decision, messages: keep };
+    } catch (error) {
+      failures += 1;
+      log('group turn setup failed: ' + short(error));
+      if (pendingFile) writeFileSync(pendingFile, JSON.stringify([...pending(), ...keep.map(m => ({ content: m.content, source: m.source }))]), { mode: 0o600 });
+      turns.current = undefined;
+      if (failures >= 2) { reported = true; await setHostError('group_turn_setup_failed: ' + short(error)); }
+      else setTimeout(redeliver, retryMs).unref?.();
+      return { kind: 'reject' };
+    }
+  }
+  return { step, redeliver, get failures() { return failures; } };
 }

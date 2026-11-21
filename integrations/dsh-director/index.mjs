@@ -13,7 +13,7 @@
  *  used to be a backend call. Order of registration is kept, because the order of
  *  tools in a request is part of the request (design §9 MF2). */
 import { createRequire } from 'node:module';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -32,7 +32,7 @@ import { openMemory, profileSection, registerMemoryTools } from './lib/memory/to
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
-import { GroupTurns, GROUP_SOURCE, foldGroupTurns, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
+import { GroupTurns, GROUP_SOURCE, createGroupSetup, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 
 export const name = 'dsh-director';
@@ -661,48 +661,15 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Step 23: the first step of every steward turn decides its audience, puts input of another
   // audience back for the next turn, folds the finished group turns, records the audience on the
   // host and sets or clears the pause - all before the step runs; any failure rejects the step
-  // and its input is kept and delivered again (7.7.3 item 6).
-  let setupFailures = 0;
-  const pendingFile = config.stateDir ? join(config.stateDir, 'group-setup-pending.json') : undefined;
-  const redeliver = () => {
-    let kept = [];
-    try { kept = pendingFile ? JSON.parse(readFileSync(pendingFile, 'utf8')) : []; } catch { kept = []; }
-    if (!kept.length || !agent || disposed) return;
-    rmSync(pendingFile, { force: true });
-    ctx.agents.withoutInitiator(() => { for (const m of kept) agent.steer(createUserMessage({ content: m.content, source: m.source })); });
-  };
-  const groupStep = async (payload, decision) => {
-    const { keep, back } = groupTurns.split(decision.messages, payload.step);
-    for (const message of [...back].reverse()) payload.agent.inbox.prepend('next-turn', message);
-    if (payload.step !== 1) return { ...decision, messages: keep };
-    const audience = groupTurns.audience();
-    try {
-      foldGroupTurns(payload.agent.session, createUserMessage);
-      if (host.groups?.audience) await host.groups.audience({ turn: String(payload.turn), audience: audience.kind,
-        ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
-        senderRefs: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []) }, payload.signal);
-      if (audience.kind === 'group') groupTurns.pause();
-      else {
-        const pause = groupTurns.pauseRecord();
-        const given = keep.map(m => (m.content ?? []).map(b => b.text ?? '').join('')).join('\n');
-        if (pause && host.groups?.ownerSpokeSince && await host.groups.ownerSpokeSince(pause.at, given, payload.signal)) groupTurns.unpause();
-      }
-      setupFailures = 0;
-      return { ...decision, messages: keep };
-    } catch (error) {
-      setupFailures += 1;
-      ctx.logger.warn('group turn setup failed: ' + String(error?.message ?? error).slice(0, 300));
-      if (pendingFile) {
-        let kept = [];
-        try { kept = JSON.parse(readFileSync(pendingFile, 'utf8')); } catch { kept = []; }
-        writeFileSync(pendingFile, JSON.stringify([...kept, ...keep.map(m => ({ content: m.content, source: m.source }))]), { mode: 0o600 });
-      }
-      groupTurns.current = undefined;
-      if (setupFailures >= 2) await api.setHostError('group_turn_setup_failed: ' + String(error?.message ?? error).slice(0, 300));
-      else setTimeout(redeliver, 30000).unref?.();
-      return { kind: 'reject' };
-    }
-  };
+  // and its input is kept and delivered again (7.7.3 item 6; lib/group-turns.mjs).
+  const groupSetup = groupTurns ? createGroupSetup({ turns: groupTurns, groups: host.groups, createUserMessage,
+    pendingFile: config.stateDir ? join(config.stateDir, 'group-setup-pending.json') : undefined,
+    canSteer: () => Boolean(agent) && !disposed,
+    steer: messages => ctx.agents.withoutInitiator(() => { for (const m of messages) agent.steer(m); }),
+    setHostError: message => api.setHostError(message), clearHostError: () => api.clearHostError(),
+    log: line => ctx.logger.warn(line) }) : undefined;
+  const redeliver = () => groupSetup?.redeliver();
+  const groupStep = (payload, decision) => groupSetup.step(payload, decision);
   const options = { agentOptions: { provider: config.provider, model: config.model }, setup };
   const resume = await ctx.sessionPersistence.stat(config.sessionId) !== undefined;
   const handle = resume ? await ctx.agents.resume({ ...options, resumeSessionId: config.sessionId })

@@ -701,8 +701,10 @@ class StateGroups:
                                   "deleted_at IS NULL", (channel, group))
             if entries >= FAMILY_LIMITS["entries"]:
                 raise StateConflict("family_memory_full: ask your owner to clear some on the dashboard")
-            refs = json.loads(turn["sender_refs_json"])
-            sender = refs[-1] if refs else None
+            # "Who added it" is the turn's asker; a turn that merged several askers' questions
+            # cannot tell which of them asked to remember, so it names nobody.
+            refs = set(json.loads(turn["sender_refs_json"]))
+            sender = next(iter(refs)) if len(refs) == 1 else None
             account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
                                    (channel,)).fetchone()
             role = "owner" if sender is not None and account is not None and account[0] == sender else "member"

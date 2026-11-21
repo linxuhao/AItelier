@@ -806,7 +806,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     attention: {
       async ask({ id, text, context }, signal) {
         const body = askOwnerRequest(project, { id, text, context });
-        const result = await request('/api/state/commands/send_user_message', body, signal)
+        // Step 23 (7.7.5): a tool's request - in a group turn it carries the public-read header,
+        // so a guard slip still cannot write.
+        const result = await toolRequest('/api/state/commands/send_user_message', body, signal)
           .catch(error => ({ error: String(error?.message ?? error) }));
         if (result.error) return /idempotency_conflict/.test(result.error)
           ? { refused: 'question_id_reused', reason: `question ${id} already asks something else; give this question its own id` }
@@ -817,13 +819,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         return { asked: true, question_id: id, message_id: result.message_id };
       },
       async close({ id, reason }, signal) {
-        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
+        const listed = await toolRequest('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
         // Another director in the project may use the same id: the list carries no
         // sender, so try the matches newest first and let State say whose each is.
         const matches = ((listed.result ?? listed).questions ?? []).filter(q => q.segment_id === id);
         let answered = false, foreign = false;
         for (const question of matches) {
-          const result = await request('/api/state/commands/withdraw_user_question', { request_key: `close-question:${project}:${question.message_id}:${id}`,
+          const result = await toolRequest('/api/state/commands/withdraw_user_question', { request_key: `close-question:${project}:${question.message_id}:${id}`,
             project_id: project, message_id: question.message_id, segment_id: id, reason }, signal).catch(error => ({ error: String(error?.message ?? error) }));
           if (!result.error) return result.withdrawn ? { closed: true, question_id: id, message_id: question.message_id }
             : { closed: false, already_closed: true, question_id: id, message_id: question.message_id };
@@ -844,7 +846,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           reason: foreign ? `question ${id} in this project is another director's` : `no question ${id} among this project's newest 200 questions` };
       },
       async list(signal) {
-        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
+        const listed = await toolRequest('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
         const page = listed.result ?? listed;
         const open = (page.questions ?? []).map(q => ({ id: q.segment_id, text: q.text, message_id: q.message_id }));
         if (page.has_more) open.truncated = true;   // more than the newest 200 are open: said, not hidden

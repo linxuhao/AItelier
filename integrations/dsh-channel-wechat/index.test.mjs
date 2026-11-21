@@ -41,7 +41,7 @@ function fakeChannels({ accept = () => true, fail = 0, unavailable = 0, answer }
 
 /** A bridge stand-in: events are pushed by the test; every request is recorded. */
 async function fakeBridge({ status = { logged_in: true, since: 'x' }, hangEvents = false } = {}) {
-  const bridge = { events: [], requests: [], sent: [], status, sendAnswer: [200, { ref: null }], loginAnswer: [202, { phase: 'starting' }] };
+  const bridge = { events: [], requests: [], sent: [], rooms: [], status, sendAnswer: [200, { ref: null }], loginAnswer: [202, { phase: 'starting' }] };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://x');
     bridge.requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams),
@@ -63,6 +63,12 @@ async function fakeBridge({ status = { logged_in: true, since: 'x' }, hangEvents
       return reply(...bridge.sendAnswer);
     }
     if (url.pathname === '/login' && request.method === 'POST') return reply(...bridge.loginAnswer);
+    if (url.pathname === '/rooms' && request.method === 'PUT') {
+      let raw = '';
+      for await (const chunk of request) raw += chunk;
+      bridge.rooms.push(JSON.parse(raw));
+      return reply(200, { rooms: 1 });
+    }
     return reply(404, { error: 'not_found' });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -127,6 +133,52 @@ test('bridge messages reach ownerChannels.inbound with the channel fields, and t
     assert.ok(polls.some(r => r.query.after === '102'), 'polled after what it had seen');
     assert.ok(bridge.requests.every(r => r.auth === `Bearer ${TOKEN}`));
     assert.equal(channels.received.filter(m => m.messageRef === 'm101').length, 1, 'no message is passed on twice');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+// ---- step 23: the family group (design-steward 7.7.11, 7.7.16 bridge and plugin tests) ----
+
+test('a bridge group event reaches ownerChannels.inbound with its room; a group code carries groupBind; a refused group message never holds the cursor, `unavailable` does', async () => {
+  const bridge = await fakeBridge();
+  let down = 2;
+  const channels = fakeChannels({ answer: m => {
+    if (m.messageRef === 'g3') return { accepted: false, reason: 'member_quota' };
+    if (m.messageRef === 'g4' && down > 0) { down--; return { accepted: false, reason: 'unavailable' }; }
+    return { accepted: true };
+  } });
+  const at = new Date().toISOString();
+  bridge.events.push({ seq: 1, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m1', message_ref: 'g1', text: '周六干嘛', at },
+    { seq: 2, type: 'group_bind', room_ref: 'r2@chatroom', sender_ref: 'wxid_owner', message_ref: 'g2', prefix: '@管家', code: 'G-7K2M-Q9XD', at },
+    { seq: 3, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m1', message_ref: 'g3', text: '又问', at },
+    { seq: 4, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m2', message_ref: 'g4', text: '再问', at },
+    event(5));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1, retryMs: 10 });
+  try {
+    await until(() => channels.received.some(m => m.messageRef === 'm5'));
+    assert.deepEqual(channels.received[0], { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g1', text: '周六干嘛', at,
+      conversationRef: 'r1@chatroom' });
+    assert.deepEqual(channels.received[1], { channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'g2', text: 'G-7K2M-Q9XD', at,
+      conversationRef: 'r2@chatroom', groupBind: { prefix: '@管家', code: 'G-7K2M-Q9XD' } });
+    // member_quota is final (once); `unavailable` holds g4 until the host answers, in order.
+    assert.deepEqual(channels.received.map(m => m.messageRef), ['g1', 'g2', 'g3', 'g4', 'g4', 'g4', 'm5']);
+    assert.equal(channels.received[6].conversationRef, undefined, 'a 1:1 message carries no room');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('sendGroup posts {room, text} to /send; setRooms puts the whole whitelist to /rooms', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels();
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.registered !== undefined);
+    bridge.sendAnswer = [200, { ref: 'g-out-1' }];
+    assert.deepEqual(await channels.registered.sendGroup('r1@chatroom', '「周六干嘛」\n去外婆家'), { ref: 'g-out-1' });
+    assert.deepEqual(bridge.sent, [{ room: 'r1@chatroom', text: '「周六干嘛」\n去外婆家' }]);
+    await channels.registered.setRooms({ ownerRef: 'wxid_owner', rooms: [{ room_ref: 'r1@chatroom', prefix: '@管家' }] });
+    await channels.registered.setRooms({ rooms: [] });
+    assert.deepEqual(bridge.rooms, [{ owner_ref: 'wxid_owner', rooms: [{ room_ref: 'r1@chatroom', prefix: '@管家' }] },
+      { owner_ref: null, rooms: [] }]);
+    assert.ok(bridge.requests.filter(r => r.path === '/rooms').every(r => r.method === 'PUT' && r.auth === `Bearer ${TOKEN}`));
   } finally { await channel.stop(); await bridge.close(); }
 });
 
@@ -405,6 +457,7 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
   bot.start = async () => {};
   bot.stop = async () => {};
   bot.Contact = { find: async ({ id }) => ({ id, say: async text => { said.push({ id, text }); } }) };
+  bot.Room = { load: room => ({ say: async text => { said.push({ room, text }); return { id: 'room-out-1' }; } }) };
   const SVG = '<svg xmlns="http://www.w3.org/2000/svg"/>';
   // The bridge builds a bot per login request; this test's one fake is that bot.
   const bridge = createBridge({ makeBot: () => bot, types, token: TOKEN, renderQr: () => SVG });
@@ -427,5 +480,15 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
       { channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'w1', text: '你好', at: undefined });
     assert.deepEqual(await channels.registered.send('收到', { replyToRef: 'w1', to: 'wxid_owner' }), {});
     assert.deepEqual(said, [{ id: 'wxid_owner', text: '收到' }]);
+    // Step 23: the whitelist from the host, then one family member's @-message in that room
+    // and the steward's answer back into it.
+    await channels.registered.setRooms({ ownerRef: 'wxid_owner', rooms: [{ room_ref: 'r1@chatroom', prefix: '@管家' }] });
+    bot.emit('message', { id: 'w2', self: () => false, room: () => ({ id: 'r1@chatroom' }), type: () => 7, text: () => '@管家 周六干嘛',
+      date: () => new Date(), talker: () => ({ id: 'wxid_m1', type: () => 0 }) });
+    await until(() => channels.received.length === 2);
+    assert.deepEqual({ ...channels.received[1], at: undefined },
+      { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'w2', text: '周六干嘛', at: undefined, conversationRef: 'r1@chatroom' });
+    assert.deepEqual(await channels.registered.sendGroup('r1@chatroom', '去外婆家'), { ref: 'room-out-1' });
+    assert.deepEqual(said.at(-1), { room: 'r1@chatroom', text: '去外婆家' });
   } finally { await channel.stop(); await bridge.close(); }
 });

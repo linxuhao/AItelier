@@ -184,6 +184,7 @@
               <code class="digits">{live.code}</code>
               <span data-code-countdown>{t('steward.chanCodeExpires').replace('{time}', remaining(live.expires))}</span>
               <p>{t('steward.chanCodeHelp')}</p>
+              <p data-code-no-group>{t('steward.chanCodeNoGroup')}</p>
             {:else}<p data-code-expired>{t('steward.chanCodeExpired')}</p>{/if}
           </div>
         {/if}

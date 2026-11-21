@@ -15,17 +15,28 @@ docker-compose.yml publishes on the host's loopback alone; the backend's 4444 an
 404 for it, and the 4445 listener serves nothing else (`PortGuard`, by
 `scope["server"]` port).
 
-Who may enter is checked here on every method, whatever the write gate says: a
-loopback Host (and Origin, when sent), a steward driver's token, not via Cloudflare.
+Who may enter is checked here once per HTTP request (POST, GET, DELETE), before any
+JSON-RPC in it is read, whatever the write gate says: a loopback Host (and Origin,
+when sent), a steward driver's token, not via Cloudflare. A JSON-RPC batch is
+authorized once, for all its messages; each `tools/call` in it is still judged alone.
 The peer address is logged, never judged. Refusals are logged at most once a minute
 per source. The token is never sent upstream; arguments, results and secrets are
 never logged.
 
 `tools/list` never reaches upstream: it is the effective set from the database
 (core.state_steward_connections.effective), byte for byte the definitions the owner
-allowed. `tools/call` is judged in order - connection usable, tool allowed and
-unchanged, private connection only in an `owner` turn, no blocked argument, daily cap,
-outward tools need a confirmation (24.1b; until then refused) - then forwarded.
+allowed. It is not filtered by the turn audience: a session lists once and lives
+across turns, and a per-audience list would make every audience switch a list change.
+The turn gates are the steward plugin's per-turn catalog and, here, the audience check
+of `tools/call`, which reads step 23's turn audience record (`set_steward_turn_audience`,
+core.state_groups; core.state_steward_connections.audience_of). A request here carries
+no turn (design-steward 7.7.8a): the check relies on the steward's host recording each
+turn's audience before that turn's first step runs (a failed record rejects the step),
+and no record reads as not the owner's (fail closed). `tools/call` is judged in order - connection usable, tool allowed and unchanged, private connection
+only in an `owner` turn, no blocked argument (at any depth), daily cap, outward tools
+need a confirmation (24.1b; until then refused) - and, in the same write transaction,
+a pending ledger row is reserved (so two concurrent calls never both pass the last
+unit of a cap); then forwarded, and the row completed.
 """
 from __future__ import annotations
 
@@ -385,6 +396,8 @@ class Gateway:
         self.tasks: set[asyncio.Task] = set()
         self.checker: asyncio.Task | None = None
         self.started = False
+        self.version = 0  # bumped by every change notice; the cached hash below is for one version
+        self.digest: tuple[int, str] | None = None
 
     def spawn(self, coroutine):
         task = asyncio.get_running_loop().create_task(coroutine)
@@ -405,7 +418,7 @@ class Gateway:
             self.checker = self.spawn(self._check_loop())
 
     async def prune(self):
-        removed = await asyncio.to_thread(_read, self.app, sc.prune_orphan_secrets)
+        removed = await asyncio.to_thread(sc.prune_orphan_secrets, _store(self.app))
         if removed:
             logger.info("steward gateway: removed %d orphaned secret file(s)", len(removed))
 
@@ -429,6 +442,7 @@ class Gateway:
         """`steward_tools_changed()`: coalesce one second, then compare the hash; a change
         that lands while that check runs gets one more check after it."""
         self.dirty = True
+        self.version += 1
         if self.pending is None or self.pending.done():
             self.pending = self.spawn(self._coalesced())
 
@@ -453,7 +467,7 @@ class Gateway:
     async def check(self):
         """Hash compare (and a notice on change), upstream sessions reconciled, the
         fallback markers judged - after a change, every 30 s and once at startup."""
-        digest = await asyncio.to_thread(_read, self.app, sc.current_hash)
+        digest = await self.current(fresh=True)
         self.announce(digest)
         await self.reconcile()
         drivers = await asyncio.to_thread(self._steward_drivers)
@@ -537,14 +551,16 @@ class Gateway:
 
     @staticmethod
     async def _list(upstream) -> list[dict]:
+        """The server's WHOLE tool list (discovery deletes what it does not name): a list
+        longer than 20 pages is a failed read, never a partial one."""
         tools, cursor = [], None
         for _ in range(20):
             page = await asyncio.wait_for(upstream.session.list_tools(cursor=cursor), UPSTREAM_TIMEOUT)
             tools += [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in page.tools]
             cursor = page.nextCursor
             if not cursor:
-                break
-        return tools
+                return tools
+        raise sc.ProbeFailed("tool_list_too_long")
 
     async def relist(self, conn_id):
         row = await asyncio.to_thread(_read, self.app, lambda conn: conn.execute(
@@ -637,26 +653,32 @@ class Gateway:
             return _error(mid, "tool_not_allowed", "no such tool")
         conn_id, gw = parts
 
-        def judge(conn):
-            row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
-            if row is None:
-                return "tool_not_allowed", None, None
-            if not sc.connection_usable(row):
-                return "connection_unavailable", None, None
-            entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)
-            if entry is None:
-                return "tool_not_allowed", None, None
-            if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
-                return "not_visible_in_this_turn", None, None
-            if set(arguments) & set(entry["blocked_args"]):
-                return "argument_blocked", None, None
-            if entry["daily_cap"] is not None and sc.calls_today(conn, conn_id, entry["raw_name"]) >= entry["daily_cap"]:
-                return "daily_cap_reached", None, None
-            if entry["outward"]:
-                return "confirmation_required", None, None
-            return None, dict(row), entry
+        def judge():
+            """One BEGIN IMMEDIATE transaction: the judgement and, when it passes, the
+            reserved ledger row (the daily cap counts reserved rows too)."""
+            with _store(self.app).transaction(write=True) as conn:
+                row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+                if row is None:
+                    return "tool_not_allowed", None, None, None
+                if not sc.connection_usable(row):
+                    return "connection_unavailable", None, None, None
+                entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)
+                if entry is None:
+                    return "tool_not_allowed", None, None, None
+                if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
+                    return "not_visible_in_this_turn", None, None, None
+                if sc.blocked_present(arguments, entry["blocked_args"]):
+                    return "argument_blocked", None, None, None
+                if entry["outward"]:
+                    if entry["daily_cap"] is not None and sc.calls_today(conn, conn_id, entry["raw_name"]) >= entry["daily_cap"]:
+                        return "daily_cap_reached", None, None, None
+                    return "confirmation_required", None, None, None
+                call_id = sc.reserve_call(conn, conn_id, entry["raw_name"], entry["daily_cap"])
+                if call_id is None:
+                    return "daily_cap_reached", None, None, None
+                return None, dict(row), entry, call_id
 
-        refusal, row, entry = await asyncio.to_thread(_read, self.app, judge)
+        refusal, row, entry, call_id = await asyncio.to_thread(judge)
         texts = {"tool_not_allowed": "this tool is not allowed for you",
                  "connection_unavailable": "this connection is not available now",
                  "not_visible_in_this_turn": "this connection is not available in this conversation",
@@ -687,16 +709,26 @@ class Gateway:
             answer = _error(mid, rpc_error, "the connection did not answer this call")
         response_bytes = len(json.dumps(answer, ensure_ascii=False).encode("utf-8", "replace"))
         duration = int((time.monotonic() - started) * 1000)
-        await asyncio.to_thread(sc.record_call, _store(self.app), conn_id, entry["raw_name"], rpc_error=rpc_error,
+        await asyncio.to_thread(sc.finish_call, _store(self.app), call_id, rpc_error=rpc_error,
                                 is_error=is_error, request_bytes=request_bytes, response_bytes=response_bytes,
                                 duration_ms=duration)
         logger.info("steward gateway: tools/call %s status=%s bytes=%d/%d %dms", name,
                     rpc_error or ("tool_error" if is_error else "ok"), request_bytes, response_bytes, duration)
         return answer
 
+    async def current(self, *, fresh=False) -> str:
+        """The effective hash, cached per change version: a POST does not rescan the tool
+        table unless a change notice came since (the 30-second check reads it fresh, which
+        also catches a write that sent no notice)."""
+        version = self.version
+        if not fresh and self.digest is not None and self.digest[0] == version:
+            return self.digest[1]
+        digest = await asyncio.to_thread(_read, self.app, sc.current_hash)
+        self.digest = (version, digest)
+        return digest
+
     async def stale(self, session_id) -> bool:
-        current = await asyncio.to_thread(_read, self.app, sc.current_hash)
-        return self.served.get(session_id) != current
+        return self.served.get(session_id) != await self.current()
 
 
 def gateway(app) -> Gateway:

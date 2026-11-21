@@ -344,6 +344,8 @@ async def lifespan(app: FastAPI):
         try:
             if _restart_task is not None:
                 _restart_task.cancel()
+                # Its CancelledError (or the error it died of) is returned, not raised.
+                await _asyncio.gather(_restart_task, return_exceptions=True)
             await _steward_unlisten(app, _steward_listener)
             await _steward_gateway(app).stop()
             await dsh_runtime.close()

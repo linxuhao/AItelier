@@ -196,9 +196,80 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+URL_WALK_DEPTH = 12
+
+
+def _is_url_name(key) -> bool:
+    return isinstance(key, str) and (key == "url" or key.endswith("_url"))
+
+
+def _pointer_key(key: str) -> str:
+    return key.replace("~", "~0").replace("/", "~1")
+
+
 def _url_params(schema: dict) -> list[str]:
-    props = schema.get("properties") if isinstance(schema, dict) else None
-    return sorted(k for k in (props or {}) if isinstance(k, str) and (k == "url" or k.endswith("_url")))
+    """Every `url` / `*_url` parameter of an input schema, at any depth, as an argument
+    path: a top-level one by its bare name (`image_url`), a nested one as its JSON-pointer
+    segments joined by `/` (`target/callback_url`), `*` standing for every item of an
+    array (`pages/*/url`). It walks `properties`, `items` / `prefixItems`, `anyOf` /
+    `oneOf` / `allOf` and local `$ref`s (`#/$defs/...`, `#/definitions/...`); a
+    parameter named only by `additionalProperties` / `patternProperties` has no fixed
+    name and is not found here (the owner can still block it by hand)."""
+    root = schema if isinstance(schema, dict) else {}
+    found: set[str] = set()
+
+    def resolve(node, refs):
+        while isinstance(node, dict) and isinstance(node.get("$ref"), str) and node["$ref"] not in refs:
+            ref = node["$ref"]
+            refs = refs | {ref}
+            target = root
+            if not ref.startswith("#/"):
+                return None, refs
+            for part in ref[2:].split("/"):
+                part = part.replace("~1", "/").replace("~0", "~")
+                target = target.get(part) if isinstance(target, dict) else None
+            node = target
+        return (node if isinstance(node, dict) and "$ref" not in node else None), refs
+
+    def walk(node, path, refs, depth):
+        node, refs = resolve(node, refs)
+        if node is None or depth > URL_WALK_DEPTH:
+            return
+        for key, sub in (node.get("properties") or {}).items() if isinstance(node.get("properties"), dict) else ():
+            here = path + [_pointer_key(key)] if isinstance(key, str) else None
+            if here is None:
+                continue
+            if _is_url_name(key):
+                found.add("/".join(here))
+            else:
+                walk(sub, here, refs, depth + 1)
+        items = node.get("items")
+        for sub in ([items] if isinstance(items, dict) else items if isinstance(items, list) else []) + (
+                node.get("prefixItems") if isinstance(node.get("prefixItems"), list) else []):
+            walk(sub, path + ["*"], refs, depth + 1)
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            for sub in node.get(keyword) if isinstance(node.get(keyword), list) else []:
+                walk(sub, path, refs, depth + 1)
+
+    walk(root, [], frozenset(), 0)
+    return sorted(found)
+
+
+def blocked_present(arguments, blocked: list[str]) -> bool:
+    """Whether a call's arguments carry any blocked path (`_url_params`' shape: a bare
+    name is a top-level argument, `a/b` a nested one, `*` every item of an array; `~1` and
+    `~0` are a key's `/` and `~`). Present means the key is there, whatever its value."""
+    def present(value, parts):
+        if not parts:
+            return True
+        head, rest = parts[0], parts[1:]
+        if isinstance(value, dict):
+            key = head.replace("~1", "/").replace("~0", "~")
+            return key in value and present(value[key], rest)
+        if isinstance(value, list) and head == "*":
+            return any(present(item, rest) for item in value)
+        return False
+    return any(present(arguments, path.split("/")) for path in blocked if isinstance(path, str) and path)
 
 
 # ---------------------------------------------------------------- secrets
@@ -240,19 +311,29 @@ def delete_secret(conn_id: str) -> None:
         pass
 
 
-def prune_orphan_secrets(conn) -> list[str]:
+def prune_orphan_secrets(store) -> list[str]:
     """At startup: delete every secret file whose connection is gone (a delete that died
-    between its commit and the file's removal). OAuth revocation comes with 24.1b."""
+    between its commit and the file's removal). The files are judged from a finished
+    read, and each is deleted only if its connection is still absent just before.
+    OAuth revocation comes with 24.1b."""
     directory = secrets_dir()
     if not directory.is_dir():
         return []
-    known = {r[0] for r in conn.execute("SELECT conn_id FROM state_steward_connections")}
+    candidates = sorted(p.stem for p in directory.glob("*.json") if CONN_ID.match(p.stem))
+    if not candidates:
+        return []
+    with store.transaction() as conn:
+        known = {r[0] for r in conn.execute("SELECT conn_id FROM state_steward_connections")}
     removed = []
-    for path in directory.glob("*.json"):
-        if path.stem not in known and CONN_ID.match(path.stem):
-            delete_secret(path.stem)
-            removed.append(path.stem)
-    return sorted(removed)
+    for conn_id in candidates:
+        if conn_id in known:
+            continue
+        with store.transaction() as conn:
+            back = conn.execute("SELECT 1 FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+        if back is None:
+            delete_secret(conn_id)
+            removed.append(conn_id)
+    return removed
 
 
 def secret_status(row) -> str:
@@ -663,8 +744,8 @@ class StateStewardConnections:
                     params.append(row["schema_sha256"])
                 if "blocked_args" in item:
                     value = item["blocked_args"]
-                    if not isinstance(value, list) or any(not isinstance(v, str) or not v or len(v) > 100 for v in value):
-                        raise StateGraphError("invalid_tools: blocked_args is a list of argument names")
+                    if not isinstance(value, list) or any(not isinstance(v, str) or not v or len(v) > 1000 for v in value):
+                        raise StateGraphError("invalid_tools: blocked_args is a list of argument paths")
                     sets.append("blocked_args=?")
                     params.append(json.dumps(sorted(set(value))))
                 if "daily_cap" in item:
@@ -843,7 +924,11 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
     opening or announcing list_changed): every tool's canonical definition and hash;
     a NEW tool off, prefilled outward unless readOnlyHint is true, egress on, and on
     a public connection its url / *_url parameters blocked. Existing rows keep every
-    owner field; a changed definition simply no longer equals allowed_sha256."""
+    owner field; a changed definition simply no longer equals allowed_sha256.
+    A tool the server no longer lists (removed, or renamed: a rename is a removal and a
+    new tool) is deleted with its owner fields, so it leaves the effective set; if it
+    is listed again it is a NEW tool, off until the owner allows it again. The call
+    ledger keeps its past calls. `listed` must be the server's whole list."""
     moment = _iso(_utcnow())
     parsed = {}
     for tool in listed:
@@ -874,6 +959,10 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
             else:
                 conn.execute("UPDATE state_steward_connection_tools SET definition_json=?, schema_sha256=?, "
                              "last_seen_at=? WHERE conn_id=? AND raw_name=?", (text, digest, moment, conn_id, raw))
+        for (raw,) in conn.execute("SELECT raw_name FROM state_steward_connection_tools WHERE conn_id=?",
+                                   (conn_id,)).fetchall():
+            if raw not in parsed:
+                conn.execute("DELETE FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?", (conn_id, raw))
         conn.execute("UPDATE state_steward_connections SET last_probe_at=?, last_error=NULL, instructions=? "
                      "WHERE conn_id=?", (moment, (instructions or None) and str(instructions)[:8192], conn_id))
         changed = current_hash(conn) != before
@@ -882,16 +971,30 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
     return {"conn_id": conn_id, "listed": len(parsed)}
 
 
-def record_call(store, conn_id, raw_name, *, rpc_error=None, is_error=False, request_bytes=0,
+PENDING = "pending"  # the rpc_error of a ledger row reserved before its upstream call
+
+
+def reserve_call(conn, conn_id, raw_name, daily_cap, moment: datetime | None = None) -> int | None:
+    """On the caller's WRITE transaction (BEGIN IMMEDIATE, so the count and the insert are
+    one step): None when the tool's daily cap is reached, counting today's rows reserved
+    and not yet finished too; else a ledger row reserved now (rpc_error `pending`) and
+    its id, which `finish_call` fills in. A row left pending (the process died during
+    the call) keeps counting: the call may have run."""
+    moment = moment or _utcnow()
+    if daily_cap is not None and calls_today(conn, conn_id, raw_name, moment) >= daily_cap:
+        return None
+    conn.execute("DELETE FROM state_steward_tool_calls WHERE at<?", (_iso(moment - TOOL_CALLS_KEPT),))
+    return conn.execute("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error) "
+                        "VALUES(?,?,?,?,?)", (conn_id, raw_name, _iso(moment), _local_day(moment), PENDING)).lastrowid
+
+
+def finish_call(store, call_id, *, rpc_error=None, is_error=False, request_bytes=0,
                 response_bytes=0, duration_ms=0) -> None:
-    """One line of the call ledger: never the arguments or the result body."""
-    moment = _utcnow()
+    """Complete one reserved ledger line: never the arguments or the result body."""
     with store.transaction(write=True) as conn:
-        conn.execute("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error,is_error,"
-                     "request_bytes,response_bytes,duration_ms) VALUES(?,?,?,?,?,?,?,?,?)",
-                     (conn_id, raw_name, _iso(moment), _local_day(moment), rpc_error, int(bool(is_error)),
-                      request_bytes, response_bytes, duration_ms))
-        conn.execute("DELETE FROM state_steward_tool_calls WHERE at<?", (_iso(moment - TOOL_CALLS_KEPT),))
+        conn.execute("UPDATE state_steward_tool_calls SET rpc_error=?,is_error=?,request_bytes=?,response_bytes=?,"
+                     "duration_ms=? WHERE id=?", (rpc_error, int(bool(is_error)), request_bytes, response_bytes,
+                                                  duration_ms, call_id))
 
 
 def calls_today(conn, conn_id, raw_name, moment: datetime | None = None) -> int:

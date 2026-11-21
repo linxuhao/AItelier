@@ -86,6 +86,7 @@ class FakeUpstream:
         self.sse = False
         self.expire_next_call = False
         self.call_answer = None  # a raw JSON-RPC answer body for tools/call (result or error)
+        self.call_delay = 0.0  # seconds a tools/call takes
         self.app = Starlette(routes=[Route("/mcp", self.post, methods=["POST"]),
                                      Route("/mcp", self.other, methods=["GET", "DELETE"])])
 
@@ -112,6 +113,7 @@ class FakeUpstream:
         if method == "tools/list":
             return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": {"tools": self.tools}})
         if method == "tools/call":
+            await asyncio.sleep(self.call_delay)
             if self.expire_next_call:
                 self.expire_next_call = False
                 self.sessions.clear()
@@ -323,6 +325,47 @@ def test_a_connection_made_public_blocks_its_url_arguments(world):
     assert blocked()["ocr_image"] == ["image_url"]
 
 
+NESTED = {"name": "crawl", "description": "Crawl pages", "annotations": {"readOnlyHint": True}, "inputSchema": {
+    "type": "object", "$defs": {"Hook": {"type": "object", "properties": {"callback_url": {"type": "string"},
+                                                                          "name": {"type": "string"}}}},
+    "properties": {
+        "query": {"type": "string"},
+        "target": {"type": "object", "properties": {"url": {"type": "string"}, "depth": {"type": "integer"},
+                                                    "a/b_url": {"type": "string"}}},
+        "pages": {"type": "array", "items": {"type": "object", "properties": {"page_url": {"type": "string"}}}},
+        "hook": {"$ref": "#/$defs/Hook"},
+        "either": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"source_url": {}}}]},
+        "loop": {"$ref": "#/properties/loop"}}}}
+
+
+def test_url_parameters_are_found_at_any_depth():
+    assert sc._url_params(NESTED["inputSchema"]) == [
+        "either/source_url", "hook/callback_url", "pages/*/page_url", "target/a~1b_url", "target/url"]
+    assert sc._url_params({"type": "object", "properties": {"image_url": {}, "x": {}}}) == ["image_url"]
+    assert sc._url_params({"type": "object"}) == [] and sc._url_params(None) == []
+    blocked = sc._url_params(NESTED["inputSchema"]) + ["image_url"]
+    for arguments in ({"image_url": None}, {"target": {"url": "http://x"}}, {"target": {"a/b_url": "y"}},
+                      {"pages": [{"q": 1}, {"page_url": "http://x"}]}, {"hook": {"callback_url": ""}},
+                      {"either": {"source_url": "z"}}):
+        assert sc.blocked_present(arguments, blocked), arguments
+    for arguments in ({}, {"query": "url"}, {"target": {"depth": 1}}, {"target": "url"}, {"pages": [{"q": 1}]},
+                      {"pages": {"page_url": "x"}}, {"either": "source_url"}, {"hook": {"name": "url"}}):
+        assert not sc.blocked_present(arguments, blocked), arguments
+
+
+def test_nested_url_parameters_are_blocked_on_a_public_connection(world):
+    add(world, visibility="private")
+    discover(world, tools=[NESTED])
+    blocked = lambda: execute(world.owner, "list_steward_connection_tools", {"conn_id": "media"})["tools"][0]["blocked_args"]
+    assert blocked() == []
+    add(world, visibility="public", label="Media")
+    assert "pages/*/page_url" in blocked() and "target/url" in blocked()
+    add(world, conn_id="fresh", visibility="public")
+    discover(world, "fresh", tools=[NESTED])
+    assert execute(world.owner, "list_steward_connection_tools", {"conn_id": "fresh"})["tools"][0]["blocked_args"] == \
+        sc._url_params(NESTED["inputSchema"])
+
+
 def test_the_servers_instructions_are_the_owners_panel_alone(world, monkeypatch):
     add(world)
     discover(world, instructions="upload is REST: curl -X POST ...")
@@ -394,9 +437,25 @@ def test_startup_removes_secret_files_whose_connection_is_gone(world):
     add(world, conn_id="docs", url="https://good.example/mcp", auth_kind="header", visibility="private")
     execute(world.owner, "steward_connection_secret_set", {"conn_id": "docs", "value": "v1"}, allow_write=True)
     sc.write_secret("gone", {"header_value": "left behind"})
-    with world.db.get_connection() as conn:
-        assert sc.prune_orphan_secrets(conn) == ["gone"]
+    assert sc.prune_orphan_secrets(world.owner.store) == ["gone"]
     assert sorted(p.name for p in (world.tmp / "secrets").iterdir()) == ["docs.json"]
+    # A file whose connection appears after the first read is kept (judged again just before).
+    sc.write_secret("late", {"header_value": "v"})
+    real = world.owner.store.transaction
+    reads = []
+
+    def transaction(*a, **kw):
+        reads.append(1)
+        if len(reads) == 2:  # the per-file re-check: the connection was added meanwhile
+            add(world, conn_id="late", url="https://good.example/mcp", auth_kind="header", visibility="private",
+                label="Late")
+        return real(*a, **kw)
+    world.owner.store.transaction = transaction
+    try:
+        assert sc.prune_orphan_secrets(world.owner.store) == []
+    finally:
+        del world.owner.store.transaction
+    assert (world.tmp / "secrets" / "late.json").exists()
 
 
 # --- who may write ----------------------------------------------------------------------------
@@ -533,13 +592,49 @@ def test_a_name_collision_keeps_the_first_seen_tool(world):
                      "'2099-01-01',last_seen_at FROM state_steward_connection_tools WHERE raw_name=?", (long_b, long_a))
         conn.commit()
     allow(world, names=[long_a, long_b, "ok"])
-    for _ in range(3):
-        discover(world, tools=[{"name": long_a}, {"name": "ok"}])
+    for _ in range(3):  # both listed (a tool the server stops listing is deleted)
+        discover(world, tools=[{"name": long_a}, {"name": long_b}, {"name": "ok"}])
         effective = listed(world)["effective_tools"]
         assert len(effective) == len(set(effective)) == 2
         states = {t["raw_name"]: t["state"] for t in execute(world.owner, "list_steward_connection_tools",
                                                              {"conn_id": "media"})["tools"]}
         assert states[long_b] == "collision" and states[long_a] == "allowed"
+
+
+def test_a_tool_the_server_no_longer_lists_leaves_and_comes_back_new(world):
+    add(world)
+    discover(world)
+    allow(world, names=["web_search", "ocr_image"])
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day) "
+                     "VALUES('media','web_search','2026-11-21T00:00:00.000000Z','2026-11-21')")
+        conn.commit()
+    state = lambda: {t["raw_name"]: t["state"] for t in execute(world.owner, "list_steward_connection_tools",
+                                                                {"conn_id": "media"})["tools"]}
+    # Renamed upstream: the old name is gone, the new one is a new tool, off.
+    renamed = json.loads(json.dumps(TOOLS))
+    renamed[0]["name"] = "web_lookup"
+    discover(world, tools=renamed)
+    assert listed(world)["effective_tools"] == ["mcp__sw__media__ocr_image"]
+    assert [t["raw_name"] for t in listed(world, world.steward)["connections"][0]["tools"]] == ["ocr_image"]
+    assert state() == {"web_lookup": "new", "ocr_image": "allowed", "send_message": "new"}
+    # Removed: gone too.
+    discover(world, tools=[t for t in renamed if t["name"] != "ocr_image"])
+    assert listed(world)["effective_tools"] == [] and set(state()) == {"web_lookup", "send_message"}
+    # Listed again: a NEW tool, off until the owner allows it again.
+    discover(world)
+    assert listed(world)["effective_tools"] == []
+    assert state() == {"web_search": "new", "ocr_image": "new", "send_message": "new"}
+    allow(world, names=["web_search"])
+    assert listed(world)["effective_tools"] == ["mcp__sw__media__web_search"]
+    # The ledger keeps its past calls.
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_steward_tool_calls WHERE raw_name='web_search'").fetchone()[0] == 1
+    # Another connection's tools are untouched by this one's list.
+    add(world, conn_id="docs", url="https://good.example/mcp")
+    discover(world, "docs")
+    discover(world, tools=[])
+    assert state() == {} and len(execute(world.owner, "list_steward_connection_tools", {"conn_id": "docs"})["tools"]) == 3
 
 
 def test_effective_set_and_hash(world):
@@ -897,6 +992,95 @@ def test_the_daily_cap_counts_the_owners_day(world, server, monkeypatch):
     assert sc._local_day(late) == "2026-11-22"
     with world.db.get_connection() as conn:
         assert sc.calls_today(conn, "media", "web_search", late) == 0
+
+
+def test_the_last_unit_of_a_daily_cap_goes_to_one_of_two_concurrent_calls(world, server, upstream):
+    ready(world)
+    execute(world.owner, "steward_connection_tools_set", {"conn_id": "media", "tools": [
+        {"raw_name": "web_search", "daily_cap": 2}]}, allow_write=True)
+    call = lambda: body_of(rpc(server, world, "tools/call", {"name": "media__web_search", "arguments": {"query": "x"}}))[0]
+    assert "result" in call()  # cap 2, one used
+    upstream.call_delay = 1.0  # both calls are in flight together
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(call())) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert sorted("result" if "result" in r else r["error"]["data"]["code"] for r in results) == [
+        "daily_cap_reached", "result"]
+    assert upstream.methods.count("tools/call") == 2
+    with world.db.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT rpc_error,duration_ms FROM state_steward_tool_calls")]
+    assert len(rows) == 2 and all(r["rpc_error"] is None for r in rows)  # reserved, then completed
+    assert all(r["duration_ms"] >= 0 for r in rows)
+
+
+def test_a_reserved_call_counts_until_it_is_completed(world):
+    add(world)
+    with world.owner.store.transaction(write=True) as conn:
+        first = sc.reserve_call(conn, "media", "web_search", 2)
+        assert sc.reserve_call(conn, "media", "web_search", 2) is not None
+        assert sc.reserve_call(conn, "media", "web_search", 2) is None
+        assert sc.reserve_call(conn, "media", "web_search", None) is not None  # no cap: always a row
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT rpc_error FROM state_steward_tool_calls WHERE id=?", (first,)).fetchone()[0] == sc.PENDING
+    sc.finish_call(world.owner.store, first, rpc_error="upstream_timeout", duration_ms=5)
+    with world.db.get_connection() as conn:
+        assert tuple(conn.execute("SELECT rpc_error,duration_ms FROM state_steward_tool_calls WHERE id=?",
+                                  (first,)).fetchone()) == ("upstream_timeout", 5)
+        assert sc.calls_today(conn, "media", "web_search") == 3
+
+
+def test_a_nested_blocked_argument_is_refused_by_the_gateway(world, server, upstream):
+    add(world)
+    discover(world, tools=[NESTED])
+    allow(world, names=["crawl"])
+    call = lambda arguments: body_of(rpc(server, world, "tools/call", {"name": "media__crawl", "arguments": arguments}))[0]
+    for arguments in ({"target": {"url": "http://x"}}, {"pages": [{"page_url": "http://x"}]},
+                      {"hook": {"callback_url": "http://x"}}):
+        assert call(arguments)["error"]["data"]["code"] == "argument_blocked", arguments
+    assert "tools/call" not in upstream.methods
+    assert "result" in call({"query": "q", "target": {"depth": 1}, "pages": [{}]})
+
+
+def test_a_renamed_tool_leaves_the_gateways_list(world, server, upstream):
+    ready(world)
+    names = lambda: [t["name"] for t in rpc(server, world, "tools/list").json()["result"]["tools"]]
+    assert names() == ["media__ocr_image", "media__web_search"]
+    upstream.tools[0]["name"] = "web_lookup"
+    discover(world, tools=upstream.tools)
+    assert names() == ["media__ocr_image"]
+    refused = body_of(rpc(server, world, "tools/call", {"name": "media__web_search", "arguments": {"query": "x"}}))[0]
+    assert refused["error"]["data"]["code"] == "tool_not_allowed"
+    assert body_of(rpc(server, world, "tools/call", {"name": "media__web_lookup", "arguments": {"query": "x"}})
+                   )[0]["error"]["data"]["code"] == "tool_not_allowed"
+    assert "tools/call" not in upstream.methods
+
+
+def test_a_post_reads_the_hash_again_only_after_a_change(world, server, monkeypatch):
+    ready(world)
+    found = app.state.steward_gateway
+    settle = lambda: [time.sleep(0.05) for _ in range(100) if found.pending is not None and not found.pending.done()]
+    settle()  # the coalesced check after ready()'s writes has run
+    rpc(server, world, "tools/list", session="sess-a")
+    reads = []
+    real = sc.current_hash
+    monkeypatch.setattr(sc, "current_hash", lambda conn: reads.append(1) or real(conn))
+    server.call(found.current)  # the cache holds this version's hash
+    reads.clear()
+    for _ in range(3):
+        assert body_of(rpc(server, world, "ping", session="sess-a"))[1] == []
+    assert reads == []
+    version = found.version
+    allow(world, names=["send_message"])  # its change notice bumps the version
+    for _ in range(100):
+        if found.version != version:
+            break
+        time.sleep(0.02)
+    assert found.version != version
+    assert body_of(rpc(server, world, "ping", session="sess-a"))[1] == [gw.LIST_CHANGED]
+    assert reads
 
 
 def test_a_batch_refuses_only_its_bad_call(world, server):

@@ -427,6 +427,9 @@ describe('the channels tab', () => {
 // have their own tests), from the answer's server clock and the owner's zone.
 describe('the channel-down alert line', () => {
   const NOW = '2026-11-23T11:00:00Z';
+  // The backend's rules as GET /api/steward/channels answers them (alert_limits).
+  const LIMITS = {after_minutes: 10, retry_after_minutes: 30, unreported_minutes: 10, attempts: 2, down_every_minutes: 360,
+    quiet_from_hour: 23, quiet_until_hour: 8};
   const at = (minutes: number) => new Date(Date.parse(NOW) - minutes * 60_000).toISOString();
   const sent = {kind: 'down', down_since: at(30), state: 'sent', attempt: 1, via: 'slack', claimed_at: at(20), finished_at: at(20), error: null};
   const down = (wechatStatus: object, slack: object = {status: {connected: true, live: true}}, clock: object = {}) => ({
@@ -435,7 +438,7 @@ describe('the channel-down alert line', () => {
       {channel: 'wechat', bound: true, sender_ref: 'wxid_owner', bound_at: '2026-11-18T10:00:00Z', revoked_at: null, is_default: 0,
         status: {connected: false, live: true, detail: 'no QR (logged_out)', down_since: at(30), up_since: null, alert_down: null,
           alert_up: null, last_told: null, last_down_sent_at: null, alert_due: null, ...wechatStatus}}]}),
-    now: NOW, quiet_now: false, quiet_until: null, owner_tz: 'Asia/Shanghai', ...clock});
+    now: NOW, quiet_now: false, quiet_until: null, owner_tz: 'Asia/Shanghai', alert_limits: LIMITS, ...clock});
   const alertOf = (container: HTMLElement, channel: string) => card(container, channel).querySelector('[data-channel-alert]');
 
   it('says how long it is down and when (in the owner\'s zone) and where the owner was alerted', async () => {
@@ -468,16 +471,38 @@ describe('the channel-down alert line', () => {
     expect(alertOf(view.container, 'wechat')!.textContent).toBe('No other channel to send the down alert through');
   });
 
-  it('a connected channel with nothing owed, one not bound, or an answer without the server clock has no line', async () => {
-    api.listOwnerChannels.mockResolvedValue({...channels(), now: NOW, owner_tz: 'Europe/Paris'});
+  it('a connected channel with nothing owed, one not bound, or an answer without the server clock or rules has no line', async () => {
+    api.listOwnerChannels.mockResolvedValue({...channels(), now: NOW, owner_tz: 'Europe/Paris', alert_limits: LIMITS});
     const view = render(StewardChannels);
     await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
     expect(view.container.querySelector('[data-channel-alert]')).toBeNull();
-    cleanup();
-    api.listOwnerChannels.mockResolvedValue({...down({alert_down: sent}), now: undefined});
-    const old = render(StewardChannels);
-    await waitFor(() => expect(card(old.container, 'wechat')).not.toBeNull());
-    expect(old.container.querySelector('[data-channel-alert]')).toBeNull();
+    for (const missing of [{now: undefined}, {alert_limits: undefined}]) {
+      cleanup();
+      api.listOwnerChannels.mockResolvedValue({...down({alert_down: sent}), ...missing});
+      const old = render(StewardChannels);
+      await waitFor(() => expect(card(old.container, 'wechat')).not.toBeNull());
+      expect(old.container.querySelector('[data-channel-alert]')).toBeNull();
+    }
+  });
+
+  it('the times follow the answer\'s rules, not a copy of them', async () => {
+    api.listOwnerChannels.mockResolvedValue(down({down_since: at(4)}, undefined, {alert_limits: {...LIMITS, after_minutes: 20}}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(alertOf(view.container, 'wechat')).not.toBeNull());
+    expect(alertOf(view.container, 'wechat')!.textContent).toBe('Down 4 min; alert at 19:16 if still down');
+  });
+
+  it('a plugin taken back is not connected: Disconnected, the new-QR button, and no real reading yet', async () => {
+    // What the backend answers for "channel plugin stopped" (connected and live 0, no outage clock).
+    api.listOwnerChannels.mockResolvedValue(down({connected: false, live: false, detail: 'channel plugin stopped', down_since: null,
+      up_since: at(600)}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(alertOf(view.container, 'wechat')).not.toBeNull());
+    const wechat = card(view.container, 'wechat');
+    expect(wechat.querySelector('[data-channel-status]')?.getAttribute('data-channel-status')).toBe('disconnected');
+    expect(wechat.querySelector('[data-channel-status]')?.textContent?.trim()).toBe('Disconnected');
+    expect(wechat.querySelector('[data-channel-new-qr]')?.textContent?.trim()).toBe('New QR code');
+    expect(alertOf(view.container, 'wechat')!.textContent).toBe('Real status not read yet (channel plugin stopped)');
   });
 });
 

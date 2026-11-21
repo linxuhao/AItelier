@@ -957,9 +957,16 @@ export interface OwnerChannelLoginRequest {
   requested_at: string; completed_at: string | null;
   result: {requested?: true; refused?: string; retry_after_s?: number} | null;
 }
+/** The backend's own rules of the channel-down alert (core/state_channels.py alert_limits). */
+export interface OwnerChannelAlertLimits {
+  after_minutes: number; retry_after_minutes: number; unreported_minutes: number; attempts: number;
+  down_every_minutes: number; quiet_from_hour: number; quiet_until_hour: number;
+}
 export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null;
-  /** Design 7.9.2: the server's clock, the owner's quiet hours now (until the next 08:00) and zone. */
-  now?: string; quiet_now?: boolean; quiet_until?: string | null; owner_tz?: string }
+  /** Design 7.9.2: the server's clock, the owner's quiet hours now (until the next 08:00) and zone,
+   *  and the alert's rules the card's times are computed with. */
+  now?: string; quiet_now?: boolean; quiet_until?: string | null; owner_tz?: string;
+  alert_limits?: OwnerChannelAlertLimits }
 export function listOwnerChannels(): Promise<OwnerChannels> {
   return _get('/api/steward/channels');
 }

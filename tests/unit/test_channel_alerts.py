@@ -3,7 +3,7 @@
 The status row holds facts only: connected, detail, down_since (this outage's start),
 up_since (the last real reconnect) and live (whether the last reading was a real one; the
 three placeholders - "bridge not reached yet", "connecting", "channel plugin stopped" - are
-not). Each outage has at most one ledger row per kind in state_channel_alerts, keyed
+not; the last one is not connected either, though it starts no outage). Each outage has at most one ledger row per kind in state_channel_alerts, keyed
 (channel, kind, down_since): claimed / sent / failed, attempt 1 or 2. Which alert is due is
 one pure function of the facts, the bindings, the ledger and the time (due_alerts): the host
 reads it (due_channel_alerts), claims an item (claim_channel_alert: judged again, never through
@@ -146,12 +146,47 @@ def test_a_detail_change_keeps_the_outage_clock_and_placeholders_change_no_fact(
         before = a.row("slack")
         a.status("slack", False, placeholder)
         after = a.row("slack")
+        # A start keeps connected; a plugin taken back is not connected (the dashboard shows it
+        # disconnected, with its new-QR button), and neither starts an outage.
         assert (after["connected"], after["down_since"], after["up_since"], after["live"]) == \
-            (1, before["down_since"], before["up_since"], 0), "a placeholder on a connected row"
+            (int(placeholder != "channel plugin stopped"), before["down_since"], before["up_since"], 0), \
+            "a placeholder on a connected row"
         a.status("slack", True)
         assert a.row("slack")["live"] == 1 and a.row("slack")["up_since"] == before["up_since"]
     a.status("wechat", False, "bridge unreachable")
     assert a.row()["live"] == 1 and a.row()["down_since"] == since, "the next real reading"
+
+
+def test_a_stopped_plugin_is_not_connected_and_starts_no_outage(alerts):
+    a = alerts
+    up_since = a.row("slack")["up_since"]
+    a.clock.advance(MIN)
+    a.status("slack", False, "channel plugin stopped")
+    row = a.row("slack")
+    assert (row["connected"], row["live"], row["down_since"], row["up_since"]) == (0, 0, None, up_since)
+    view = a.view("slack")
+    assert (view["connected"], view["live"], view["down_since"]) == (False, False, None)
+    a.clock.advance(HOUR)
+    assert a.due() == [], "taken back is no outage"
+    a.status("slack", True)  # back up: the clocks say it never went down
+    assert (a.row("slack")["connected"], a.row("slack")["up_since"]) == (1, up_since)
+    # Taken back while up, then truly down: this outage starts at that reading.
+    a.status("slack", False, "channel plugin stopped")
+    a.clock.advance(HOUR)
+    a.status("slack", False, "socket closed")
+    assert a.row("slack")["down_since"] == a.clock.now.isoformat()
+    # Taken back while down, then still down: the same outage, its clock kept.
+    since = a.row("slack")["down_since"]
+    a.clock.advance(MIN)
+    a.status("slack", False, "channel plugin stopped")
+    a.clock.advance(MIN)
+    a.status("slack", False, "socket closed")
+    assert a.row("slack")["down_since"] == since
+    # Taken back while down, then up: it came back at that reading.
+    a.status("slack", False, "channel plugin stopped")
+    a.clock.advance(MIN)
+    a.status("slack", True)
+    assert (a.row("slack")["down_since"], a.row("slack")["up_since"]) == (since, a.clock.now.isoformat())
 
 
 def test_a_channel_that_is_not_live_is_neither_alerted_about_nor_carries_an_alert(alerts):
@@ -185,15 +220,8 @@ def test_the_ledger_refuses_an_outage_without_its_start(alerts):
     with alerts.world.db.get_connection() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO state_channel_alerts(channel,kind,down_since,state,attempt,via,claimed_at) "
                      "VALUES('wechat','down',NULL,'claimed',1,'slack','t')")
-
-
-def test_the_ledger_is_indexed_for_the_due_functions_two_questions(alerts):
-    # The ledger only grows; each round asks for delivered down alerts within 6 hours and for
-    # what the owner was last told, per channel (r44h).
     with alerts.world.db.get_connection() as conn:
-        columns = [r["name"] for r in conn.execute("PRAGMA index_info(state_channel_alerts_state)")]
         notnull = {r["name"]: r["notnull"] for r in conn.execute("PRAGMA table_info(state_channel_alerts)")}
-    assert columns == ["channel", "kind", "state", "finished_at"]
     assert notnull["down_since"] == 1
 
 
@@ -229,6 +257,33 @@ def test_an_old_status_table_gains_the_facts_once(tmp_path, monkeypatch):
     with db.get_connection() as conn:
         assert conn.execute("SELECT down_since FROM state_owner_channel_status WHERE channel='wechat'").fetchone()[0] \
             == T0.isoformat()
+
+
+@pytest.mark.parametrize("present", ["live", "down_since"])
+def test_each_backfill_runs_once_when_its_own_column_is_added(tmp_path, monkeypatch, present):
+    # A table that already has one of the two columns a backfill is about (say a start that
+    # added some columns and not the others): the other column's backfill still runs.
+    monkeypatch.setattr(state_channels, "_now", lambda: T0)
+    db = StateDatabase(str(tmp_path / "half.sqlite"))
+    column = "live INTEGER NOT NULL DEFAULT 1" if present == "live" else "down_since TEXT"
+    with db.get_connection() as conn:
+        conn.execute("CREATE TABLE state_owner_channel_status (channel TEXT PRIMARY KEY, connected INTEGER NOT NULL, "
+                     f"detail TEXT, qr_svg TEXT, at TEXT NOT NULL, {column})")
+        conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,at) "
+                     "VALUES('wechat',0,'bridge unreachable','2026-11-01')")
+        conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,at) "
+                     "VALUES('slack',0,'connecting','2026-11-01')")
+        conn.commit()
+    StateService(db, actor="fixture", project_read_trusted=True).channels  # noqa: B018 (builds the schema)
+    with db.get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = {r["channel"]: dict(r) for r in conn.execute("SELECT * FROM state_owner_channel_status")}
+    if present == "live":  # live was there (all 1): only the outage clock is backfilled
+        assert (rows["wechat"]["live"], rows["wechat"]["down_since"]) == (1, T0.isoformat())
+        assert (rows["slack"]["live"], rows["slack"]["down_since"]) == (1, T0.isoformat())
+    else:  # down_since was there: only live is backfilled
+        assert (rows["wechat"]["live"], rows["wechat"]["down_since"]) == (1, None)
+        assert (rows["slack"]["live"], rows["slack"]["down_since"]) == (0, None)
 
 
 def test_a_migrated_outage_is_due_ten_minutes_after_the_migration(alerts):
@@ -744,7 +799,24 @@ def test_the_dashboard_answer_carries_the_server_clock_the_quiet_hours_and_the_o
     a.clock.at(T0)
     listed = a.listing()
     assert (listed["quiet_now"], listed["quiet_until"]) == (False, None)
-    assert all(key not in execute(a.world.owner, "list_owner_channels", {}) for key in ("now", "owner_tz"))
+    assert all(key not in execute(a.world.owner, "list_owner_channels", {}) for key in ("now", "owner_tz", "alert_limits"))
+
+
+def test_the_dashboard_answer_carries_the_due_functions_own_rules(alerts, monkeypatch):
+    # The card's times (web/src/lib/channelAlert.ts) come from these, never from a copy.
+    def minutes(delta):
+        return int(delta.total_seconds() // 60)
+    sc = state_channels
+    assert alerts.listing()["alert_limits"] == {
+        "after_minutes": minutes(sc.ALERT_AFTER), "retry_after_minutes": minutes(sc.ALERT_RETRY_AFTER),
+        "unreported_minutes": minutes(sc.ALERT_UNREPORTED), "attempts": sc.ALERT_ATTEMPTS,
+        "down_every_minutes": minutes(sc.ALERT_DOWN_EVERY), "quiet_from_hour": sc.QUIET_FROM,
+        "quiet_until_hour": sc.QUIET_UNTIL}
+    assert alerts.listing()["alert_limits"] == {"after_minutes": 10, "retry_after_minutes": 30, "unreported_minutes": 10,
+                                                "attempts": 2, "down_every_minutes": 360, "quiet_from_hour": 23,
+                                                "quiet_until_hour": 8}
+    monkeypatch.setattr(state_channels, "ALERT_AFTER", timedelta(minutes=20))
+    assert alerts.listing()["alert_limits"]["after_minutes"] == 20, "read at each answer, not copied"
 
 
 def test_the_card_reads_the_ledgers_projections_and_the_same_due_function(alerts):

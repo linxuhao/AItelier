@@ -109,10 +109,10 @@ CREATE TABLE IF NOT EXISTS state_channel_alerts (
  via TEXT NOT NULL CHECK(via IN ('slack','wechat')),
  claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT,
  PRIMARY KEY(channel, kind, down_since));
--- The ledger only grows; the due function asks each round for a channel's delivered down
--- alerts within ALERT_DOWN_EVERY and for what it last told the owner.
-CREATE INDEX IF NOT EXISTS state_channel_alerts_state
- ON state_channel_alerts(channel, kind, state, finished_at);
+-- No other index: both readers (the due function's facts and the owner's channel list) hand
+-- the whole ledger to the pure due function, and the ledger stays small - at most one row per
+-- kind per outage, a down row only for an outage alerted about, at most one delivered down
+-- alert per channel in ALERT_DOWN_EVERY - so a scan of it costs less than keeping an index.
 CREATE TABLE IF NOT EXISTS state_owner_channels (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
  sender_ref TEXT CHECK(sender_ref IS NULL OR sender_ref<>''),
@@ -236,14 +236,28 @@ ALERT_DETAIL_MAX = 80
 ALERT_ERROR_MAX = 300
 QUIET_FROM, QUIET_UNTIL = 23, 8
 # What a channel plugin or the host says before (or instead of) a real reading: the WeChat
-# plugin's start, Slack's start, and a plugin taken back. A report of one of these changes
-# neither `connected` nor the outage's clock; it only marks the row not live.
-STATUS_PLACEHOLDERS = frozenset({"bridge not reached yet", "connecting", "channel plugin stopped"})
+# plugin's start, Slack's start, and a plugin taken back. A report of one of these marks the
+# row not live and starts no outage clock; the two starts keep `connected` as the last real
+# reading left it, while a plugin taken back (STATUS_STOPPED) is not connected - the dashboard
+# shows it disconnected, with its new-QR button - though it is no outage.
+STATUS_STOPPED = "channel plugin stopped"
+STATUS_PLACEHOLDERS = frozenset({"bridge not reached yet", "connecting", STATUS_STOPPED})
 # The status row's fact columns (added to existing databases): down_since (this outage's
 # start), up_since (the last time it truly came back) - neither is ever cleared - and live
 # (whether the last reading was a real one).
 _STATUS_COLUMNS = (("down_since", "TEXT"), ("up_since", "TEXT"),
                    ("live", "INTEGER NOT NULL DEFAULT 1 CHECK(live IN (0,1))"))
+
+
+def alert_limits() -> dict:
+    """The due function's rules as the owner's channel list carries them (GET
+    /api/steward/channels): the dashboard's alert line reads them from there, never a copy."""
+    def minutes(delta):
+        return int(delta.total_seconds() // 60)
+    return {"after_minutes": minutes(ALERT_AFTER), "retry_after_minutes": minutes(ALERT_RETRY_AFTER),
+            "unreported_minutes": minutes(ALERT_UNREPORTED), "attempts": ALERT_ATTEMPTS,
+            "down_every_minutes": minutes(ALERT_DOWN_EVERY), "quiet_from_hour": QUIET_FROM,
+            "quiet_until_hour": QUIET_UNTIL}
 
 
 def rate_limits() -> tuple[int, int]:
@@ -268,6 +282,18 @@ def quiet_until(moment: datetime):
 
 def _at(stamp):
     return datetime.fromisoformat(stamp)
+
+
+def _was_up(prev):
+    """Whether the channel's last real reading said connected. `connected` is 1 only from a
+    real reading; behind a placeholder that wrote 0 (STATUS_STOPPED) the clocks say it: the
+    later of up_since and down_since."""
+    if prev is None:
+        return False
+    if prev["connected"] or prev["live"]:
+        return bool(prev["connected"])
+    up, down = prev["up_since"], prev["down_since"]
+    return up is not None and (down is None or _at(up) > _at(down))
 
 
 def _settled_failed(row, moment):
@@ -344,7 +370,7 @@ def due_alerts(statuses, bindings, ledger, moment, exclude=()):
                 continue
             if any(r["kind"] == "down" and r["state"] == "sent" and moment - _at(r["finished_at"]) < ALERT_DOWN_EVERY
                    for r in rows):
-                continue  # one down alert in ALERT_DOWN_EVERY; still down when it ends, it is due again
+                continue  # one down alert in ALERT_DOWN_EVERY, even for a new outage after a recovery notice
             if last is not None and last[0]["kind"] == "down":
                 continue  # the owner was told this channel is down and not yet that it came back
             kind = "down"
@@ -574,12 +600,15 @@ class StateChannels:
                 # Additive (message time): every source row written before it has no
                 # channel time, which is what NULL means.
                 add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
-                added = [add_column_if_missing(conn, "state_owner_channel_status", column, definition)
-                         for column, definition in _STATUS_COLUMNS]
-                if added[0]:  # once: a placeholder row waits for a real reading; a real outage starts now
+                added = {column: add_column_if_missing(conn, "state_owner_channel_status", column, definition)
+                         for column, definition in _STATUS_COLUMNS}
+                # Once each, when its column is added: a placeholder row waits for a real reading;
+                # a real outage starts now.
+                if added["live"]:
                     marks = ",".join("?" * len(STATUS_PLACEHOLDERS))
                     conn.execute(f"UPDATE state_owner_channel_status SET live=0 WHERE connected=0 AND detail IN ({marks})",
                                  sorted(STATUS_PLACEHOLDERS))
+                if added["down_since"]:
                     conn.execute("UPDATE state_owner_channel_status SET down_since=? WHERE connected=0 AND live=1",
                                  (_now().isoformat(),))
                 conn.commit()
@@ -1130,18 +1159,20 @@ class StateChannels:
                 check_qr_svg(qr_svg)
             stamp = _now().isoformat()
             # Facts only (design-steward 7.9.2). A placeholder says nothing about the channel:
-            # the row is marked not live and keeps connected and both clocks (its QR, from a
-            # reading the placeholder replaces, goes as it always did). A real reading
-            # starts the outage's clock when the channel goes down, and up_since when it comes back.
+            # the row is marked not live and keeps both clocks (its QR, from a reading the
+            # placeholder replaces, goes as it always did); a start keeps connected, a plugin
+            # taken back is not connected (STATUS_STOPPED). A real reading starts the outage's
+            # clock when the channel goes down, and up_since when it comes back.
             prev = conn.execute("SELECT * FROM state_owner_channel_status WHERE channel=?", (channel,)).fetchone()
             if not connected and detail in STATUS_PLACEHOLDERS:
                 # qr_svg is cleared on purpose: a QR from before the placeholder (say, of a plugin
                 # now stopped) can no longer be scanned, so the dashboard must not keep showing it.
+                connected_now = "0" if detail == STATUS_STOPPED else "connected"
                 conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at,live) "
                              "VALUES(?,0,?,NULL,?,0) ON CONFLICT(channel) DO UPDATE SET live=0,detail=excluded.detail,"
-                             "qr_svg=NULL,at=excluded.at", (channel, detail, stamp))
+                             f"qr_svg=NULL,at=excluded.at,connected={connected_now}", (channel, detail, stamp))
             else:
-                was_up = prev is not None and prev["connected"]
+                was_up = _was_up(prev)
                 down_since, up_since = (prev["down_since"], prev["up_since"]) if prev is not None else (None, None)
                 if connected and not was_up:
                     up_since = stamp
@@ -1361,7 +1392,7 @@ class StateChannels:
         quiet = quiet_until(moment)
         return {"channels": channels, "default_channel": default, "now": moment.isoformat(),
                 "quiet_now": quiet is not None, "quiet_until": quiet.isoformat() if quiet else None,
-                "owner_tz": default_tz()}
+                "owner_tz": default_tz(), "alert_limits": alert_limits()}
 
     @staticmethod
     def _status_view(status, rows, due, moment):

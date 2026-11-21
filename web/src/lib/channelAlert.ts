@@ -9,14 +9,15 @@
  * one that only moves its time, so the time a card promises is the time the backend's due
  * function will name. Times are the server's; HH:MM is shown in the owner's zone.
  */
-import type {OwnerChannel, OwnerChannelAlertRow, OwnerChannelName} from './api';
+import type {OwnerChannel, OwnerChannelAlertLimits, OwnerChannelAlertRow, OwnerChannelName} from './api';
 import type {t} from './i18n.svelte';
 
 const MIN = 60_000;
-// The backend's rules (core/state_channels.py: ALERT_AFTER, ALERT_RETRY_AFTER,
-// ALERT_UNREPORTED, ALERT_ATTEMPTS, ALERT_DOWN_EVERY, QUIET_FROM / QUIET_UNTIL).
-const ALERT_AFTER = 10 * MIN, RETRY_AFTER = 30 * MIN, UNREPORTED = 10 * MIN, ATTEMPTS = 2, DOWN_EVERY = 6 * 60 * MIN;
-const QUIET_FROM = 23, QUIET_UNTIL = 8;
+// The backend's rules come with its answer (alert_limits, core/state_channels.py alert_limits);
+// the page shows no line without them. These values are only for a clock built without them
+// (the tests): never a copy the page relies on.
+export const TEST_ALERT_LIMITS: OwnerChannelAlertLimits = Object.freeze({after_minutes: 10, retry_after_minutes: 30,
+  unreported_minutes: 10, attempts: 2, down_every_minutes: 360, quiet_from_hour: 23, quiet_until_hour: 8});
 // How long a recovery notice's outcome stays on a connected channel's card.
 const UP_SHOWN = 24 * 60 * MIN;
 
@@ -40,30 +41,31 @@ export type ChannelAlertLine =
   | {key: 'upUnclaimed'}
   | {key: 'upWaiting'; at: string; quiet: boolean; first?: string | null};
 
-export interface ChannelClock {now: string; owner_tz: string}
+export interface ChannelClock {now: string; owner_tz: string; limits?: OwnerChannelAlertLimits}
 
 const at = (iso: string) => Date.parse(iso);
-const lapsed = (row: OwnerChannelAlertRow, now: number) =>
-  row.state === 'failed' || (row.state === 'claimed' && now >= at(row.claimed_at) + UNREPORTED);
-const gaveUp = (row: OwnerChannelAlertRow | null | undefined, now: number) => !!row && row.attempt >= ATTEMPTS && lapsed(row, now);
-const firstMissed = (row: OwnerChannelAlertRow | null | undefined, now: number) => !!row && row.attempt < ATTEMPTS && lapsed(row, now);
-const claiming = (row: OwnerChannelAlertRow | null | undefined, now: number) =>
-  !!row && row.state === 'claimed' && now < at(row.claimed_at) + UNREPORTED;
 
 function hourIn(ms: number, zone: string): number {
   return Number(new Intl.DateTimeFormat('en-GB', {timeZone: zone, hour: '2-digit', hourCycle: 'h23'}).format(new Date(ms)));
 }
 
-/** The later of `times` and `now`, and whether it falls in the owner's quiet hours. */
-function when(times: number[], now: number, zone: string): {at: string; quiet: boolean} {
-  const moment = Math.max(now, ...times), hour = hourIn(moment, zone);
-  return {at: new Date(moment).toISOString(), quiet: hour >= QUIET_FROM || hour < QUIET_UNTIL};
-}
-
 export function channelAlertLine(row: OwnerChannel, rows: OwnerChannel[], clock: ChannelClock): ChannelAlertLine {
   const status = row.status;
   if (!status) return {key: 'none'};
-  const now = at(clock.now), zone = clock.owner_tz;
+  const now = at(clock.now), zone = clock.owner_tz, limits = clock.limits ?? TEST_ALERT_LIMITS;
+  const ALERT_AFTER = limits.after_minutes * MIN, RETRY_AFTER = limits.retry_after_minutes * MIN;
+  const UNREPORTED = limits.unreported_minutes * MIN, ATTEMPTS = limits.attempts, DOWN_EVERY = limits.down_every_minutes * MIN;
+  const lapsed = (r: OwnerChannelAlertRow) =>
+    r.state === 'failed' || (r.state === 'claimed' && now >= at(r.claimed_at) + UNREPORTED);
+  const gaveUp = (r: OwnerChannelAlertRow | null | undefined) => !!r && r.attempt >= ATTEMPTS && lapsed(r);
+  const firstMissed = (r: OwnerChannelAlertRow | null | undefined) => !!r && r.attempt < ATTEMPTS && lapsed(r);
+  const claiming = (r: OwnerChannelAlertRow | null | undefined) =>
+    !!r && r.state === 'claimed' && now < at(r.claimed_at) + UNREPORTED;
+  /** The later of `times` and `now`, and whether it falls in the owner's quiet hours. */
+  const when = (times: number[]): {at: string; quiet: boolean} => {
+    const moment = Math.max(now, ...times), hour = hourIn(moment, zone);
+    return {at: new Date(moment).toISOString(), quiet: hour >= limits.quiet_from_hour || hour < limits.quiet_until_hour};
+  };
   const minutes = status.down_since ? Math.max(0, Math.floor((now - at(status.down_since)) / MIN)) : 0;
   const usable = row.bound && !(status.detail ?? '').startsWith('not configured');
   const via = rows.some(o => o.channel !== row.channel && o.bound && o.status?.live !== false && o.status?.connected);
@@ -73,27 +75,27 @@ export function channelAlertLine(row: OwnerChannel, rows: OwnerChannel[], clock:
     if (status.live === false || !status.down_since) return {key: 'notLive', detail: status.detail ?? ''};
     if (down?.state === 'sent') return {key: 'alerted', minutes, at: down.finished_at!, via: down.via};
     if (told?.kind === 'down' && told.down_since !== status.down_since) return {key: 'toldEarlier', minutes, at: told.at};
-    if (claiming(down, now)) return {key: 'alerting', via: down!.via};
-    if (gaveUp(down, now)) return {key: 'gaveUp', error: down!.error};
+    if (claiming(down)) return {key: 'alerting', via: down!.via};
+    if (gaveUp(down)) return {key: 'gaveUp', error: down!.error};
     if (!via) return {key: 'noVia'};
     if (status.alert_due) return {key: 'unclaimed'};
     const times = [at(status.down_since) + ALERT_AFTER];
     if (status.last_down_sent_at) times.push(at(status.last_down_sent_at) + DOWN_EVERY);
-    const missed = firstMissed(down, now);
+    const missed = firstMissed(down);
     if (missed) times.push(at(down!.claimed_at) + RETRY_AFTER);
-    return {key: 'waiting', minutes, ...when(times, now, zone), ...(missed ? {first: down!.error} : {})};
+    return {key: 'waiting', minutes, ...when(times), ...(missed ? {first: down!.error} : {})};
   }
   if (!usable) return {key: 'none'};
   if (status.live === false) return {key: 'notLive', detail: status.detail ?? ''};
   const recent = !!status.up_since && now - at(status.up_since) < UP_SHOWN;
   if (up?.state === 'sent' && recent) return {key: 'upSent', at: up.finished_at!, via: up.via};
-  if (gaveUp(up, now) && recent) return {key: 'upGaveUp', error: up!.error};
+  if (gaveUp(up) && recent) return {key: 'upGaveUp', error: up!.error};
   if (told?.kind !== 'down') return {key: 'none'};
-  if (claiming(up, now)) return {key: 'upSending'};
+  if (claiming(up)) return {key: 'upSending'};
   if (!via) return {key: 'upNoVia'};
   if (status.alert_due) return {key: 'upUnclaimed'};
-  const missed = firstMissed(up, now);
-  return {key: 'upWaiting', ...when(missed ? [at(up!.claimed_at) + RETRY_AFTER] : [], now, zone),
+  const missed = firstMissed(up);
+  return {key: 'upWaiting', ...when(missed ? [at(up!.claimed_at) + RETRY_AFTER] : []),
     ...(missed ? {first: up!.error} : {})};
 }
 

@@ -46,7 +46,8 @@
       const result = await listOwnerChannels();
       if (!alive) return;
       rows = result.channels ?? []; defaultChannel = result.default_channel ?? null;
-      clock = result.now && result.owner_tz ? {now: result.now, owner_tz: result.owner_tz} : null;
+      clock = result.now && result.owner_tz && result.alert_limits
+        ? {now: result.now, owner_tz: result.owner_tz, limits: result.alert_limits} : null;
       error = ''; loaded = true;
       for (const channel of CHANNELS) {
         const live = codes[channel], binding = bindingOf(row(channel));

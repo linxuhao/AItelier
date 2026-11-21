@@ -2,7 +2,7 @@
 // two tables (a down channel, a connected one) has an example; where several hold, the first
 // wins. Times come from the answer's server clock and are shown in the owner's zone.
 import { describe, expect, it, vi } from 'vitest';
-import { channelAlertLine, channelAlertText, ownerTime, type ChannelClock } from '../../lib/channelAlert';
+import { TEST_ALERT_LIMITS, channelAlertLine, channelAlertText, ownerTime, type ChannelClock } from '../../lib/channelAlert';
 import { t } from '../../lib/i18n.svelte';
 import { langStore } from '../../stores/i18n';
 import type { OwnerChannel, OwnerChannelAlertRow } from '../../lib/api';
@@ -162,6 +162,35 @@ describe('a connected channel', () => {
     const status = {up_since: '2026-11-22T20:00:00Z', alert_up: ledger({kind: 'up', finished_at: '2026-11-22T20:05:00Z'}),
       last_told: {kind: 'up' as const, down_since: '2026-11-22T19:00:00Z', at: '2026-11-22T20:05:00Z'}};
     expect(line(status, slackUp, {}, quiet)).toEqual({key: 'none'});
+  });
+});
+
+describe('the backend\'s rules', () => {
+  // The answer's alert_limits (core/state_channels.py alert_limits) set every time on the card.
+  const rules = (over: Partial<NonNullable<ChannelClock['limits']>>): ChannelClock =>
+    ({...CLOCK, limits: {...TEST_ALERT_LIMITS, ...over}});
+
+  it('the answer\'s values move the times: ten minutes in, the retry, the six hours, the unreported claim', () => {
+    expect(words(downFor(4), slackUp, rules({}))).toBe('Down 4 min; alert at 12:06 if still down');
+    expect(words(downFor(4), slackUp, rules({after_minutes: 20}))).toBe('Down 4 min; alert at 12:16 if still down');
+    expect(words(downFor(30, {alert_down: ledger({state: 'failed', claimed_at: ago(20), error: 'x'})}), slackUp,
+      rules({retry_after_minutes: 45}))).toBe('First alert not sent (x); Down 30 min; alert at 12:25 if still down');
+    expect(words(downFor(30, {last_down_sent_at: ago(300)}), slackUp, rules({down_every_minutes: 420})))
+      .toBe('Down 30 min; alert at 14:00 if still down');
+    const claimed = downFor(30, {alert_down: ledger({state: 'claimed', claimed_at: ago(15), finished_at: null})});
+    expect(line(claimed, slackUp, {}, rules({})).key).toBe('waiting');
+    expect(line(claimed, slackUp, {}, rules({unreported_minutes: 20})).key).toBe('alerting');
+  });
+
+  it('the answer\'s attempts and quiet hours', () => {
+    const second = downFor(30, {alert_down: ledger({state: 'failed', attempt: 2, claimed_at: ago(40), error: 'x'})});
+    expect(line(second, slackUp, {}, rules({})).key).toBe('gaveUp');
+    expect(line(second, slackUp, {}, rules({attempts: 3})).key).toBe('waiting');
+    const evening: ChannelClock = {now: '2026-11-23T20:30:00Z', owner_tz: 'Europe/Paris'};  // 21:30 local
+    const status = {connected: false, detail: 'x', down_since: '2026-11-23T20:25:00Z'};
+    expect(channelAlertText(line(status, slackUp, {}, evening), evening, t)).toBe('Down 5 min; alert at 21:35 if still down');
+    const early = {...evening, limits: {...TEST_ALERT_LIMITS, quiet_from_hour: 21}};
+    expect(channelAlertText(line(status, slackUp, {}, early), early, t)).toBe('Down 5 min; alert at 08:00 if still down');
   });
 });
 

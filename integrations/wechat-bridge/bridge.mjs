@@ -31,6 +31,22 @@ export const HOST = '127.0.0.1';
 export const CONTAINER_HOST = '0.0.0.0';
 export const DEFAULT_PORT = 18731;
 export const RING_SIZE = 500;
+/** Step 23 (design-steward 7.7.11): the group path keeps its own ring, so a burst of @-messages
+ *  while the host is away never pushes the owner's 1:1 messages out of theirs, and - once the
+ *  host has named the bound account (`PUT /rooms` owner_ref) - anyone else's 1:1 messages go to
+ *  a small stranger ring for the same reason. All rings share one `seq`. */
+export const GROUP_RING_SIZE = 200;
+export const STRANGER_RING_SIZE = 50;
+/** The platform director's ruling of 2026-11-20 (design 7.7.10): the bounds this bridge
+ *  enforces are code constants. Every group send waits at least sendGapMs after the previous
+ *  one (one queue for all groups); a group past backstopPerHour sends in an hour is answered
+ *  429 - a backstop against a bug, looser than the backend's own 60 + 1 + 1 per group and hour.
+ *  The backend keeps the question quotas (core/state_groups.py GROUP_LIMITS) and the plugin its
+ *  turn bounds (dsh-director/lib/channels.mjs GROUP_LIMITS); no key is in two places. */
+export const GROUP_SEND_LIMITS = Object.freeze({ sendGapMs: 10_000, backstopPerHour: 90 });
+// A group code as the owner posts it after the @ prefix: G-XXXX-XXXX (Crockford base32).
+const GROUP_CODE = /^[Gg](?:[\s-]*[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]){8}$/;
+const MENTION_GAP = /[\u2005 ]/;
 export const MAX_WAIT_SECONDS = 25;
 // WeChat cuts long texts in the client; splitting here keeps each part whole.
 export const SEND_CHUNK = 1500;
@@ -82,12 +98,45 @@ export function isOwnerCandidate(message, types) {
 
 /** `loginEnabled` false (WECHAT_BRIDGE_SKIP_LOGIN=1) answers every POST /login
  *  `login_disabled`: no bot is ever built or started. */
+/** A group message of a bound room that calls the bot: its text after `prefix` (NFKC, leading
+ *  whitespace dropped, the prefix followed by U+2005 or a space), else undefined. */
+export function calledText(text, prefix) {
+  const folded = String(text ?? '').normalize('NFKC').replace(/^\s+/u, '');
+  const head = String(prefix ?? '').normalize('NFKC');
+  if (!head || !folded.startsWith(head) || !MENTION_GAP.test(folded.charAt(head.length))) return undefined;
+  const rest = folded.slice(head.length).trim();
+  return rest || undefined;
+}
+
+/** A message of a room that is not bound: {prefix, code} only when the WHOLE text is one @
+ *  prefix and a group code, else undefined. */
+export function groupBindAttempt(text) {
+  const folded = String(text ?? '').normalize('NFKC').trim();
+  if (!folded.startsWith('@')) return undefined;
+  const cut = Math.max(folded.lastIndexOf('\u2005'), folded.lastIndexOf(' '));
+  if (cut <= 1) return undefined;
+  const prefix = folded.slice(0, cut).trimEnd(), code = folded.slice(cut + 1).trim();
+  // "@name G-XXXX XXXX": the code may itself hold one space; take it back from the prefix.
+  const spaced = /^(.*)[\u2005 ]([Gg][0-9A-Za-z-]{4,})$/u.exec(prefix);
+  if (!GROUP_CODE.test(code) && spaced && GROUP_CODE.test(spaced[2] + ' ' + code))
+    return { prefix: spaced[1].trimEnd(), code: spaced[2] + ' ' + code };
+  return GROUP_CODE.test(code) && prefix.length > 1 ? { prefix, code } : undefined;
+}
+
 export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
-  log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS }) {
+  log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS,
+  groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
-  const ring = [];
+  const ring = [], groupRing = [], strangerRing = [];
+  // Step 23: the host's whitelist (PUT /rooms), in memory only - a restart starts empty and
+  // the host sets it again: the bound account and each bound room with its @ prefix.
+  let ownerRef, rooms = new Map();
+  // Group sends: one queue, a gap between any two, and each room's sends of the last hour.
+  let sendQueue = Promise.resolve(), lastGroupSend = 0;
+  const roomSends = new Map();
   // Sequence numbers start at the boot time in ms: a cursor a client kept from
   // before a bridge restart is below every new number, so a restart never hides
   // new messages behind an old cursor (and needs no reset rule).
@@ -221,16 +270,49 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     return [202, { phase: 'starting' }];
   }
 
+  const push = (target, size, event) => {
+    target.push({ seq: ++seq, ...event });
+    if (target.length > size) target.splice(0, target.length - size);
+  };
+
+  /** A group message (step 23): the account's own and non-text ones are dropped; a bound
+   *  room's message passes only when it calls the bot with the room's prefix; an unbound
+   *  room's only when it is exactly "@prefix group-code". Nothing else is kept or logged. */
+  function relayGroup(message, room, at) {
+    if (message.self() || message.type() !== types.Message.Text) return false;
+    const roomRef = room.id, senderRef = message.talker()?.id;
+    if (!roomRef || !senderRef) return false;
+    const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
+    if (rooms.has(roomRef)) {
+      const text = calledText(message.text(), rooms.get(roomRef));
+      if (text === undefined) return false;
+      push(groupRing, groupRingSize, { type: 'group_message', ...base, text });
+      return true;
+    }
+    const attempt = groupBindAttempt(message.text());
+    if (!attempt) return false;
+    push(groupRing, groupRingSize, { type: 'group_bind', ...base, prefix: attempt.prefix, code: attempt.code });
+    return true;
+  }
+
   function relay(message) {
     try {
-      if (!isOwnerCandidate(message, types)) return;
       // When the owner wrote it, as WeChat says; a message WeChat does not date carries no
       // time (never the bridge's own: the host refuses an undated approval phrase).
       const date = message.date?.();
       const at = date instanceof Date && !Number.isNaN(date.getTime()) ? date.toISOString() : undefined;
-      ring.push({ seq: ++seq, type: 'message', sender_ref: message.talker().id, message_ref: String(message.id),
-        text: message.text(), ...(at ? { at } : {}) });
-      if (ring.length > ringSize) ring.splice(0, ring.length - ringSize);
+      const room = message.room();
+      if (room) {
+        if (!relayGroup(message, room, at)) return;
+      } else {
+        if (!isOwnerCandidate(message, types)) return;
+        const event = { type: 'message', sender_ref: message.talker().id, message_ref: String(message.id),
+          text: message.text(), ...(at ? { at } : {}) };
+        // Once the host named the bound account, anyone else's 1:1 message is a stranger's: it
+        // cannot crowd the owner's out of the main ring.
+        if (ownerRef && event.sender_ref !== ownerRef) push(strangerRing, strangerRingSize, event);
+        else push(ring, ringSize, event);
+      }
       const pending = waiters;
       waiters = new Set();
       for (const wake of pending) wake();
@@ -240,7 +322,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     }
   }
 
-  const after = cursor => ring.filter(event => event.seq > cursor);
+  const after = cursor => [...ring, ...groupRing, ...strangerRing].filter(event => event.seq > cursor)
+    .sort((a, b) => a.seq - b.seq);
 
   // `response` closes before we answer only when the client went away; a request's
   // own 'close' can fire as soon as its (empty) body is read, so it is not used.
@@ -276,6 +359,27 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       ref ??= sent?.id ?? null;
     }
     return [200, { ref }];
+  }
+
+  /** POST /send {room, text} (step 23): only a bound room; one queue for every group, at least
+   *  sendGapMs between two sends, at most backstopPerHour per room and hour (429 past it). */
+  function sendGroup(room, text) {
+    if (!rooms.has(room)) return Promise.resolve([409, { error: 'room_not_bound' }]);
+    const run = sendQueue.then(async () => {
+      if (!state.logged_in || !bot) return [409, { error: 'not_logged_in' }];
+      const at = now().getTime();
+      const recent = (roomSends.get(room) ?? []).filter(time => time > at - HOUR_MS);
+      roomSends.set(room, recent);
+      if (recent.length >= sendLimits.backstopPerHour) return [429, { error: 'room_backstop' }];
+      const wait = lastGroupSend + sendLimits.sendGapMs - at;
+      if (wait > 0) await sleep(wait);
+      lastGroupSend = now().getTime();
+      recent.push(lastGroupSend);
+      const sent = await bot.Room.load(room).say(text);
+      return [200, { ref: sent?.id ?? null }];
+    });
+    sendQueue = run.catch(() => {});
+    return run;
   }
 
   const reply = (response, status, body) => {
@@ -329,8 +433,23 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         const [status, result] = requestLogin();
         return reply(response, status, result);
       }
+      if (request.method === 'PUT' && url.pathname === '/rooms') {
+        const body = await readJson(request);
+        const list = Array.isArray(body?.rooms) ? body.rooms : null;
+        if (!list || list.length > 10 || (body.owner_ref != null && (typeof body.owner_ref !== 'string' || !body.owner_ref))
+          || list.some(r => typeof r?.room_ref !== 'string' || !r.room_ref || typeof r.prefix !== 'string' || !r.prefix.trim()))
+          return reply(response, 400, { error: 'bad_request' });
+        ownerRef = body.owner_ref ?? undefined;
+        rooms = new Map(list.map(r => [r.room_ref, r.prefix.normalize('NFKC').trim()]));
+        return reply(response, 200, { rooms: rooms.size, owner_ref_set: Boolean(ownerRef) });
+      }
       if (request.method === 'POST' && url.pathname === '/send') {
         const body = await readJson(request);
+        if (typeof body?.room === 'string' && body.room) {
+          if (typeof body.text !== 'string' || !body.text.trim()) return reply(response, 400, { error: 'bad_request' });
+          const [status, result] = await sendGroup(body.room, body.text);
+          return reply(response, status, result);
+        }
         if (typeof body?.to !== 'string' || !body.to || typeof body.text !== 'string' || !body.text.trim()) {
           return reply(response, 400, { error: 'bad_request' });
         }

@@ -705,3 +705,79 @@ test('run.sh puts the container on its own network, creating it only when missin
   assert.deepEqual(present.map(line => line.split(' ').slice(0, 2).join(' ')), ['network inspect', 'run --detach']);
   assert.ok(present[1].includes('--network aitelier-wechat-bridge'));
 });
+
+// --- step 23: the family group (design-steward 7.7.11) --------------------------------------
+const ROOM = 'r1@chatroom';
+const roomMessage = (options = {}) => message({ room: { id: options.roomId ?? ROOM }, from: 'wxid_m1', ...options });
+const withRooms = async (s, rooms = [{ room_ref: ROOM, prefix: '@管家' }], owner = 'wxid_owner') =>
+  assert.equal((await s.json('/rooms', { method: 'PUT', body: { owner_ref: owner, rooms } }))[0], 200);
+
+test('group: the bridge keeps the group bounds as code constants', async () => {
+  const { GROUP_SEND_LIMITS, GROUP_RING_SIZE, STRANGER_RING_SIZE } = await import('./bridge.mjs');
+  assert.deepEqual({ ...GROUP_SEND_LIMITS }, { sendGapMs: 10000, backstopPerHour: 90 });
+  assert.equal(Object.isFrozen(GROUP_SEND_LIMITS), true);
+  assert.deepEqual([GROUP_RING_SIZE, STRANGER_RING_SIZE], [200, 50]);
+});
+
+test('group: a bound room passes only messages that call the bot, without the prefix; the rest is dropped', async () => {
+  const s = await started();
+  const bot = await s.login();
+  await withRooms(s);
+  bot.emit('message', roomMessage({ id: 'g1', text: '@管家 武侠那个项目做到哪了' }));
+  bot.emit('message', roomMessage({ id: 'g2', text: '今天吃什么' }));
+  bot.emit('message', roomMessage({ id: 'g3', text: '@管家 hi', self: true }));
+  bot.emit('message', roomMessage({ id: 'g4', text: '@管家 hi', type: types.Message.Image }));
+  bot.emit('message', roomMessage({ id: 'g5', text: '@管家 hi', date: null }));
+  const [, body] = await s.json('/events?after=0');
+  await s.bridge.close();
+  assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.text, e.at ?? null]),
+    [['group_message', 'g1', '武侠那个项目做到哪了', '2026-11-18T10:00:00.000Z'], ['group_message', 'g5', 'hi', null]]);
+  assert.equal(body.events[0].room_ref, ROOM);
+  assert.equal(body.events[0].sender_ref, 'wxid_m1');
+  await s.bridge.close();
+});
+
+test('group: an unbound room passes only "@prefix group-code"', async () => {
+  const s = await started();
+  const bot = await s.login();
+  bot.emit('message', roomMessage({ id: 'b1', roomId: 'r9@chatroom', text: '@管家 G-7K2M-Q9XD' }));
+  bot.emit('message', roomMessage({ id: 'b2', roomId: 'r9@chatroom', text: '@管家 武侠呢' }));
+  bot.emit('message', roomMessage({ id: 'b3', roomId: 'r9@chatroom', text: '看 G-7K2M-Q9XD' }));
+  const [, body] = await s.json('/events?after=0');
+  assert.deepEqual(body.events.map(e => [e.type, e.room_ref, e.prefix, e.code]),
+    [['group_bind', 'r9@chatroom', '@管家', 'G-7K2M-Q9XD']]);
+  await s.bridge.close();
+});
+
+test('group: a full group ring and 600 strangers never push the owner\'s 1:1 messages out', async () => {
+  const s = await started({ groupRingSize: 5, strangerRingSize: 3, known: ['wxid_owner', 'wxid_x'] });
+  const bot = await s.login();
+  await withRooms(s);
+  bot.emit('message', message({ id: 'own1', text: 'from the owner' }));
+  for (let i = 0; i < 20; i++) bot.emit('message', roomMessage({ id: 'g' + i, text: '@管家 q' + i }));
+  for (let i = 0; i < 600; i++) bot.emit('message', message({ id: 's' + i, from: 'wxid_x', text: 'hello' }));
+  const [, body] = await s.json('/events?after=0');
+  const kinds = body.events.map(e => e.message_ref);
+  assert.ok(kinds.includes('own1'));
+  assert.equal(kinds.filter(k => k.startsWith('g')).length, 5);
+  assert.equal(kinds.filter(k => k.startsWith('s')).length, 3);
+  // One seq across the rings, in order.
+  assert.deepEqual(body.events.map(e => e.seq), [...body.events.map(e => e.seq)].sort((a, b) => a - b));
+  await s.bridge.close();
+});
+
+test('group: sends go to bound rooms only, one queue with the gap, and a room\'s backstop answers 429', async () => {
+  let clock = Date.parse('2026-11-21T10:00:00Z');
+  const slept = [];
+  const s = await started({ now: () => new Date(clock), sleep: async ms => { slept.push(ms); clock += ms; },
+    sendLimits: { sendGapMs: 10000, backstopPerHour: 3 },
+    prepare: bot => { bot.Room = { load: id => ({ say: async text => { bot.said.push({ room: id, text }); return { id: 'gr' + bot.said.length }; } }) }; } });
+  const bot = await s.login();
+  assert.equal((await s.json('/send', { method: 'POST', body: { room: ROOM, text: 'x' } }))[1].error, 'room_not_bound');
+  await withRooms(s);
+  const sends = await Promise.all([1, 2, 3, 4].map(i => s.json('/send', { method: 'POST', body: { room: ROOM, text: 'a' + i } })));
+  assert.deepEqual(sends.map(([status]) => status), [200, 200, 200, 429]);
+  assert.deepEqual(bot.said.map(x => x.text), ['a1', 'a2', 'a3']);
+  assert.deepEqual(slept, [10000, 10000]);
+  await s.bridge.close();
+});

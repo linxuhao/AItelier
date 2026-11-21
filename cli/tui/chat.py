@@ -754,8 +754,8 @@ class ChatZone(Container):
         # Butler vs coding mode — user-toggled (never model-toggled, so prompt
         # injection can't escalate). The mode used to ride every chat request and
         # be persisted server-side to sessions.mode; with the backend retired it
-        # is local UI state only. Coding mode used to unlock the interactive
-        # coding agent (edit_file/bash/generate_pipeline/…).
+        # is local UI state only. Coding mode used to unlock the butler's
+        # in-process coding agent (edit_file/bash/…), retired with it.
         self._agent_mode: str = "butler"
         self._agent_streaming = False
         self._queued_message: str | None = None
@@ -1279,10 +1279,10 @@ class ChatZone(Container):
     def _handle_mode_cmd(self, arg: str):
         """Show or switch the butler↔coding agent mode.
 
-        Coding mode unlocks the interactive coding agent (edit_file / bash /
-        generate_pipeline / drive_pipeline / …). Mirrors the web SPA's mode
-        toggle; the request field is the ONLY way to set it (never a model
-        tool), so this stays a user-driven control."""
+        Coding mode used to unlock the butler's in-process coding agent
+        (edit_file / bash / …); with the butler retired the mode is local UI
+        state only and unlocks nothing. Pipeline generation and test-drives are
+        MCP tools (generate_pipeline, run_pipeline + wait_for_run)."""
         arg = (arg or "").lower()
         if not arg:
             self._add_system(
@@ -1294,9 +1294,7 @@ class ChatZone(Container):
             return
         self._agent_mode = arg
         self._add_system(
-            f"Switched to {arg} mode."
-            + (" Coding agent unlocked (edit_file/bash/generate_pipeline/…)."
-               if arg == "coding" else ""))
+            f"Switched to {arg} mode.")
 
     def _handle_project_cmd(self, arg: str):
         """Handle /project <number|id>."""

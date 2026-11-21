@@ -583,8 +583,7 @@ def measure_outgoing_body(kwargs: dict) -> tuple[int, list[dict]]:
     Called ONCE per completion by `refuse_if_body_too_large` (the funnel
     `_complete_prebuilt` goes through it, as did both direct
     `litellm.acompletion` sites in the retired core/meta_agent.py), never per
-    candidate attempt and
-    never twice in one call. Cost: one JSON encoding of
+    candidate attempt and never twice in one call. Cost: one JSON encoding of
     the payload the transport is about to encode anyway — a second pass over
     bytes that then go out over a network call costing seconds to minutes, so
     it is a rounding error against the call it protects. It is also why this
@@ -718,11 +717,11 @@ def refuse_if_body_too_large(kwargs: dict, *, identity: dict | None = None) -> N
       3. `_stream_llm` (was in the retired core/meta_agent.py) — the butler's
          streaming turn, through its `_open_stream` attempt.
 
-    Sites 2 and 3 went with the butler; only site 1 remains today, and any new
-    direct `litellm.acompletion` caller must call this guard itself.
     Sites 2 and 3 bypassed the gateway entirely, so a body over the bound there
     was forwarded unexamined and died upstream with the same unattributable
-    `decoded body exceeds 50331648 bytes` the guard exists to replace. The
+    `decoded body exceeds 50331648 bytes` the guard exists to replace. They
+    went with the butler; only site 1 remains today, and any new direct
+    `litellm.acompletion` caller must call this guard itself. The
     bound, the error type and this message shape live HERE and nowhere else; an
     imported guard keeps them one policy, a second copy in a bypass path drifts.
 

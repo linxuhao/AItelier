@@ -58,8 +58,10 @@ export function defaultTexts() {
  *  `header`. */
 export class ContextInjection {
   constructor(session, runtime, createMessage, { kind = defaultLabels.context, section = defaultLabels.contextSection,
-    header = 'Director context — startup / post-compaction snapshot:\n' } = {}) {
-    Object.assign(this, { session, runtime, createMessage, kind, section, header });
+    header = 'Director context — startup / post-compaction snapshot:\n', audience = () => 'owner' } = {}) {
+    // `audience()`: whose turn it is (step 23, design-steward 7.7.6). Only an owner turn gets
+    // the snapshot; a group turn neither gets it nor counts as having had it.
+    Object.assign(this, { session, runtime, createMessage, kind, section, header, audience });
     this.epoch = 0;
     this.injected = undefined;
     this.queued = undefined;
@@ -73,7 +75,7 @@ export class ContextInjection {
     }
   }
   async prepare() {
-    if (this.injected === this.epoch) return;
+    if (this.injected === this.epoch || this.audience() !== 'owner') return;
     await this.runtime.refresh();
     const text = this.header + this.runtime.render();
     const message = this.createMessage({ content: [{ type: 'text', text }], source: {
@@ -84,7 +86,7 @@ export class ContextInjection {
     return message;
   }
   async beforeRequest() {
-    if (this.injected === this.epoch || this.queued?.epoch === this.epoch) return;
+    if (this.injected === this.epoch || this.queued?.epoch === this.epoch || this.audience() !== 'owner') return;
     // Overflow retries do not run pre-step again. Their initial step already
     // committed its system prompt; append the fresh postcompact snapshot now.
     const message = await this.prepare();

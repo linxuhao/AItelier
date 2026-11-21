@@ -23,8 +23,10 @@
  *    inbox/*.json|txt one wake event per file, id 'inbox:<file>'; delivered, then moved to inbox/done/
  *    progress.jsonl  one phase report per line
  *    questions.json  the director's questions to its owner: { "<id>": { text, context?, status
- *                    (open | answered | withdrawn), asked_at, answer?, reason? } }; the
- *                    owner answers by dropping inbox/answer-<id>.json ({ "answer": "..." })
+ *                    (open | answered | withdrawn), asked_at, answer?, answered_by?, answered_at?,
+ *                    reason? } }; the owner answers by dropping inbox/answer-<id>.json
+ *                    ({ "answer": "...", "answered_by"?: "..." }); an answer without
+ *                    answered_by is recorded as owner:local
  *    state/          the director's own state (todo plans) */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -43,6 +45,9 @@ async function writeJson(file, value) {
   await writeFile(file + '.tmp', JSON.stringify(value, null, 2) + '\n');
   await rename(file + '.tmp', file);
 }
+/** Who answered when nothing says: the owner of this local host (plugin step 15). */
+export const LOCAL_OWNER = 'owner:local';
+const ANSWER_FILE = /^answer-([A-Za-z0-9._:-]{1,64})\.json$/;
 
 /** @param options - root (required), sessionId, provider, model, dshEntry, rolesFile,
  *  objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv }. */
@@ -178,22 +183,25 @@ export function localHost(options = {}) {
           if (isDisposed()) return;
           const path = join(files.inbox, file);
           const [text, { ino, mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
-          const answered = /^answer-([A-Za-z0-9._:-]{1,64})\.json$/.exec(file)?.[1];
+          const answered = ANSWER_FILE.exec(file)?.[1];
           if (answered) {
             // The owner's answer: recorded on the question (an answer wins over a
-            // withdrawal), then delivered naming the question, then moved like any event.
-            let answer;
-            try { answer = JSON.parse(text).answer; } catch { answer = undefined; }
+            // withdrawal) with who answered (step 15: owner:local when the file does not
+            // say), then delivered naming the question, then moved like any event.
+            let answer, by;
+            try { ({ answer, answered_by: by } = JSON.parse(text)); } catch { answer = undefined; }
+            const answeredBy = typeof by === 'string' && by.trim() ? by.trim() : LOCAL_OWNER;
             const all = await locked(async () => {
               const current = await questions();
               if (current[answered] && typeof answer === 'string') {
-                current[answered] = { ...current[answered], status: 'answered', answer, answered_at: current[answered].answered_at ?? new Date().toISOString() };
+                current[answered] = { ...current[answered], status: 'answered', answer, answered_by: answeredBy,
+                  answered_at: current[answered].answered_at ?? new Date().toISOString() };
                 await writeJson(files.questions, current);
               }
               return current;
             });
             await notify('Owner answered (' + file + '):\n' + JSON.stringify({ question_id: answered, question: all[answered]?.text ?? null,
-              answer: answer ?? null, ...(all[answered] ? {} : { unknown_question: true }) }), { id: `inbox:${file}:${ino}:${mtimeMs}` });
+              answer: answer ?? null, answered_by: answeredBy, ...(all[answered] ? {} : { unknown_question: true }) }), { id: `inbox:${file}:${ino}:${mtimeMs}` });
             await rename(path, join(files.done, file));
             continue;
           }

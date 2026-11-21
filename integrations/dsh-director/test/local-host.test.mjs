@@ -123,10 +123,13 @@ test('local host: the owner answers by dropping answer-<id>.json; the event name
   events.stop(); await events.done;
   assert.equal(api.notified.length, 1);
   const delivered = JSON.parse(api.notified[0].slice(api.notified[0].indexOf('\n') + 1));
-  assert.deepEqual(delivered, { question_id: 'q-1', question: 'Restart now?', answer: 'yes, at 14:00Z' });
+  assert.deepEqual(delivered, { question_id: 'q-1', question: 'Restart now?', answer: 'yes, at 14:00Z', answered_by: 'owner:local' });
   assert.match(api.notifiedIds[0], /^inbox:answer-q-1\.json:/);
   const stored = JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'))['q-1'];
   assert.equal(stored.status, 'answered'); assert.equal(stored.answer, 'yes, at 14:00Z');
+  // Step 15: an answer is attributable - a file that does not say who answered is the owner's (owner:local).
+  assert.equal(stored.answered_by, 'owner:local');
+  assert.match(stored.answered_at, /^\d{4}-\d\d-\d\dT/);
   assert.deepEqual(await host.attention.list(), []);
   assert.equal((await host.attention.close({ id: 'q-1', reason: 'late' })).refused, 'question_answered', 'an answered question was withdrawn');
 });

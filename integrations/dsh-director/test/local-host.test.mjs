@@ -327,7 +327,12 @@ test('local host, step 15: the steward\'s snapshot tells it how its owner answer
   assert.doesNotMatch(full, /\/forget/);
   // With memory: memory_forget refuses (no_owner_channel), so the steward is told to give its owner /forget.
   const remembering = JSON.parse(await localHost({ root, projectsDir, memory: { userId: 'owner' } }).context('steward')).owner_commands;
-  assert.match(remembering, /\/forget <id> \[reason\] and bring it back with \/restore <id>\. When memory_forget refuses with no_owner_channel, give them \/forget <id> \[reason\] instead\.$/);
+  assert.match(remembering, /\/profile, forget one memory entry with \/forget <id> \[reason\] and bring it back with \/restore <id>, or remove one from every version, for good, with \/purge <id>\. When memory_forget refuses with no_owner_channel, give them \/forget <id> \[reason\] instead\.$/);
+  // Every owner command a DSH with proposals and memory registers is named.
+  const commands = fakeCommands();
+  registerOwnerCommands(commands, { questions: async () => ({}), answer: async () => ({}), proposals: async () => ({}), decide: async () => ({}), memory: {} });
+  assert.equal(commands.defs.size, 9);
+  for (const name of [...commands.defs.keys()]) assert.ok(remembering.includes('/' + name + ' ') || remembering.includes('/' + name + ','), `owner_commands names /${name}`);
   assert.ok(remembering.startsWith(full.slice(0, -1)), 'the memory commands are added after the others');
   assert.equal(JSON.parse(await localHost({ root, memory: { userId: 'owner' } }).context('director')).owner_commands, undefined);
   assert.equal(JSON.parse(await localHost({ root, projectsDir }).context('director')).owner_commands, undefined, 'the director\'s snapshot is unchanged');
@@ -506,7 +511,7 @@ test('local host, director 471: /forget and /restore - recoverable forgetting by
     const commands = fakeCommands();
     const api = commandApi(commands, store);
     const events = await localHost({ root, ...required, pollMs: 10 }).events(api);
-    const wakes = () => api.notified.filter(text => /^Director event \(owner-memory-\d+-\d+\.txt\):\n/.test(text));
+    const wakes = () => api.notified.filter(text => /^Director event \(owner-memory-\d+-\d+-[0-9a-f]{8}\.txt\):\n/.test(text));
     // Refusals: no id, an unknown id, an entry that is not forgotten; none changes anything or wakes.
     for (const [name, input, said] of [['forget', '', /^Usage: \/forget <id> \[reason\]$/], ['restore', '  ', /^Usage: \/restore <id>$/],
       ['forget', ' t-nope because', /^Not forgotten t-nope: unknown_id/], ['restore', ' t-t1-0', /^Not restored t-t1-0: not_forgotten/],
@@ -561,6 +566,27 @@ test('local host, director 471: a wake that cannot be written is said, and the f
   const restored = await commands.run('restore', ' m-1');
   assert.equal(restored.kind, 'success'); assert.match(restored.text, /Your steward was not told: disk full\.$/);
   assert.deepEqual(calls, [['forget', ['m-1'], { reason: 'old', by: 'owner:local' }], ['restore', 'm-1', 'owner:local']]);
+});
+
+test('local host, director 472: a wake written after a restart in the same millisecond does not overwrite an undelivered one', async () => {
+  const root = await freshRoot();
+  const memory = { forget: async ids => ({ forgotten: ids, already: [], unknown: [], remote_forget: 'local', note: 'n' }), restore: async id => ({ restored: id }) };
+  const now = Date.now;
+  try {
+    Date.now = () => 1700000000000;
+    // Two process lives, each with its counter at 0; a disposed api delivers nothing, so the first wake waits.
+    for (const [name, input] of [['forget', ' m-1 old'], ['restore', ' m-1']]) {
+      const commands = fakeCommands();
+      const events = await localHost({ root, ...required, pollMs: 600000 }).events({ ...commandApi(commands, memory), isDisposed: () => true });
+      assert.equal((await commands.run(name, input)).kind, 'success');
+      events.stop(); await events.done;
+    }
+  } finally { Date.now = now; }
+  const names = (await readdir(join(root, 'inbox'))).filter(name => name.startsWith('owner-memory-')).sort();
+  assert.equal(names.length, 2, names.join(' '));
+  for (const name of names) assert.match(name, /^owner-memory-1700000000000-1-[0-9a-f]{8}\.txt$/);
+  const lines = await Promise.all(names.map(name => readFile(join(root, 'inbox', name), 'utf8')));
+  assert.deepEqual(lines.map(line => /forgot|restored/.exec(line)[0]).sort(), ['forgot', 'restored']);
 });
 
 // ---- Review 467 (s15 section 2): bounded portfolio pages, tolerant proposal records,

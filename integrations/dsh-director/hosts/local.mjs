@@ -38,7 +38,7 @@
  *  (ctx.commands; not registered when the process has none) - see local-commands.mjs:
  *  /questions, /answer <id> <text>, /proposals, /approve <id>, /decline <id> [reason], /profile,
  *  /purge <id>, /forget <id> [reason], /restore <id> (the last two wake the steward with one line,
- *  inbox/owner-memory-<ms>-<n>.txt). A DSH command carries no user identity, so whatever the owner decides through
+ *  inbox/owner-memory-<ms>-<n>-<random hex>.txt). A DSH command carries no user identity, so whatever the owner decides through
  *  them is recorded as owner:local (answered_by, decided_by).
  *  With `projectsDir` (a directory whose every subdirectory is one local host root, its name
  *  the project id) the host also offers the steward `portfolio` (those projects, read-only) and
@@ -46,7 +46,7 @@
  *  project.json, notes.md (the goal) and work.json (one work item per seed node). */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
 import { registerOwnerCommands } from './local-commands.mjs';
@@ -70,7 +70,8 @@ const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposa
   + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
 /** With memory: memory_forget refuses here (no_owner_channel - a DSH command carries no owner
  *  message to cite), so the steward sends its owner to the commands that forget and restore. */
-const STEWARD_MEMORY_COMMANDS = '; they forget one memory entry with /forget <id> [reason] and bring it back with /restore <id>.'
+const STEWARD_MEMORY_COMMANDS = '; they see their resident profile with /profile, forget one memory entry with /forget <id> [reason]'
+  + ' and bring it back with /restore <id>, or remove one from every version, for good, with /purge <id>.'
   + ' When memory_forget refuses with no_owner_channel, give them /forget <id> [reason] instead';
 /** One page of a portfolio answer, as the backend adapter's steward host pages one (steward-host.mjs
  *  NODES_CHARS): as many entries as fit while the whole answer stays under this many characters,
@@ -272,11 +273,13 @@ export function localHost(options = {}) {
       ...(proposal.result ? { result: proposal.result } : {}) }) + '\n');
     await rename(file + '.tmp', file);
   };
-  /** An owner's memory command (/forget, /restore) as a wake event: one line in its own inbox file. */
+  /** An owner's memory command (/forget, /restore) as a wake event: one line in its own inbox file.
+   *  The counter starts again at a restart, so a random suffix keeps a wake from one process
+   *  life from overwriting an undelivered one from the last, even within the same millisecond. */
   let wakes = 0;
   const wakeLine = async line => {
     await mkdir(files.inbox, { recursive: true });
-    const file = join(files.inbox, `owner-memory-${Date.now()}-${++wakes}.txt`);
+    const file = join(files.inbox, `owner-memory-${Date.now()}-${++wakes}-${randomBytes(4).toString('hex')}.txt`);
     await writeFile(file + '.tmp', line + '\n');
     await rename(file + '.tmp', file);
   };

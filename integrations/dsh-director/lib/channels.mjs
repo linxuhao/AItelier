@@ -52,6 +52,7 @@ const DECIDED = Object.freeze({
   stop_driver: t => [`stop director of ${t}`, `停止 ${t} 项目的导演`],
   archive_project: t => [`archive project ${t}`, `归档 ${t} 项目`],
   unarchive_project: t => [`unarchive project ${t}`, `取消归档 ${t} 项目`],
+  connection_change: t => [`change the steward's connection ${t}`, `修改管家的连接 ${t}`],
 });
 const cut = (value, max) => { const s = String(value ?? ''); return s.length > max ? s.slice(0, max - 1) + '…' : s; };
 const decided = ({ kind, target }) => {
@@ -83,6 +84,9 @@ export const channelReplies = Object.freeze({
     }
     if (refusal === 'approval_undated') return `proposal ${id}: not done - the message carried no time, so it cannot decide; use the dashboard. 未执行：消息没有时间，不能用来决定，请在面板上操作。`;
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
+    // Step 24.1c (design-steward 7.8.10a): a change that widens a connection's permissions has
+    // no chat approval - its card is on the dashboard (there is no box to tick).
+    if (refusal === 'needs_dashboard_approval') return `proposal ${id}: not done - approve it on the dashboard card. 未执行：这条要在面板的卡片上批准。`;
     return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
   },
   /** Step 24.1b (design-steward 7.8.9): the host decided the sender's `确认 <code>` /

@@ -833,6 +833,21 @@ export function catalogOps(request, { confirm } = {}) {
     humanInput,
     // This host's own writing tools (runtime.mjs) and the State writes behind them.
     writes: ['reply_to_director', 'schedule_set', 'schedule_delete', 'send_director_message', 'send_driver_message'],
+    // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
+    // changes; the owner approves and the backend executes. It writes no registry row itself.
+    manage: {
+      tools: (connId, signal) => request('/api/state/query/list_steward_connection_tools', { conn_id: connId }, signal)
+        .then(r => r?.result ?? r, stateRefusal),
+      refresh: (connId, signal) => request('/api/state/commands/steward_connection_refresh', { conn_id: connId }, signal)
+        .then(r => r?.result ?? r, stateRefusal),
+      propose({ payload, reason, supersedes }, signal) {
+        const body = { kind: 'connection_change', payload, reason, ...(supersedes ? { supersedes } : {}) };
+        // The proposal's digest: a retried call is State's replay, not a second card.
+        const key = 'proposal:' + createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 40);
+        return request('/api/state/commands/create_steward_proposal', { request_key: key, ...body }, signal)
+          .then(r => r?.result ?? r, stateRefusal);
+      },
+    },
   };
 }
 
@@ -1000,6 +1015,9 @@ export function stewardOps({ request, rawRequest = request, project, me, stateDi
       const result = await request('/api/state/commands/send_director_message', {
         sender_project_id: project, director_identity: me, target_project_id: projectId,
         request_key: `handoff:${citesUserMessageId}:${projectId}`, subject: 'From your owner, via the steward',
+        // Step 24.1c (7.8.10a): the owner message this letter passes on, checked by the backend,
+        // so a director's reply to it can be the source of a connection proposal.
+        cites_owner_message_id: citesUserMessageId,
         body: markExternal(`${text.trim()}\n\nYour owner wrote (message ${citesUserMessageId}, ${cited.created_at}):\n${quoted}`, externalContent()) }, signal)
         .catch(error => ({ error: String(error?.message ?? error) }));
       if (result.error) return /idempotency_conflict/.test(result.error)

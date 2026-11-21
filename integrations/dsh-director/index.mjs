@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
+import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
 import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
@@ -694,6 +695,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // when the host's catalog provides confirmations.
     if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput,
       HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog });
+    // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
+    // changes to them, when the host's catalog provides those operations.
+    if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,
+      manage: catalogHost.manage, catalog: stewardCatalog, host: catalogHost });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
     // Step 23: the family memory, a store of its own on the host, for group turns only (the

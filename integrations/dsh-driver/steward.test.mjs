@@ -449,7 +449,8 @@ test('owner-message check and handoff: only the owner\'s own message, never to t
   const done = await ops.handoff({ projectId: 'wuxia', text: 'Your owner asks you to pause the save rows.', citesUserMessageId: 'o1' });
   assert.equal(done.handed_off, true);
   assert.deepEqual({ ...state.sent[0], body: undefined }, { sender_project_id: 'aitelier-home', director_identity: 'drv-home',
-    target_project_id: 'wuxia', request_key: 'handoff:o1:wuxia', subject: 'From your owner, via the steward', body: undefined });
+    target_project_id: 'wuxia', request_key: 'handoff:o1:wuxia', subject: 'From your owner, via the steward', body: undefined,
+    cites_owner_message_id: 'o1' }, 'step 24.1c: the backend checks and keeps the owner message the letter passes on');
   assert.match(state.sent[0].body, /^Your owner asks you to pause the save rows\.\n\nYour owner wrote \(message o1, .*\):\n> tell wuxia to pause the save rows$/);
   assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'Your owner asks you to pause the save rows.', citesUserMessageId: 'o1' })).handed_off, true, 'a retry is a replay');
   assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'other words', citesUserMessageId: 'o1' })).refused, 'already_handed_off');
@@ -1258,6 +1259,30 @@ test('step 24.1b: the requester is the newest owner message the wake carries; th
   assert.equal(ops.confirm, confirm);
   assert.equal(ops.requesterOf, requesterOf);
   assert.equal(catalogOps(request).confirm, undefined, 'no confirmations without the ops');
+});
+
+test('step 24.1c: the connection ops are two reads, one refresh and one proposal of kind connection_change', async () => {
+  const calls = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path.endsWith('/steward_connection_refresh')) throw new Error('AItelier /x: HTTP 422 "refresh_too_soon"');
+    if (path.endsWith('/create_steward_proposal')) return { result: { proposal_id: 'prop-1', version: 1, status: 'open', needs_dashboard: true } };
+    return { result: { conn_id: body.conn_id, tools: [] } };
+  };
+  const { manage } = catalogOps(request);
+  assert.deepEqual(await manage.tools('media'), { conn_id: 'media', tools: [] });
+  assert.deepEqual((await manage.refresh('media')).refused, 'refresh_too_soon');
+  const proposal = { payload: { op: 'remove', conn_id: 'media', source: { kind: 'owner_message', ref: 'm1' }, conn_uid: 'u',
+    expect_config_version: 2, external_content: false }, reason: 'owner asked' };
+  assert.deepEqual(await manage.propose(proposal), { proposal_id: 'prop-1', version: 1, status: 'open', needs_dashboard: true });
+  await manage.propose(proposal);
+  assert.deepEqual(calls.map(([path]) => path.split('/').slice(-2).join('/')), ['query/list_steward_connection_tools',
+    'commands/steward_connection_refresh', 'commands/create_steward_proposal', 'commands/create_steward_proposal']);
+  const [, body] = calls[2];
+  assert.equal(body.kind, 'connection_change');
+  assert.deepEqual(body.payload, proposal.payload);
+  assert.match(body.request_key, /^proposal:[0-9a-f]{40}$/);
+  assert.equal(calls[3][1].request_key, body.request_key, 'a retry is State\'s replay, not a second card');
 });
 
 test('a refused reply is not reported as sent: a 200 with a code inside the result is a refusal in either inbox', async () => {

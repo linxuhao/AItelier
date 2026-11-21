@@ -297,6 +297,12 @@ export interface DirectorHost {
    *    reached them (`channel` is the requester's: a chat channel's mirror must take it);
    *    cancel voids a pending record whose text did not arrive; get answers the stored
    *    record ({status, name, arguments}) run_confirmed runs. Refusals are {refused}.
+   *  - manage (optional, step 24.1c, design-steward 7.8.10a): connections_list,
+   *    connection_tools, connection_refresh and propose_connection_change are registered only
+   *    with it. tools reads one connection's tools (descriptions are the server's words);
+   *    refresh re-reads its server's list (new, changed and gone names) and never changes a
+   *    permission; propose records one open proposal of kind connection_change and answers
+   *    {proposal_id, version, status, needs_dashboard}. Refusals are {refused}.
    *  The catalog writes no audience of its own: the turn's audience is step 23's (groups.audience,
    *  recorded by the group turns before each turn's first step), which the catalog reads to filter
    *  and the host's MCP gateway reads to judge a private connection's call. */
@@ -313,6 +319,13 @@ export interface DirectorHost {
         Promise<{ message_id: string } | { refused: string; reason?: string }>;
       cancel(code: string, signal?: AbortSignal): Promise<unknown>;
       get(code: string, signal?: AbortSignal): Promise<{ status: string; name: string; arguments: object } | { refused: string }>;
+    };
+    manage?: {
+      tools(connId: string, signal?: AbortSignal): Promise<{ conn_id: string; tools: object[] } | { refused: string }>;
+      refresh(connId: string, signal?: AbortSignal):
+        Promise<{ conn_id: string; added: string[]; changed: string[]; gone: string[] } | { conn_id: string; error: string } | { refused: string }>;
+      propose(proposal: { payload: object; reason: string; supersedes?: string }, signal?: AbortSignal):
+        Promise<{ proposal_id: string; version: number; status: 'open'; needs_dashboard: boolean } | { refused: string; reason?: string }>;
     };
   };
   channels?: {

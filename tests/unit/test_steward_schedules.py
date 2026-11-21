@@ -407,7 +407,11 @@ def test_the_owner_round_trip_over_http(world, client):
     assert row["next_run_at"] == "2027-01-04T14:00:00+00:00"
     assert set(row) == {"schedule_id", "version", "title", "instruction", "schedule", "tz", "enabled", "next_run_at",
                         "last_run_at", "last_missed", "created_by", "updated_by", "last_fired_by", "created_at",
-                        "updated_at", "overdue_seconds"}
+                        "updated_at", "overdue_seconds",
+                        # Step 25 C11 (design-steward 7.9.4): the target and the binding a group reminder
+                        # records, and the run the row last fired for (tests/unit/test_steward_family.py).
+                        "target", "target_channel", "target_group_ref", "target_bound_at", "last_due_at"}
+    assert row["target"] == "owner" and row["target_group_ref"] is None
     listed = client.get("/api/steward/schedules", headers=OWNER_HEADERS)
     assert listed.status_code == 200 and listed.json()["schedules"] == [row], listed.text
     # The steward reads it too, and may change the owner's row: updated_by says so.

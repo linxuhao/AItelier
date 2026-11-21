@@ -97,6 +97,19 @@ test('proposals: propose passes kind, payload, reason (and supersedes); an unkno
     ['withdraw', { id: 'p-1', reason: 'gone' }]]);
 });
 
+test('proposals, step 15: a host that names its kinds (the local host: create_project) is offered only those', async () => {
+  const calls = [];
+  const proposals = { kinds: ['create_project'], propose: async p => (calls.push(p), { proposal_id: 'p-1' }), withdraw: async () => ({}) };
+  const propose = collect(registerProposalTools, { proposals }).get('propose');
+  assert.deepEqual(propose.parameters.kind.enum, ['create_project']);
+  assert.match(propose.description, /kind is one of create_project\. payload: create_project \{project_id, title, goal, seed_nodes/);
+  assert.doesNotMatch(propose.description, /start_driver|stop_driver|archive_project/);
+  assert.deepEqual(await propose.execute({ kind: 'start_driver', payload: { project_id: 'w' }, reason: 'r' }, exec), { refused: 'unknown_kind', kinds: ['create_project'] });
+  assert.equal(calls.length, 0);
+  await propose.execute({ kind: 'create_project', payload: { project_id: 'w', title: 't', goal: 'g' }, reason: 'r' }, exec);
+  assert.equal(calls.length, 1);
+});
+
 test('request_wechat_qr asks the WeChat channel for a login and answers only {requested} or {refused, retry_after_s}: never a QR', async () => {
   const asked = [];
   let answer;
@@ -121,4 +134,10 @@ test('request_wechat_qr asks the WeChat channel for a login and answers only {re
   assert.ok(roles.steward.presented.includes('request_wechat_qr'));
   assert.ok(!roles.director.presented.includes('request_wechat_qr') && !roles.worker.presented.includes('request_wechat_qr'));
   assert.match(readFileSync(new URL('../steward.md', import.meta.url), 'utf8'), /request_wechat_qr[\s\S]*only on the dashboard's Channels tab/);
+});
+
+test('proposals, review 467: a host that can execute none of the kinds is offered no propose (never "kind is one of .")', () => {
+  const proposals = { kinds: [], propose: async () => ({}), withdraw: async () => ({}) };
+  const tools = collect(registerProposalTools, { proposals });
+  assert.deepEqual([...tools.keys()], ['withdraw_proposal']);
 });

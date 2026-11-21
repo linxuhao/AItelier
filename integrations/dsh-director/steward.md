@@ -41,6 +41,9 @@ When your owner writes:
   as it was given to you, and say they can send that line back from Slack or WeChat as
   well as decide on the dashboard. Only that exact line, sent by your owner, decides; you
   never approve or decline anything yourself.
+  If your context snapshot has owner_commands, your owner has no Slack, WeChat or
+  dashboard: give them the commands it names instead of that line; only their command
+  decides.
 - Questions a director asked your owner stay theirs: point your owner to them, never
   answer them yourself.
 

@@ -314,9 +314,15 @@ class DBManager:
                 conn.execute("ALTER TABLE chat_history ADD COLUMN message_json TEXT")
             except sqlite3.OperationalError:
                 pass
-            # Migration: per-session agent mode (butler | coding), user-toggled.
+            # Migration: per-session agent mode (coding), user-toggled.
             try:
-                conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'butler'")
+                conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'coding'")
+            except sqlite3.OperationalError:
+                pass
+            # Migration: butler mode was deleted, so rows created while it existed stop
+            # reading as a mode that no longer exists.
+            try:
+                conn.execute("UPDATE sessions SET mode = 'coding' WHERE mode = 'butler'")
             except sqlite3.OperationalError:
                 pass
             # Migration: cumulative token counter persisted across chat() calls.
@@ -2028,7 +2034,7 @@ class DBManager:
         return out
 
     def set_session_mode(self, session_id: str, mode: str):
-        """Persist the agent mode (butler | coding) on a session."""
+        """Persist the agent mode (coding) on a session."""
         with self.get_connection() as conn:
             conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
             conn.execute("UPDATE sessions SET mode = ? WHERE id = ?",
@@ -2036,12 +2042,12 @@ class DBManager:
             conn.commit()
 
     def get_session_mode(self, session_id: str) -> str:
-        """Return the session's stored agent mode (defaults to 'butler')."""
+        """Return the session's stored agent mode (defaults to 'coding')."""
         with self.get_connection() as conn:
             row = conn.execute(
                 "SELECT mode FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
-            return (row["mode"] if row and row["mode"] else "butler")
+            return (row["mode"] if row and row["mode"] else "coding")
 
     def get_session_total_tokens(self, session_id: str) -> int:
         """Return the session's accumulated total token count (default 0)."""

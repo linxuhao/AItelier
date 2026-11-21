@@ -577,8 +577,6 @@ def declare_isolation(db, run_id: str, project_id: str, config_name: str) -> Non
                    config_name=config_name, repo_mode=repo_mode)
 
 
-
-
 def _resume_existing(db, existing: dict, run_id: str, project_id: str,
                      config_name: str) -> dict:
     """Return the one decision already made for this run.

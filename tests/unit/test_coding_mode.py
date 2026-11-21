@@ -69,10 +69,25 @@ class TestTranscriptPersistence:
 
     def test_session_mode(self, db_manager):
         sid = db_manager.create_session()
-        assert db_manager.get_session_mode(sid) == "butler"
+        assert db_manager.get_session_mode(sid) == "coding"
         db_manager.set_session_mode(sid, "coding")
         assert db_manager.get_session_mode(sid) == "coding"
-        assert db_manager.get_session_mode("nonexistent") == "butler"
+        assert db_manager.get_session_mode("nonexistent") == "coding"
+
+    def test_a_row_written_while_butler_mode_existed_reads_coding(self, db_manager):
+        """The column's default and the backfill both moved to 'coding'; a row that
+        already holds the deleted value is rewritten when the schema is built again."""
+        from core.db_manager import DBManager
+
+        sid = db_manager.create_session()
+        with db_manager.get_connection() as conn:
+            conn.execute("UPDATE sessions SET mode = 'butler' WHERE id = ?", (sid,))
+            conn.commit()
+        # The row really holds the old value first — otherwise the assertion below
+        # would pass on a fresh default and measure nothing.
+        assert db_manager.get_session_mode(sid) == "butler"
+        rebuilt = DBManager(db_manager.db_path)
+        assert rebuilt.get_session_mode(sid) == "coding"
 
 
 class TestCondenser:

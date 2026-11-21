@@ -341,6 +341,20 @@ class ListDriverMessages(Request):
     driver_id: str | None = None
     after: int = Field(default=0, ge=0)
     limit: int = Field(default=100, ge=1, le=100)
+    newest: bool = Field(default=False, description=(
+        "Answer the NEWEST `limit` deliveries (descending seq, newest first) instead of the "
+        "oldest `limit` above `after` (ascending). False keeps the forward keyset page. "
+        "`after` still bounds the window; matched_total/has_more describe the same filtered set."))
+    statuses: list[Literal["unread", "acknowledged", "resolved"]] | None = Field(
+        default=None, min_length=1, description=(
+            "Optional delivery-status filter. The page, matched_total and has_more all "
+            "count only deliveries carrying one of these statuses."))
+
+    @model_validator(mode="after")
+    def statuses_are_unique(self):
+        if self.statuses is not None and len(set(self.statuses)) != len(self.statuses):
+            raise ValueError("statuses must be duplicate-free")
+        return self
 
 
 class MessageSegment(BaseModel):

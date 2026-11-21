@@ -52,6 +52,18 @@ test('audience: a turn whose first step has a group message is that group\'s; ot
   assert.deepEqual(g.split([group('mid')], 2).back.map(m => m.content[0].text), ['mid']);
 });
 
+test('audience: the host\'s system clock line is nobody\'s input - a group turn keeps it, puts nothing back, still merges', () => {
+  const g = new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group-turns-')), limits: GROUP_LIMITS, neutralKinds: ['host-clock'] });
+  const clock = message('[system clock] now', { kind: 'host-clock' }), q1 = group('q1');
+  const first = g.split([clock, q1], 1);
+  assert.deepEqual(first, { keep: [clock, q1], back: [] });
+  assert.equal(g.audience().kind, 'group');
+  assert.equal(g.waiting.size, 0, 'the clock line waits on no turn');
+  // No owner input is waiting, so the next question of the same group still merges.
+  const q2 = group('q2');
+  assert.deepEqual(g.split([message('[system clock] later', { kind: 'host-clock' }), q2], 2).keep.at(-1), q2);
+});
+
 test('audience: a group turn merges at most five questions of its group', () => {
   const g = turns();
   const qs = Array.from({ length: 7 }, (_, i) => group('q' + i));

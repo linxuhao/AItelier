@@ -150,7 +150,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // Step 23 (design-steward 7.7): the steward's family-group turns - whose turn it is, what it
   // may call, and that a group turn never stays in the owner's context (lib/group-turns.mjs).
   const groupTurns = rootRole === 'steward' ? new GroupTurns({ stateDir: config.stateDir, limits: GROUP_LIMITS,
-    pausedTools: Array.isArray(host.groups?.pausedTools) ? host.groups.pausedTools : [] }) : undefined;
+    pausedTools: Array.isArray(host.groups?.pausedTools) ? host.groups.pausedTools : [],
+    // The root session's clock line enters a step inside the group hook (it registers later, so
+    // it runs inner): nobody's input, never a reason to put a turn's input back.
+    neutralKinds: [labels.clock] }) : undefined;
   if (groupTurns) {
     // Synchronous, keyed on the caller's session; call_tool reaches the same guard. The turn DSH
     // has open keys the bookkeeping: a group turn's call count is that turn's, from 0.

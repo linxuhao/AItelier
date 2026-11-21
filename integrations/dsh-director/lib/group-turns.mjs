@@ -45,9 +45,10 @@ const readable = message => {
 };
 const turnKey = turn => turn === undefined || turn === null ? undefined : String(turn);
 /** DSH's own per-step context (working directory, sandbox policy): nobody's input, kept in
- *  whichever turn it arrives with and never a reason to put anything back. */
+ *  whichever turn it arrives with and never a reason to put anything back. The host adds its
+ *  own such kinds (`neutralKinds`: the system clock line, which joins a step's input inside
+ *  this hook). */
 const NEUTRAL = new Set(['runtime-context', FOLD_SOURCE]);
-const isNeutral = message => NEUTRAL.has(message?.source?.kind);
 const keepOnFold = event => event.type === 'user/message'
   && (event.data?.source?.kind === FOLD_SOURCE || /compact/.test(String(event.data?.source?.kind ?? '')));
 const FOLDABLE = new Set(['user/message', 'assistant/message', 'tool/result']);
@@ -169,8 +170,9 @@ export function filterCompactionRequest(options, events, createUserMessage) {
  *  The merge count and the tool call count belong to one turn id (`current.turn`): each turn
  *  starts them at 0, and only a group turn counts (7.7.3 item 3, 7.7.5). */
 export class GroupTurns {
-  constructor({ stateDir, limits, log = () => {}, pausedTools = [] }) {
+  constructor({ stateDir, limits, log = () => {}, pausedTools = [], neutralKinds = [] }) {
     Object.assign(this, { limits, log });
+    this.neutral = new Set([...NEUTRAL, ...neutralKinds]);
     this.pausedTools = new Set([...PAUSED_TOOLS, ...pausedTools]);
     this.pauseFile = stateDir ? join(stateDir, 'group-pause.json') : undefined;
     // The owner input a group turn put back (message ids): it opens the very next turn, so the
@@ -184,6 +186,8 @@ export class GroupTurns {
     this.liveTurn = undefined;
   }
 
+  /** Nobody's input: kept in whichever turn it arrives with, never put back or waited on. */
+  isNeutral(message) { return this.neutral.has(message?.source?.kind); }
   /** DSH opened turn `turn` (the root session's turn/start). */
   turnOpened(turn) { this.liveTurn = turnKey(turn); }
   /** The bookkeeping of the turn that is open now, or undefined when it is another turn's. */
@@ -224,7 +228,7 @@ export class GroupTurns {
   split(messages, step, turnId) {
     if (step === 1 || !this.current || this.current.turn !== turnKey(turnId)) {
       // Owner input a group turn put back opens this turn, whatever else came with it.
-      const waited = messages.some(m => !isGroup(m) && !isNeutral(m) && this.waiting.has(m.id));
+      const waited = messages.some(m => !isGroup(m) && !this.isNeutral(m) && this.waiting.has(m.id));
       const first = waited ? undefined : messages.find(isGroup);
       const audience = first ? { kind: 'group', channel: first.source.channel, group_ref: first.source.group_ref,
         label: first.source.group_label } : { kind: 'owner' };
@@ -233,7 +237,7 @@ export class GroupTurns {
     const turn = this.current, keep = [], back = [];
     let served = false;
     for (const message of messages) {
-      if (isNeutral(message)) { keep.push(message); continue; }
+      if (this.isNeutral(message)) { keep.push(message); continue; }
       if (turn.audience.kind === 'owner') {
         if (isGroup(message)) back.push(message);
         else { keep.push(message); served = this.waiting.delete(message.id) || served; }
@@ -322,7 +326,7 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
     if (!kept.length || !canSteer()) return 0;
     rmSync(pendingFile, { force: true });
     const messages = kept.map(m => createUserMessage({ content: m.content, source: m.source }));
-    for (const message of messages) if (!isGroup(message) && !isNeutral(message)) turns.wait(message.id);
+    for (const message of messages) if (!isGroup(message) && !turns.isNeutral(message)) turns.wait(message.id);
     steer(messages);
     return messages.length;
   };

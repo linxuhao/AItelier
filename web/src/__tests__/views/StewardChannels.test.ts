@@ -423,68 +423,83 @@ describe('the channels tab', () => {
   });
 });
 
-// Step 25 C12 (design 7.9.2): a channel that is down shows its down-alert line on its card and at
-// the top of the steward's pane - delivered (minutes, time, the other channel), failed (why), or
-// no other bound connected channel to carry it (only once the 10-minute alert delay has passed).
+// Step 25 C12 (design 7.9.2): each card shows its alert line (lib/channelAlert.ts, whose tables
+// have their own tests), from the answer's server clock and the owner's zone; the steward's pane
+// carries the lines the owner may have to act on, named, on every tab.
 describe('the channel-down alert line', () => {
-  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
-  const down = (wechatStatus: object, slack: object = {status: {connected: true}}) => channels({channels: [
-    {channel: 'slack', bound: true, sender_ref: 'U0OWNER', bound_at: '2026-11-18T10:00:00Z', revoked_at: null, is_default: 1, ...slack},
-    {channel: 'wechat', bound: true, sender_ref: 'wxid_owner', bound_at: '2026-11-18T10:00:00Z', revoked_at: null, is_default: 0,
-      status: {connected: false, detail: 'no QR (logged_out)', down_since: ago(12), alerted_at: null, alert_via: null, alert_error: null,
-        ...wechatStatus}}]});
+  const NOW = '2026-11-23T11:00:00Z';
+  const at = (minutes: number) => new Date(Date.parse(NOW) - minutes * 60_000).toISOString();
+  const sent = {kind: 'down', down_since: at(30), state: 'sent', attempt: 1, via: 'slack', claimed_at: at(20), finished_at: at(20), error: null};
+  const down = (wechatStatus: object, slack: object = {status: {connected: true, live: true}}, clock: object = {}) => ({
+    ...channels({channels: [
+      {channel: 'slack', bound: true, sender_ref: 'U0OWNER', bound_at: '2026-11-18T10:00:00Z', revoked_at: null, is_default: 1, ...slack},
+      {channel: 'wechat', bound: true, sender_ref: 'wxid_owner', bound_at: '2026-11-18T10:00:00Z', revoked_at: null, is_default: 0,
+        status: {connected: false, live: true, detail: 'no QR (logged_out)', down_since: at(30), up_since: null, alert_down: null,
+          alert_up: null, last_told: null, last_down_sent_at: null, alert_due: null, ...wechatStatus}}]}),
+    now: NOW, quiet_now: false, quiet_until: null, owner_tz: 'Asia/Shanghai', ...clock});
   const alertOf = (container: HTMLElement, channel: string) => card(container, channel).querySelector('[data-channel-alert]');
 
-  it('says how long it is down and when and where the owner was alerted', async () => {
-    const at = ago(2);
-    api.listOwnerChannels.mockResolvedValue(down({alerted_at: at, alert_via: 'slack'}));
+  it('says how long it is down and when (in the owner\'s zone) and where the owner was alerted', async () => {
+    api.listOwnerChannels.mockResolvedValue(down({alert_down: sent}));
     const view = render(StewardChannels);
     await waitFor(() => expect(alertOf(view.container, 'wechat')).not.toBeNull());
-    const time = new Date(at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-    expect(alertOf(view.container, 'wechat')!.textContent).toBe(`Down 12 min; alerted on Slack at ${time}`);
+    expect(alertOf(view.container, 'wechat')!.textContent).toBe('Down 30 min; alerted on Slack at 18:40');
     expect(alertOf(view.container, 'wechat')!.getAttribute('data-channel-alert')).toBe('alerted');
     expect(alertOf(view.container, 'slack')).toBeNull();
     langStore.set('zh-CN');
-    await waitFor(() => expect(alertOf(view.container, 'wechat')!.textContent).toBe(`断开 12 分钟，${time} 已在 Slack 告警`));
+    await waitFor(() => expect(alertOf(view.container, 'wechat')!.textContent).toBe('断开 30 分钟，18:40 已在 Slack 告警'));
   });
 
-  it('a failed alert says it was not sent and why', async () => {
-    api.listOwnerChannels.mockResolvedValue(down({alerted_at: ago(2), alert_via: 'slack', alert_error: '409 recipient_unknown'}));
+  it('a given-up alert says it was not sent and why; a pending one says when it will go', async () => {
+    api.listOwnerChannels.mockResolvedValue(down({alert_down: {...sent, attempt: 2, state: 'failed', error: '409 recipient_unknown'}}));
     const view = render(StewardChannels);
     await waitFor(() => expect(alertOf(view.container, 'wechat')).not.toBeNull());
     expect(alertOf(view.container, 'wechat')!.textContent).toBe('Down alert not sent: 409 recipient_unknown');
+    cleanup();
+    api.listOwnerChannels.mockResolvedValue(down({down_since: at(4)}));
+    const early = render(StewardChannels);
+    await waitFor(() => expect(alertOf(early.container, 'wechat')).not.toBeNull());
+    expect(alertOf(early.container, 'wechat')!.textContent).toBe('Down 4 min; alert at 19:06 if still down');
   });
 
-  it('no other connected channel: says so once the alert delay has passed, nothing before', async () => {
-    api.listOwnerChannels.mockResolvedValue(down({}, {status: {connected: false, detail: 'socket closed', down_since: ago(1)}}));
+  it('no other connected channel says so', async () => {
+    api.listOwnerChannels.mockResolvedValue(down({}, {status: {connected: false, live: true, detail: 'socket closed', down_since: at(1)}}));
     const view = render(StewardChannels);
     await waitFor(() => expect(alertOf(view.container, 'wechat')).not.toBeNull());
     expect(alertOf(view.container, 'wechat')!.textContent).toBe('No other channel to send the down alert through');
-    expect(alertOf(view.container, 'slack')).toBeNull();
-    cleanup();
-    api.listOwnerChannels.mockResolvedValue(down({down_since: ago(9)}, {status: {connected: false, down_since: ago(1)}}));
-    const early = render(StewardChannels);
-    await waitFor(() => expect(card(early.container, 'wechat')).not.toBeNull());
-    expect(alertOf(early.container, 'wechat')).toBeNull();
   });
 
-  it('a connected channel, or one not bound, has no line', async () => {
-    api.listOwnerChannels.mockResolvedValue(channels());
+  it('a connected channel with nothing owed, one not bound, or an answer without the server clock has no line', async () => {
+    api.listOwnerChannels.mockResolvedValue({...channels(), now: NOW, owner_tz: 'Europe/Paris'});
     const view = render(StewardChannels);
     await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
     expect(view.container.querySelector('[data-channel-alert]')).toBeNull();
+    cleanup();
+    api.listOwnerChannels.mockResolvedValue({...down({alert_down: sent}), now: undefined});
+    const old = render(StewardChannels);
+    await waitFor(() => expect(card(old.container, 'wechat')).not.toBeNull());
+    expect(old.container.querySelector('[data-channel-alert]')).toBeNull();
   });
 
-  it('the same line is at the top of the steward\'s pane, named, on every tab', async () => {
+  it('the lines the owner may have to act on are at the top of the steward\'s pane, named, on every tab', async () => {
     api.dshDriverConversation.mockResolvedValue(page([]));
-    api.listOwnerChannels.mockResolvedValue(down({alerted_at: ago(2), alert_via: 'slack'}));
+    api.listOwnerChannels.mockResolvedValue(down({alert_down: sent}));
     const view = render(StewardPane, {projectId: 'aitelier-home', status: status('steward', 'aitelier-home'), onanswer: vi.fn()});
     const top = () => view.container.querySelector('[data-steward-channel-alert="wechat"]');
     await waitFor(() => expect(top()).not.toBeNull());
-    expect(top()!.textContent).toMatch(/^WeChat: Down 12 min; alerted on Slack at /);
+    expect(top()!.textContent).toBe('WeChat: Down 30 min; alerted on Slack at 18:40');
     expect(view.container.querySelector('[data-steward-channel-alert="slack"]')).toBeNull();
     await fireEvent.click(view.getByRole('tab', {name: 'Proposals'}));
     expect(top()).not.toBeNull();
+  });
+
+  it('a channel that only waits for its alert time is not at the top of the pane', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([]));
+    api.listOwnerChannels.mockResolvedValue(down({down_since: at(4)}));
+    const view = render(StewardPane, {projectId: 'aitelier-home', status: status('steward', 'aitelier-home'), onanswer: vi.fn()});
+    await waitFor(() => expect(api.listOwnerChannels).toHaveBeenCalled());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(view.container.querySelector('[data-steward-channel-alert]')).toBeNull();
   });
 });
 

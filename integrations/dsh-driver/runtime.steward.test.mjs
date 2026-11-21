@@ -120,6 +120,10 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
       assert.ok(mine.length, `boot ${boot}: no steward request`);
       for (const r of mine) {
         assert.deepEqual([...r.tools].sort(), expected, `boot ${boot}: the steward's tool list`);
+        // Design-steward 7.9.2 F6: the steward has no State MCP client, so no command behind the
+        // host's own code (claim_channel_alert, record_channel_alert, due_channel_alerts) can
+        // reach its tool table - beside the exact set above, no presented name is an MCP one.
+        assert.deepEqual(r.tools.filter(name => name.startsWith('mcp__')), [], `boot ${boot}: the steward is presented an MCP tool`);
         assert.ok(r.system.includes(stewardSkill.trim()), `boot ${boot}: the steward's system prompt lacks steward.md`);
         assert.ok(!r.system.includes(directorSkill.split('\n')[0]), `boot ${boot}: the steward's system prompt carries director.md`);
         assert.ok(r.recent, `boot ${boot}: the steward's request lacks the recent conversation from memory`);

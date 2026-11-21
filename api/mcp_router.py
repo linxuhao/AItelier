@@ -363,12 +363,13 @@ def build_mcp() -> FastMCP:
             "AItelier runs deterministic, auditable multi-step pipelines. Use it when you need a "
             "reproducible workflow (research → architect → plan → implement → verify), not a quick "
             "one-off edit.\n"
-            "Generate a pipeline: describe the workflow, then generate_pipeline (coding mode).\n"
+            "Generate a pipeline: generate_pipeline(description) → wait_for_run → answer_checkpoint "
+            "at its design review; on completion list_pipelines shows it as gen_<slug>.\n"
             "Run: list_pipelines → run_pipeline(config) → wait_for_run(run_id).\n"
             "Checkpoints: when a run pauses, answer_checkpoint(run_id, 'approve'|'reject', feedback).\n"
             "Inspect: get_run_summary / get_run_status / trace_list / trace_read / get_step_output.\n"
             "Edit a generated pipeline: edit_pipeline / edit_role / edit_template / edit_tool, then "
-            "drive_pipeline to test it before relying on it."
+            "run_pipeline + wait_for_run to test-drive it before relying on it."
         )
 
     return mcp

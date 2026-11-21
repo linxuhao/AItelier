@@ -1617,3 +1617,20 @@ def test_stop_pipeline_reconciles_the_checkout_lease(monkeypatch):
         "steps_closed": [], "admitted_operations": [],
         "admitted_owner_state": {}, "recovery_required": False})
     assert calls == [(None, "r1")]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_workflow_prompt_names_only_registered_tools():
+    """The `pipeline_workflow` prompt outlived a tool it taught: after the butler
+    was retired it still told callers to `drive_pipeline` a generated pipeline,
+    a tool that no longer existed anywhere. Every snake_case word in the prompt
+    is a tool name except the argument names listed here."""
+    import re
+    mcp = build_mcp()
+    result = await mcp.get_prompt("pipeline_workflow")
+    text = " ".join(m.content.text for m in result.messages)
+    tools = {t.name for t in await mcp.list_tools()}
+    args = {"run_id"}
+    named = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", text))
+    assert named, "prompt text not read"
+    assert named - args <= tools, f"unknown tools in prompt: {named - args - tools}"

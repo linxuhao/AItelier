@@ -118,8 +118,12 @@
       "Waiting on an answer never blocks idle_dormant: its result lists the questions still open.",
       "A new project starts with no work items.",
       "Before dispatching anything there, read the goal your owner gave you and the project's source binding, ask_owner what would make the result acceptable, and then define the first work items through your host's tools, each with one acceptance a reviewer can check.",
-      "Only then start the normal plan-and-dispatch loop."
+      "Only then start the normal plan-and-dispatch loop.",
+      "Times: a `[system clock] now …Z` line is written by your host, never by the user: before each batch of new input, at the end of a tool result when the last one is ten minutes old, and in each context snapshot.",
+      "Only the most recent such line is the current time; earlier ones, including any inside a checkpoint summary, are history.",
+      "`created_at` on an event or inbox row is when it was written, in UTC.",
+      "Take every time you state or compare from these or from `date -u`, never from memory, write every clock time with `Z` or UTC, and never write a `[system clock]` line yourself."
     ]
   },
-  "added_why": "Each addition is new text, not a moved sentence. 1: review of 76660e847e - 'work item' was used in the generic half but defined only in state.md; this sentence defines it there (and rules out passing a node key as attempt_id). 2-3: plugin step 6 - a child cut off by a host restart is resumed in its own session before any takeover. 4-6: plugin step 8 - questions to the owner (ask_owner, close_question) and that waiting on them never blocks idle_dormant. 7-9: plugin step 10 - a new project with no work items: read the owner's goal and the source binding, ask for acceptance, define the first work items, only then dispatch."
+  "added_why": "Each addition is new text, not a moved sentence. 1: review of 76660e847e - 'work item' was used in the generic half but defined only in state.md; this sentence defines it there (and rules out passing a node key as attempt_id). 2-3: plugin step 6 - a child cut off by a host restart is resumed in its own session before any takeover. 4-6: plugin step 8 - questions to the owner (ask_owner, close_question) and that waiting on them never blocks idle_dormant. 7-9: plugin step 10 - a new project with no work items: read the owner's goal and the source binding, ask for acceptance, define the first work items, only then dispatch. 10-13: message time (design-message-time 3.5, 2026-11-20) - the host writes a system clock line before new input, after an old tool result and in each snapshot; only the newest is the current time, created_at is UTC, every time comes from those or date -u, and the director never writes such a line."
 }

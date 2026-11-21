@@ -409,6 +409,15 @@ test('driver guide: independent tool calls share a step, and state_graph_write f
     'state_graph_write fills director_identity when omitted, and project_id while you belong to exactly one project - except on a notebook write, which must name its notebook (project_id or driver_id) itself'])
     assert.ok(guide.includes(phrase), phrase);
 });
+test('driver guide (message time 3.5): the system clock line is the host\'s, only the newest is now, and it is never written', async () => {
+  const guide = (await driverGuide()).replace(/\s+/g, ' ');
+  for (const phrase of ['Times: a `[system clock] now …Z` line is written by your host, never by the user',
+    'before each batch of new input, at the end of a tool result when the last one is ten minutes old, and in each context snapshot',
+    'Only the most recent such line is the current time', 'including any inside a checkpoint summary, are history',
+    '`created_at` on an event or inbox row is when it was written, in UTC', 'never from memory',
+    'write every clock time with `Z` or UTC', 'never write a `[system clock]` line yourself'])
+    assert.ok(guide.includes(phrase), phrase);
+});
 test('a failing dormancy compaction is reported, never thrown, and dormancy holds', async t => {
   t.mock.timers.enable({apis:['setTimeout']});
   const errors=[],agent={status:'idle'},goal={id:'g',phase:'active',activation:'disarmed'};

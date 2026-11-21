@@ -23,8 +23,8 @@ export const name = 'fixture-steward-provider';
 export const inject = ['llm'];
 const post = (path, body) => fetch(process.env.STW_TEST_URL + path, { method: 'POST', body: JSON.stringify(body) }).catch(() => {});
 const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
-const systemText = messages => messages.filter(m => m.role === 'system')
-  .map(m => typeof m.content === 'string' ? m.content : m.content.map(b => b.text ?? '').join('')).join('\n');
+const flat = m => typeof m.content === 'string' ? m.content : m.content.map(b => b.text ?? '').join('');
+const systemText = messages => messages.filter(m => m.role === 'system').map(flat).join('\n');
 export function apply(ctx) {
   const done = new Set(), boot = process.env.STW_TEST_BOOT;
   const once = (key, make) => done.has(key) ? undefined : (done.add(key), make());
@@ -35,7 +35,7 @@ export function apply(ctx) {
       await post('/test/request', { session: options.sessionId, purpose: options.purpose ?? null,
         tools: (options.tools ?? []).map(t => t.name), descriptions: (options.tools ?? []).map(t => [t.name, t.description ?? '']),
         recent: text.includes('RECENT_TURN_MARKER_99'),
-        system: systemText(options.messages) });
+        system: systemText(options.messages), users: options.messages.filter(m => m.role === 'user').map(flat) });
       let block;
       if (options.purpose === 'compaction') block = { type: 'text', text: 'Checkpoint: nothing in flight.' };
       else if (!options.tools?.length || options.sessionId !== 'stw-root') block = { type: 'text', text: 'Fixture session' };
@@ -135,6 +135,21 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
     assert.ok(!output.includes('STEWARD_HAS_A_SHELL'), 'bash never ran');
     assert.match(resultText("n1"), /\\"id\\":\\"n-[0-9a-f]{20}/);
     checkRequests(1, 0);
+    // Message time (design-message-time 12-3, real DSH): the step that claimed the wake carries
+    // one system clock line right before it (UTC only: this memory has no time zone), the
+    // snapshot carries its own, and the steps after a tool call (no new input) add none.
+    const clockLines = r => r.users.filter(u => u.startsWith('[system clock] '));
+    const [first, second, third] = rootRequests();
+    const wake = first.users.findIndex(u => u.startsWith('Director event (start.json)'));
+    assert.ok(wake >= 0, 'the first request carries the wake: ' + JSON.stringify(first.users).slice(0, 2000));
+    assert.match(String(first.users[wake - 1]), /^\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ$/, 'the clock line right before the wake');
+    assert.equal(clockLines(first).length, 1, 'one clock line for the step');
+    assert.ok(first.users.some(u => /\n\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ \(context snapshot\)\n/.test(u)), 'the snapshot has its line');
+    for (const later of [second, third]) assert.deepEqual(clockLines(later), clockLines(first), 'a step without new input adds no clock line');
+    assert.ok(stewardSkill.includes('Times: a line that starts with `[system clock]` is written by your host, not by your'), 'steward.md: who writes the clock');
+    for (const phrase of ['Only the most recent such line is the current time', '`channel_at`, when present, is when your owner sent it',
+      'Never copy the `[system clock]` line or its format into anything you'])
+      assert.ok(stewardSkill.replace(/\s+/g, ' ').includes(phrase), phrase);
     const before = rootRequests().length;
     proc.kill('SIGTERM'); await once(proc, 'exit');
 

@@ -6,8 +6,8 @@
  *  - the AUDIENCE of a turn: a turn whose first step claims a message tagged by the host
  *    (`source.kind` GROUP_SOURCE) is that group's turn, any other turn the owner's; input of
  *    another audience is put back to open the next turn;
- *  - the GUARD: a group turn may call only GROUP_TOOLS (at most turnToolCalls calls, counted
- *    per turn id from 0), an owner turn never the family memory tools, and after a group turn,
+ *  - the GUARD: a group turn may call only GROUP_TOOLS (at most turnToolCalls calls, every call
+ *    counted, refused or not, per turn id from 0), an owner turn never the family memory tools, and after a group turn,
  *    until the owner writes, an owner turn not the PAUSED_TOOLS (group-pause.json);
  *  - the FOLD: each finished group turn is replaced on the surface by one fixed line at the
  *    first step of the next turn (DSH's own positional replace, the one compaction uses), so
@@ -253,14 +253,17 @@ export class GroupTurns {
   }
 
   /** The guard's verdict for one root tool call (a refusal string, or undefined). The audience
-   *  first, then the count: only a group turn counts its calls, from 0 in each turn. */
+   *  first, then the count: only a group turn counts its calls, from 0 in each turn, and it
+   *  counts EVERY call the guard sees (a refused one too, as resume() counts them from the log),
+   *  so a group turn is bounded at turnToolCalls calls: from the next one on every call is
+   *  answerNow, whatever its name; before that a name off the whitelist is groupTurnRefusal. */
   guard(name) {
     const turn = this.open();
     if ((turn?.audience.kind ?? 'group') === 'group') {
+      if (turn) turn.calls += 1;
+      if (turn && turn.calls > this.limits.turnToolCalls) return answerNow;
       if (!GROUP_TOOLS.has(name)) return groupTurnRefusal;
-      if (!turn) return answerNow;
-      turn.calls += 1;
-      return turn.calls > this.limits.turnToolCalls ? answerNow : undefined;
+      return turn ? undefined : answerNow;
     }
     if (FAMILY_TOOLS.has(name)) return familyRefusal;
     if (this.paused() && this.pausedTools.has(name)) return pausedRefusal;

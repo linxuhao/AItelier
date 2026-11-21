@@ -62,10 +62,12 @@ test('audience: a group turn merges at most five questions of its group', () => 
 });
 
 test('guard: in a group turn only the four tools, at most six calls; anything new is refused', () => {
-  const g = turns();
-  g.split([group('q')], 1);
-  for (const name of STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n))) assert.equal(g.guard(name), groupTurnRefusal, name);
-  assert.equal(g.guard('a_tool_added_next_year'), groupTurnRefusal);
+  // Each name as a turn's first call (every call counts, so a 7th refused call would read answerNow).
+  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'a_tool_added_next_year']) {
+    const g = turns();
+    g.split([group('q')], 1);
+    assert.equal(g.guard(name), groupTurnRefusal, name);
+  }
   const g2 = turns();
   g2.split([group('q')], 1);
   for (const name of ['portfolio_projects', 'portfolio_project', 'family_memory_note', 'family_memory_show', 'portfolio_project', 'portfolio_project'])
@@ -316,6 +318,34 @@ test('grep_chat_history never finds what a group turn said', () => {
     ev('turn/start'), ev('user/message', group('FAMILY_WORD')), ev('tool/call', { arguments: 'FAMILY_WORD' }), ev('turn/end')]);
   const kept = JSON.stringify(withoutGroupTurns(events));
   assert.ok(kept.includes('OWNER_WORD') && !kept.includes('FAMILY_WORD'));
+});
+
+// --- director 477 S1: a group turn is bounded at six calls, refused calls included ---
+
+test('guard: every call of a group turn counts - thirty refused calls, then a whitelisted one is answerNow', () => {
+  const g = turns();
+  g.turnOpened(7);
+  g.split([group('Q')], 1, 7);
+  const verdicts = Array.from({ length: 30 }, () => g.guard('bash'));
+  assert.deepEqual(verdicts.slice(0, 6), Array(6).fill(groupTurnRefusal), 'the first six: the whitelist refusal');
+  assert.deepEqual(verdicts.slice(6), Array(24).fill(answerNow), 'from the 7th on: answer now, whatever the name');
+  assert.equal(g.guard('portfolio_project'), answerNow);
+  assert.equal(g.current.calls, 31);
+});
+
+test('guard: a refused call in the middle of six permitted ones - the 7th call overall is answerNow', () => {
+  const g = turns();
+  g.turnOpened(8);
+  g.split([group('Q')], 1, 8);
+  const order = ['portfolio_projects', 'portfolio_project', 'portfolio_project', 'memory_note', 'family_memory_show', 'portfolio_project', 'portfolio_project'];
+  assert.deepEqual(order.map(name => g.guard(name)), [undefined, undefined, undefined, groupTurnRefusal, undefined, undefined, answerNow]);
+  assert.equal(g.current.calls, 7);
+  // An owner turn is unaffected: refused and permitted calls alike, nothing counted, never answerNow.
+  g.turnOpened(9);
+  g.split([message('OWNER')], 1, 9);
+  const owner = Array.from({ length: 10 }, (_, i) => g.guard(i % 2 ? 'family_memory_note' : 'portfolio_project'));
+  assert.deepEqual(owner, Array.from({ length: 10 }, (_, i) => i % 2 ? familyRefusal : undefined));
+  assert.equal(g.current.calls, 0);
 });
 
 // --- r44n 7.7.3 item 3, 7.7.5, 7.7.16 (platform director 466 A): the counts are this turn's ---

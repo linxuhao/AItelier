@@ -131,6 +131,9 @@ BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回�
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
                "让我记住的事只在本群用，30 天后删。")
 OWNER_LABEL = "业主"
+# 7.9.4 step 4 (director 489 (b)): a group reminder's row is kind 'notice' with sender_role NULL
+# (step 23's CHECK stays owner/member). A reader that names a row's sender reads it as this.
+STEWARD_NOTICE_LABEL = "管家通知"
 _STEMS = "甲乙丙丁戊己庚辛壬癸"
 # Crockford base32 (no I L O U).
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -246,6 +249,8 @@ class StateGroups:
     def _label_of(conn, channel, group_ref, sender_ref, role):
         if role == "owner":
             return OWNER_LABEL
+        if role != "member":  # NULL: no person (the steward's rows); never read as a member
+            return None
         row = conn.execute("SELECT ordinal,label FROM state_group_members WHERE channel=? AND group_ref=? "
                            "AND sender_ref=?", (channel, group_ref, sender_ref)).fetchone()
         return (row["label"] or member_label(row["ordinal"])) if row else None
@@ -308,7 +313,8 @@ class StateGroups:
         return {"code": f"G-{code[1:5]}-{code[5:]}", "expires_at": (moment + CODE_TTL).isoformat()}
 
     def unbind_owner_group(self, channel):
-        """Unbind the channel's group and delete everything kept about it."""
+        """Unbind the channel's group and delete everything kept about it; the family lists
+        stay, without who of this group added or checked an item (7.9.5)."""
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
             row = self._live_group(conn, channel)
@@ -316,6 +322,12 @@ class StateGroups:
                 group = row["group_ref"]
                 conn.execute("UPDATE state_owner_groups SET revoked_at=? WHERE channel=? AND group_ref=?",
                              (_now().isoformat(), channel, group))
+                # 7.9.5 (director 489 (a)): the family lists stay; who of this group added or
+                # checked an item is forgotten (its members, and the owner's account here).
+                from core.state_lists import forget_group_senders
+                forget_group_senders(conn, [r[0] for r in conn.execute(
+                    "SELECT sender_ref FROM state_group_members WHERE channel=? AND group_ref=? UNION "
+                    "SELECT sender_ref FROM state_owner_channels WHERE channel=?", (channel, group, channel))])
                 for table in ("state_group_messages", "state_group_members", "state_family_memory",
                               "state_family_note"):
                     conn.execute(f"DELETE FROM {table} WHERE channel=? AND group_ref=?", (channel, group))
@@ -453,8 +465,9 @@ class StateGroups:
                         "reply_to,answered_by,at FROM state_group_messages WHERE channel=? AND group_ref=? "
                         "ORDER BY at DESC, rowid DESC LIMIT 500", key)]
                     for m in group["messages"]:
-                        m["sender_label"] = self._label_of(conn, *key, m["sender_ref"], m["sender_role"]) \
-                            if m["direction"] == "in" else None
+                        m["sender_label"] = (self._label_of(conn, *key, m["sender_ref"], m["sender_role"])
+                                             if m["direction"] == "in" else
+                                             STEWARD_NOTICE_LABEL if m["kind"] == "notice" else None)
                     note = conn.execute("SELECT text,updated_at FROM state_family_note WHERE channel=? AND group_ref=?",
                                         key).fetchone()
                     group["family_note"] = dict(note) if note else None

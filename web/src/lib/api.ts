@@ -1027,7 +1027,7 @@ export function deleteFamilyMemory(channel: OwnerChannelName, entryId?: string):
 //    group sees everything on them; adding passes the group's exit check (422 "withheld: <kind>").
 export type FamilyListName = 'shopping' | 'todo';
 export interface FamilyListItem {
-  item_id: string; list: FamilyListName; text: string; added_by: string; added_by_role: 'owner' | 'member' | 'steward';
+  item_id: string; list: FamilyListName; text: string; added_by: string | null; added_by_role: 'owner' | 'member' | 'steward';
   added_via: 'group' | 'owner_dm' | 'dashboard'; added_at: string; done: boolean; done_at: string | null; done_by: string | null;
 }
 export function listFamilyLists(): Promise<{lists: Record<FamilyListName, FamilyListItem[]>}> {

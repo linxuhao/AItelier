@@ -34,6 +34,8 @@
     void run(async () => { await addFamilyListItems(list, items); drafts[list] = ''; });
   }
   const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '';
+  // An item whose family group was unbound keeps no "who" (added_by / done_by null, design
+  // 7.9.5): it reads 「曾由一位成员添加」, never a blank.
   onMount(() => {
     alive = true;
     void load();
@@ -63,7 +65,7 @@
             <label class="check"><input type="checkbox" checked={item.done} disabled={busy} data-item-check={item.item_id}
               onchange={(event) => void run(() => checkFamilyListItems([item.item_id], event.currentTarget.checked))} />
               <span class="text">{item.text}</span></label>
-            <small class="who" data-item-who>{t('steward.listAddedBy').replace('{who}', item.added_by).replace('{when}', when(item.added_at))}{#if item.done && item.done_by} · {t('steward.listDoneBy').replace('{who}', item.done_by)}{/if}</small>
+            <small class="who" data-item-who>{item.added_by ? t('steward.listAddedBy').replace('{who}', item.added_by).replace('{when}', when(item.added_at)) : t('steward.listAddedByFormer').replace('{when}', when(item.added_at))}{#if item.done} · {item.done_by ? t('steward.listDoneBy').replace('{who}', item.done_by) : t('steward.listDoneByFormer')}{/if}</small>
             <button type="button" class="outline danger" disabled={busy} data-item-remove={item.item_id}
               onclick={() => void run(() => removeFamilyListItem(item.item_id))}>{t('steward.listRemove')}</button>
           </li>

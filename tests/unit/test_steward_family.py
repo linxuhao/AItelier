@@ -258,6 +258,34 @@ def test_unbinding_disables_the_groups_reminders_and_a_rebinding_never_revives_t
     assert out_rows(world) == []
 
 
+def test_director_489_b_a_notice_row_reads_as_the_stewards_notice_and_a_null_role_is_never_a_member(world, clock):
+    """7.9.4 step 4: the reminder row is kind 'notice' with sender_role NULL (step 23's CHECK
+    unchanged); the readers that name a row's sender read it as 管家通知."""
+    bound_group(world)
+    ask(world, "m1", "@管家 几点吃药")
+    made, shot = fired_reminder(world, clock)
+    posted = notice(world, made["schedule_id"], shot["due_at"])
+    assert rows(world, "SELECT kind, direction, sender_role, sender_ref FROM state_group_messages WHERE message_id=?",
+                (posted["message_id"],)) == [("notice", "out", None, None)]
+    # The dashboard's group view: the notice is the steward's notice; the members are the people.
+    view = world.owner.groups.owner_view("wechat")["groups"][0]
+    by_id = {m["message_id"]: m for m in view["messages"]}
+    assert by_id[posted["message_id"]]["sender_label"] == state_groups.STEWARD_NOTICE_LABEL == "管家通知"
+    assert [m["label"] for m in view["members"]] == ["成员甲"]
+    question = next(m for m in view["messages"] if m["direction"] == "in")
+    assert (question["sender_role"], question["sender_label"]) == ("member", "成员甲")
+    # A NULL role never throws and never reads as a member, even beside a member's own ref.
+    with world.db.get_connection() as conn:
+        assert state_groups.StateGroups._label_of(conn, "wechat", ROOM, MEMBER, None) is None
+        assert state_groups.StateGroups._label_of(conn, "wechat", ROOM, None, None) is None
+        assert state_groups.StateGroups._label_of(conn, "wechat", ROOM, MEMBER, "member") == "成员甲"
+    # The model's group history (a wake's `recent`) holds answered questions only: no notice in it.
+    reply(world, question["message_id"], "八点")
+    recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
+    assert [(r["sender"], r["q"]) for r in recent] == [("成员甲", "@管家 几点吃药")]
+    assert all("该吃药了" not in (r["q"], r["a"]) for r in recent)
+
+
 def test_review_f1_a_channel_alone_never_turns_an_owner_reminder_into_group_text(world, clock):
     bound_group(world)
     mine = world.owner.steward.create_schedule("医生", "call the doctor about my results",
@@ -502,6 +530,47 @@ def test_the_list_routes_are_the_owner_sessions_alone(world, clock, client):
     assert client.get("/api/steward/lists", headers=OWNER_HEADERS).json()["lists"] == {"shopping": [], "todo": []}
     bad = client.post("/api/steward/lists/shopping/items", json={"items": ["看 /home/x"]}, headers=OWNER_HEADERS)
     assert bad.status_code == 422 and bad.json()["detail"].startswith("withheld"), bad.text
+
+
+def test_director_489_a_unbinding_keeps_the_lists_and_forgets_who_added_or_checked(world, clock):
+    """7.9.5 / 7.9.9 (d): unbinding the family group keeps every list item (text, checked state,
+    times) and sets added_by_ref / done_by_ref to NULL; the readers show nobody's name."""
+    bound_group(world)
+    ask(world, "m1", "@管家 加牛奶和鸡蛋")
+    audience(world, senders=(MEMBER,), turn="t1")
+    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    view = lists_view(world)
+    milk, eggs = [i["item_id"] for i in add(view, ["牛奶", "鸡蛋"], turn="t1")["items"]]
+    check(view, [milk], turn="t1")
+    audience(world, senders=(OWNER_WX,), turn="t2")  # the owner, in the group
+    bread = add(view, ["面包"], key="a2", turn="t2")["items"][0]["item_id"]
+    task = world.owner.lists.add_items("todo", ["交水费"], as_owner=True)["items"][0]["item_id"]
+    refs = "SELECT item_id, added_by_ref, done_by_ref FROM state_steward_list_items ORDER BY added_at, rowid"
+    kept = ("SELECT item_id, list, text, added_by_role, added_via, added_at, done_at, done_by_role, deleted_at "
+            "FROM state_steward_list_items ORDER BY added_at, rowid")
+    # Before: the group's items name their senders.
+    assert rows(world, refs) == [(milk, MEMBER, MEMBER), (eggs, MEMBER, None), (bread, OWNER_WX, None),
+                                 (task, None, None)]
+    before = rows(world, kept)
+    world.owner.groups.unbind_owner_group("wechat")
+    # After: every item still there, unchanged but for who.
+    assert rows(world, kept) == before
+    assert rows(world, refs) == [(milk, None, None), (eggs, None, None), (bread, None, None), (task, None, None)]
+    assert rows(world, "SELECT added_by_label, done_by_label FROM state_steward_list_items ORDER BY added_at, rowid") == [
+        (None, None), (None, None), ("业主", None), ("业主", None)]
+    # list_show (the owner's turn) and the dashboard: no name of the group's members, no throw.
+    for shown in (execute(world.steward, "list_list_items", {})["lists"], world.owner.lists.list_items(as_owner=True)["lists"]):
+        assert [(i["text"], i["added_by"], i["done"], i["done_by"]) for i in shown["shopping"]] == [
+            ("鸡蛋", None, False, None), ("面包", "业主", False, None), ("牛奶", None, True, None)]
+        assert [(i["text"], i["added_by"]) for i in shown["todo"]] == [("交水费", "业主")]
+    # A rebinding of the same group brings no name back.
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": ROOM,
+                                                "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
+            allow_write=True)
+    audience(world, senders=(MEMBER,), turn="t3")
+    again = {i["text"]: i for i in show(view, turn="t3")["lists"]["shopping"]}
+    assert (again["牛奶"]["added_by"], again["牛奶"]["done_by"], again["鸡蛋"]["added_by"]) == (None, None, None)
 
 
 def test_acceptance_four_a_member_adds_the_owner_checks_in_dm_the_dashboard_removes(world, clock):

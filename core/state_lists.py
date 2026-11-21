@@ -15,7 +15,10 @@ the asker the audience record names (one sender: that member's dashboard name, e
 「家庭群」), in an owner turn the steward, on the dashboard the owner. Every item passes the
 family group's exit check when it is ADDED, from wherever (core.state_groups.exit_check): a
 hit is refused `withheld` with its kind, so nothing on a list can make a group reply
-withheld later. The bounds are LIST_LIMITS. No write emits a State event (nothing wakes
+withheld later. Unbinding the family group keeps every item and forgets who of that group
+added or checked it (forget_group_senders, director 489 (a)): an item's `added_by` / `done_by`
+is then null, which each reader shows as 「曾由一位成员添加」 / 「曾由一位成员勾掉」 (the
+dashboard's i18n, the host's list tools for the model). The bounds are LIST_LIMITS. No write emits a State event (nothing wakes
 anyone, 7.7.7). The table is private (core.state_privacy.PRIVATE_STATE_TABLES).
 """
 from __future__ import annotations
@@ -35,7 +38,7 @@ CREATE TABLE IF NOT EXISTS state_steward_list_items (
  list TEXT NOT NULL CHECK(list IN ('shopping','todo')),
  text TEXT NOT NULL,
  added_by_role TEXT NOT NULL CHECK(added_by_role IN ('owner','member','steward')),
- added_by_ref TEXT, added_by_label TEXT NOT NULL,
+ added_by_ref TEXT, added_by_label TEXT,
  added_via TEXT NOT NULL CHECK(added_via IN ('group','owner_dm','dashboard')),
  added_at TEXT NOT NULL,
  done_at TEXT, done_by_role TEXT, done_by_ref TEXT, done_by_label TEXT,
@@ -61,6 +64,21 @@ def _now():
 
 def _clean(text) -> str:
     return unicodedata.normalize("NFKC", str(text)).strip()
+
+
+def forget_group_senders(conn, refs) -> None:
+    """7.9.5 (director 489 (a)): the family group was unbound. Its items stay (text, checked
+    state and times unchanged); every `added_by_ref` / `done_by_ref` that is one of the group's
+    senders (`refs`) becomes NULL, and a member's stored name with it (the owner stays 「业主」):
+    the list is the family's, only the group's 「who」 goes."""
+    refs = sorted({r for r in refs if r})
+    if not refs:
+        return
+    marks = ",".join("?" * len(refs))
+    conn.execute("UPDATE state_steward_list_items SET added_by_ref=NULL,added_by_label=CASE WHEN "
+                 f"added_by_role='member' THEN NULL ELSE added_by_label END WHERE added_by_ref IN ({marks})", refs)
+    conn.execute("UPDATE state_steward_list_items SET done_by_ref=NULL,done_by_label=CASE WHEN "
+                 f"done_by_role='member' THEN NULL ELSE done_by_label END WHERE done_by_ref IN ({marks})", refs)
 
 
 class StateLists:
@@ -97,7 +115,8 @@ class StateLists:
     @staticmethod
     def _label(conn, role, ref, stored):
         """The name shown now: a member's current dashboard name (a rename shows, the key is
-        the sender_ref), else what was stored."""
+        the sender_ref), else what was stored - None for a member of a group since unbound
+        (forget_group_senders)."""
         if role == "member" and ref is not None:
             row = conn.execute("SELECT label FROM state_group_members WHERE sender_ref=? AND label IS NOT NULL "
                                "LIMIT 1", (ref,)).fetchone()

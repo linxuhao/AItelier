@@ -68,7 +68,8 @@
       <ol class="records">{#each group.messages ?? [] as r (r.message_id)}
         <li data-group-record={r.direction} class:withheld={!!r.withheld_reason}>
           <small>{new Date(r.at).toLocaleString()}</small>
-          {r.direction === 'in' ? (r.sender_label ?? '') + ':' : '→'}
+          <!-- A group reminder (kind 'notice', sender_role null, design 7.9.4) is the steward's notice. -->
+          {r.kind === 'notice' ? t('steward.groupNoticeFrom') + ':' : r.direction === 'in' ? (r.sender_label ?? '') + ':' : '→'}
           {r.body ?? t('steward.groupNoBody').replace('{kind}', r.kind)}
           {#if r.withheld_reason}<div class="original" data-withheld>{t('steward.groupWithheld').replace('{reason}', r.withheld_reason)}: {r.original}</div>{/if}
         </li>

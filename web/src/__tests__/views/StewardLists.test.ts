@@ -38,6 +38,22 @@ describe('StewardLists', () => {
     expect((view.container.querySelector('[data-list="todo"]') as HTMLElement).textContent).toContain('Nothing on this list.');
   });
 
+  it('director 489 (a): an item of an unbound group (added_by / done_by null) reads 曾由一位成员添加, never blank, never a throw', async () => {
+    api.listFamilyLists.mockResolvedValue({lists: {shopping: [item('li-1', '牛奶', {added_by: null}),
+      item('li-2', '鸡蛋', {added_by: null, done: true, done_at: '2026-11-21T11:00:00Z', done_by: null})], todo: []}});
+    langStore.set('zh');
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    const milk = (view.container.querySelector('[data-item="li-1"]') as HTMLElement).querySelector('[data-item-who]')?.textContent ?? '';
+    expect(milk).toContain('曾由一位成员添加');
+    expect(milk).not.toContain('null');
+    const eggs = (view.container.querySelector('[data-item="li-2"]') as HTMLElement).querySelector('[data-item-who]')?.textContent ?? '';
+    expect(eggs).toContain('曾由一位成员添加');
+    expect(eggs).toContain('曾由一位成员勾掉');
+    expect(eggs).not.toContain('null');
+    langStore.set('en');
+  });
+
   it('review F4: more than 10 items at once is refused with a message, nothing is cut and the draft is kept', async () => {
     const view = render(StewardLists);
     await view.findByText('牛奶');

@@ -38,6 +38,8 @@ class StateStub(BaseHTTPRequestHandler):
     guide = None
     nodes = None
     standing = None
+    standing_rows = None  # active standing deliveries the stub pages through
+    standing_error_after = None  # fail every list page whose cursor is past this
     operations = None  # state_graph_help advertisement; None = an older server
     identity = None  # driver_whoami response
     guidance = None  # driver_postcompact_guidance v1 envelope
@@ -113,16 +115,50 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
                 ],
             }
         else:
-            assert args == {"action": "list_director_messages", "arguments": {
-                "project_id": StateStub.project, "after": 0, "limit": 8,
-                "delivery_mode": "standing", "statuses": ["unread", "acknowledged"]}}
-            result = StateStub.standing or {
-                "schema": "aitelier.director-messaging.v2",
-                "result": {"project_id": StateStub.project, "items": [], "matched_total": 0,
-                           "has_more": False, "next_after": 0},
-            }
-        text = json.dumps({"result": result})
-        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}}).encode()
+            # `list_director_messages` pages FORWARD from a delivery cursor, so the
+            # stub answers exactly like that reader: a page of the rows after the
+            # cursor, `has_more` when more remain, and `matched_total` for the rows
+            # its own cursor still reaches. A planted `standing` envelope keeps its
+            # verbatim single page; a walk past it gets the terminal empty page an
+            # honest reader answers with.
+            assert args["action"] == "list_director_messages"
+            arguments = args["arguments"]
+            assert arguments["project_id"] == StateStub.project
+            assert arguments["delivery_mode"] == "standing"
+            assert arguments["statuses"] == ["unread", "acknowledged"]
+            after, limit = arguments["after"], arguments["limit"]
+            assert type(after) is int and after >= 0
+            assert type(limit) is int and 1 <= limit <= 100
+            if StateStub.standing_error_after is not None and after > StateStub.standing_error_after:
+                result = None  # answered below as an MCP error envelope
+            elif StateStub.standing_rows is not None:
+                rows = [row for row in StateStub.standing_rows
+                        if row["delivery"]["delivery_seq"] > after]
+                page, more = rows[:limit], len(rows) > limit
+                result = {"schema": "aitelier.director-messaging.v2", "result": {
+                    "project_id": StateStub.project, "items": page,
+                    "matched_total": len(rows), "has_more": more,
+                    "next_after": (page[-1]["delivery"]["delivery_seq"] if more else after)}}
+            elif after == 0:
+                result = StateStub.standing or {
+                    "schema": "aitelier.director-messaging.v2",
+                    "result": {"project_id": StateStub.project, "items": [], "matched_total": 0,
+                               "has_more": False, "next_after": 0},
+                }
+            else:
+                planted = StateStub.standing or {}
+                result = {"schema": planted.get("schema", "aitelier.director-messaging.v2"),
+                          "result": {"project_id": StateStub.project, "items": [],
+                                     "matched_total": planted.get("result", {}).get(
+                                         "matched_total", 0),
+                                     "has_more": False, "next_after": after}}
+        if result is None:
+            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+                "isError": True, "content": [{"type": "text", "text": "{}"}]}}).encode()
+        else:
+            text = json.dumps({"result": result})
+            payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": text}]}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -136,6 +172,7 @@ def state_server():
     StateStub.requests = []
     StateStub.lines = StateStub.extra = StateStub.items = StateStub.guide = StateStub.nodes = None
     StateStub.standing = None
+    StateStub.standing_rows = StateStub.standing_error_after = None
     StateStub.operations = StateStub.identity = StateStub.guidance = None
     StateStub.driver_tokens = []
     StateStub.credentials = []
@@ -1482,7 +1519,11 @@ def test_guidance_v1_omission_count_reaches_the_tracked_entry_with_one_whole_row
     lines = section.splitlines()
     kept, marker = lines[:-1], lines[-1]
     assert len(kept) == len(rows) - 1
-    assert kept == rows[:len(kept)]  # whole leading rows, byte for byte
+    # The hook's own marker pushed the block over the cap, so the row it drops is
+    # the OLDEST one: what survives is the newest suffix of the producer's rows,
+    # byte for byte. (This line used to pin `rows[:len(kept)]`, the old end; the
+    # producer and the hook now both give way at the old end.)
+    assert kept == rows[-len(kept):]
     assert marker == _v1_marker(envelope["omitted"] + 1)
     for line in kept:
         assert json.loads(line)["body_excerpt"] == "界" * 320  # no truncated row
@@ -1533,6 +1574,140 @@ def test_guidance_v1_row_count_beyond_included_fails_closed(tmp_path, state_serv
     assert "recovery required" in context
 
 
+# ---------------------------------------------------------------------------
+# Newest-first recovery projection: the section is a resume prompt, so the rows
+# a compacted session has NOT worked under yet are the newest ones. The hook's
+# own trim must therefore give way at the OLD end (item 1), and its v2 fallback
+# must reach the newest standing rows instead of the first page of them (item 2).
+
+
+def _v1_row(delivery_seq):
+    """One producer-shaped v1 row, distinguishable by delivery_seq and subject."""
+    return json.dumps({
+        "message_id": f"00000000-0000-4000-8000-{delivery_seq:012d}",
+        "thread_id": f"00000000-0000-4000-8000-{delivery_seq:012d}",
+        "delivery_id": f"10000000-0000-4000-8000-{delivery_seq:012d}",
+        "sender_project_id": "other",
+        "delivery_seq": delivery_seq,
+        "status": "unread",
+        "version": 1,
+        # 106 characters of subject+excerpt keeps every row 371 long: eight rows
+        # fit the producer's own 3000-char bound (2975), and the hook's marker is
+        # what pushes the section over it.
+        "subject": f"standing {delivery_seq} " + "s" * 33,
+        "body_excerpt": "界" * 60,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def test_guidance_v1_budget_drops_the_oldest_producer_rows(tmp_path, state_server):
+    rows = [_v1_row(delivery_seq) for delivery_seq in range(101, 109)]
+    projection = "\n".join(rows)
+    envelope = {
+        "schema": "aitelier.driver-guidance.v1", "project_id": "aitelier",
+        "driver_id": "stub", "standing_only": True,
+        "projection": projection, "included": len(rows), "omitted": 3,
+    }
+    # The premise: the producer's block fits its own bound, the hook's omission
+    # marker does not, so a whole row has to go - and it must be the OLDEST one.
+    assert len(projection) <= 3000
+    assert len(projection) + 1 + len(_v1_marker(3)) > 3000
+    assert len(rows) == 8
+
+    section = _tracked_standing_section(tmp_path, state_server, envelope)
+
+    assert len(section) <= 3000
+    lines = section.splitlines()
+    kept, marker = lines[:-1], lines[-1]
+    assert len(kept) == 7
+    # Whole producer rows, byte for byte, and the newest seven of them: delivery
+    # seq 101 (the oldest) is the row the budget costs, 108 survives.
+    assert kept == rows[-len(kept):]
+    assert [json.loads(line)["delivery_seq"] for line in kept] == [102, 103, 104, 105, 106, 107, 108]
+    assert [json.loads(line)["subject"] for line in kept] == [
+        f"standing {delivery_seq} " + "s" * 33 for delivery_seq in range(102, 109)]
+    # N still accounts for every row the producer matched plus the local drop.
+    assert marker == _v1_marker(3 + 1)
+
+
+def _standing_page_rows(count):
+    """Active standing deliveries with delivery_seq 1..count, oldest first."""
+    rows = []
+    for index in range(1, count + 1):
+        message_id = f"00000000-0000-4000-8000-{index:012d}"
+        rows.append({
+            "message": {
+                "message_id": message_id, "thread_id": message_id,
+                "sender_project_id": "other", "director_identity": "director",
+                "actor": "actor", "subject": f"standing {index:02d}",
+                "body": f"body {index:02d}",
+                "created_at": "2026-09-14T00:00:00.000000Z",
+                "reply_to_delivery_id": None, "delivery_mode": "standing"},
+            "delivery": {
+                "delivery_id": f"10000000-0000-4000-8000-{index:012d}",
+                "message_id": message_id, "target_project_id": "aitelier",
+                "delivery_seq": index, "status": "unread", "version": 1},
+        })
+    return rows
+
+
+def _fallback_page_reads():
+    """The cursors and limits the hook asked the v2 reader for, in order."""
+    reads = []
+    for request in StateStub.requests:
+        params = request["params"]
+        if params["name"] != "state_graph_read":
+            continue
+        if params["arguments"].get("action") != "list_director_messages":
+            continue
+        arguments = params["arguments"]["arguments"]
+        reads.append((arguments["after"], arguments["limit"]))
+    return reads
+
+
+def test_fallback_projection_reaches_the_newest_standing_rows(tmp_path, state_server):
+    StateStub.standing_rows = _standing_page_rows(12)
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert len(section) <= 3000
+    lines = section.splitlines()
+    assert lines[0].startswith(f"- {OWN_STANDING_UNAVAILABLE}: ")
+    payloads = [json.loads(line) for line in lines[1:-1]]
+    # Twelve pending standing notices: the newest eight survive, in ascending
+    # delivery order, and the four oldest are the ones omitted.
+    assert [payload["delivery_seq"] for payload in payloads] == list(range(5, 13))
+    subjects = [payload["subject"] for payload in payloads]
+    assert subjects[-1] == "standing 12" and subjects[0] == "standing 05"
+    assert "standing 01" not in subjects
+    # The count covers every matched row, not the eight the projection carries.
+    assert lines[-1] == _v1_marker(4)
+    assert _fallback_page_reads() == [(0, 100)]
+
+
+def test_fallback_projection_walks_past_the_first_reader_page(tmp_path, state_server):
+    StateStub.standing_rows = _standing_page_rows(105)
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    lines = section.splitlines()
+    payloads = [json.loads(line) for line in lines[1:-1]]
+    # 105 > one page of 100: only the drained walk reaches the newest rows.
+    assert [payload["delivery_seq"] for payload in payloads] == list(range(98, 106))
+    assert payloads[-1]["subject"] == "standing 105"
+    assert "standing 01" not in section
+    assert lines[-1] == _v1_marker(105 - 8)
+    assert _fallback_page_reads() == [(0, 100), (100, 100)]
+
+
+def test_fallback_projection_fails_closed_when_a_later_page_is_unavailable(tmp_path, state_server):
+    StateStub.standing_rows = _standing_page_rows(105)
+    StateStub.standing_error_after = 0  # the cursor-100 page answers an MCP error
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    assert _fallback_page_reads() == [(0, 100), (100, 100)]
+    # A host that dies mid-walk still gets the honest, bounded recovery block:
+    # never an exception, never a partial page passed off as the newest rows.
+    assert "recovery required" in context
+    assert "could not be loaded within the bounded PostCompact hook request" in context
+    assert "standing 105" not in context
+    assert len(context) <= 12_000
 
 
 @pytest.mark.parametrize("event", ["PostCompact", "SessionStart", "UserPromptSubmit", "Stop"])

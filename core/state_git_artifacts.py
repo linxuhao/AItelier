@@ -207,6 +207,13 @@ def typed_ref(bundle_sha256):
 def git_custody(retained_ref):
     """Pure classifier: ``(custody, legacy_cas_path, embedded_digest)``.
 
+    ``legacy_db_plus_cas_path`` labels the SHAPE of the stored reference - an
+    absolute path - never that a file exists there. The legacy CAS copy it names
+    may be gone (released, or never restored with the row), so ``legacy_cas_path``
+    is a HISTORICAL location and not a live custody promise: never open it as
+    custody, and ask the release ledger (``bundle_release``) whether the bytes are
+    still held.
+
     ``state-db:`` is a reserved namespace; a malformed value there fails closed
     and is never reclassified as legacy/unrecognized. The error never echoes the
     stored reference."""
@@ -224,6 +231,12 @@ def custody_metadata(row, release=None, *, disclose_actor=True):
     """Metadata-only view of a state_git_artifacts row (no bytes): the four
     stored columns plus derived ``custody``, ``legacy_cas_path`` and
     ``released``. A valid typed reference must carry the row's own digest column.
+
+    ``custody`` labels the DECLARED shape of the row's stored reference, never
+    that a file exists; ``legacy_cas_path`` is therefore a HISTORICAL location
+    and not a live custody promise - the legacy CAS file may no longer exist, so
+    never open it as custody. Only ``custody`` plus the release answer below
+    separates bytes State still holds from a released digest.
 
     ``release`` is the ``state_git_bundle_releases`` row for this digest, when
     the caller has one (``bundle_release(conn, digest)``); it is the only thing

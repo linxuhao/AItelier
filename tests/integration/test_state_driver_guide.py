@@ -488,3 +488,36 @@ def test_harness_doc_report_examples_bind_to_real_validators(tmp_path):
                 attempt["attempt_id"], "omitted-" + omitted, criterion, verdict,
                 artifact, str(report), hashlib.sha256(raw).hexdigest())
         assert service.attempts.evidence(attempt["attempt_id"]) == []
+
+
+def test_the_served_guide_says_legacy_cas_custody_is_historical():
+    """The guide must not promise a CAS file State no longer holds.
+
+    Measured on the released store: 1,219 historical ``state_git_artifacts``
+    rows keep an absolute ``retained_ref`` whose legacy CAS file no longer exists
+    and whose bytes are served from the portable bundle store. The guide is
+    injected into driver prompts, so the old prose ("older attempts keep their
+    database bytes and CAS file", "no release API exists") sent a driver to open
+    a path that is history and denied the release path that does exist - the
+    operator tool ``tools/release_bundle_store.py`` plus the append-only
+    ``state_git_bundle_releases`` ledger (a tool, not an HTTP API).
+    """
+    text = GUIDE_SECTIONS["handle-changes-without-inventing-acceptance"]["text"]
+    assert text in STATE_DRIVER_GUIDE
+    # The two false sentences are gone, verbatim.
+    assert "Historical rows and existing CAS bytes are unchanged" not in text
+    assert "keep their database bytes and CAS file" not in text
+    assert "no release API exists" not in text
+    # What is true instead: a historical location, never live custody.
+    assert "`legacy_cas_path` is a HISTORICAL location" in text
+    assert "must not be opened as custody" in text
+    assert "never that a file exists" in text
+    assert "records as released keeps no bytes" in text
+    assert "present/released/missing" in text
+    # The release path that DOES exist is named as a tool plus its ledger.
+    assert "tools/release_bundle_store.py" in text
+    assert "state_git_bundle_releases" in text
+    assert "not an HTTP API" in text
+    # Literals other tests and readers quote stay untouched.
+    assert "state-db:git-bundle:sha256:" in text
+    assert "256 MiB" in text

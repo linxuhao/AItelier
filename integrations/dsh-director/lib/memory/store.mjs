@@ -490,9 +490,12 @@ export class MemoryStore {
   }
 
   /** The index's token list for an entry (design 3.5): its text's tokens, then the date words
-   *  of its time in the owner's zone. Every add and every remove of the index takes the list
-   *  from here, so a remove takes back exactly what the add put in (the zone is fixed for the
-   *  process). The text itself is never changed: grep, memory_read and the log never see the
+   *  of its time in the owner's zone - writtenAt, on purpose: the owner searching '11月20日'
+   *  finds what they wrote that day, even when it reached the backend after midnight. Only
+   *  the date words do: the index's own time (index.add's third argument, which orders equal
+   *  scores), ordering, month files, ids and the forget/restore/purge rewrites use `at`.
+   *  Every add and every remove of the index takes the list from here, so a remove takes back
+   *  exactly what the add put in (the zone is fixed for the process). The text itself is never changed: grep, memory_read and the log never see the
    *  date words. */
   #docTokens(e) {
     return [...documentTokens(e.text), ...dateTokens(writtenAt(e), this.timeZone)];
@@ -1158,7 +1161,7 @@ export class MemoryStore {
   }
 
   #readable(e) {
-    return { id: e.id, at: e.at, ...(e.channel_at ? { channel_at: e.channel_at } : {}), role: e.role, ...(e.channel ? { channel: e.channel } : {}), source: e.source, text: e.text,
+    return { id: e.id, at: e.at, ...(!Number.isNaN(parseAt(e.channel_at)) ? { channel_at: e.channel_at } : {}), role: e.role, ...(e.channel ? { channel: e.channel } : {}), source: e.source, text: e.text,
       ...(e.batch && e.batch !== e.id ? { turn: e.batch } : {}) };
   }
 

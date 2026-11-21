@@ -29,9 +29,11 @@ export function parseAt(at) {
 }
 
 /** The time memory shows for an entry: when the owner wrote it in a chat app (`channel_at`,
- *  kept from message_sources) when there is a usable one, else `at` (when the backend received
- *  it; still what entries are kept and ordered by). A line's date, its day group and its index
- *  date words all read this one time. */
+ *  kept from message_sources), used only when it parses (parseAt); anything else (absent, null,
+ *  not a time) gives `at`, when the backend received it - so not `channel_at ?? at`. A line's
+ *  date, its day group and its index date words (search date words: the owner searching
+ *  '11月20日' finds what they wrote that day) all read this one time. Nothing else does:
+ *  ordering, month files, ids and the forget/restore/purge rewrites all use `at`. */
 export function writtenAt({ at, channel_at }) {
   return Number.isNaN(parseAt(channel_at)) ? at : channel_at;
 }

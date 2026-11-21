@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { CLOCK_TAG, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
+import { parseAt } from '../dsh-director/lib/memory/render.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -413,7 +414,7 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
       const source = sources[m.message_id];
       return { message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300),
         ...(source?.direction === 'in' && source.channel ? { source_channel: source.channel } : {}),
-        ...(source?.direction === 'in' && source.channel_at ? { channel_at: source.channel_at } : {}) };
+        ...(source?.direction === 'in' && !Number.isNaN(parseAt(source.channel_at)) ? { channel_at: source.channel_at } : {}) };
     });
   } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
   try {

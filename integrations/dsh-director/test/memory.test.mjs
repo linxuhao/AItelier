@@ -140,6 +140,81 @@ test('memory-channel-at: an owner message\'s channel_at is kept beside at when i
   await store.close();
 });
 
+// memory-channel-at-2 (director review 424b S1): channel_at reaches only what memory SHOWS (a
+// line's stamp, its day group, its search date words, memory_read); everything that keeps or
+// orders entries reads `at`. Each entry below has a channel_at on the other side of `at` from
+// its neighbour, across a month boundary, so any of those paths switched to writtenAt fails here.
+const LATE = { role: 'owner', part: 'o', at: '2026-11-01T00:10:00Z', channel_at: '2026-10-31T23:50:00Z', channel: 'wechat', text: 'the pump' };
+const EARLY = { role: 'owner', part: 'o', at: '2026-10-31T23:55:00Z', text: 'the pump' };
+// Not a turn the steward host builds (parts this far out of order), only to pin the in-turn order.
+const PAIR = [{ role: 'owner', part: 'a', at: '2026-11-02T10:00:00Z', channel_at: '2026-11-02T09:00:00Z', text: 'pair a' },
+  { role: 'steward', part: 'b', at: '2026-11-02T09:30:00Z', text: 'pair b' }, { role: 'steward', part: 'c', at: '2026-11-02T09:45:00Z', text: 'pair c' }];
+const atStore = async root => {
+  const store = await open(root, { timeZone: 'UTC' });
+  await store.recordTurn('early', [EARLY]); await store.recordTurn('late', [LATE]); await store.recordTurn('pair', PAIR);
+  return store;
+};
+const monthIds = (root, m) => { const f = join(repo(root), 'log', m + '.jsonl');
+  return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l).id) : []; };
+
+test('memory-channel-at-2: an entry goes in the month file of its at, not of its channel_at; its id is the turn\'s, and a replay with another channel_at writes nothing', async () => {
+  const root = newRoot(); let store = await atStore(root);
+  assert.deepEqual(monthIds(root, '2026-10'), ['t-early-o'], 'written in October, received in November: the November file');
+  assert.deepEqual(monthIds(root, '2026-11'), ['t-late-o', 't-pair-a', 't-pair-b', 't-pair-c']);
+  assert.deepEqual(await store.recordTurn('late', [{ ...LATE, channel_at: '2026-11-01T00:05:00Z' }]), { written: 0 }, 'the id is the turn\'s, not a time');
+  await store.flush(); await store.close();
+  store = await open(root, { timeZone: 'UTC' });
+  assert.deepEqual((await store.read(['t-late-o'])).entries.map(e => [e.id, e.at, e.channel_at]),
+    [['t-late-o', '2026-11-01T00:10:00Z', '2026-10-31T23:50:00Z']], 'the first write stands, read back from the November file');
+  await store.close();
+});
+
+test('memory-channel-at-2: recent turns, grep, ranked ties, a day group and with_turn are ordered by at; only the shown times are channel_at', async () => {
+  const root = newRoot(); const store = await atStore(root);
+  assert.deepEqual(store.recentTurns(), ['[2026-10-31T23:55:00Z] owner: the pump', '[2026-10-31T23:50:00Z] owner (wechat): the pump',
+    '[2026-11-02T09:30:00Z] steward: pair b\n[2026-11-02T09:45:00Z] steward: pair c\n[2026-11-02T09:00:00Z] owner: pair a'],
+    'turns and their rows by at; each row shows writtenAt');
+  const r = await store.search('pump');
+  assert.deepEqual(r.grep.hits.map(h => [h.id, h.at]), [['t-late-o', '2026-11-01T00:10:00Z'], ['t-early-o', '2026-10-31T23:55:00Z']],
+    'grep newest first by at; a hit carries at');
+  assert.deepEqual(r.ranked.hits.map(h => [h.id, h.at]), [['t-late-o', '2026-11-01T00:10:00Z'], ['t-early-o', '2026-10-31T23:55:00Z']],
+    'equal scores newest first by the index\'s at');
+  // Both were written on the 31st (one day group); in it, oldest first by at.
+  assert.deepEqual(r.grep.text.split('\n').map(line => line.split(': ')[0]), ['[2026-10-31 周六 23:55+00:00] 业主 {t-early-o}',
+    '[2026-10-31 周六 23:50+00:00] 业主（wechat） {t-late-o}']);
+  const read = await store.read(['t-pair-c'], { withTurn: true });
+  assert.deepEqual(read.entries.map(e => [e.id, !!e.context]), [['t-pair-c', false], ['t-pair-b', true], ['t-pair-a', true]], 'the rest of the turn by at');
+  await store.close();
+});
+
+test('memory-channel-at-2: forget strips the line from its at month file, restore puts it back there with its channel_at', async () => {
+  const root = newRoot(); let store = await atStore(root);
+  const f = await store.forget(['t-late-o'], { reason: 'owner asked', by: 'owner' });
+  assert.deepEqual(f.forgotten, ['t-late-o']);
+  assert.deepEqual([monthIds(root, '2026-10'), monthIds(root, '2026-11')], [['t-early-o'], ['t-pair-a', 't-pair-b', 't-pair-c']],
+    'gone from November\'s file at once (not left for the next boot to finish)');
+  assert.equal((await store.restore('t-late-o')).restored, 't-late-o');
+  assert.deepEqual([monthIds(root, '2026-10'), monthIds(root, '2026-11')], [['t-early-o'], ['t-pair-a', 't-pair-b', 't-pair-c', 't-late-o']]);
+  await store.flush(); await store.close();
+  store = await open(root, { timeZone: 'UTC' });
+  assert.deepEqual((await store.read(['t-late-o'])).entries.map(e => [e.at, e.channel_at]), [['2026-11-01T00:10:00Z', '2026-10-31T23:50:00Z']]);
+  await store.close();
+});
+
+test('memory-channel-at-2: memory_read gives channel_at only when it parses, as recordTurn keeps it (a hand-written log line)', async () => {
+  const root = newRoot(); let store = await open(root);
+  await store.recordTurn('x', [{ role: 'owner', part: 'o', at: '2026-11-20T12:00:00Z', text: 'kept' }]);
+  await store.flush(); await store.close();
+  appendFileSync(join(repo(root), 'log', '2026-11.jsonl'), [
+    { id: 't-y-o', at: '2026-11-20T12:01:00Z', channel_at: 'yesterday', role: 'owner', source: 'conversation', text: 'odd', batch: 'y' },
+    { id: 't-z-o', at: '2026-11-20T12:02:00Z', channel_at: '2026-11-20T11:59:00Z', role: 'owner', source: 'conversation', text: 'ok', batch: 'z' }]
+    .map(e => JSON.stringify(e) + '\n').join(''));
+  store = await open(root);
+  const read = await store.read(['t-y-o', 't-z-o']);
+  assert.deepEqual(read.entries.map(e => [e.id, 'channel_at' in e, e.channel_at]), [['t-y-o', false, undefined], ['t-z-o', true, '2026-11-20T11:59:00Z']]);
+  await store.close();
+});
+
 test('one search, both answers, each naming its source and marking the other', async () => {
   const root = newRoot(); const store = await open(root);
   await store.recordTurn('t1', [{ role: 'owner', text: 'I want a small Ledger app for 记账' }]);

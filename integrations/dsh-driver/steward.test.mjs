@@ -1328,6 +1328,22 @@ test('open threads name the chat channel each unanswered owner message came from
   assert.deepEqual(threads.unanswered_owner_messages.map(m => m.message_id), ['o1', 'o2', 'o3'], 'a failed sources read keeps the list');
 });
 
+test('memory-channel-at-2: open threads keep a channel_at only when it parses (parseAt, as recordTurn), not when it is merely truthy', async () => {
+  const conversation = [owner('o1', '2026-11-20T12:48:00Z', 'a'), owner('o2', '2026-11-20T12:49:00Z', 'b'), owner('o3', '2026-11-20T12:50:00Z', 'c'),
+    owner('o4', '2026-11-20T12:51:00Z', 'd')];
+  const request = async (path) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/message_sources')) return { result: { sources: { o1: { direction: 'in', channel: 'wechat', channel_at: 'yesterday' },
+      o2: { direction: 'in', channel: 'wechat', channel_at: 42 }, o3: { direction: 'in', channel: 'wechat', channel_at: '2026-11-20T12:48:41.123456+00:00' },
+      o4: { direction: 'out', channel: 'wechat', channel_at: '2026-11-20T12:50:00+00:00' } } } };
+    throw new Error('unexpected ' + path);
+  };
+  const { openThreads } = await import('./steward-host.mjs');
+  const threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir: mkdtempSync(join(tmpdir(), 'steward-state-')) });
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => [m.message_id, 'channel_at' in m, m.channel_at]), [['o1', false, undefined],
+    ['o2', false, undefined], ['o3', true, '2026-11-20T12:48:41.123456+00:00'], ['o4', false, undefined]]);
+});
+
 test('review 340 (a): every tool the adapter adds to the steward\'s presented list is one runtime.mjs registers', () => {
   const effective = aitelierRoles(table);
   const added = effective.steward.presented.filter(name => !table.steward.presented.includes(name));

@@ -168,15 +168,16 @@ is re-read within a process that keeps running. (The message of `7873a4bb99` gro
    survey(ground in the live tool registry) → architect(graph shape + missing tools) → tool_plan
    → tool_loop(BUILD + register each missing tool in-graph) → emit_graph(graph + roles + templates)
    → 3-part gate: skillflow_lint → forge_registry_check → forge_dryrun_smoke → explain(checkpoint) → done
-   Driven by the butler's `generate_pipeline(description=<user request>[, edit_target=gen_<slug>])`
+   Driven by the MCP `generate_pipeline(description=<user request>[, edit_target=gen_<slug>])`
    tool (edit_target seeds the existing pipeline as a baseline for a surgical change). scheduler_owned,
    so the poller drives it. On completion the host BRIDGES it into a runnable config
    (`core/pipeline_registry.py:register_forge_pipeline`): namespaced `gen_<slug>`, persisted to
    `~/.AItelier/configs/` (+ `<slug>.roles.json` for the real role prompts; gitignored, boot-scanned),
    live-registered, manifest via `ConfigRegistry.register_one`. Missing tools persist to
    `~/.AItelier/tools/` (boot-scanned). NOTE: the 3 gates verify STRUCTURE, not runtime behavior —
-   the CODING-mode `drive_pipeline` tool test-drives the generated pipeline context-isolated and the
-   agent fixes it (edit gen_<slug>.yaml/.roles.json → drive again). See design/pipeline_forge.md.
+   the calling agent test-drives the generated pipeline over MCP (`run_pipeline` → `wait_for_run` →
+   `get_run_summary` / `trace_*`) and fixes it (`edit_*` or `generate_pipeline(edit_target=…)` →
+   drive again); integrations/dsh/README.md has the loop. See design/pipeline_forge.md.
 
 4. Butler CODING MODE (user-toggled per session: SPA toggle / `mode` field; sessions.mode column)
    The butler becomes an interactive coding agent (templates/coding_mode.md): direct repo tools

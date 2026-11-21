@@ -5,8 +5,8 @@
 # kind DPE agents call natively. JSON mode was unreliable here (the model would
 # emit the bare result JSON as plain text instead of the tool-call envelope,
 # burning turns without ever writing the output file). The butler's custom
-# tools (save_draft_brief, …) belong to the meta_agent/MetaAgent class below,
-# NOT to these agents, so they don't block native mode.
+# tools (save_draft_brief, …) belonged to the meta_agent/MetaAgent class (the
+# retired core/meta_agent.py), NOT to these agents, so they didn't block native mode.
 
 intent_detector:
   model: "flash"
@@ -29,9 +29,9 @@ meta_conversation_agent:
   thinking:
     enable: true
 
-# Autonomous CLI/WebGUI butler agent config. The butler's actual tool surface is
-# defined in core/meta_agent.py (TOOL_DEFINITIONS); this `tools` field is unused
-# by MetaAgent and kept empty to avoid confusion.
+# Autonomous CLI/WebGUI butler agent config — read by no live code since the
+# butler (core/meta_agent.py, whose TOOL_DEFINITIONS held its real tool surface)
+# was retired. Kept pending a decision, like `compacter` below.
 meta_agent:
   model: "smart"
   template: "meta_conversation.md"

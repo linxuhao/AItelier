@@ -28,7 +28,13 @@ on the owner's exact words.
 The host also reports each channel's status (`report_channel_status`, steward only:
 connected or not, a short detail, and the WeChat login QR as an SVG while a scan is
 needed) into `state_owner_channel_status`, one row per channel, which only the owner's
-dashboard reads. Neither the detail nor the QR is ever logged.
+dashboard reads. Neither the detail nor the QR is ever logged. The row holds facts only
+(design-steward 7.9.2): since when the channel is down, since when it is up, and whether
+the last reading was a real one (`live`). The channel-down alert keeps one ledger row per
+outage and kind (`state_channel_alerts`); which alert is due is one pure function of the
+facts, the ledger and the time (`due_alerts`), read by the host (`due_channel_alerts`),
+claimed (`claim_channel_alert`) and settled (`record_channel_alert`) by its code, never a
+model turn; see ALERT_AFTER.
 
 A binding attempt that names its channel message is remembered by that message
 (`state_owner_channel_bind_attempts`: who, which message, bound or the refusal), so a
@@ -79,6 +85,7 @@ import secrets
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
+from zoneinfo import ZoneInfo
 
 from core import drivers
 from core.driver_inbox import USER_SUBJECT
@@ -86,13 +93,26 @@ from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
 from core.state_schema_migration import add_column_if_missing
-from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, _proposal, impact_is_empty,
+from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, _proposal, default_tz, impact_is_empty,
                                 steward_project, stop_impact)
 
 log = logging.getLogger(__name__)
 
 CHANNELS = ("slack", "wechat")
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS state_channel_alerts (
+ channel TEXT NOT NULL CHECK(channel IN ('slack','wechat')),
+ kind TEXT NOT NULL CHECK(kind IN ('down','up')),
+ down_since TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('claimed','sent','failed')),
+ attempt INTEGER NOT NULL CHECK(attempt IN (1,2)),
+ via TEXT NOT NULL CHECK(via IN ('slack','wechat')),
+ claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT,
+ PRIMARY KEY(channel, kind, down_since));
+-- No other index: both readers (the due function's facts and the owner's channel list) hand
+-- the whole ledger to the pure due function, and the ledger stays small - at most one row per
+-- kind per outage, a down row only for an outage alerted about, at most one delivered down
+-- alert per channel in ALERT_DOWN_EVERY - so a scan of it costs less than keeping an index.
 CREATE TABLE IF NOT EXISTS state_owner_channels (
  channel TEXT PRIMARY KEY CHECK(channel IN ('slack','wechat')),
  sender_ref TEXT CHECK(sender_ref IS NULL OR sender_ref<>''),
@@ -197,6 +217,47 @@ _RUNNING = object()
 # request). A file whose decision is still running stays out of it, so a later service
 # of the same start tries again.
 _START_SETTLED: set[str] = set()
+# The channel-down alert (design-steward 7.9.2, C12), decided in code, never a model turn.
+# A channel bound to the owner that has been truly down ALERT_AFTER is told to the owner
+# through ANOTHER bound, live, connected channel (the default first); a delivered down alert
+# is followed by one recovery notice once the channel is truly back. Each outage (its
+# down_since) has at most one ledger row per kind, and at most ALERT_ATTEMPTS sends: the
+# second ALERT_RETRY_AFTER after the first claim, when that one failed or was not reported
+# within ALERT_UNREPORTED (the host most likely died). No down alert within ALERT_DOWN_EVERY
+# of the last delivered one. Nothing is due in the quiet hours (local QUIET_FROM:00 to
+# QUIET_UNTIL:00 in the owner's zone, core.state_steward.default_tz, as in design 7.6.4).
+ALERT_KINDS = ("down", "up")
+ALERT_AFTER = timedelta(minutes=10)
+ALERT_RETRY_AFTER = timedelta(minutes=30)
+ALERT_UNREPORTED = timedelta(minutes=10)
+ALERT_ATTEMPTS = 2
+ALERT_DOWN_EVERY = timedelta(hours=6)
+ALERT_DETAIL_MAX = 80
+ALERT_ERROR_MAX = 300
+QUIET_FROM, QUIET_UNTIL = 23, 8
+# What a channel plugin or the host says before (or instead of) a real reading: the WeChat
+# plugin's start, Slack's start, and a plugin taken back. A report of one of these marks the
+# row not live and starts no outage clock; the two starts keep `connected` as the last real
+# reading left it, while a plugin taken back (STATUS_STOPPED) is not connected - the dashboard
+# shows it disconnected, with its new-QR button - though it is no outage.
+STATUS_STOPPED = "channel plugin stopped"
+STATUS_PLACEHOLDERS = frozenset({"bridge not reached yet", "connecting", STATUS_STOPPED})
+# The status row's fact columns (added to existing databases): down_since (this outage's
+# start), up_since (the last time it truly came back) - neither is ever cleared - and live
+# (whether the last reading was a real one).
+_STATUS_COLUMNS = (("down_since", "TEXT"), ("up_since", "TEXT"),
+                   ("live", "INTEGER NOT NULL DEFAULT 1 CHECK(live IN (0,1))"))
+
+
+def alert_limits() -> dict:
+    """The due function's rules as the owner's channel list carries them (GET
+    /api/steward/channels): the dashboard's alert line reads them from there, never a copy."""
+    def minutes(delta):
+        return int(delta.total_seconds() // 60)
+    return {"after_minutes": minutes(ALERT_AFTER), "retry_after_minutes": minutes(ALERT_RETRY_AFTER),
+            "unreported_minutes": minutes(ALERT_UNREPORTED), "attempts": ALERT_ATTEMPTS,
+            "down_every_minutes": minutes(ALERT_DOWN_EVERY), "quiet_from_hour": QUIET_FROM,
+            "quiet_until_hour": QUIET_UNTIL}
 
 
 def rate_limits() -> tuple[int, int]:
@@ -208,6 +269,126 @@ def rate_limits() -> tuple[int, int]:
 def _now() -> datetime:
     """The channels' clock (aware UTC); tests replace it."""
     return datetime.now(timezone.utc)
+
+
+def quiet_until(moment: datetime):
+    """When the quiet hours that hold `moment` end (aware UTC), or None outside them."""
+    local = moment.astimezone(ZoneInfo(default_tz()))
+    if QUIET_UNTIL <= local.hour < QUIET_FROM:
+        return None
+    day = local.date() + timedelta(days=1) if local.hour >= QUIET_FROM else local.date()
+    return datetime(day.year, day.month, day.day, QUIET_UNTIL, tzinfo=local.tzinfo).astimezone(timezone.utc)
+
+
+def _at(stamp):
+    return datetime.fromisoformat(stamp)
+
+
+def _was_up(prev):
+    """Whether the channel's last real reading said connected. `connected` is 1 only from a
+    real reading; behind a placeholder that wrote 0 (STATUS_STOPPED) the clocks say it: the
+    later of up_since and down_since."""
+    if prev is None:
+        return False
+    if prev["connected"] or prev["live"]:
+        return bool(prev["connected"])
+    up, down = prev["up_since"], prev["down_since"]
+    return up is not None and (down is None or _at(up) > _at(down))
+
+
+def _settled_failed(row, moment):
+    """An attempt that failed, or was claimed and not reported within ALERT_UNREPORTED."""
+    return row["state"] == "failed" or (row["state"] == "claimed" and moment >= _at(row["claimed_at"]) + ALERT_UNREPORTED)
+
+
+def _told_at(row, moment):
+    """When this ledger row told the owner: a sent one when it was reported; a recovery
+    notice given up after its last attempt counts as told too (or no later outage would ever
+    be alerted again), at its report or ALERT_UNREPORTED after its claim. None otherwise."""
+    if row["state"] == "sent":
+        return _at(row["finished_at"])
+    if row["kind"] == "up" and row["attempt"] >= ALERT_ATTEMPTS and _settled_failed(row, moment):
+        return _at(row["finished_at"]) if row["finished_at"] else _at(row["claimed_at"]) + ALERT_UNREPORTED
+    return None
+
+
+def _last_told(rows, moment):
+    """(row, when) of the newest ledger row that told the owner, or None."""
+    told = [(at, row) for row in rows if (at := _told_at(row, moment)) is not None]
+    return max(told, key=lambda pair: pair[0])[::-1] if told else None
+
+
+def _next_attempt(row, moment):
+    """The attempt a claim of this ledger row's alert would be, or None: 1 with no row; 2
+    once the first failed (or went unreported) and ALERT_RETRY_AFTER has passed since its claim."""
+    if row is None:
+        return 1
+    if row["attempt"] < ALERT_ATTEMPTS and _settled_failed(row, moment) \
+            and moment >= _at(row["claimed_at"]) + ALERT_RETRY_AFTER:
+        return row["attempt"] + 1
+    return None
+
+
+def _usable(status, binding):
+    """A channel the alert may be about: bound to the owner, its last reading a real one, and
+    not one that says it is not configured (WeChat's `not configured`, Slack's `not configured: ...`)."""
+    return (binding is not None and binding["sender_ref"] is not None and binding["revoked_at"] is None
+            and status is not None and status["live"] and not (status["detail"] or "").startswith("not configured"))
+
+
+def _via(channel, statuses, bindings, exclude=()):
+    """Another channel bound to the owner, live and connected, the default first; or None.
+    Never one in `exclude` (the channels the host cannot send through now)."""
+    others = [c for c in CHANNELS if c != channel and c not in exclude and bindings.get(c) is not None
+              and bindings[c]["sender_ref"] is not None and bindings[c]["revoked_at"] is None
+              and statuses.get(c) is not None and statuses[c]["live"] and statuses[c]["connected"]]
+    others.sort(key=lambda c: (not bindings[c]["is_default"], c))
+    return others[0] if others else None
+
+
+def due_alerts(statuses, bindings, ledger, moment, exclude=()):
+    """The channel alerts due at `moment`: [{channel, kind, down_since, attempt, via}]. A
+    pure function of the status rows and bindings (by channel), the alert ledger's rows and
+    the time - nothing about an alert lives anywhere else (design-steward 7.9.2). `exclude`
+    (a claim's) only narrows the channels a `via` is chosen from."""
+    if quiet_until(moment) is not None:
+        return []
+    due = []
+    for channel in CHANNELS:
+        status, binding = statuses.get(channel), bindings.get(channel)
+        if not _usable(status, binding):
+            continue
+        via = _via(channel, statuses, bindings, exclude)
+        if via is None:
+            continue
+        rows = [r for r in ledger if r["channel"] == channel]
+        own = {(r["kind"], r["down_since"]): r for r in rows}
+        last = _last_told(rows, moment)
+        if not status["connected"]:
+            since = status["down_since"]
+            if since is None or moment < _at(since) + ALERT_AFTER:
+                continue
+            if any(r["kind"] == "down" and r["state"] == "sent" and moment - _at(r["finished_at"]) < ALERT_DOWN_EVERY
+                   for r in rows):
+                continue  # one down alert in ALERT_DOWN_EVERY, even for a new outage after a recovery notice
+            if last is not None and last[0]["kind"] == "down":
+                continue  # the owner was told this channel is down and not yet that it came back
+            kind = "down"
+        else:
+            if last is None or last[0]["kind"] != "down":
+                continue  # no down alert went out that a recovery notice would answer
+            kind, since = "up", last[0]["down_since"]
+        attempt = _next_attempt(own.get((kind, since)), moment)
+        if attempt is not None:
+            due.append({"channel": channel, "kind": kind, "down_since": since, "attempt": attempt, "via": via})
+    return due
+
+
+def _alert_facts(conn):
+    """What due_alerts reads: status rows and bindings by channel, and the ledger."""
+    return ({r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channel_status")},
+            {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channels")},
+            conn.execute("SELECT * FROM state_channel_alerts").fetchall())
 
 
 def _code_hash(pepper: str, channel: str, code: str) -> str:
@@ -419,6 +600,17 @@ class StateChannels:
                 # Additive (message time): every source row written before it has no
                 # channel time, which is what NULL means.
                 add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
+                added = {column: add_column_if_missing(conn, "state_owner_channel_status", column, definition)
+                         for column, definition in _STATUS_COLUMNS}
+                # Once each, when its column is added: a placeholder row waits for a real reading;
+                # a real outage starts now.
+                if added["live"]:
+                    marks = ",".join("?" * len(STATUS_PLACEHOLDERS))
+                    conn.execute(f"UPDATE state_owner_channel_status SET live=0 WHERE connected=0 AND detail IN ({marks})",
+                                 sorted(STATUS_PLACEHOLDERS))
+                if added["down_since"]:
+                    conn.execute("UPDATE state_owner_channel_status SET down_since=? WHERE connected=0 AND live=1",
+                                 (_now().isoformat(),))
                 conn.commit()
             if inbox is not None:  # the inbox's owner writers scan their text first
                 inbox.owner_text_guard = self.owner_text_guard
@@ -966,13 +1158,109 @@ class StateChannels:
             if qr_svg is not None:
                 check_qr_svg(qr_svg)
             stamp = _now().isoformat()
-            conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at) VALUES(?,?,?,?,?) "
-                         "ON CONFLICT(channel) DO UPDATE SET connected=excluded.connected,detail=excluded.detail,"
-                         "qr_svg=excluded.qr_svg,at=excluded.at",
-                         (channel, int(bool(connected)), detail, qr_svg, stamp))
+            # Facts only (design-steward 7.9.2). A placeholder says nothing about the channel:
+            # the row is marked not live and keeps both clocks (its QR, from a reading the
+            # placeholder replaces, goes as it always did); a start keeps connected, a plugin
+            # taken back is not connected (STATUS_STOPPED). A real reading starts the outage's
+            # clock when the channel goes down, and up_since when it comes back.
+            prev = conn.execute("SELECT * FROM state_owner_channel_status WHERE channel=?", (channel,)).fetchone()
+            if not connected and detail in STATUS_PLACEHOLDERS:
+                # qr_svg is cleared on purpose: a QR from before the placeholder (say, of a plugin
+                # now stopped) can no longer be scanned, so the dashboard must not keep showing it.
+                connected_now = "0" if detail == STATUS_STOPPED else "connected"
+                conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at,live) "
+                             "VALUES(?,0,?,NULL,?,0) ON CONFLICT(channel) DO UPDATE SET live=0,detail=excluded.detail,"
+                             f"qr_svg=NULL,at=excluded.at,connected={connected_now}", (channel, detail, stamp))
+            else:
+                was_up = _was_up(prev)
+                down_since, up_since = (prev["down_since"], prev["up_since"]) if prev is not None else (None, None)
+                if connected and not was_up:
+                    up_since = stamp
+                if not connected and (was_up or down_since is None):
+                    down_since = stamp
+                conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at,live,down_since,"
+                             "up_since) VALUES(?,?,?,?,?,1,?,?) "
+                             "ON CONFLICT(channel) DO UPDATE SET connected=excluded.connected,detail=excluded.detail,"
+                             "qr_svg=excluded.qr_svg,at=excluded.at,live=1,down_since=excluded.down_since,"
+                             "up_since=excluded.up_since",
+                             (channel, int(bool(connected)), detail, None if connected else qr_svg, stamp, down_since,
+                              up_since))
             return self.steward._record(conn, "report_channel_status", request_key, request_hash,
                                         {"recorded": True, "channel": channel, "connected": bool(connected),
                                          "at": stamp})
+
+    # ---------------------------------------------------------------- channel-down alert (host, in code)
+    @writer_only_read("due_channel_alerts")
+    def due_channel_alerts(self):
+        """The steward's host (or the owner): the channel alerts due now, [{channel, kind,
+        down_since, attempt}]. A read: nothing is written, not even a request record."""
+        moment = _now()
+        with self.store.transaction() as conn:
+            self._reader(conn)
+            due = due_alerts(*_alert_facts(conn), moment)
+        return {"due": [{k: d[k] for k in ("channel", "kind", "down_since", "attempt")} for d in due]}
+
+    def claim_channel_alert(self, project_id, request_key, channel, kind, down_since, attempt, exclude=()):
+        """The steward's host, in code: may it send this alert now? Judged again here, in one
+        transaction, by due_alerts: due with this very outage and attempt, through a `via`
+        not in `exclude` (the channels the host cannot send through now: not registered there,
+        or their current reading not accepted here) - the ledger row is claimed and the answer
+        is {granted: true, via, to, minutes, detail}, the same for the same request_key;
+        otherwise {granted: false} and nothing is written, not even the request record, so the
+        same key may be granted once it is due. The request's digest is [channel, kind,
+        down_since, attempt] only: a granted claim asked again with another `exclude` answers
+        its first grant (that row is already claimed through that via)."""
+        if channel not in CHANNELS:
+            raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
+        if kind not in ALERT_KINDS or attempt not in range(1, ALERT_ATTEMPTS + 1):
+            raise StateGraphError("invalid_request: kind is down or up, attempt 1 or 2")
+        exclude = tuple(exclude or ())
+        if any(c not in CHANNELS for c in exclude):
+            raise StateGraphError(f"invalid_channel: exclude names only {', '.join(CHANNELS)}")
+        request_hash = _hash([channel, kind, down_since, attempt])
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "claim_channel_alert", request_key, request_hash)
+            if replay is not None:
+                return replay
+            statuses, bindings, ledger = _alert_facts(conn)
+            due = [d for d in due_alerts(statuses, bindings, ledger, moment, exclude)
+                   if (d["channel"], d["kind"], d["down_since"], d["attempt"]) == (channel, kind, down_since, attempt)]
+            if not due:
+                return {"granted": False}
+            via, status = due[0]["via"], statuses[channel]
+            conn.execute("INSERT INTO state_channel_alerts(channel,kind,down_since,state,attempt,via,claimed_at) "
+                         "VALUES(?,?,?,'claimed',?,?,?) ON CONFLICT(channel,kind,down_since) DO UPDATE SET "
+                         "state='claimed',attempt=excluded.attempt,via=excluded.via,claimed_at=excluded.claimed_at,"
+                         "finished_at=NULL,error=NULL", (channel, kind, down_since, attempt, via, moment.isoformat()))
+            until = moment if kind == "down" or status["up_since"] is None else _at(status["up_since"])
+            return self.steward._record(conn, "claim_channel_alert", request_key, request_hash, {
+                "granted": True, "via": via, "to": bindings[via]["sender_ref"],
+                "minutes": max(0, int((until - _at(down_since)).total_seconds() // 60)),
+                "detail": (status["detail"] or "")[:ALERT_DETAIL_MAX] or None})
+
+    def record_channel_alert(self, project_id, request_key, channel, kind, down_since, attempt, ok, error=None):
+        """The steward's host: how the alert it claimed went - `ok`, or the channel's `error`.
+        It settles only the ledger row of that outage while it is still this attempt's claim;
+        a late or replayed result changes nothing else ({recorded: false})."""
+        if channel not in CHANNELS:
+            raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
+        if kind not in ALERT_KINDS or (ok is True) == bool(error):
+            raise StateGraphError("invalid_request: kind is down or up, and either ok or an error")
+        error = error[:ALERT_ERROR_MAX] if error else None
+        request_hash = _hash([channel, kind, down_since, attempt, ok, error])
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "record_channel_alert", request_key, request_hash)
+            if replay is not None:
+                return replay
+            changed = conn.execute("UPDATE state_channel_alerts SET state=?,finished_at=?,error=? WHERE channel=? "
+                                   "AND kind=? AND down_since=? AND attempt=? AND state='claimed'",
+                                   ("sent" if ok else "failed", _now().isoformat(), error, channel, kind, down_since,
+                                    attempt)).rowcount
+            return self.steward._record(conn, "record_channel_alert", request_key, request_hash,
+                                        {"recorded": changed == 1, "channel": channel, "kind": kind})
 
     # ---------------------------------------------------------------- new login QR (owner -> host)
     @staticmethod
@@ -1075,11 +1363,13 @@ class StateChannels:
             rows = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channels")}
             statuses = {r["channel"]: r for r in conn.execute("SELECT * FROM state_owner_channel_status")} \
                 if with_status else {}
+            ledger = conn.execute("SELECT * FROM state_channel_alerts").fetchall() if with_status else []
             # Each channel's newest request for a new login QR (the dashboard's feedback).
             logins = {r["channel"]: r for r in conn.execute(
                 "SELECT * FROM state_owner_channel_login_requests AS r WHERE requested_at=(SELECT MAX(requested_at) "
                 "FROM state_owner_channel_login_requests WHERE channel=r.channel)")} if with_status else {}
         moment = _now()
+        due = {d["channel"]: d for d in due_alerts(statuses, rows, ledger, moment)} if with_status else {}
         channels, default = [], None
         for channel in CHANNELS:
             row = rows.get(channel)
@@ -1093,11 +1383,36 @@ class StateChannels:
             if with_status:
                 status = statuses.get(channel)
                 channels[-1].update(
-                    status={"connected": bool(status["connected"]), "detail": status["detail"], "at": status["at"]}
-                    if status is not None else None,
+                    status=self._status_view(status, [r for r in ledger if r["channel"] == channel],
+                                             due.get(channel), moment) if status is not None else None,
                     qr_svg=status["qr_svg"] if status is not None else None,
                     login_request=self._login_view(logins[channel], moment) if channel in logins else None)
-        return {"channels": channels, "default_channel": default}
+        if not with_status:
+            return {"channels": channels, "default_channel": default}
+        quiet = quiet_until(moment)
+        return {"channels": channels, "default_channel": default, "now": moment.isoformat(),
+                "quiet_now": quiet is not None, "quiet_until": quiet.isoformat() if quiet else None,
+                "owner_tz": default_tz(), "alert_limits": alert_limits()}
+
+    @staticmethod
+    def _status_view(status, rows, due, moment):
+        """A status row for the dashboard: its facts, and the projections of the alert ledger
+        the Channels card reads (design-steward 7.9.2) - this outage's down alert, the recovery
+        notice of the last delivered one, what the owner was last told, and what is due now."""
+        def ledger_row(row):
+            return None if row is None else {k: row[k] for k in (
+                "kind", "down_since", "state", "attempt", "via", "claimed_at", "finished_at", "error")}
+        own = {(r["kind"], r["down_since"]): r for r in rows}
+        sent = sorted((r for r in rows if r["kind"] == "down" and r["state"] == "sent"), key=lambda r: r["finished_at"])
+        last = _last_told(rows, moment)
+        return {"connected": bool(status["connected"]), "detail": status["detail"], "at": status["at"],
+                "live": bool(status["live"]), "down_since": status["down_since"], "up_since": status["up_since"],
+                "alert_down": ledger_row(own.get(("down", status["down_since"]))) if status["down_since"] else None,
+                "alert_up": ledger_row(own.get(("up", sent[-1]["down_since"]))) if sent else None,
+                "last_told": {"kind": last[0]["kind"], "down_since": last[0]["down_since"], "at": last[1].isoformat()}
+                if last else None,
+                "last_down_sent_at": sent[-1]["finished_at"] if sent else None,
+                "alert_due": {"kind": due["kind"], "attempt": due["attempt"]} if due else None}
 
     @writer_only_read("message_sources")
     def message_sources(self, message_ids):

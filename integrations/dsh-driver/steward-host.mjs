@@ -580,7 +580,8 @@ export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'inval
 
 /** Design-steward 7.2: the host side of the owner's chat channels, over the State commands
  *  and queries of step 19 (relay_owner_message, bind_owner_channel, record_channel_delivery,
- *  report_channel_status, list_owner_channels, message_sources). The server checks
+ *  report_channel_status, list_owner_channels, message_sources) and step 25's channel-down
+ *  alert (due_channel_alerts, claim_channel_alert, record_channel_alert). The server checks
  *  everything again - the binding, the bounds, the approval phrase, the QR image; this only
  *  maps the plugin's calls onto it. A refusal is {refused: code}; a failure that is not one
  *  (5xx, transport) is thrown for the plugin to log.
@@ -635,6 +636,20 @@ export function channelOps(request) {
       request_key: `channel-status:${channel}:${Date.now()}:${digest(JSON.stringify([connected, detail ?? null, qrSvg ?? null]))}`,
       channel, connected: connected === true, ...(typeof detail === 'string' && detail ? { detail } : {}),
       ...(typeof qrSvg === 'string' && qrSvg ? { qr_svg: qrSvg } : {}) }, signal).then(answered, refused),
+    // The channel-down alert (design-steward 7.9.2), called by the plugin's code after a status
+    // poll, never by the model: what is due (a read - it writes nothing), may this one go now
+    // and through which channel, and how its send went. One key per outage, kind and attempt:
+    // a granted claim asked again is State's replay (its `exclude` - the channels the plugin
+    // cannot send through now - is not in the key, so the replay is the first grant), an
+    // ungranted one leaves no record.
+    dueAlerts: signal => request('/api/state/query/due_channel_alerts', {}, signal).then(r => r?.result ?? r),
+    claimAlert: ({ channel, kind, downSince, attempt, exclude }, signal) => request('/api/state/commands/claim_channel_alert', {
+      request_key: `channel-alert:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt,
+      exclude: Array.isArray(exclude) ? exclude : [] }, signal)
+      .then(answered, refused),
+    recordAlert: ({ channel, kind, downSince, attempt, error }, signal) => request('/api/state/commands/record_channel_alert', {
+      request_key: `channel-alert-result:${channel}:${kind}:${downSince}:${attempt}`, channel, kind, down_since: downSince, attempt,
+      ok: !error, ...(error ? { error: String(error).slice(0, 300) } : {}) }, signal).then(answered, refused),
   };
 }
 

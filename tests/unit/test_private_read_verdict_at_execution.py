@@ -67,6 +67,7 @@ _ARGS = {
     "list_steward_schedules": {},
     "list_owner_channels": {},
     "list_owner_channel_login_requests": {},
+    "due_channel_alerts": {},
     "message_sources": {"message_ids": [C.CHANNEL_MESSAGE]},
 }
 
@@ -110,7 +111,7 @@ def _steward_reader(trusted, tmp_path):
 
 # Step 19: the channel reads answer the owner's session or the steward too.
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
-                       "list_owner_channel_login_requests", "message_sources"}
+                       "list_owner_channel_login_requests", "message_sources", "due_channel_alerts"}
 
 
 def _classify(call):

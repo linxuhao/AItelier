@@ -1165,7 +1165,11 @@ def test_the_hosts_status_report_reaches_the_owners_list_and_only_there(world):
     assert out == {"recorded": True, "channel": "wechat", "connected": False, "at": out["at"]}
     assert report(world, "s1", detail="scan needed", qr_svg=QR) == out, "a replay"
     listed = {c["channel"]: c for c in world.owner.channels.list_owner_channels(with_status=True)["channels"]}
-    assert listed["wechat"]["status"] == {"connected": False, "detail": "scan needed", "at": out["at"]}
+    # Step 25 (design-steward 7.9.2): the facts and the alert ledger's projections ride along.
+    assert listed["wechat"]["status"] == {"connected": False, "detail": "scan needed", "at": out["at"], "live": True,
+                                          "down_since": out["at"], "up_since": None, "alert_down": None,
+                                          "alert_up": None, "last_told": None, "last_down_sent_at": None,
+                                          "alert_due": None}
     assert listed["wechat"]["qr_svg"] == QR
     assert listed["slack"]["status"] is None and listed["slack"]["qr_svg"] is None
     # A later report replaces the row: logged in, the QR is gone.

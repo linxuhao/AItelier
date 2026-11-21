@@ -5,7 +5,7 @@
  *  host.d.ts `channels` shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies, channelText, MORE } from '../lib/channels.mjs';
+import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies, channelText, MORE, alertText } from '../lib/channels.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1008,6 +1008,539 @@ test('the channels capability may implement reportStatus or not', () => {
     config: { sessionId: 's', provider: 'p', model: 'm', stateDir: '/tmp/x', dshEntry: '/x', rolesFile: join(dir, 'roles.json'),
       todo: { module: 'dsh_todo', stateDirEnv: 'X' } }, context: async () => '', events: async () => ({ stop() {} }) };
   assert.ok(validateHost(host));
+});
+
+// ---- channel-down alert (design-steward 7.9.2): one pass after each poll - read what is due, claim, send, record
+
+const MINUTE = 60000;
+/** A fake backend behind host.channels for the alert, in line with core/state_channels.py
+ *  (r44l): the status rows hold facts only (a placeholder marks a row not live and changes no
+ *  fact), the ledger one row per outage and kind, and what is due is one function of both and
+ *  the time - 10 minutes in, via another bound live connected channel, a second attempt 30
+ *  minutes after a first that failed or went unreported for 10, no down within 6 hours of a
+ *  delivered one nor while the owner was last told the channel is down, an `up` only for a
+ *  delivered `down`. A claim's `exclude` is never its via. A granted claim's replay answers the
+ *  same whatever its exclude (the key holds none); an ungranted one keeps nothing. A channel in
+ *  `refuse` has its status reports refused ({refused}) and its row left as it was.
+ *  No quiet hours (tests/unit/test_channel_alerts.py pins those, and the real backend's
+ *  contract: test_the_hosts_request_keys_and_fields_are_these). It outlives a plugin. */
+function alertBackend(clock, { bindings = { slack: 'U-OWNER', wechat: 'wxid-owner' } } = {}) {
+  const rows = new Map(), ledger = new Map(), granted = new Map(), calls = [], excludes = [], refuse = new Set();
+  const PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting', 'channel plugin stopped']);
+  const iso = () => new Date(clock.now).toISOString();
+  const lapsed = r => r.state === 'failed' || (r.state === 'claimed' && clock.now >= r.claimedAt + 10 * MINUTE);
+  const toldAt = r => r.state === 'sent' ? r.finishedAt
+    : r.kind === 'up' && r.attempt >= 2 && lapsed(r) ? (r.finishedAt ?? r.claimedAt + 10 * MINUTE) : null;
+  const next = r => !r ? 1 : r.attempt < 2 && lapsed(r) && clock.now >= r.claimedAt + 30 * MINUTE ? r.attempt + 1 : null;
+  const live = c => rows.get(c)?.live === true;
+  const via = (c, exclude) => CHANNEL_NAMES.find(o => o !== c && !exclude.includes(o) && bindings[o] && live(o) && rows.get(o).connected);
+  const due = (exclude = []) => CHANNEL_NAMES.flatMap(channel => {
+    const row = rows.get(channel), through = via(channel, exclude);
+    if (!bindings[channel] || !live(channel) || (row.detail ?? '').startsWith('not configured') || !through) return [];
+    const own = [...ledger.values()].filter(r => r.channel === channel);
+    const last = own.filter(r => toldAt(r) !== null).sort((x, y) => toldAt(x) - toldAt(y)).at(-1);
+    let kind, since;
+    if (!row.connected) {
+      if (!row.downSince || clock.now < Date.parse(row.downSince) + 10 * MINUTE) return [];
+      if (own.some(r => r.kind === 'down' && r.state === 'sent' && clock.now - r.finishedAt < 6 * 60 * MINUTE)) return [];
+      if (last?.kind === 'down') return [];
+      [kind, since] = ['down', row.downSince];
+    } else {
+      if (last?.kind !== 'down') return [];
+      [kind, since] = ['up', last.downSince];
+    }
+    const attempt = next(ledger.get(`${channel}:${kind}:${since}`));
+    return attempt ? [{ channel, kind, down_since: since, attempt, via: through }] : [];
+  });
+  return { rows, ledger, calls, bindings, excludes, refuse,
+    reportStatus(status) {
+      calls.push(['report', status.channel, status.connected, status.detail ?? null]);
+      if (refuse.has(status.channel)) return { refused: 'qr_svg_refused' };
+      const prev = rows.get(status.channel);
+      if (!status.connected && PLACEHOLDERS.has(status.detail))
+        rows.set(status.channel, { ...(prev ?? { connected: false, downSince: null, upSince: null }), live: false, detail: status.detail });
+      else {
+        const row = { connected: status.connected, detail: status.detail ?? null, live: true, downSince: prev?.downSince ?? null,
+          upSince: prev?.upSince ?? null };
+        if (status.connected && !prev?.connected) row.upSince = clock.now;
+        if (!status.connected && (prev?.connected || !row.downSince)) row.downSince = iso();
+        rows.set(status.channel, row);
+      }
+      return { recorded: true, channel: status.channel, connected: status.connected, at: iso() };
+    },
+    dueAlerts() { calls.push(['due']); return { due: due().map(({ via: _via, ...item }) => item) }; },
+    claimAlert({ channel, kind, downSince, attempt, exclude = [] }) {
+      const key = `channel-alert:${channel}:${kind}:${downSince}:${attempt}`;
+      calls.push(['claim', key]);
+      excludes.push(exclude);
+      if (granted.has(key)) return granted.get(key);
+      const hit = due(exclude).find(d => d.channel === channel && d.kind === kind && d.down_since === downSince && d.attempt === attempt);
+      if (!hit) return { granted: false };
+      ledger.set(`${channel}:${kind}:${downSince}`, { channel, kind, downSince, state: 'claimed', attempt, via: hit.via, claimedAt: clock.now,
+        finishedAt: null, error: null });
+      const row = rows.get(channel), until = kind === 'down' ? clock.now : row.upSince;
+      const answer = { granted: true, via: hit.via, to: bindings[hit.via], minutes: Math.floor((until - Date.parse(downSince)) / MINUTE),
+        detail: row.detail ? row.detail.slice(0, 80) : null };
+      granted.set(key, answer);
+      return answer;
+    },
+    recordAlert({ channel, kind, downSince, attempt, error }) {
+      calls.push(['record', `channel-alert-result:${channel}:${kind}:${downSince}:${attempt}`, error ?? null]);
+      const row = ledger.get(`${channel}:${kind}:${downSince}`);
+      const settles = row?.state === 'claimed' && row.attempt === attempt;
+      if (settles) Object.assign(row, { state: error ? 'failed' : 'sent', finishedAt: clock.now, error: error ?? null });
+      return { recorded: settles, channel, kind };
+    } };
+}
+/** Two channels on a plugin over `backend`; each channel's status and send are the test's. */
+function alertSetup(backend, clock, { limits, slackNow, wechatNow, host = {} } = {}) {
+  const fake = fakeHost({ bindings: backend.bindings }), logs = [];
+  Object.assign(fake.host, { reportStatus: async s => backend.reportStatus(s), dueAlerts: async () => backend.dueAlerts(),
+    claimAlert: async c => backend.claimAlert(c), recordAlert: async o => backend.recordAlert(o) }, host);
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), clock: () => clock.now,
+    limits: { ...CHANNEL_LIMITS, recordRetryMs: 1, ...limits } });
+  const make = name => {
+    const c = { now: { connected: true }, sent: [], fail: undefined, hold: undefined };
+    c.channel = { name, status: () => c.now, async send(text, options) {
+      c.sent.push({ text, options });
+      if (c.hold) await c.hold;
+      if (c.fail) throw new Error(c.fail);
+      return { ref: 'r' };
+    } };
+    return c;
+  };
+  const slack = make('slack'), wechat = make('wechat');
+  if (slackNow) slack.now = slackNow;  // what each reads when it registers (a restart)
+  if (wechatNow) wechat.now = wechatNow;
+  channels.ready();
+  const off = { slack: channels.service.register(slack.channel), wechat: channels.service.register(wechat.channel) };
+  /** Polls every 30 s (the host's statusMs) for `ms`, as the timer would. */
+  const run = async ms => { for (const end = clock.now + ms; clock.now < end;) { clock.now += CHANNEL_LIMITS.statusMs; await channels.pollStatus(); } };
+  return { channels, logs, slack, wechat, run, poll: () => channels.pollStatus(), fake, off };
+}
+const T_ALERT = Date.parse('2026-11-23T11:00:00Z');
+const kinds = backend => backend.calls.filter(([what]) => what !== 'report').map(([what]) => what);
+
+test('alert: due, then claimed, then sent through the host\'s via to its account, then recorded; the text has no QR', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const s = alertSetup(backend, clock);
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'no QR (logged_out)', qrSvg: QR_SVG };
+    await s.poll();
+    await s.run(9 * MINUTE + 30000);
+    assert.deepEqual(backend.calls.filter(([what]) => what === 'claim'), [], 'nothing is claimed before it is due');
+    assert.deepEqual(s.slack.sent, []);
+    await s.run(30000);
+    const since = new Date(T_ALERT).toISOString();
+    assert.deepEqual(backend.calls.filter(([what]) => what !== 'report' && what !== 'due'),
+      [['claim', `channel-alert:wechat:down:${since}:1`], ['record', `channel-alert-result:wechat:down:${since}:1`, null]]);
+    assert.deepEqual(s.wechat.sent, [], 'never through the channel that is down');
+    assert.equal(s.slack.sent.length, 1);
+    const [{ text, options }] = s.slack.sent;
+    assert.deepEqual(options, { to: 'U-OWNER' });
+    assert.equal(text, '微信断开了 10 分钟（no QR (logged_out)）。断开期间发到微信的消息收不到；去面板「渠道」页处理。');
+    assert.ok(!text.includes('<svg') && !text.includes('qrSvg'));
+    // Stably down and told: an hour of passes claims nothing more.
+    await s.run(60 * MINUTE);
+    assert.equal(backend.calls.filter(([what]) => what === 'claim').length, 1);
+    assert.deepEqual(s.logs.filter(([event]) => event.startsWith('channel_alert')),
+      [['channel_alert_sent', { channel: 'wechat', kind: 'down', attempt: 1, ok: true }]], 'logged: never the text or the detail');
+    assert.ok(!JSON.stringify(s.logs).includes('logged_out') && !JSON.stringify(s.logs).includes('断开'));
+    // Back: one recovery notice through Slack, with how long it was down.
+    s.wechat.now = { connected: true };
+    await s.poll();
+    assert.equal(s.slack.sent.length, 2);
+    assert.equal(s.slack.sent[1].text, '微信恢复了（断开了 70 分钟）。');
+    await s.run(60 * MINUTE);
+    assert.equal(s.slack.sent.length, 2, 'stably connected: nothing more');
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a channel whose reading the host refused is dropped from what is due and is no via; the pass goes on (457 F2, 458 F3)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const s = alertSetup(backend, clock);
+  try {
+    await s.poll();
+    // WeChat truly down (taken); five minutes on it is back, but that report is refused: the
+    // host's row still says down, ten minutes in it names WeChat due - never a false alert.
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    await s.run(5 * MINUTE);
+    backend.refuse.add('wechat');
+    s.wechat.now = { connected: true, detail: 'back' };
+    await s.run(6 * MINUTE);
+    assert.deepEqual(backend.dueAlerts().due.map(d => [d.channel, d.kind]), [['wechat', 'down']], 'the host\'s old row is due');
+    assert.ok(kinds(backend).includes('due'), 'the pass was not skipped');
+    assert.equal(backend.calls.filter(([what]) => what === 'claim').length, 0, 'but WeChat\'s item is dropped: never claimed');
+    assert.deepEqual([s.slack.sent, s.wechat.sent], [[], []]);
+    backend.refuse.delete('wechat');
+    s.wechat.now = { connected: true };
+    await s.run(MINUTE);
+    assert.equal(backend.rows.get('wechat').connected, true);
+    assert.deepEqual([s.slack.sent, s.wechat.sent, [...backend.ledger.keys()]], [[], [], []], 'never told it was down: nothing at all');
+    // Now Slack goes down while WeChat's reading is refused: Slack's own item is claimed as
+    // usual, with WeChat in `exclude` - not granted, no ledger row, no attempt spent.
+    s.slack.now = { connected: false, detail: 'socket closed' };
+    await s.poll();
+    const since = backend.rows.get('slack').downSince;
+    await s.run(9 * MINUTE);
+    backend.refuse.add('wechat');
+    s.wechat.now = { connected: true, detail: 'new detail' };
+    await s.run(MINUTE);
+    assert.deepEqual(backend.calls.filter(([what]) => what === 'claim').map(([, key]) => key).at(-1), `channel-alert:slack:down:${since}:1`);
+    assert.deepEqual(backend.excludes.at(-1), ['wechat']);
+    assert.deepEqual([s.wechat.sent, [...backend.ledger.keys()]], [[], []]);
+    backend.refuse.delete('wechat');
+    s.wechat.now = { connected: true, detail: 'newer detail' };
+    await s.poll();
+    assert.deepEqual(backend.excludes.at(-1), []);
+    assert.equal(s.wechat.sent.length, 1, 'taken: the first attempt goes now');
+    assert.equal(backend.ledger.get(`slack:down:${since}`).attempt, 1);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a recovery notice is claimed only while its channel\'s current reading is connected and taken; nothing spent before (458 F3)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let then;  // what WeChat reads right after a connected report reached the host, before the pass
+  const s = alertSetup(backend, clock, { host: { reportStatus: async st => {
+    const answer = st.channel === 'wechat' && st.detail === 'b' ? { refused: 'detail_too_long' } : backend.reportStatus(st);
+    if (then && st.channel === 'wechat' && st.connected) { s.wechat.now = then; then = undefined; }
+    return answer;
+  } } });
+  const claims = () => backend.calls.filter(([what]) => what === 'claim').map(([, key]) => key);
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    const since = backend.rows.get('wechat').downSince;
+    await s.run(10 * MINUTE);
+    assert.equal(s.slack.sent.length, 1, 'the down alert');
+    // Back, and down again before the pass: the host names `up` due; this side does not claim it.
+    then = { connected: false, detail: 'bridge unreachable' };
+    s.wechat.now = { connected: true };
+    await s.poll();
+    assert.deepEqual(backend.dueAlerts().due.map(d => d.kind), ['up'], 'the host\'s row says connected');
+    assert.deepEqual(claims(), [`channel-alert:wechat:down:${since}:1`], 'only the down was ever claimed');
+    assert.equal(backend.ledger.has(`wechat:up:${since}`), false, 'no ledger row, no attempt');
+    await s.poll();  // its down reading reached the host: nothing is due
+    assert.deepEqual(backend.dueAlerts().due, []);
+    // Back with a reading the host takes, then a connected one it refuses: the host's row says
+    // connected and `up` is due, but this side's current reading is not the host's.
+    then = { connected: true, detail: 'b' };
+    s.wechat.now = { connected: true, detail: 'a' };
+    await s.poll();
+    await s.poll();  // 'b' reported and refused: still not the host's
+    assert.equal(backend.rows.get('wechat').detail, 'a');
+    assert.equal(claims().length, 1, 'not claimed on a reading the host did not take');
+    assert.equal(s.slack.sent.length, 1);
+    s.wechat.now = { connected: true, detail: 'c' };
+    await s.poll();
+    assert.equal(s.slack.sent.length, 2, 'taken: the recovery notice goes');
+    assert.equal(claims().at(-1), `channel-alert:wechat:up:${since}:1`, 'as the first attempt');
+    assert.equal(s.slack.sent[1].text, `微信恢复了（断开了 ${Math.floor((backend.rows.get('wechat').upSince - Date.parse(since)) / MINUTE)} 分钟）。`);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a stale `up` is not claimed while that channel\'s current reading, taken by the host, is disconnected', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let stale;  // the host's answer, read while WeChat was still back
+  const s = alertSetup(backend, clock, { host: { dueAlerts: async () => stale ? { due: [stale] } : backend.dueAlerts() } });
+  const claims = () => backend.calls.filter(([what]) => what === 'claim').map(([, key]) => key);
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    const since = backend.rows.get('wechat').downSince;
+    await s.run(10 * MINUTE);
+    assert.equal(s.slack.sent.length, 1, 'the down alert');
+    stale = { channel: 'wechat', kind: 'up', down_since: since, attempt: 1 };
+    await s.poll();
+    assert.equal(backend.rows.get('wechat').connected, false, 'the disconnected reading is the host\'s');
+    assert.deepEqual(claims(), [`channel-alert:wechat:down:${since}:1`], 'the stale up is never claimed');
+    assert.equal(s.slack.sent.length, 1);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a placeholder channel is neither alerted about nor carries an alert, across a host restart (D10)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  // Before the restart WeChat was connected; Slack goes down and the host stops at once.
+  let s = alertSetup(backend, clock);
+  await s.poll();
+  s.slack.now = { connected: false, detail: 'socket closed' };
+  await s.poll();
+  s.channels.stop();
+  clock.now += 15 * MINUTE;
+  s = alertSetup(backend, clock, { slackNow: { connected: false, detail: 'socket closed' }, wechatNow: { connected: false, detail: 'bridge not reached yet' } });
+  try {
+    await s.run(MINUTE);
+    assert.deepEqual([s.slack.sent, s.wechat.sent], [[], []], 'WeChat not read yet: it carries nothing');
+    assert.equal(backend.rows.get('wechat').connected, true, 'and its row still says what it last really was');
+    s.wechat.now = { connected: true };
+    await s.poll();
+    assert.equal(s.wechat.sent.length, 1, 'read: it carries the alert');
+    assert.match(s.wechat.sent[0].text, /^Slack断开了 16 分钟（socket closed）/);
+  } finally { s.channels.stop(); }
+  // Before the restart WeChat was down 5 minutes (not alerted yet); the host comes back at 12.
+  const clock2 = { now: T_ALERT }, backend2 = alertBackend(clock2);
+  s = alertSetup(backend2, clock2);
+  await s.poll();
+  s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+  await s.poll();
+  await s.run(5 * MINUTE);
+  s.channels.stop();
+  clock2.now += 7 * MINUTE;
+  s = alertSetup(backend2, clock2, { wechatNow: { connected: false, detail: 'bridge not reached yet' } });
+  try {
+    await s.run(MINUTE);
+    assert.deepEqual(s.slack.sent, [], 'down for 13 minutes, but not read yet: no alert');
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    assert.equal(s.slack.sent.length, 1);
+    assert.match(s.slack.sent[0].text, /^微信断开了 13 分钟（bridge unreachable）/, 'the outage kept its clock');
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a start placeholder still read placeholderMs after it was first read is reported as still connecting, and alerted like any outage (457 F1)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  assert.equal(CHANNEL_LIMITS.placeholderMs, 120000);
+  const s = alertSetup(backend, clock, { wechatNow: { connected: false, detail: 'bridge not reached yet' } });
+  try {
+    await s.run(CHANNEL_LIMITS.placeholderMs - 30000);
+    assert.equal(backend.rows.get('wechat').live, false);
+    await s.run(30000);
+    assert.deepEqual(backend.calls.filter(([what, channel]) => what === 'report' && channel === 'wechat').at(-1),
+      ['report', 'wechat', false, 'still connecting (bridge not reached yet)']);
+    assert.equal(backend.rows.get('wechat').live, true);
+    await s.run(10 * MINUTE);
+    assert.equal(s.slack.sent.length, 1);
+    assert.match(s.slack.sent[0].text, /^微信断开了 10 分钟（still connecting \(bridge not reached yet\)）/);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: the placeholder clock restarts on any other reading and when the plugin is taken back; "channel plugin stopped" is never rewritten', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const s = alertSetup(backend, clock, { slackNow: { connected: false, detail: 'connecting' },
+    wechatNow: { connected: false, detail: 'bridge not reached yet' } });
+  const last = channel => backend.calls.filter(([what, c]) => what === 'report' && c === channel).at(-1);
+  try {
+    await s.run(90000);
+    s.slack.now = { connected: true };  // a real reading in between
+    await s.poll();
+    s.slack.now = { connected: false, detail: 'connecting' };
+    await s.poll();  // first read now
+    await s.run(90000);
+    assert.deepEqual(last('slack'), ['report', 'slack', false, 'connecting'], 'its clock started again at the second placeholder');
+    await s.run(30000);
+    assert.deepEqual(last('slack'), ['report', 'slack', false, 'still connecting (connecting)']);
+    // WeChat taken back 30 s before its bound: the host gets "channel plugin stopped", as it is,
+    // and no later poll rewrites it (a channel taken back is not polled).
+    assert.deepEqual(last('wechat'), ['report', 'wechat', false, 'still connecting (bridge not reached yet)']);
+    s.off.wechat();
+    await s.run(10 * MINUTE);
+    assert.deepEqual(last('wechat'), ['report', 'wechat', false, 'channel plugin stopped']);
+    assert.equal(backend.rows.get('wechat').live, false);
+    // Loaded again: its own clock, not the old one.
+    const again = { connected: false, detail: 'bridge not reached yet' };
+    s.off.wechat = s.channels.service.register({ name: 'wechat', status: () => again, async send() { return { ref: 'r' }; } });
+    await s.run(90000);
+    assert.deepEqual(last('wechat'), ['report', 'wechat', false, 'bridge not reached yet']);
+    await s.run(30000);
+    assert.deepEqual(last('wechat'), ['report', 'wechat', false, 'still connecting (bridge not reached yet)']);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: two passes overlapping send each due item once', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const items = [{ channel: 'wechat', kind: 'down', down_since: 'D1', attempt: 1 }, { channel: 'slack', kind: 'up', down_since: 'D2', attempt: 1 }];
+  const claims = [];
+  const s = alertSetup(backend, clock, { host: { dueAlerts: async () => ({ due: items }),
+    claimAlert: async c => { claims.push(c); return { granted: true, via: c.channel === 'wechat' ? 'slack' : 'wechat', to: 'X', minutes: 12, detail: null }; } } });
+  try {
+    let release;
+    s.slack.hold = new Promise(resolve => { release = resolve; });
+    const first = s.poll(), second = s.poll(), third = s.poll();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    release();
+    await Promise.all([first, second, third]);
+    assert.deepEqual(claims.map(c => c.channel), ['wechat', 'slack']);
+    assert.deepEqual([s.slack.sent.length, s.wechat.sent.length], [1, 1]);
+    assert.equal(s.wechat.sent[0].text, 'Slack恢复了（断开了 12 分钟）。');
+  } finally { s.channels.stop(); }
+});
+
+test('alert: the only channel that could carry it not registered here: in exclude, nothing granted, still due at the same attempt (458 F3, 460 F7)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const s = alertSetup(backend, clock);
+  await s.poll();
+  s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+  await s.poll();
+  s.channels.stop();  // the host died; this time the Slack plugin does not load (its row still says live, connected)
+  const fake = fakeHost({ bindings: backend.bindings });
+  Object.assign(fake.host, { reportStatus: async st => backend.reportStatus(st), dueAlerts: async () => backend.dueAlerts(),
+    claimAlert: async c => backend.claimAlert(c), recordAlert: async o => backend.recordAlert(o) });
+  const lone = createOwnerChannels({ host: fake.host, clock: () => clock.now, limits: { ...CHANNEL_LIMITS, recordRetryMs: 1 } });
+  lone.ready();
+  lone.service.register({ name: 'wechat', status: () => ({ connected: false, detail: 'bridge unreachable' }),
+    async send() { throw new Error('never through itself'); } });
+  try {
+    const since = new Date(T_ALERT).toISOString();
+    for (let i = 0; i < 4; i++) { clock.now += 10 * MINUTE; await lone.pollStatus(); }
+    assert.deepEqual(backend.dueAlerts().due, [{ channel: 'wechat', kind: 'down', down_since: since, attempt: 1 }], 'still due, the first attempt');
+    assert.deepEqual(backend.excludes, [['slack'], ['slack'], ['slack'], ['slack']], 'Slack never a via');
+    assert.deepEqual([...backend.ledger.keys()], [], 'nothing claimed, nothing spent');
+    assert.equal(backend.calls.filter(([what]) => what === 'record').length, 0);
+  } finally { lone.stop(); }
+});
+
+test('alert: a granted via taken back between the claim and the send is not sent to, and recorded as via_not_running', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let s;
+  s = alertSetup(backend, clock, { host: { claimAlert: async c => { const grant = backend.claimAlert(c); s.off.slack(); return grant; } } });
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    clock.now += 10 * MINUTE;
+    await s.poll();
+    const since = new Date(T_ALERT).toISOString();
+    assert.deepEqual(backend.calls.filter(([what]) => what === 'claim' || what === 'record'),
+      [['claim', `channel-alert:wechat:down:${since}:1`], ['record', `channel-alert-result:wechat:down:${since}:1`, 'via_not_running']]);
+    assert.deepEqual(s.slack.sent, []);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a grant whose answer was lost, asked again with another exclude, is the same grant through the same via (460 F6)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let lose = true, stale;
+  // The pass's read of what is due raced the lost grant: it still names the same item.
+  const s = alertSetup(backend, clock, { host: { dueAlerts: async () => {
+    const answer = backend.dueAlerts();
+    if (answer.due.length) stale = answer;
+    return stale ?? answer;
+  }, claimAlert: async c => {
+    const grant = backend.claimAlert(c);
+    if (lose) { lose = false; throw new Error('socket hang up'); }
+    return grant;
+  } } });
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    clock.now += 10 * MINUTE;
+    await s.poll();
+    assert.deepEqual(s.slack.sent, [], 'the grant never came back');
+    const since = new Date(T_ALERT).toISOString();
+    assert.equal(backend.ledger.get(`wechat:down:${since}`).state, 'claimed');
+    // Slack's next reading is refused: this side now excludes it, and the same key is the host's replay.
+    backend.refuse.add('slack');
+    s.slack.now = { connected: true, detail: 'reconnected' };
+    await s.poll();
+    assert.deepEqual(backend.excludes, [[], ['slack']]);
+    assert.equal(s.slack.sent.length, 1, 'the first grant: through Slack');
+    assert.deepEqual(s.slack.sent[0].options, { to: 'U-OWNER' });
+    assert.equal(backend.ledger.get(`wechat:down:${since}`).state, 'sent');
+  } finally { s.channels.stop(); }
+});
+
+test('alert: granted false sends nothing; a read or a claim with no answer is simply asked again at the next pass (D18)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let failDue = false, failClaim = false;
+  const s = alertSetup(backend, clock, { host: {
+    dueAlerts: async () => { if (failDue) throw new Error('HTTP 502'); return backend.dueAlerts(); },
+    claimAlert: async c => { if (failClaim) throw new Error('socket hang up'); return backend.claimAlert(c); } } });
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.run(9 * MINUTE);
+    const early = backend.claimAlert({ channel: 'wechat', kind: 'down', downSince: new Date(T_ALERT + 30000).toISOString(), attempt: 1 });
+    assert.deepEqual(early, { granted: false });
+    failDue = true;
+    await s.run(2 * MINUTE);
+    assert.deepEqual(s.slack.sent, []);
+    failDue = false; failClaim = true;
+    await s.poll();
+    assert.deepEqual(s.slack.sent, []);
+    failClaim = false;
+    await s.poll();
+    assert.equal(s.slack.sent.length, 1);
+    assert.deepEqual(s.logs.filter(([event]) => event === 'channel_alert_due_failed' || event === 'channel_alert_claim_failed').map(([e]) => e).slice(-2),
+      ['channel_alert_due_failed', 'channel_alert_claim_failed']);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a record that fails is tried again under the same key; WeChat\'s recipient_unknown is recorded as a failure', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let failures = 2;
+  const s = alertSetup(backend, clock, { host: { recordAlert: async o => {
+    backend.calls.push(['record-try', o.attempt]);
+    if (failures-- > 0) throw new Error('HTTP 503');
+    return backend.recordAlert(o);
+  } } });
+  try {
+    s.wechat.fail = '409 recipient_unknown';
+    await s.poll();
+    s.slack.now = { connected: false, detail: 'socket closed' };
+    await s.poll();
+    await s.run(10 * MINUTE);
+    assert.equal(s.wechat.sent.length, 1);
+    const since = backend.rows.get('slack').downSince;
+    assert.deepEqual(backend.calls.filter(([what]) => what.startsWith('record')),
+      [['record-try', 1], ['record-try', 1], ['record-try', 1], ['record', `channel-alert-result:slack:down:${since}:1`, '409 recipient_unknown']]);
+    await s.run(30 * MINUTE);
+    assert.equal(s.wechat.sent.length, 2, 'the second attempt, 30 minutes after the first claim');
+    await s.run(120 * MINUTE);
+    assert.equal(s.wechat.sent.length, 2, 'never a third');
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a down claimed, then reconnected, then recorded sent: the next pass sends the recovery (D6)', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  const s = alertSetup(backend, clock);
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    let release;
+    s.slack.hold = new Promise(resolve => { release = resolve; });
+    clock.now += 10 * MINUTE;
+    const pass = s.poll();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    s.wechat.now = { connected: true };  // back while the alert is still being sent
+    backend.reportStatus({ channel: 'wechat', connected: true });
+    release();
+    await pass;
+    s.slack.hold = undefined;
+    await s.poll();
+    assert.deepEqual(s.slack.sent.map(m => m.text), ['微信断开了 10 分钟（bridge unreachable）。断开期间发到微信的消息收不到；去面板「渠道」页处理。',
+      '微信恢复了（断开了 10 分钟）。']);
+  } finally { s.channels.stop(); }
+});
+
+test('alert: a host without all three of dueAlerts, claimAlert and recordAlert is never asked (the standalone DSH host has none)', async () => {
+  for (const missing of ['dueAlerts', 'claimAlert', 'recordAlert']) {
+    const clock = { now: T_ALERT }, backend = alertBackend(clock);
+    const host = { ...fakeHost().host, reportStatus: async st => backend.reportStatus(st), dueAlerts: async () => backend.dueAlerts(),
+      claimAlert: async c => backend.claimAlert(c), recordAlert: async o => backend.recordAlert(o) };
+    delete host[missing];
+    const plain = createOwnerChannels({ host, clock: () => clock.now });
+    plain.ready();
+    plain.service.register({ name: 'slack', status: () => ({ connected: false, detail: 'socket closed' }), async send() { throw new Error('never'); } });
+    clock.now += 60 * MINUTE;
+    await plain.pollStatus();
+    await plain.pollStatus();
+    plain.stop();
+    assert.deepEqual(kinds(backend), [], `without ${missing}`);
+  }
+});
+
+test('alertText: the two fixed texts from the host\'s minutes; the detail is cut to 80 characters; no detail, no brackets', () => {
+  assert.equal(alertText({ channel: 'wechat', kind: 'down', minutes: 12, detail: 'no QR (logged_out)' }),
+    '微信断开了 12 分钟（no QR (logged_out)）。断开期间发到微信的消息收不到；去面板「渠道」页处理。');
+  assert.equal(alertText({ channel: 'slack', kind: 'down', minutes: 10, detail: null }),
+    'Slack断开了 10 分钟。断开期间发到Slack的消息收不到；去面板「渠道」页处理。');
+  assert.ok(alertText({ channel: 'wechat', kind: 'down', minutes: 10, detail: '长'.repeat(200) }).includes('（' + '长'.repeat(80) + '）'));
+  assert.equal(alertText({ channel: 'wechat', kind: 'up', minutes: 40, detail: 'x' }), '微信恢复了（断开了 40 分钟）。');
 });
 
 // --- what claude/s19-integrate held that this line did not (each fails at 9678b68e08) -------

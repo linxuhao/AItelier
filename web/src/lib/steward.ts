@@ -71,13 +71,17 @@ export async function runMemoryRequest(
 
 // ── Scheduled reminders (plugin step 16) ──
 
-/** One-click cron expressions; the owner can still write any 5-field expression. */
-export const SCHEDULE_PRESETS = [
+/** One-click cron expressions; the owner can still write any 5-field expression. A preset
+ *  with `fill` also fills the title and instruction when they are empty, from the texts
+ *  steward.schedPresetTitle.<id> / steward.schedPresetInstruction.<id> (design 7.9.3: the daily
+ *  brief - what goes into it is steward.md's rule, not the reminder's). */
+export const SCHEDULE_PRESETS: readonly {id: string; expr: string; fill?: boolean}[] = [
   {id: 'daily', expr: '0 9 * * *'},
   {id: 'weekdays', expr: '0 9 * * 1-5'},
   {id: 'monday', expr: '0 9 * * 1'},
   {id: 'monthly', expr: '0 9 1 * *'},
-] as const;
+  {id: 'brief', expr: '0 8 * * *', fill: true},
+];
 
 /** The refusal codes the schedule endpoints give with a 422 (each has a steward.schedReason.* text). */
 export const SCHEDULE_REFUSALS = ['invalid_cron', 'too_frequent', 'at_in_past', 'invalid_timezone'];

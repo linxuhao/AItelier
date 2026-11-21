@@ -62,6 +62,14 @@
       if (current) { conflict = current; onchange(current); } else error = refusalText(e);
     } finally { busy = false; }
   }
+  // A preset sets the expression; one that fills (the daily brief) also writes its title and
+  // instruction into whichever of the two is still empty - never over what the owner wrote.
+  function usePreset(preset: {id: string; expr: string; fill?: boolean}) {
+    expr = preset.expr;
+    if (!preset.fill) return;
+    if (!title.trim()) title = t('steward.schedPresetTitle.' + preset.id);
+    if (!instruction.trim()) instruction = t('steward.schedPresetInstruction.' + preset.id);
+  }
   function startFromCurrent() {
     if (!conflict) return;
     fill(conflict); conflict = null;
@@ -80,7 +88,7 @@
     <label>{t('steward.schedExpr')}<input type="text" bind:value={expr} placeholder="0 9 * * 1-5" data-schedule-expr /></label>
     <div class="presets" role="group" aria-label={t('steward.schedPresets')}>
       {#each SCHEDULE_PRESETS as preset (preset.id)}
-        <button type="button" class="outline" onclick={() => { expr = preset.expr; }}>{t('steward.schedPreset.' + preset.id)}</button>
+        <button type="button" class="outline" onclick={() => usePreset(preset)}>{t('steward.schedPreset.' + preset.id)}</button>
       {/each}
     </div>
   {:else}

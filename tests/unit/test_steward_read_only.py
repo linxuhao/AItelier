@@ -152,7 +152,11 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "report_channel_status",
         # ...and records what the WeChat bridge answered to the owner's request for a new
         # login QR ({requested} or {refused}; never the QR), run by the host in code.
-        "complete_owner_channel_login_request"}
+        "complete_owner_channel_login_request",
+        # Step 25 C12 (design-steward 7.9.2): the channel-down alert, called ONLY by the host's
+        # code after its status poll (no steward tool maps onto them): the backend decides if an
+        # alert is due and through which channel; the host records how its fixed text went.
+        "claim_channel_alert", "record_channel_alert"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

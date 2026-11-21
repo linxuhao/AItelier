@@ -48,7 +48,9 @@
       rows = rows.filter(r => r.schedule_id !== row.schedule_id);
     } catch (e) { failed(e); }
   }
-  const presetId = (expr: string) => SCHEDULE_PRESETS.find(p => p.expr === expr)?.id;
+  // A row is named after the preset its expression matches - never after one that fills a
+  // title and instruction (the daily brief): any 08:00 reminder shares that expression.
+  const presetId = (expr: string) => SCHEDULE_PRESETS.find(p => !p.fill && p.expr === expr)?.id;
   onMount(() => {
     alive = true;
     void load();

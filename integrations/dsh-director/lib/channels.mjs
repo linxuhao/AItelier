@@ -22,7 +22,21 @@
  *  registered channel's status() - connected, a detail line, and while a WeChat login
  *  needs a scan its QR as an SVG (`qrSvg`) - is handed to the host when it changes: read
  *  when the channel registers, every `statusMs` after, and as disconnected when it is
- *  taken back. The detail and the QR are never logged (the QR is a login token). */
+ *  taken back. The detail and the QR are never logged (the QR is a login token).
+ *
+ *  Channel-down alert (design-steward 7.9.2): with the host's optional channels.dueAlerts,
+ *  claimAlert and recordAlert, a channel that stays down is told to the owner through ANOTHER
+ *  channel, in code - never a model turn, never the owner's conversation. After each poll's
+ *  status reports, one pass reads what the host says is due, claims each item, sends a granted
+ *  one to the bound account of the channel the host named (`via`) and records how it went.
+ *  The host decides everything and keeps every alert's state; this side keeps none (one flag
+ *  stops two passes overlapping). A channel whose current reading the host has not accepted
+ *  (a report refused, or not reached) is neither alerted about nor carries an alert this pass:
+ *  its due items are dropped and it goes in the claim's `exclude`; a recovery notice is claimed
+ *  only while its channel's current reading is connected and accepted. A channel still on its
+ *  start placeholder placeholderMs after it was first read is reported as
+ *  `still connecting (<placeholder>)`, a real outage. The text is fixed (alertText), never
+ *  carries a QR, and only the channel, kind, attempt and outcome are logged. */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -205,7 +219,26 @@ const within = (promise, ms, what) => {
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
   lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000, mirrorChars: 600,
-  fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12 });
+  fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12, alertDetail: 80,
+  placeholderMs: 120000 });
+
+/** The fixed text of a channel-down alert (design-steward 7.9.2): which channel, for how many
+ *  minutes (the host's count) and the channel's own detail line (cut to `max` characters) - or
+ *  that it is back. Nothing else: no QR, no account. */
+const ALERT_NAMES = Object.freeze({ slack: 'Slack', wechat: '微信' });
+export function alertText({ channel, kind, minutes, detail }, max = CHANNEL_LIMITS.alertDetail) {
+  const name = ALERT_NAMES[channel] ?? channel, count = Math.max(0, Math.floor(Number(minutes) || 0));
+  if (kind === 'up') return `${name}恢复了（断开了 ${count} 分钟）。`;
+  const why = text(detail) ? `（${Array.from(detail).slice(0, max).join('')}）` : '';
+  return `${name}断开了 ${count} 分钟${why}。断开期间发到${name}的消息收不到；去面板「渠道」页处理。`;
+}
+/** What a channel plugin says before its first real reading (the WeChat plugin, Slack); still
+ *  read placeholderMs after it was first read, it is reported as still connecting - a real
+ *  outage. Not `channel plugin stopped`: that is this side's own report for a channel taken
+ *  back, which is no longer polled. placeholderMs is not readyMs (the host's own start, below):
+ *  a bridge container restarting with the host takes tens of seconds to log in again; twice
+ *  that, to be measured at go-live (design-steward 7.9.7 item 1). */
+const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -220,7 +253,7 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
  *    message in before the host has installed itself (measured: its caller did not exist
  *    yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
-  owedFile = defaultOwedFile() }) {
+  owedFile = defaultOwedFile(), clock = Date.now }) {
   const registered = new Map(), told = new Map(), sending = new Map(), binds = new Map(), lanes = new Map(),
     answeredRefs = new Set();
   // Channel messages this process handed to the host and got no answer for: whatever the
@@ -468,27 +501,41 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   };
 
   // A channel's status as the host takes it; a status() that throws reads as disconnected.
-  const statusOf = entry => {
+  // A start placeholder still read placeholderMs after it was first read is a channel that
+  // never got going (a bridge that took the connection and never answers, a socket start that
+  // never returns): reported as still connecting, which the host counts as down. When each
+  // channel's start placeholder was first read: cleared by any other reading and when the
+  // channel is taken back (a plugin loaded again starts its own clock).
+  const placeholderSince = new Map();
+  const statusOf = (channel, entry) => {
     let raw;
     try { raw = entry.status(); } catch { raw = { connected: false, detail: 'status unavailable' }; }
-    return { connected: raw?.connected === true,
-      ...(text(raw?.detail) ? { detail: raw.detail.slice(0, limits.statusDetail) } : {}),
+    const connected = raw?.connected === true;
+    let detail = text(raw?.detail) ? raw.detail : undefined;
+    if (!connected && START_PLACEHOLDERS.has(detail)) {
+      if (!placeholderSince.has(channel)) placeholderSince.set(channel, clock());
+      if (clock() - placeholderSince.get(channel) >= limits.placeholderMs) detail = `still connecting (${detail})`;
+    } else placeholderSince.delete(channel);
+    return { connected, ...(detail ? { detail: detail.slice(0, limits.statusDetail) } : {}),
       ...(text(raw?.qrSvg) ? { qrSvg: raw.qrSvg } : {}) };
   };
+  const statusKey = status => JSON.stringify([status.connected, status.detail ?? null, status.qrSvg ?? null]);
   // What the host last took per channel. One report at a time; only a change is reported.
   // A refusal is the host's answer to that status (not reported again); a failure to reach
-  // it is tried again at the next poll.
-  const reported = new Map();
+  // it is tried again at the next poll. `accepted` is what the host last wrote per channel - a
+  // refused reading is in `reported`, never here - so the alert pass knows whose row is current.
+  const reported = new Map(), accepted = new Map();
   let statusQueue = Promise.resolve(), statusTimer, owedTimer;
   const reportStatus = (channel, status) => {
     if (typeof host.reportStatus !== 'function') return statusQueue;
     statusQueue = statusQueue.then(async () => {
-      const key = JSON.stringify([status.connected, status.detail ?? null, status.qrSvg ?? null]);
+      const key = statusKey(status);
       if (reported.get(channel) === key) return;
       try {
         await hostReady();
         const result = await host.reportStatus({ channel, ...status });
         reported.set(channel, key);
+        if (!result?.refused) accepted.set(channel, key);
         if (result?.refused) log('channel_status_refused', { channel, connected: status.connected, reason: String(result.refused) });
         else log('channel_status_reported', { channel, connected: status.connected });
       } catch (error) { log('channel_status_failed', { channel, error: short(error) }); }
@@ -496,8 +543,73 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return statusQueue;
   };
   const pollStatus = () => {
-    for (const [channel, entry] of registered) void reportStatus(channel, statusOf(entry));
-    return statusQueue;
+    for (const [channel, entry] of registered) void reportStatus(channel, statusOf(channel, entry));
+    // The alert pass runs after this poll's reports, outside the status queue: a send may take
+    // sendMs and its record half a minute more, and the next poll's reports must not wait.
+    return statusQueue.then(alertPass).catch(error => log('channel_alert_failed', { error: short(error) }));
+  };
+
+  // The channel-down alert's one pass (design-steward 7.9.2). Every alert state is the host's:
+  // a read or a claim with no answer is simply asked again at the next pass; an item not
+  // claimed here stays due at the same attempt. The host's row is current only for a channel
+  // whose current reading it accepted (a refused or unreached report leaves an old fact there):
+  // any other channel - or one not registered here - is neither alerted about nor a `via`.
+  let alerting = false;
+  const current = channel => {
+    const entry = registered.get(channel);
+    if (!entry) return null;
+    const status = statusOf(channel, entry);
+    return accepted.get(channel) === statusKey(status) ? status : null;
+  };
+  const alertPass = async () => {
+    if (alerting || typeof host.dueAlerts !== 'function' || typeof host.claimAlert !== 'function'
+      || typeof host.recordAlert !== 'function') return;
+    alerting = true;
+    try {
+      let due;
+      try { due = (await host.dueAlerts())?.due; }
+      catch (error) { log('channel_alert_due_failed', { error: short(error) }); return; }
+      for (const item of Array.isArray(due) ? due : []) {
+        const { channel, kind, down_since: downSince, attempt } = item ?? {};
+        if (!CHANNEL_NAMES.includes(channel) || !['down', 'up'].includes(kind) || !text(downSince) || !Number.isInteger(attempt)) continue;
+        const readings = new Map(CHANNEL_NAMES.map(name => [name, current(name)]));
+        const reading = readings.get(channel);
+        if (!reading || (kind === 'up' && !reading.connected)) continue;
+        // Asked even when nothing left could carry it: a grant whose answer was lost is replayed
+        // whatever the exclude; otherwise the host answers {granted: false} and keeps nothing.
+        const exclude = CHANNEL_NAMES.filter(name => !readings.get(name));
+        const ask = { channel, kind, downSince, attempt };
+        let grant;
+        try { grant = await host.claimAlert({ ...ask, exclude }); }
+        catch (error) { log('channel_alert_claim_failed', { channel, kind, attempt, error: short(error) }); continue; }
+        if (grant?.granted !== true) continue;
+        await recordAlert(ask, await sendAlert({ channel, kind, attempt }, grant));
+      }
+    } finally { alerting = false; }
+  };
+  // Sent straight to `to` on `via` (not mirror(): that is the default channel's); the error, if any.
+  const sendAlert = async ({ channel, kind, attempt }, { via, to, minutes, detail }) => {
+    let error;
+    const entry = registered.get(via);
+    if (!entry) error = 'via_not_running';
+    else {
+      try {
+        await within(Promise.resolve(entry.send(alertText({ channel, kind, minutes, detail }, limits.alertDetail), { to })),
+          limits.sendMs, 'send_timeout');
+      } catch (failure) { error = short(failure); }
+    }
+    log(error ? 'channel_alert_failed' : 'channel_alert_sent', { channel, kind, attempt, ok: !error });
+    return error;
+  };
+  // Recorded under the claim's own key, retried like a delivery record.
+  const recordAlert = async (ask, error) => {
+    for (let attempt = 1; ; attempt++) {
+      try { await host.recordAlert({ ...ask, ...(error ? { error } : {}) }); return; }
+      catch (failure) {
+        if (attempt >= limits.recordAttempts) { log('channel_alert_record_failed', { channel: ask.channel, kind: ask.kind, error: short(failure) }); return; }
+        try { await pause(limits.recordRetryMs * 2 ** (attempt - 1)); } catch { return; }
+      }
+    }
   };
 
   const service = {
@@ -512,10 +624,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}) };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
-      void reportStatus(channel.name, statusOf(entry));
+      void reportStatus(channel.name, statusOf(channel.name, entry));
       return () => {
         if (registered.get(channel.name) !== entry) return;
         registered.delete(channel.name);
+        placeholderSince.delete(channel.name);
         void reportStatus(channel.name, { connected: false, detail: 'channel plugin stopped' });
       };
     },

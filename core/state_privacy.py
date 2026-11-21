@@ -122,6 +122,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # The owner's requests for a new WeChat login QR and what the bridge answered (never
     # the QR itself). No projection.
     "state_owner_channel_login_requests",
+    # Step 25: the channel-down alert ledger, one row per outage and kind (which channel
+    # carried it, how it went, the channel's error). No projection.
+    "state_channel_alerts",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

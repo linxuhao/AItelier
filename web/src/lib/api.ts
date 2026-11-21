@@ -930,11 +930,21 @@ export function previewStewardSchedule(schedule: StewardScheduleSpec, tz: string
 // ── Owner chat channels (plugin step 19, design 7.2). Owner session only: the
 //    plaintext bind code exists in exactly one response, the POST below.
 export type OwnerChannelName = 'slack' | 'wechat';
+/** One row of the channel-down alert ledger (design 7.9.2): one per outage and kind. */
+export interface OwnerChannelAlertRow {
+  kind: 'down' | 'up'; down_since: string; state: 'claimed' | 'sent' | 'failed'; attempt: number;
+  via: OwnerChannelName; claimed_at: string; finished_at: string | null; error: string | null;
+}
 export interface OwnerChannel {
   channel: OwnerChannelName; bound: boolean; sender_ref: string | null;
   bound_at: string | null; revoked_at: string | null; is_default: boolean | number;
-  /** What the steward's host last reported for this channel (and when); null when it reported nothing. */
-  status?: {connected: boolean; detail?: string | null; at?: string} | null;
+  /** What the steward's host last reported for this channel (and when); null when it reported nothing.
+   *  Design 7.9.2: the facts (live: the last reading was a real one; down_since: this outage's
+   *  start; up_since: the last real reconnect) and the channel-down alert ledger's projections. */
+  status?: {connected: boolean; detail?: string | null; at?: string; live?: boolean; down_since?: string | null;
+    up_since?: string | null; alert_down?: OwnerChannelAlertRow | null; alert_up?: OwnerChannelAlertRow | null;
+    last_told?: {kind: 'down' | 'up'; down_since: string; at: string} | null; last_down_sent_at?: string | null;
+    alert_due?: {kind: 'down' | 'up'; attempt: number} | null} | null;
   /** While a WeChat login needs a scan: its QR as an SVG document (the backend checked it). */
   qr_svg?: string | null;
   /** The newest request for a new login QR on this channel (WeChat only), or null. */
@@ -947,7 +957,16 @@ export interface OwnerChannelLoginRequest {
   requested_at: string; completed_at: string | null;
   result: {requested?: true; refused?: string; retry_after_s?: number} | null;
 }
-export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null }
+/** The backend's own rules of the channel-down alert (core/state_channels.py alert_limits). */
+export interface OwnerChannelAlertLimits {
+  after_minutes: number; retry_after_minutes: number; unreported_minutes: number; attempts: number;
+  down_every_minutes: number; quiet_from_hour: number; quiet_until_hour: number;
+}
+export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null;
+  /** Design 7.9.2: the server's clock, the owner's quiet hours now (until their next end) and zone,
+   *  and the alert's rules the card's times are computed with. */
+  now?: string; quiet_now?: boolean; quiet_until?: string | null; owner_tz?: string;
+  alert_limits?: OwnerChannelAlertLimits }
 export function listOwnerChannels(): Promise<OwnerChannels> {
   return _get('/api/steward/channels');
 }

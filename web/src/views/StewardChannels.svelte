@@ -3,6 +3,7 @@
   import { createOwnerChannelCode, listOwnerChannels, requestOwnerChannelQr, setDefaultOwnerChannel, unbindOwnerChannel,
     type OwnerChannel, type OwnerChannelLoginRequest, type OwnerChannelName } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
+  import { channelAlertLine, channelAlertText, type ChannelClock } from '../lib/channelAlert';
   import ConfirmDialog from './ConfirmDialog.svelte';
   // The owner's chat channels (design 7.2): who is bound on Slack / WeChat, the
   // one-time bind code, unbind, and where the steward's unprompted messages go.
@@ -20,10 +21,13 @@
   // only for QR_ON_ITS_WAY_MS after the bridge took the request (its 30 s QR wait and a
   // status report): a QR that came and went, or an attempt that failed at once, leaves the
   // status line alone to say why there is no QR.
+  // Each card shows its channel-down alert line (design 7.9.2, lib/channelAlert.ts), from the
+  // answer's own clock and the owner's zone; an answer without them (an older backend) shows none.
   const QR_FEEDBACK_MS = 10 * 60_000, QR_ON_ITS_WAY_MS = 60_000;
   const CHANNELS: OwnerChannelName[] = ['slack', 'wechat'];
   const BIND_POLL_MS = 5000, OFFLINE_POLL_MS = 15000;
   let rows = $state<OwnerChannel[]>([]), defaultChannel = $state<OwnerChannelName | null>(null);
+  let clock = $state<ChannelClock | null>(null);
   let loaded = $state(false), error = $state(''), notice = $state(''), busy = $state('');
   // A live code per channel, with the binding it was issued against: a different
   // binding later means the code was used.
@@ -42,6 +46,8 @@
       const result = await listOwnerChannels();
       if (!alive) return;
       rows = result.channels ?? []; defaultChannel = result.default_channel ?? null;
+      clock = result.now && result.owner_tz && result.alert_limits
+        ? {now: result.now, owner_tz: result.owner_tz, limits: result.alert_limits} : null;
       error = ''; loaded = true;
       for (const channel of CHANNELS) {
         const live = codes[channel], binding = bindingOf(row(channel));
@@ -145,6 +151,8 @@
     {#each CHANNELS as channel (channel)}
       {@const r = row(channel)}
       {@const live = codes[channel]}
+      {@const alert = clock ? channelAlertLine(r, rows, clock) : null}
+      {@const alertText = alert && clock ? channelAlertText(alert, clock, t) : ''}
       <article class="channel" data-channel={channel} data-bound={r.bound ? '1' : '0'}>
         <header>
           <strong>{t('steward.chan.' + channel)}</strong>
@@ -155,6 +163,7 @@
           {/if}
         </header>
         {#if r.status?.detail}<p class="detail" data-channel-detail>{r.status.detail}</p>{/if}
+        {#if alertText}<p class="alert" data-channel-alert={alert?.key}>{alertText}</p>{/if}
         {#if r.qr_svg}
           <figure class="qr" data-channel-qr>
             <!-- The QR is a reported SVG: only ever an <img> data URL (no script, no external
@@ -218,4 +227,5 @@
   .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}
   .default{display:block;margin:12px 0 0;font-size:13px;}.default select{margin:4px 0 0;font-size:13px;}
   .notice{color:var(--pico-primary);}.error{color:var(--pico-del-color);}
+  .alert{margin:0 0 6px;overflow-wrap:anywhere;}
 </style>

@@ -1033,3 +1033,60 @@ export function stewardMessageSources(ids: string[]): Promise<Record<string, Mes
     '/api/steward/message-sources?ids=' + ids.map(encodeURIComponent).join(','))
     .then(r => r.sources ?? {});
 }
+
+// ── The steward's own MCP connections (step 24.1a, design 7.8.10). Owner session
+//    only; a header secret goes in and is never answered back (`secret` is set/unset).
+export type StewardVisibility = 'private' | 'public';
+export interface StewardConnection {
+  conn_id: string; label: string; url: string; auth_kind: 'none' | 'header' | 'oauth';
+  header_name: string | null; visibility: StewardVisibility; enabled: boolean;
+  generation: number; config_version: number; secret: 'set' | 'unset' | 'oauth_needs_consent';
+  auth_identity: string | null; created_at: string; updated_at: string;
+  last_probe_at: string | null; last_error: string | null; last_change: string; usable: boolean;
+  tool_counts: {all: number; allowed: number; outward: number; changed: number; new: number};
+}
+export interface StewardRestartState {
+  due: {driver_id: string; reason: string; due_at: string; created_at: string}[];
+  done: {id: number; driver_id: string; reasons: {reason: string; effective_hash: string}[];
+    restarted_at: string; error: string | null; noticed_at: string | null}[];
+}
+export interface StewardConnections {
+  connections: StewardConnection[]; effective_tools: string[]; effective_hash: string; restart: StewardRestartState;
+}
+export interface StewardConnectionTool {
+  raw_name: string; gw_name: string; name: string; description: string; input_schema: unknown;
+  annotations: Record<string, unknown> | null; schema_sha256: string;
+  allowed: boolean; outward: boolean; egress: boolean; blocked_args: string[]; daily_cap: number | null;
+  state: 'new' | 'allowed' | 'off' | 'changed' | 'collision';
+}
+export interface StewardConnectionTools {
+  conn_id: string; instructions: string | null; last_probe_at: string | null; last_error: string | null;
+  tools: StewardConnectionTool[]; error?: string;
+}
+export interface StewardConnectionInput {
+  conn_id: string; label: string; url: string; auth_kind: 'none' | 'header';
+  header_name?: string | null; visibility: StewardVisibility; enabled: boolean;
+}
+export type StewardToolChange = {raw_name: string} & Partial<Pick<StewardConnectionTool,
+  'allowed' | 'outward' | 'egress' | 'blocked_args' | 'daily_cap'>>;
+export function listStewardConnections(): Promise<StewardConnections> {
+  return _get('/api/steward/connections');
+}
+export function saveStewardConnection(input: StewardConnectionInput): Promise<StewardConnection> {
+  return _post('/api/steward/connections', input);
+}
+export function deleteStewardConnection(connId: string): Promise<unknown> {
+  return _del('/api/steward/connections/' + encodeURIComponent(connId));
+}
+export function stewardConnectionTools(connId: string): Promise<StewardConnectionTools> {
+  return _get('/api/steward/connections/' + encodeURIComponent(connId) + '/tools');
+}
+export function setStewardConnectionTools(connId: string, tools: StewardToolChange[]): Promise<StewardConnectionTools> {
+  return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/tools', {tools});
+}
+export function setStewardConnectionSecret(connId: string, value: string | null): Promise<{secret: 'set' | 'unset'}> {
+  return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/secret', {value});
+}
+export function probeStewardConnection(connId: string): Promise<StewardConnectionTools> {
+  return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/probe');
+}

@@ -8,9 +8,10 @@
   import StewardProfile from './StewardProfile.svelte';
   import StewardSchedules from './StewardSchedules.svelte';
   import StewardChannels from './StewardChannels.svelte';
+  import StewardConnections from './StewardConnections.svelte';
   // The steward's pane is the ordinary conversation pane of its project, plus
   // tabs of its own: proposals, every project's open questions, reminders, chat
-  // channels, profile. Only this pane asks where its messages came from (`sources`).
+  // channels, its own MCP connections (step 24.1a), profile. Only this pane asks where its messages came from (`sources`).
   const { projectId, projects = [], status = null, questions = {}, onread = () => {}, onrefresh = () => {}, onanswer }: {
     projectId: string; projects?: StateProjectRow[]; status?: DriverStatusResponse | null;
     questions?: Record<string, number>; onread?: () => void; onrefresh?: () => void;
@@ -25,6 +26,7 @@
     {id: 'questions', label: t('steward.tabQuestions')},
     {id: 'schedules', label: t('steward.tabSchedules')},
     {id: 'channels', label: t('steward.tabChannels')},
+    {id: 'connections', label: t('steward.tabConnections')},
     {id: 'profile', label: t('steward.tabProfile')},
   ]);
   // "Change it" is not an endpoint: the owner tells the steward in the
@@ -43,6 +45,7 @@
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />
     {:else if tab === 'schedules'}<StewardSchedules />
     {:else if tab === 'channels'}<StewardChannels />
+    {:else if tab === 'connections'}<StewardConnections />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}
 </DriverConversationPane>

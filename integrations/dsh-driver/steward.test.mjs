@@ -1140,6 +1140,32 @@ test('step 17 layer 2: open threads from data - the unanswered owner messages an
   void now;
 });
 
+test('step 17 layer 2: a reply newer than the first 100 deliveries of the steward\'s inbox still counts as an answer', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  const conversation = [owner('o1', '2026-11-18T10:00:00Z', 'tell wuxia to pause'), mine('s1', '2026-11-18T10:01:00Z', 'ok', 'o1')];
+  // 250 deliveries, the reply to the handoff is the 230th: the reader pages forward, 100 at a time.
+  const inbox = Array.from({ length: 250 }, (_, i) => ({ message: { message_id: 'r' + i, ...(i === 229 ? { reply_to_delivery_id: 'hd1' } : {}) },
+    delivery: { delivery_id: 'd' + i, delivery_seq: i + 1 } }));
+  const pages = [];
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/send_director_message')) return { result: { message: { message_id: 'hm1' }, deliveries: [{ delivery_id: 'hd1' }] } };
+    if (path.endsWith('/list_director_messages')) {
+      pages.push(body.after);
+      const rest = inbox.filter(i => i.delivery.delivery_seq > body.after), items = rest.slice(0, body.limit);
+      const has_more = rest.length > items.length;
+      return { result: { items, matched_total: rest.length, has_more, next_after: has_more ? items.at(-1).delivery.delivery_seq : 250 } };
+    }
+    throw new Error('unexpected ' + path);
+  };
+  const ops = stewardOps({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'pause please', citesUserMessageId: 'o1' })).handed_off, true);
+  const { openThreads } = await import('./steward-host.mjs');
+  const threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.deepEqual(threads.handoffs_last_7_days.map(h => [h.project_id, h.answered]), [['wuxia', true]]);
+  assert.deepEqual(pages, [0, 100, 200], 'every page, each from the cursor the last one gave');
+});
+
 test('open threads name the chat channel each unanswered owner message came from, and nothing for a dashboard one', async () => {
   const conversation = [owner('o1', '2026-11-20T12:48:00Z', '测试'), owner('o2', '2026-11-20T12:49:00Z', 'from wechat'),
     owner('o3', '2026-11-20T12:50:00Z', 'from the dashboard')];

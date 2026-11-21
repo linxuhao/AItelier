@@ -394,9 +394,18 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
       .split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return undefined; } })
       .filter(h => h && h.at >= since);
     if (sent.length) {
-      const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
-        statuses: ['unread', 'acknowledged', 'resolved'], after: 0, limit: 100 }, signal);
-      const replied = new Set(((listed.result ?? listed).items ?? []).map(i => i.message?.reply_to_delivery_id).filter(Boolean));
+      // The reader pages forward from the oldest delivery: every page is read, so a reply
+      // newer than the first 100 deliveries still counts.
+      const replied = new Set();
+      for (let after = 0; ;) {
+        const listed = await request('/api/state/query/list_director_messages', { project_id: project, protocol_version: 'v3',
+          statuses: ['unread', 'acknowledged', 'resolved'], after, limit: 100 }, signal);
+        const page = listed.result ?? listed, items = page.items ?? [];
+        for (const i of items) if (i.message?.reply_to_delivery_id) replied.add(i.message.reply_to_delivery_id);
+        // A page with nothing on it, or a cursor that did not move, cannot be paged past.
+        if (!page.has_more || !items.length || !(page.next_after > after)) break;
+        after = page.next_after;
+      }
       threads.handoffs_last_7_days = sent.map(h => ({ at: h.at, project_id: h.project_id, cites_user_message_id: h.cites_user_message_id,
         answered: (h.delivery_ids ?? []).some(id => replied.has(id)) }));
     } else threads.handoffs_last_7_days = [];

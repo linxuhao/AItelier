@@ -646,32 +646,43 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dic
         "action": "project_overview", "arguments": {"project_id": PROJECT_ID},
     })
     guide = _mcp_call(url, headers, "state_graph_help", {})
-    standing = _newest_standing_envelope(url, headers)
     # Owner standing-only selection: the private aggregate is called ONLY when
     # the server advertises the typed standing_only selector AND the baseline
     # identity check establishes the caller. Anything else falls back to the
-    # bounded project-standing query above with an honest notice — an older API
+    # bounded project-standing walk with an honest notice — an older API
     # is never handed an unfiltered aggregator call, silently or otherwise.
     # A server that does not advertise the operation at all (or advertises it in
     # a shape we cannot trust) is the older API too: same fallback, same notice.
+    #
+    # The advertisement is decided FIRST, before any standing read, because it is
+    # what decides whether the page walk is owed at all. Draining the forward
+    # pages first and overwriting the answer afterwards paid ceil(matched/100)
+    # list_director_messages requests on every compaction for a result that was
+    # then discarded, and it made a server that answers in one typed call fail
+    # closed when a later page it never needed went transiently unavailable.
     reason = "server does not advertise driver_postcompact_guidance"
     operations = guide.get("operations")
     operation = operations.get("driver_postcompact_guidance") if isinstance(operations, dict) else None
+    selector_advertised = False
     if isinstance(operation, dict):
         authenticated = True  # _authorized_connection already matched this session driver
         arguments = operation.get("arguments")
         properties = arguments.get("properties") if isinstance(arguments, dict) else None
         selector = properties.get("standing_only") if isinstance(properties, dict) else None
-        advertised = isinstance(selector, dict) and selector.get("type") == "boolean"
-        if authenticated and advertised:
-            standing = _mcp_call(url, headers, "state_graph_read", {
-                "action": "driver_postcompact_guidance",
-                "arguments": {"project_id": PROJECT_ID, "standing_only": True},
-            })
+        selector_advertised = (
+            authenticated and isinstance(selector, dict) and selector.get("type") == "boolean")
+        if selector_advertised:
             reason = ""
         else:
             reason = ("driver identity not established" if not authenticated
                       else "server does not advertise the standing_only selector")
+    if selector_advertised:
+        standing = _mcp_call(url, headers, "state_graph_read", {
+            "action": "driver_postcompact_guidance",
+            "arguments": {"project_id": PROJECT_ID, "standing_only": True},
+        })
+    else:
+        standing = _newest_standing_envelope(url, headers)
     own_notice = (
         f"- own standing driver notices unavailable: {reason}; "
         "only the bounded project standing below was projected."

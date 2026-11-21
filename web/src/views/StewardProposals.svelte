@@ -3,10 +3,12 @@
   import { listStewardProposals, type StewardProposal } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   import StewardProposalCard from './StewardProposalCard.svelte';
-  const { onchange = () => {}, onrevise }: {
+  const { onchange = () => {}, onrevise, onconnect }: {
     /** Something was decided: the owner's pending count may have moved. */
     onchange?: () => void;
     onrevise: (row: StewardProposal) => void;
+    /** Step 24.1c: a connection proposal's "set the secret / sign in". */
+    onconnect?: (connId: string) => void;
   } = $props();
   // An executing proposal settles on its own; the list re-reads on this cadence
   // so the card moves from the spinner to its result without a click.
@@ -40,7 +42,7 @@
   {#if !loaded && !error}<p aria-busy="true">{t('steward.loading')}</p>
   {:else if loaded && !rows.length}<p class="empty">{t('steward.proposalsEmpty')}</p>{/if}
   {#each ordered as proposal (proposal.proposal_id)}
-    <StewardProposalCard {proposal} onupdate={update} onreload={() => void load()} {onrevise} />
+    <StewardProposalCard {proposal} onupdate={update} onreload={() => void load()} {onrevise} {onconnect} />
   {/each}
 </section>
 <style>

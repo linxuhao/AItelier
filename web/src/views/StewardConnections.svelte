@@ -8,6 +8,9 @@
   import { STEWARD_PROJECT_ID } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  // Step 24.1c: a connection to open for its secret / sign-in (a proposal's "set the secret").
+  const { focus = null }: {focus?: string | null} = $props();
+  let focused = '';
   // The steward's own MCP connections (design 7.8.10): add / edit / delete a server, read
   // its tools, tick each one (allowed, outward, egress, blocked arguments, daily cap).
   // Saving takes effect at once - the gateway tells the steward its tool list changed, no
@@ -26,6 +29,8 @@
   async function load() {
     try { data = await listStewardConnections(); error = ''; }
     catch (e) { failed(e); }
+    const target = data?.connections.find(c => c.conn_id === focus);
+    if (target && focused !== target.conn_id) { focused = target.conn_id; edit(target); }
     try { confirmations = (await listStewardConfirmations()).confirmations; } catch { confirmations = []; }
   }
   function blank() {
@@ -148,7 +153,7 @@
   {/each}
   {#if data}
     {#each data.connections as c (c.conn_id)}
-      <article class="connection" data-conn={c.conn_id} data-usable={c.usable ? '1' : '0'}>
+      <article class="connection" data-conn={c.conn_id} data-usable={c.usable ? '1' : '0'} data-focus={c.conn_id === focus ? '1' : undefined}>
         <header>
           <strong>{c.label}</strong> <code>{c.conn_id}</code>
           <span class="mark" class:off={c.visibility === 'private'}>{c.visibility === 'private' ? t('steward.connPrivate') : t('steward.connPublic')}</span>

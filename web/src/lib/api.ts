@@ -853,7 +853,8 @@ export function stateRunSummary(projectId:string):Promise<import('./stateGraph')
 
 export type StewardProposalStatus = 'open' | 'executing' | 'done' | 'failed' | 'declined' | 'withdrawn' | 'superseded';
 export interface StewardProposal {
-  proposal_id: string; version: number; kind: 'create_project' | 'start_driver' | 'stop_driver' | 'archive_project' | 'unarchive_project';
+  proposal_id: string; version: number;
+  kind: 'create_project' | 'start_driver' | 'stop_driver' | 'archive_project' | 'unarchive_project' | 'connection_change';
   payload: Record<string, any>; reason: string; status: StewardProposalStatus;
   created_at: string; decided_at: string | null; decided_by: string | null; result: unknown;
 }

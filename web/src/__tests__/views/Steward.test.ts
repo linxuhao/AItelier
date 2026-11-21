@@ -434,6 +434,70 @@ describe('a proposal card', () => {
   });
 });
 
+describe('a connection_change card (step 24.1c)', () => {
+  const props = (p: StewardProposal) => ({proposal: p, onupdate: vi.fn(), onreload: vi.fn(), onrevise: vi.fn(), onconnect: vi.fn()});
+  const definition = {name: 'ocr_image', description: 'Read text <b>in</b> an image', inputSchema: {type: 'object',
+    properties: {image_file_id: {type: 'string', description: 'PARAM-MARKER the file'}}}};
+  const update = (over: Record<string, unknown> = {}) => proposal({kind: 'connection_change', payload: {
+    op: 'update', conn_id: 'media', conn_uid: 'u', expect_config_version: 4, visibility: 'public',
+    tools: [{raw_name: 'ocr_image', schema_sha256: 'a'.repeat(64), allowed: true}],
+    source: {kind: 'owner_message', ref: 'm1'}, widens: true, widened: ['visibility', 'tools.ocr_image.allowed'],
+    snapshot: {connection: {label: 'Media', url: 'http://mcp_server:9003/mcp', auth_kind: 'none', header_name: null,
+      auth_identity: null, visibility: 'private', enabled: true},
+      tools: [{raw_name: 'ocr_image', state: 'new', definition, allowed: false, outward: false, egress: true,
+        blocked_args: [], daily_cap: null}],
+      source: {kind: 'owner_message', ref: 'm1', owner_message: {message_id: 'm1', channel: 'wechat',
+        created_at: '2026-11-20T07:02:00Z', text: '把 OCR 也给家里用'}}}, ...over}});
+
+  it('every field before -> after, each widening one marked, definitions and the source as plain text', () => {
+    const view = render(StewardProposalCard, props(update()));
+    const field = (key: string) => view.container.querySelector(`[data-field="${key}"]`) as HTMLElement;
+    expect(field('visibility').dataset.widen).toBe('1');
+    expect(field('visibility').querySelector('[data-before]')?.textContent).toBe('private');
+    expect(field('visibility').querySelector('[data-after]')?.textContent).toBe('public');
+    expect(field('label').dataset.widen).toBe('0');
+    expect(field('label').querySelector('[data-after]')?.textContent).toBe('Media');
+    const tool = view.container.querySelector('[data-tool="ocr_image"]') as HTMLElement;
+    expect((tool.querySelector('[data-field="allowed"]') as HTMLElement).dataset.widen).toBe('1');
+    expect(tool.querySelector('[data-field="allowed"] [data-after]')?.textContent).toBe('true');
+    expect(tool.querySelector('[data-field="egress"] [data-after]')?.textContent).toBe('true');
+    const shown = tool.querySelector('[data-definition]')?.textContent ?? '';
+    expect(shown).toContain('PARAM-MARKER the file');
+    expect(tool.querySelector('b')).toBeNull();
+    expect(view.container.querySelector('[data-source-owner]')?.textContent).toContain('把 OCR 也给家里用');
+    expect(view.container.querySelector('[data-source-owner]')?.textContent).toContain('wechat');
+    expect(view.container.querySelector('[data-widen-note]')).toBeTruthy();
+    expect(view.container.querySelector('[data-external]')).toBeNull();
+    expect(view.container.querySelector('[data-host]')?.textContent).toBe('mcp_server:9003');
+  });
+
+  it('an add shows every field as new, an external mark, and after approval the way to the secret', async () => {
+    const p = props(proposal({kind: 'connection_change', status: 'done', payload: {op: 'add', conn_id: 'mailpub',
+      label: 'Pub', url: 'https://xn--bcher-kva.example/mcp', transport: 'streamable-http', auth_kind: 'header',
+      header_name: 'Authorization', visibility: 'public', source: {kind: 'owner_message', ref: 'm1'}, external_content: true,
+      widens: true, widened: ['add'], snapshot: {connection: null, tools: [], source: {}}},
+      result: {op: 'add', conn_id: 'mailpub', connect_url: 'https://a.example/#/steward/connections/mailpub/connect'}}));
+    const view = render(StewardProposalCard, p);
+    expect(view.container.querySelector('[data-field="url"] [data-after]')?.textContent).toBe('https://xn--bcher-kva.example/mcp');
+    expect(view.container.querySelector('[data-field="enabled"] [data-after]')?.textContent).toBe('false');
+    expect([...view.container.querySelectorAll('tr[data-widen="1"]')].length).toBeGreaterThan(3);
+    expect(view.container.querySelector('[data-external]')).toBeTruthy();
+    await fireEvent.click(view.container.querySelector('[data-connect]') as HTMLElement);
+    expect(p.onconnect).toHaveBeenCalledWith('mailpub');
+  });
+
+  it('a narrowing change has no widening note; the card still approves on the version shown', async () => {
+    const p = props(update({visibility: 'private', widens: false, widened: [],
+      tools: [{raw_name: 'ocr_image', schema_sha256: 'a'.repeat(64), allowed: false}]}));
+    api.approveStewardProposal.mockResolvedValue(proposal({kind: 'connection_change', status: 'done'}));
+    const view = render(StewardProposalCard, p);
+    expect(view.container.querySelector('[data-widen-note]')).toBeNull();
+    expect(view.container.querySelectorAll('tr[data-widen="1"]')).toHaveLength(0);
+    await fireEvent.click(view.getByRole('button', {name: 'Approve'}));
+    await waitFor(() => expect(api.approveStewardProposal).toHaveBeenCalledWith('p1', 3, false));
+  });
+});
+
 describe('a stop_driver card', () => {
   const stop = proposal({kind: 'stop_driver', payload: {project_id: 'alpha',
     impact: {running_subagents: [{session_id: 'sess-old'}], unsettled_attempts: []}}});

@@ -5,7 +5,8 @@
   import { impactIsEmpty } from '../lib/steward';
   import { stateProjectHref } from '../lib/stateGraph';
   import { t } from '../lib/i18n.svelte';
-  const { proposal, onupdate, onreload, onrevise }: {
+  import StewardConnectionChange from './StewardConnectionChange.svelte';
+  const { proposal, onupdate, onreload, onrevise, onconnect }: {
     proposal: StewardProposal;
     /** A newer form of this row: the decision's answer, or the current row a 409 carried. */
     onupdate: (row: StewardProposal) => void;
@@ -13,6 +14,8 @@
     onreload: () => void;
     /** "Change it": the steward is asked in the conversation; it proposes again. */
     onrevise: (row: StewardProposal) => void;
+    /** Step 24.1c: open a connection's secret / sign-in on the connections tab. */
+    onconnect?: (connId: string) => void;
   } = $props();
   let busy = $state(false), error = $state(''), changed = $state(false), impactMoved = $state(false),
     confirmStop = $state(false);
@@ -103,6 +106,7 @@
       <dt>{t('steward.archiveReason')}</dt><dd data-archive-reason>{proposal.payload.reason}</dd>
     {/if}
   </dl>
+  {#if proposal.kind === 'connection_change'}<StewardConnectionChange {proposal} {onconnect} />{/if}
   {#if isStop}
     <section class="impact" aria-label={t('steward.impactHeading')}>
       <strong>{t('steward.impactHeading')}</strong>

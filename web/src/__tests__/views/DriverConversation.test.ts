@@ -1,7 +1,8 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { langStore } from '../../stores/i18n';
-const api = vi.hoisted(() => ({ dshDriverConversation: vi.fn(), sendDriverConversationMessage: vi.fn(), markDriverConversationRead: vi.fn() }));
+const api = vi.hoisted(() => ({ dshDriverConversation: vi.fn(), sendDriverConversationMessage: vi.fn(), markDriverConversationRead: vi.fn(),
+  stewardMessageSources: vi.fn(), MESSAGE_SOURCES_BATCH: 200 }));
 vi.mock('../../lib/api', () => api);
 import DriverConversation from '../../views/DriverConversation.svelte';
 
@@ -152,5 +153,66 @@ describe('readable messages and composing', () => {
     await waitFor(() => expect(input.value).toBe(''));
     expect(api.sendDriverConversationMessage).toHaveBeenCalledTimes(2);
     expect(api.sendDriverConversationMessage.mock.calls[1][2].replyToMessageId).toBe('m2');
+  });
+});
+
+describe('message time (design-message-time 9)', () => {
+  // The viewer's zone and "now" are pinned: on a UTC host, or on the fixture's own day,
+  // an unpinned test passes with or without the conversion.
+  let prevTZ: string | undefined;
+  beforeEach(() => {
+    prevTZ = process.env.TZ; process.env.TZ = 'Europe/Paris';
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-03T15:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    if (prevTZ === undefined) delete process.env.TZ; else process.env.TZ = prevTZ;
+  });
+  const timeOf = (view: ReturnType<typeof render>, id: string) =>
+    view.container.querySelector(`[data-message-id="${id}"] time`) as HTMLTimeElement;
+
+  it('today shows the local time, another day the date too; the tooltip has the zone and the UTC instant', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('m2', 'driver', 'Second report', 'today', '2026-11-03T10:00:00.123456+00:00'),
+      entry('m1', 'user', 'Message from the user', 'yesterday', '2026-11-02T17:49:00+00:00'),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Second report');
+    expect(timeOf(view, 'm2').textContent).toBe('11:00');
+    expect(timeOf(view, 'm2').getAttribute('datetime')).toBe('2026-11-03T10:00:00.123456+00:00');
+    expect(timeOf(view, 'm2').title).toContain('2026-11-03T10:00:00.123Z');
+    expect(timeOf(view, 'm2').title).toContain('November 3, 2026');
+    expect(timeOf(view, 'm1').textContent).toBe('Nov 2, 18:49');
+    expect(timeOf(view, 'm1').title).toContain('2026-11-02T17:49:00.000Z');
+  });
+
+  it('an unparseable time renders an empty <time> without a tooltip, never "Invalid Date" (E5)', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('m2', 'driver', 'Second report', 'fine', '2026-11-03T10:00:00+00:00'),
+      entry('m1', 'user', 'Message from the user', 'broken', 'not-a-time'),
+    ]));
+    const view = render(DriverConversation, {projectId: 'alpha'});
+    await view.findByText('Second report');
+    expect(timeOf(view, 'm1').textContent).toBe('');
+    expect(timeOf(view, 'm1').hasAttribute('title')).toBe(false);
+    expect(view.container.textContent).not.toContain('Invalid Date');
+  });
+
+  it('a chat channel mark says when the owner sent it from the app', async () => {
+    api.dshDriverConversation.mockResolvedValue(page([
+      entry('m2', 'driver', 'Second report', 'reply', '2026-11-03T10:00:00+00:00'),
+      entry('m1', 'user', 'Message from the user', 'from wechat', '2026-11-03T09:00:00+00:00'),
+    ]));
+    api.stewardMessageSources.mockResolvedValue({
+      m1: {direction: 'in', channel: 'wechat', sender_ref: 'wxid_owner', channel_message_ref: 'w1', at: '2026-11-03T09:00:00+00:00',
+        error: null, channel_at: '2026-11-03T08:58:30+00:00'},
+      m2: {direction: 'out', channel: 'wechat', sender_ref: 'wxid_owner', channel_message_ref: 'w2', at: 'x', error: null},
+    });
+    const view = render(DriverConversation, {projectId: 'alpha', sources: true});
+    const badge = (id: string) => view.container.querySelector(`[data-message-id="${id}"] [data-message-source]`) as HTMLElement | null;
+    await waitFor(() => expect(badge('m1')).not.toBeNull());
+    expect(badge('m1')!.title).toMatch(/^Sent from WeChat at .*9:58:30/);
+    expect(badge('m1')!.title).toContain('2026-11-03T08:58:30.000Z');
+    expect(badge('m2')!.hasAttribute('title')).toBe(false);
   });
 });

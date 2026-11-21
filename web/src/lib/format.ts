@@ -136,6 +136,51 @@ export function formatTime(value: number | string | null | undefined): string {
   return Math.floor(diffSeconds / 86400) + 'd ago';
 }
 
+// Formatters for message times, per locale and shape. Keyed on the current UTC
+// offset like traceFormat's clock: Intl.DateTimeFormat freezes its zone at
+// construction, so a zone change (a tz-pinned test, a DST switch) rebuilds them.
+const _messageFmts = new Map<string, Intl.DateTimeFormat>();
+let _messageFmtOffset: number | null = null;
+function _messageFmt(locale: string, shape: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const offset = new Date().getTimezoneOffset();
+  if (_messageFmtOffset !== offset) { _messageFmts.clear(); _messageFmtOffset = offset; }
+  const key = locale + '|' + shape;
+  let fmt = _messageFmts.get(key);
+  if (!fmt) _messageFmts.set(key, fmt = new Intl.DateTimeFormat(locale, options));
+  return fmt;
+}
+
+/**
+ * A message's time in the viewer's zone: "11:14" on the viewer's local day
+ * of `now`, with the date ("Nov 19, 18:49") on another day of the same local
+ * year, and the year as well on another year. Days are compared in the
+ * viewer's zone, never in UTC. Returns "" for a missing or unparseable value,
+ * so a caller can omit the label rather than print "Invalid Date".
+ */
+export function formatMessageTime(value: number | string | null | undefined, locale: string,
+                                  now: number = Date.now()): string {
+  const epoch = toEpochSeconds(value);
+  if (epoch == null) return '';
+  const date = new Date(epoch * 1000), today = new Date(now);
+  const sameYear = date.getFullYear() === today.getFullYear();
+  const sameDay = sameYear && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  const shape = sameDay ? 'day' : sameYear ? 'year' : 'full';
+  const options: Intl.DateTimeFormatOptions = {hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+    ...(sameDay ? {} : {month: 'short', day: 'numeric'}), ...(sameYear ? {} : {year: 'numeric'})};
+  return _messageFmt(locale, shape, options).format(date);
+}
+
+/**
+ * A message's full time for a tooltip: the viewer's local date and time with
+ * its zone name, then the same instant in UTC (ISO, Z). "" when unparseable.
+ */
+export function formatFullTime(value: number | string | null | undefined, locale: string): string {
+  const epoch = toEpochSeconds(value);
+  if (epoch == null) return '';
+  const date = new Date(epoch * 1000);
+  return _messageFmt(locale, 'tooltip', {dateStyle: 'full', timeStyle: 'long'}).format(date) + '\n' + date.toISOString();
+}
+
 /**
  * Format a number as a human-readable token count.
  * E.g. 1234 → "1.2k", 3456789 → "3.4M".

@@ -1412,7 +1412,7 @@ test('alert: a grant whose answer was lost, asked again with another exclude, is
     assert.deepEqual(s.slack.sent, [], 'the grant never came back');
     const since = new Date(T_ALERT).toISOString();
     assert.equal(backend.ledger.get(`wechat:down:${since}`).state, 'claimed');
-    // Slack's next reading is refused: this side now excludes it, and the same key is State's replay.
+    // Slack's next reading is refused: this side now excludes it, and the same key is the host's replay.
     backend.refuse.add('slack');
     s.slack.now = { connected: true, detail: 'reconnected' };
     await s.poll();

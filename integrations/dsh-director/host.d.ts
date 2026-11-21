@@ -264,7 +264,7 @@ export interface DirectorHost {
  *    {refused: code} when the host will not take it.
  *  - dueAlerts, claimAlert, recordAlert (optional, all three or none - the plugin checks each
  *    with typeof and runs no alert without all three; not in the required channels set): the
- *    channel-down alert (design-steward 7.9.2), the AItelier host's only.
+ *    channel-down alert (design-steward 7.9.2); only some hosts have them.
  *  - dueAlerts: the channel-down alerts (`down`) and recovery notices (`up`) due now,
  *    {due: [{channel, kind, down_since, attempt}]} - a read.
  *  - claimAlert: may this one go now? `exclude` names the channels the plugin cannot send

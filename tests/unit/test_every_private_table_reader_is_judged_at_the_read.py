@@ -712,14 +712,17 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # status, and the steward's claim and record commands.
 # Step 24.1a adds the steward's connection tables and step 23's turn audience the gateway
 # reads: both connection queries, the owner's connection routes, the steward host's two
-# writes, the turn audience write and the gateway itself.
+# writes, the turn audience write and the gateway itself. Step 22 adds the pushed questions
+# and the relayed answers: the pushed-questions query and the steward's two commands (the
+# push and the relay).
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
                   "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
                   "state_owner_channel_status", "state_owner_channel_bind_attempts",
                   "state_owner_channel_login_requests", "state_channel_alerts",
                   "state_steward_connections", "state_steward_connection_tools", "state_steward_turn_audience",
                   "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
-                  "state_steward_tool_calls")
+                  "state_steward_tool_calls",
+                  "state_owner_question_pushes", "state_owner_question_answers")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -766,6 +769,8 @@ def _steward_calls(svc):
                                                                  {"conn_id": C.STEWARD_CONNECTION}),
         "list_connections": lambda: svc.steward_connections.list_connections(),
         "list_connection_tools": lambda: svc.steward_connections.list_connection_tools(C.STEWARD_CONNECTION),
+        "execute list_pushed_owner_questions": lambda: execute(svc, "list_pushed_owner_questions", {}),
+        "list_pushed": lambda: svc.owner_questions.list_pushed(),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -863,6 +868,11 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/commands/complete_owner_channel_login_request",
              {"project_id": steward_project(), "request_key": "q",
               "request_id": C.canary("state_owner_channel_login_requests"), "result": {"requested": True}}),
+            ("POST", "/api/state/query/list_pushed_owner_questions", {}),
+            ("POST", "/api/state/commands/sync_owner_questions", {"project_id": steward_project()}),
+            ("POST", "/api/state/commands/relay_owner_answer",
+             {"project_id": steward_project(), "request_key": "a",
+              "source_message_id": C.canary("state_owner_question_answers")}),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -922,6 +932,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert [tuple(r) for r in conn.execute("SELECT conn_id, enabled, generation FROM state_steward_connections")] \
                 == [(C.STEWARD_CONNECTION, 0, 1)]
             assert [tuple(r) for r in conn.execute("SELECT allowed FROM state_steward_connection_tools")] == [(0,)]
+            assert [tuple(r) for r in conn.execute("SELECT code_no, closed_at FROM state_owner_question_pushes")] \
+                == [(7, None)]
+            assert conn.execute("SELECT COUNT(*) FROM state_owner_question_answers").fetchone()[0] == 1
 
 
 def _trusted_db(anonymous):

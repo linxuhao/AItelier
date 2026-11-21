@@ -48,7 +48,9 @@ CHANNEL_PRIVATE={'state_owner_channels','state_owner_channel_codes','state_messa
                  'state_owner_channel_status','state_owner_channel_bind_attempts',
                  'state_owner_channel_login_requests',
                  # Step 25: the channel-down alert ledger.
-                 'state_channel_alerts'}
+                 'state_channel_alerts',
+                 # Step 22: the questions pushed to the owner's channel and the answers relayed.
+                 'state_owner_question_pushes','state_owner_question_answers'}
 # Step 23: the family group's tables (core/state_groups.py) are PRIVATE, each with a canary.
 GROUP_PRIVATE={'state_owner_groups','state_group_messages','state_group_members','state_family_memory',
                'state_family_note','state_steward_turn_audience','state_pending_groups'}

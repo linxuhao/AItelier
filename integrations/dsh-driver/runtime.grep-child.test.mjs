@@ -23,6 +23,19 @@
  *     real shell-style job carrying the driver session tag, `backgroundProcesses` reports
  *     the job alone and `dormancyRefusal` names only it.
  *
+ *  Test 1's two samples have a store each, for a measured reason (iss-44844192be184fbb): the
+ *  "still running" sample was first taken after store.search() returned, and search() joins the
+ *  grep answer with the ranked half (store.mjs:1031), so the distance from the answer to the
+ *  /proc sample was that half's duration - work of unbounded duration. Under the load of the
+ *  full suite it once ran past the 1200 ms window and the arm reddened (tests 549 / pass 548 /
+ *  fail 1, 2026-11-21) while the helper was correct: the sample observed a moment already past
+ *  the deadline it meant to be before. Now "still there, asleep" is witnessed on the product's
+ *  wide default window, with the distance from the request (which the answer cannot precede)
+ *  measured and printed, so no stall this test can meet carries the sample past the deadline;
+ *  "it leaves by itself" gets a store with the short window, where the exit is also required to
+ *  come no earlier than one whole window after the request - so a helper that left at once
+ *  cannot pass as one that waited.
+ *
  *  Everything is observed in /proc and over real pipes: no fixture stands in for the helper, and
  *  no assertion is satisfied by the shape of the code.
  *
@@ -54,6 +67,13 @@ const IDLE_ENV = 'DSH_GREP_CHILD_IDLE_MS';
  *  module under test would let a rename move the goalposts. */
 const INTERNAL = 'DSH_INTERNAL_HELPER=1';
 const FALLBACK = 'memory/grep-spawn-fallback';
+/** Test 1's two idle windows. The first is the product's own default (grep-helper.mjs's
+ *  idleExitMs 60000), wide enough that no stall between the helper's answer and a /proc sample
+ *  can reach it; the second is short enough to watch a helper leave inside the test. They are
+ *  two stores on purpose: the "alive" sample must not wait out a window, and the "gone" sample
+ *  has to be watched from inside a short one. */
+const WIDE_IDLE_MS = 60000;
+const SHORT_IDLE_MS = 1200;
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-grepchild-'));
 const open = (extra = {}) => MemoryStore.open({ root: newRoot(), userId: USER, ...extra });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -96,34 +116,60 @@ async function until(predicate, ms) {
 
 test('1: a helper exits by itself after answering (its idle window), and the next search starts a fresh one', async () => {
   const events = [];
-  const store = await open({ logger: (event, fields) => events.push([event, fields]), grepHelper: { idleExitMs: 1200 } });
+  const log = (event, fields) => events.push([event, fields]);
+  // (a) An answered helper that has not reached its idle deadline is still there, and asleep.
+  // What binds this sample to the window is measurement, not luck: the window is the product's
+  // wide default and `since_request_ms` - printed, and asserted below to be inside that window -
+  // bounds the answer-to-sample distance from above, because the request (and so the answer) went
+  // out after `started`. So no work between the two - search()'s ranked half, a slow host, other
+  // containers sharing two CPUs - can carry the sample past the deadline without this test
+  // saying so first, instead of blaming the helper.
+  const store = await open({ logger: log, grepHelper: { idleExitMs: WIDE_IDLE_MS } });
   try {
     await store.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+    const started = Date.now();
     const answer = await store.search('needle');
     assert.equal(answer.grep.complete, true, 'the helper answered');
     const pid = store.grepHelper.pid;
     assert.ok(Number.isInteger(pid) && pid > 1, 'the store boots one helper');
-    assert.equal(running(pid), true, 'it answered and is still running, one idle window short of leaving');
+    const sinceRequestMs = Date.now() - started;
+    console.log(`IDLE_ALIVE pid=${pid} window_ms=${WIDE_IDLE_MS} since_request_ms=${sinceRequestMs}`);
+    assert.ok(sinceRequestMs < WIDE_IDLE_MS, `the sample came ${sinceRequestMs} ms after the request, past the helper's ${WIDE_IDLE_MS} ms window: it witnesses nothing about a helper still inside one`);
+    assert.equal(running(pid), true, 'it answered and is still running, inside the window measured above');
     const idle = procState(pid);
     assert.equal(idle.state, 'S', 'it is asleep in its wait for the next request, not busy');
-    // Nothing closes its store, nothing kills its pid: it has to leave on its own, and this is
-    // the assertion the issue asked for - the process is gone, read from /proc, not inferred.
+  } finally { await store.close(); }
+  // (b) The same helper with a window short enough to watch it leave: nothing closes this store
+  // and nothing kills its pid, so the exit has to be its own - and this is the assertion the
+  // issue asked for, the process gone, read from /proc, not inferred. A store of its own, both
+  // because (a) must not wait out a wide window and because "it waited its window, it did not
+  // leave at once" can only be measured against a short one.
+  const dying = await open({ logger: log, grepHelper: { idleExitMs: SHORT_IDLE_MS } });
+  try {
+    await dying.recordTurn('t1', [{ role: 'owner', text: 'needle here' }]);
+    const started = Date.now();
+    assert.equal((await dying.search('needle')).grep.complete, true, 'the short-window helper answered');
+    const dyingPid = dying.grepHelper.pid;
     // Wait on the exit the store records, not on `running()`: that helper calls a zombie "not at
     // work", so polling it can return between the kernel's exit and node's dispatch of 'exit'
     // (measured red in the full suite 2026-11-20: pid already 'Z', reason still undefined).
-    const diedMs = await until(() => store.grepHelper.reason !== undefined, 15000);
-    assert.notEqual(diedMs, undefined, `the helper never left after answering (pid ${pid}); an idle helper that stays is the leak`);
-    console.log(`IDLE_EXIT pid=${pid} idle_exit_ms=${diedMs} exit_reason=${JSON.stringify(store.grepHelper.reason)}`);
-    assert.match(String(store.grepHelper.reason), /helper-died \(exit code 0\)/, 'it left by itself, exit 0 - not killed, not wedged');
-    assert.equal(procState(pid), null, 'and no /proc entry is left for it: not a live process, not a zombie');
-    assert.equal(fdTarget(pid, 0), undefined, 'and its stdin is gone with it');
+    const diedMs = await until(() => dying.grepHelper.reason !== undefined, 15000);
+    assert.notEqual(diedMs, undefined, `the helper never left after answering (pid ${dyingPid}); an idle helper that stays is the leak`);
+    const sinceRequestMs = Date.now() - started;
+    console.log(`IDLE_EXIT pid=${dyingPid} idle_exit_ms=${diedMs} since_request_ms=${sinceRequestMs} exit_reason=${JSON.stringify(dying.grepHelper.reason)}`);
+    // The answer cannot precede the request either, so an exit this long after the request is an
+    // exit no earlier than one whole window after the answer: it kept its window, not left at once.
+    assert.ok(sinceRequestMs >= SHORT_IDLE_MS, `it left ${sinceRequestMs} ms after the request, less than its ${SHORT_IDLE_MS} ms window after the answer: it did not leave on its idle clock`);
+    assert.match(String(dying.grepHelper.reason), /helper-died \(exit code 0\)/, 'it left by itself, exit 0 - not killed, not wedged');
+    assert.equal(procState(dyingPid), null, 'and no /proc entry is left for it: not a live process, not a zombie');
+    assert.equal(fdTarget(dyingPid, 0), undefined, 'and its stdin is gone with it');
     // The store is not left without an answer: the next search starts a fresh helper.
-    const again = await store.search('needle');
+    const again = await dying.search('needle');
     assert.equal(again.grep.complete, true, 'the search after an idle exit still answers');
-    assert.ok(Number.isInteger(store.grepHelper.pid) && store.grepHelper.pid !== pid, 'a fresh helper served it');
-    assert.equal(store.grepHelper.reason, undefined, 'and the store holds no fault from the idle exit');
+    assert.ok(Number.isInteger(dying.grepHelper.pid) && dying.grepHelper.pid !== dyingPid, 'a fresh helper served it');
+    assert.equal(dying.grepHelper.reason, undefined, 'and the store holds no fault from the idle exit');
     assert.deepEqual(events.filter(([event]) => event === FALLBACK), [], 'an idle exit is not a fallback: no search paid for it');
-  } finally { await store.close(); }
+  } finally { await dying.close(); }
 });
 
 test('2: while its store lives, what keeps the child alive is the parent\'s open stdin: fd 0 open, state S, no CPU', async () => {

@@ -41,7 +41,7 @@ describe('StewardLists', () => {
   it('director 489 (a): an item of an unbound group (added_by / done_by null) reads 曾由一位成员添加, never blank, never a throw', async () => {
     api.listFamilyLists.mockResolvedValue({lists: {shopping: [item('li-1', '牛奶', {added_by: null}),
       item('li-2', '鸡蛋', {added_by: null, done: true, done_at: '2026-11-21T11:00:00Z', done_by: null})], todo: []}});
-    langStore.set('zh');
+    langStore.set('zh-CN');
     const view = render(StewardLists);
     await view.findByText('牛奶');
     const milk = (view.container.querySelector('[data-item="li-1"]') as HTMLElement).querySelector('[data-item-who]')?.textContent ?? '';

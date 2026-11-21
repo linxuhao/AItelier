@@ -52,7 +52,7 @@ describe('StewardGroups', () => {
       rec({message_id: 'q1', direction: 'in', kind: 'question', body: '几点了', sender_ref: 'wxid_m1', sender_role: 'member', sender_label: '成员甲'}),
       rec({message_id: 'r1', direction: 'out', kind: 'reply', body: '八点'}),
     ]}]});
-    langStore.set('zh');
+    langStore.set('zh-CN');
     const view = render(StewardGroups, {channel: 'wechat', bound: true});
     await waitFor(() => expect(view.container.querySelector('[data-group-bound]')).not.toBeNull());
     await fireEvent.click(view.getByRole('button', {name: '查看记录'}));

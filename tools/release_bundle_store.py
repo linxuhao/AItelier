@@ -8,10 +8,12 @@ Never run automatically. Usage (from the repository root)::
     python tools/release_bundle_store.py DB --apply --actor NAME [--window-days N]
                                                  [--batch-size N] [--limit N]
 
-NO ARGUMENT IS A DRY RUN. Without ``--apply`` this tool writes NOTHING: it prints
-the digests the rule selects, the keyframes a surviving delta pins, and the row
-count and byte totals it would release. ``--apply`` is the only way to write, and
-it needs ``--actor`` because every release row names who decided it.
+NO ARGUMENT IS A DRY RUN. Without ``--apply`` this tool writes NOTHING: it walks
+the SAME batch loop the release would take, and reports the digests the rule
+selects, the keyframes a surviving delta pins, the number of batches the pass
+takes, and the row count and byte totals of the WHOLE pass - every batch, not the
+first payload-capped one. ``--apply`` is the only way to write, and it needs
+``--actor`` because every release row names who decided it.
 
 What a release IS (owner ruling, 2026-11-20; measured in
 ``evidence/bundle-store-release-20261120/``): the bytes have no live consumer any
@@ -107,9 +109,43 @@ def _require_schema(conn, path):
                          "State schema upgrade runs, then retry")
 
 
+def _counted_batches_leave_the_store(conn):
+    """Let the projection's next batch see the store the apply loop would see.
+
+    An apply pass is not one batch: it loops until the rule's set is exhausted,
+    and batch ``k+1`` reads a store that batch ``k``'s DELETE already changed. A
+    projection may not write, so the digests it has counted so far are hidden
+    from the next plan by a TEMP view of the same name - SQLite resolves an
+    unqualified table name to TEMP before main, so ``release_plan`` (the one
+    deciding statement, unmodified) judges the remaining store and the loop
+    below is the apply loop too. Nothing is deleted and the file is untouched.
+    """
+    conn.execute("CREATE TEMP TABLE release_projection_taken(bundle_sha256 TEXT PRIMARY KEY)")
+    conn.execute(f"CREATE TEMP VIEW {BUNDLE_STORE} AS SELECT * FROM main.{BUNDLE_STORE} "
+                 "WHERE bundle_sha256 NOT IN "
+                 "(SELECT bundle_sha256 FROM temp.release_projection_taken)")
+
+
+def _pinned_rows(pinned):
+    """The pinned keyframes as the summary reports them (one shape, both modes)."""
+    return [{"bundle_sha256": row["bundle_sha256"],
+             "commit_sha": row["commit_sha"],
+             "payload_bytes": int(row["payload_bytes"]),
+             "raw_size": int(row["raw_size"])} for row in pinned]
+
+
 def release(path, *, actor=None, apply=False, window_days=0, batch_size=32, limit=None,
             max_payload_bytes=MAX_BUNDLE_BYTES, log=print):
-    """Project (``apply=False``) or perform the release, one batch per transaction."""
+    """Project (``apply=False``) or perform the release, one batch per transaction.
+
+    ONE batch loop serves both modes, so the projection describes the pass it
+    would actually take instead of the first batch the payload cap allows:
+    ``summary["batches"]`` is how many batches that pass is, and
+    ``summary["rows"]`` / ``payload_bytes`` / ``raw_size`` are its cumulative
+    totals - the same numbers ``--apply`` then reports. ``eligible_rows`` /
+    ``eligible_payload_bytes`` are NOT those totals: they stay the rule's
+    whole-store reach, read before any row is taken.
+    """
     if apply and not actor:
         raise SystemExit("--apply needs --actor NAME: every release row names who decided it")
     conn = _connect(path, readonly=not apply)
@@ -123,48 +159,70 @@ def release(path, *, actor=None, apply=False, window_days=0, batch_size=32, limi
                    "store_rows_before": None, "store_payload_before": None,
                    "store_rows_after": None, "store_payload_after": None}
         if not apply:
-            plan = release_plan(conn, window_days=window_days, limit=limit,
-                                max_payload_bytes=max_payload_bytes)
-            summary.update(rows=plan["rows"], payload_bytes=plan["payload_bytes"],
-                           raw_size=plan["raw_size"], digests=plan["digests"],
-                           pinned=[{"bundle_sha256": row["bundle_sha256"],
-                                    "commit_sha": row["commit_sha"],
-                                    "payload_bytes": int(row["payload_bytes"]),
-                                    "raw_size": int(row["raw_size"])} for row in plan["pinned"]],
-                           eligible_rows=plan["eligible_rows"],
-                           eligible_payload_bytes=plan["eligible_payload_bytes"],
-                           deltas=plan["deltas"], keyframes=plan["keyframes"])
-            return summary
-        wal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+            # What the RULE allows over the whole store, which is what
+            # eligible_rows/eligible_payload_bytes have always meant. limit=0
+            # selects nothing, so this is the reach read before any batch.
+            reach = release_plan(conn, window_days=window_days, limit=0,
+                                 max_payload_bytes=max_payload_bytes)
+            summary.update(eligible_rows=reach["eligible_rows"],
+                           eligible_payload_bytes=reach["eligible_payload_bytes"],
+                           deltas=0, keyframes=0, pinned=_pinned_rows(reach["pinned"]))
+            _counted_batches_leave_the_store(conn)
+        wal = apply and conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         remaining = limit
         last = None
         while remaining is None or remaining > 0:
             size = batch_size if remaining is None else min(batch_size, remaining)
-            result = release_bundles(conn, actor=actor, admin=True, window_days=window_days,
-                                     limit=size, max_payload_bytes=max_payload_bytes)
-            summary["pinned"] = [{"bundle_sha256": row["bundle_sha256"],
-                                  "commit_sha": row["commit_sha"],
-                                  "payload_bytes": int(row["payload_bytes"]),
-                                  "raw_size": int(row["raw_size"])} for row in result["pinned"]]
-            if not result["released_rows"]:
+            if apply:
+                result = release_bundles(conn, actor=actor, admin=True, window_days=window_days,
+                                         limit=size, max_payload_bytes=max_payload_bytes)
+                taken, payload, raw = (result["released_rows"], result["released_payload_bytes"],
+                                       result["released_raw_size"])
+            else:
+                # The same decision release_bundles makes, without its writes.
+                result = release_plan(conn, window_days=window_days, limit=size,
+                                      max_payload_bytes=max_payload_bytes)
+                taken, payload, raw = result["rows"], result["payload_bytes"], result["raw_size"]
+            summary["pinned"] = _pinned_rows(result["pinned"])
+            if not taken:
                 break
             last = result
-            summary["store_rows_before"] = result["rows_before"]
-            summary["store_payload_before"] = result["payload_before"]
-            summary["store_rows_after"] = result["rows_after"]
-            summary["store_payload_after"] = result["payload_after"]
-            summary["released_at"] = result["released_at"]
+            if apply:
+                summary["store_rows_before"] = result["rows_before"]
+                summary["store_payload_before"] = result["payload_before"]
+                summary["store_rows_after"] = result["rows_after"]
+                summary["store_payload_after"] = result["payload_after"]
+                summary["released_at"] = result["released_at"]
+                summary["released_rows"] += taken
+                summary["released_payload_bytes"] += payload
+                summary["released_raw_size"] += raw
+            else:
+                summary["deltas"] += result["deltas"]
+                summary["keyframes"] += result["keyframes"]
+                conn.executemany("INSERT INTO temp.release_projection_taken(bundle_sha256) "
+                                 "VALUES(?)", [(digest,) for digest in result["digests"]])
             summary["batches"] += 1
-            summary["released_rows"] += result["released_rows"]
-            summary["released_payload_bytes"] += result["released_payload_bytes"]
-            summary["released_raw_size"] += result["released_raw_size"]
+            summary["rows"] += taken
+            summary["payload_bytes"] += payload
+            summary["raw_size"] += raw
             summary["digests"].extend(result["digests"])
             if remaining is not None:
-                remaining -= result["released_rows"]
-            log(f"... batch {summary['batches']}: released {summary['released_rows']} "
-                f"({summary['released_payload_bytes']} bytes)", file=sys.stderr)
+                remaining -= taken
+            if apply:
+                log(f"... batch {summary['batches']}: released {summary['released_rows']} "
+                    f"({summary['released_payload_bytes']} bytes)", file=sys.stderr)
+            else:
+                log(f"... batch {summary['batches']}: would release {summary['rows']} "
+                    f"({summary['payload_bytes']} bytes)", file=sys.stderr)
             if wal:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if not apply:
+            # The PASS, not batch one: an operator announcing this number must be
+            # announcing what --apply will take.
+            log(f"... projection: {summary['batches']} batch(es) cover {summary['rows']} rows / "
+                f"{summary['payload_bytes']} payload bytes / {summary['raw_size']} raw bytes",
+                file=sys.stderr)
+            return summary
         summary["rows"] = summary["released_rows"]
         summary["payload_bytes"] = summary["released_payload_bytes"]
         summary["raw_size"] = summary["released_raw_size"]

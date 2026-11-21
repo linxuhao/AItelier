@@ -35,7 +35,7 @@
                   "propose", "withdraw_proposal", "request_wechat_qr",
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history",
                   "family_memory_note", "family_memory_show", "list_show", "list_add", "list_check", "list_remove",
-                  "search_tools", "call_tool"],
+                  "search_tools", "call_tool", "request_confirmation", "run_confirmed"],
     "presented_only": true,
     "catalog": "host",
     "forbidden": ["bash", "read", "write", "edit", "grep", "read_image", "subagent", "subagent_fork", "workflow",

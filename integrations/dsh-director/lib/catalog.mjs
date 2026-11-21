@@ -21,6 +21,9 @@
  *   a turn that a person's message opens. While marked, an `egress` tool is refused, and
  *   the steward's own writes are refused in a turn without a person's message; with one,
  *   the host marks what it writes (`externalContent()`).
+ * - The requester (step 24.1b, 7.8.9): the newest person's message of the turn's input,
+ *   as the host reads it from the input text (`requesterOf`), kept in the turn record. Only
+ *   it can start an outward action (lib/confirm.mjs); a turn without one has none.
  */
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
@@ -57,7 +60,8 @@ export class StewardCatalog {
     try {
       const value = JSON.parse(readFileSync(this.file, 'utf8'));
       if (value && typeof value === 'object' && typeof value.external === 'boolean')
-        return { human: value.human === true, external: value.external };
+        return { human: value.human === true, external: value.external,
+          ...(typeof value.requester === 'string' ? { requester: value.requester } : {}) };
       return { human: false, external: true };
     } catch (error) {
       // No record yet: nothing was read. A record that cannot be read counts as marked.
@@ -73,10 +77,14 @@ export class StewardCatalog {
 
   get externalSeen() { return this.state.external; }
 
+  /** The newest person's message of this turn (its id), or undefined. */
+  get requester() { return this.state.requester; }
+
   /** The session events of the root session. */
   observe(event) {
     if (event?.type === 'turn/start') {
-      this.state = { ...this.state, human: false };
+      const { requester: _previous, ...rest } = this.state;
+      this.state = { ...rest, human: false };
       this.assistantInTurn = false;
       this.#save();
     } else if (event?.type === 'assistant/message') this.assistantInTurn = true;
@@ -85,9 +93,12 @@ export class StewardCatalog {
       let human = false;
       try { human = this.host.humanInput(text) === true; } catch { human = false; }
       if (!human) return;
+      let requester;
+      try { requester = this.host.requesterOf?.(text); } catch { requester = undefined; }
       // A person's message that OPENS the turn clears the mark; one that arrives mid-turn
       // only lets this turn's own writes through.
-      this.state = { ...this.state, human: true, ...(this.assistantInTurn ? {} : { external: false }) };
+      this.state = { ...this.state, human: true, ...(this.assistantInTurn ? {} : { external: false }),
+        ...(typeof requester === 'string' && requester ? { requester } : {}) };
       this.#save();
     }
   }
@@ -157,6 +168,9 @@ export class StewardCatalog {
       for (const tool of connection.tools ?? []) if (tool.name === name) return tool;
     return undefined;
   }
+
+  /** Whether the cache marks this connection tool outward (undefined: not in the cache). */
+  outward(name) { return this.#tool(name)?.outward; }
 
   /** The synchronous guard for the root session. */
   refusal(exec) {

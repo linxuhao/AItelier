@@ -2438,3 +2438,35 @@ test('channelText: a text with nothing left once flattened goes as written, stil
   }
   assert.equal(channelText('slack', '|---|---|'), '|---|---|', 'a short one goes as written');
 });
+
+// --- step 24.1b (design-steward 7.8.9): confirmations of outward actions ---------------------
+
+test('a confirmation the host decided is answered with its one code-written line; a redelivery is not answered again', async () => {
+  const s = setup();
+  const decided = (outcome, refusal) => ({ message_id: 'm', duplicate: false, approval: null,
+    confirmation: { code: 'K7Q2A', action: 'confirm', outcome, ...(refusal ? { refusal } : {}) } });
+  const lines = [];
+  for (const result of [decided('confirmed'), decided('cancelled'), decided('expired'), decided('refused', 'confirmation_undated')]) {
+    s.host.next = result;
+    await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'c-' + lines.length, text: '确认 K7Q2A', at: NOW() });
+    lines.push(s.slack.sent.at(-1).text);
+  }
+  assert.match(lines[0], /^已确认 K7Q2A，正在执行。/);
+  assert.match(lines[1], /^已取消 K7Q2A/);
+  assert.match(lines[2], /^K7Q2A 已过期/);
+  assert.match(lines[3], /消息没有时间/);
+  assert.equal(s.slack.sent.length, 4, 'no receipt besides the line');
+  s.host.next = { ...decided('confirmed'), duplicate: true };
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'c-0', text: '确认 K7Q2A', at: NOW() });
+  assert.equal(s.slack.sent.length, 4);
+});
+
+test('a confirmation text goes back exactly as written, never shaped or cut, to the requester\'s own channel message', async () => {
+  const s = setup();
+  s.sources.set('m-owner', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
+  const text = '请确认（K7Q2A，10 分钟内有效）：用「家庭公共邮箱」执行 send_message。回复「确认 K7Q2A」执行，「取消 K7Q2A」作废。\n'
+    + 'subject：**not bold** `code`\nbody（长文）：\n# not a heading\n' + 'x'.repeat(1500) + '\n—— 以上是全部内容 ——';
+  assert.ok(Array.from(text).length > CHANNEL_LIMITS.mirrorChars);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-confirm', text, 'm-owner', { exact: true }), { mirrored: true, channel: 'slack' });
+  assert.deepEqual(s.slack.sent, [{ text, options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
+});

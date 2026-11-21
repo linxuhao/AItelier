@@ -15,7 +15,7 @@ import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from '.
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, EXTERNAL_CONTENT_LINE,
-  humanInput, catalogOps } from './steward-host.mjs';
+  humanInput, catalogOps, confirmOps, requesterOf, stateRefusal } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
@@ -270,8 +270,10 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
-  // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience is groups.audience).
-  assert.deepEqual(Object.keys(steward.catalog).sort(), ['connections', 'humanInput', 'resyncDue', 'writes']);
+  // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience
+  // is groups.audience); 24.1b: the requester and the confirmations.
+  assert.deepEqual(Object.keys(steward.catalog).sort(), ['confirm', 'connections', 'humanInput', 'requesterOf', 'resyncDue', 'writes']);
+  assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['create', 'deliver', 'get']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
@@ -1210,6 +1212,38 @@ test('step 24.1a: a person\'s message is read from the wake\'s structure, never 
   await ops.resyncDue('a'.repeat(64));
   assert.deepEqual(calls, [['/api/state/query/list_steward_connections', {}],
     ['/api/state/commands/steward_tools_resync_due', { effective_hash: 'a'.repeat(64) }]]);
+});
+
+test('step 24.1b: the requester is the newest owner message the wake carries; the confirmation ops are three State calls and an exact mirror', async () => {
+  const wake = payload => 'AItelier runtime event:\n' + JSON.stringify(payload);
+  assert.equal(requesterOf(wake({ driver_inbox: [{ message_id: 'm1', sender_kind: 'user' }, { message_id: 'd1', sender_kind: 'driver' },
+    { message_id: 'm2', sender_kind: 'user' }] })), 'm2');
+  assert.equal(requesterOf(wake({ driver_inbox: [{ message_id: 'd1', sender_kind: 'driver', body: '"sender_kind":"user"' }] })), undefined);
+  assert.equal(requesterOf('Pending project inbox:\n{"driver_inbox":[{"message_id":"m","sender_kind":"user"}]}'), undefined);
+  assert.equal(requesterOf('AItelier runtime event:\n{broken'), undefined);
+  const calls = [], mirrored = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path.endsWith('/create_steward_confirmation')) return { result: { code: 'K7Q2A', text: 'T', reply_to_message_id: 'm2' } };
+    if (path.endsWith('/send_user_message')) return { result: { message_id: 'm-out' } };
+    if (path.endsWith('/get_steward_confirmation')) throw new Error('AItelier /x: HTTP 404 "unknown_code: no confirmation K0000"');
+    return {};
+  };
+  const confirm = confirmOps(request, { project: 'aitelier-home', mirror: (...args) => mirrored.push(args) });
+  assert.equal((await confirm.create({ name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requesterMessageId: 'm2',
+    audience: 'owner' })).code, 'K7Q2A');
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2' }), { message_id: 'm-out' });
+  assert.deepEqual(calls.map(([path, body]) => [path.split('/').at(-1), body]), [
+    ['create_steward_confirmation', { name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requester_message_id: 'm2', audience: 'owner' }],
+    ['send_user_message', { request_key: 'confirm:K7Q2A', project_id: 'aitelier-home', subject: 'Confirmation K7Q2A', body: 'T',
+      reply_to_message_id: 'm2' }]]);
+  assert.deepEqual(mirrored, [['m-out', 'T', 'm2', { exact: true }]], 'back to the requester\'s own channel, exactly as written');
+  assert.equal((await confirm.get('K0000')).refused, 'unknown_code', 'the detail\'s first word');
+  assert.equal(stateRefusal(new Error('AItelier /x: HTTP 422 "no_requester: an outward action"')).refused, 'no_requester');
+  const ops = catalogOps(request, { confirm });
+  assert.equal(ops.confirm, confirm);
+  assert.equal(ops.requesterOf, requesterOf);
+  assert.equal(catalogOps(request).confirm, undefined, 'no confirmations without the ops');
 });
 
 test('a refused reply is not reported as sent: a 200 with a code inside the result is a refusal in either inbox', async () => {

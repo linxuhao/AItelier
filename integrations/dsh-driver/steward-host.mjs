@@ -766,10 +766,59 @@ export function humanInput(text) {
   } catch { return false; }
 }
 
-/** The steward's catalog operations over its State reads and host writes (step 24.1a). The turn
- *  audience is not one of them: it is step 23's record (groupOps.audience). */
-export function catalogOps(request) {
+/** The id of the newest message the owner wrote that one wake text carries (an AItelier
+ *  runtime event's driver inbox, sender_kind user), else undefined. Parsed, never matched
+ *  as text: a letter quoting those words names no message (step 24.1b, 7.8.9). */
+export function requesterOf(text) {
+  const prefix = 'AItelier runtime event:\n';
+  if (typeof text !== 'string' || !text.startsWith(prefix)) return undefined;
+  try {
+    const inbox = JSON.parse(text.slice(prefix.length))?.driver_inbox;
+    if (!Array.isArray(inbox)) return undefined;
+    const owners = inbox.filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string' && m.message_id);
+    return owners.length ? owners[owners.length - 1].message_id : undefined;
+  } catch { return undefined; }
+}
+
+/** A State refusal as {refused: code, reason}: the code is the detail's first word. */
+export function stateRefusal(error) {
+  const message = String(error?.message ?? error);
+  const code = /HTTP \d+ "([a-z_]+)/.exec(message)?.[1] ?? 'state_refused';
+  return { refused: code, reason: message.slice(0, 500) };
+}
+
+/** The confirmation operations (step 24.1b, design-steward 7.8.9) over the steward's State
+ *  commands: the backend stores the call and writes the text by code; the host sends that
+ *  text into the requester's conversation as a reply to their message (a chat channel's
+ *  message goes back to that channel, exactly as written - `exact`, never shaped or cut). */
+export function confirmOps(request, { project, mirror = () => {} }) {
   return {
+    create: ({ name, arguments: args, requesterMessageId, audience }, signal) =>
+      request('/api/state/commands/create_steward_confirmation', { name, arguments: args,
+        requester_message_id: requesterMessageId, audience }, signal).then(r => r?.result ?? r, stateRefusal),
+    async deliver({ code, text, replyTo }, signal) {
+      let sent;
+      try {
+        sent = await request('/api/state/commands/send_user_message', { request_key: `confirm:${code}`, project_id: project,
+          subject: `Confirmation ${code}`, body: text, reply_to_message_id: replyTo }, signal);
+      } catch (error) { return stateRefusal(error); }
+      const messageId = (sent?.result ?? sent)?.message_id;
+      if (!messageId) return { refused: 'not_delivered' };
+      void mirror(messageId, text, replyTo, { exact: true });
+      return { message_id: messageId };
+    },
+    get: (code, signal) => request('/api/state/commands/get_steward_confirmation', { code }, signal)
+      .then(r => r?.result ?? r, stateRefusal),
+  };
+}
+
+/** The steward's catalog operations over its State reads and host writes (step 24.1a),
+ *  and its confirmations (24.1b) when `confirm` is given. The turn audience is not one of
+ *  them: it is step 23's record (groupOps.audience). */
+export function catalogOps(request, { confirm } = {}) {
+  return {
+    requesterOf,
+    ...(confirm ? { confirm } : {}),
     connections: signal => request('/api/state/query/list_steward_connections', {}, signal).then(r => r?.result ?? r),
     resyncDue: (effectiveHash, signal) => request('/api/state/commands/steward_tools_resync_due',
       { effective_hash: effectiveHash }, signal),

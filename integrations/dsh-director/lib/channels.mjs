@@ -22,7 +22,17 @@
  *  registered channel's status() - connected, a detail line, and while a WeChat login
  *  needs a scan its QR as an SVG (`qrSvg`) - is handed to the host when it changes: read
  *  when the channel registers, every `statusMs` after, and as disconnected when it is
- *  taken back. The detail and the QR are never logged (the QR is a login token). */
+ *  taken back. The detail and the QR are never logged (the QR is a login token).
+ *
+ *  Channel-down alert (design-steward 7.9.2): with the host's optional channels.claimAlert,
+ *  a channel that stays down is told to the owner through ANOTHER channel, in code - never a
+ *  model turn, never the owner's conversation. The host's status answer says since when the
+ *  channel is down (down_since) and whether a recovery notice is owed (up_due); after a poll
+ *  the alert is claimed only when one may be due - alertAfterMs into the outage, a recovery
+ *  owed, a held answer's retry_at reached, another channel connected after `no_channel`, or
+ *  alertRetryMs after a failed send - and an empty answer ends it for that outage. The host
+ *  decides whether it is due and which channel carries it (`via`); the text is fixed
+ *  (alertText), never carries a QR, and only the channel, kind and outcome are logged. */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -198,7 +208,21 @@ const within = (promise, ms, what) => {
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
   lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000, mirrorChars: 600,
-  fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12 });
+  fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12,
+  alertAfterMs: 600000, alertRetryMs: 1800000, alertDetail: 80 });
+
+/** The fixed text of a channel-down alert (design-steward 7.9.2): which channel, for how many
+ *  minutes and the channel's own detail line (cut to `max` characters) - or that it is back.
+ *  Nothing else: no QR, no account. */
+const ALERT_NAMES = Object.freeze({ slack: 'Slack', wechat: '微信' });
+export function alertText({ channel, kind, down_since: downSince, detail, up_at: upAt }, now = Date.now(),
+  max = CHANNEL_LIMITS.alertDetail) {
+  const name = ALERT_NAMES[channel] ?? channel;
+  const minutes = until => Math.max(0, Math.floor((until - Date.parse(downSince)) / 60000));
+  if (kind === 'up') return `${name}恢复了（断开了 ${minutes(text(upAt) ? Date.parse(upAt) : now)} 分钟）。`;
+  const why = text(detail) ? `（${Array.from(detail).slice(0, max).join('')}）` : '';
+  return `${name}断开了 ${minutes(now)} 分钟${why}。断开期间发到${name}的消息收不到；去面板「渠道」页处理。`;
+}
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -213,7 +237,7 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
  *    message in before the host has installed itself (measured: its caller did not exist
  *    yet); every call to the host waits for ready(). */
 export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
-  owedFile = defaultOwedFile() }) {
+  owedFile = defaultOwedFile(), clock = Date.now }) {
   const registered = new Map(), told = new Map(), sending = new Map(), binds = new Map(), lanes = new Map(),
     answeredRefs = new Set();
   // Channel messages this process handed to the host and got no answer for: whatever the
@@ -483,14 +507,88 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         const result = await host.reportStatus({ channel, ...status });
         reported.set(channel, key);
         if (result?.refused) log('channel_status_refused', { channel, connected: status.connected, reason: String(result.refused) });
-        else log('channel_status_reported', { channel, connected: status.connected });
+        else { log('channel_status_reported', { channel, connected: status.connected }); noteOutage(channel, status, result); }
       } catch (error) { log('channel_status_failed', { channel, error: short(error) }); }
     });
     return statusQueue;
   };
   const pollStatus = () => {
     for (const [channel, entry] of registered) void reportStatus(channel, statusOf(entry));
+    statusQueue = statusQueue.then(alertCheck).catch(error => log('channel_alert_failed', { error: short(error) }));
     return statusQueue;
+  };
+
+  // The channel-down alerts that may still be claimed, by channel: `down` for the current
+  // outage, `up` for the recovery notice owed. Each: the outage's downSince, the attempt the
+  // next claim is (its request key), when it may be claimed (notBefore), whether it waits for
+  // another channel to connect, and `done` (an empty answer: nothing more for this outage).
+  const downs = new Map(), ups = new Map();
+  const noteOutage = (channel, status, result) => {
+    if (!result || !('down_since' in result)) return;  // an older host: no alerts
+    if (text(result.down_since)) {
+      if (downs.get(channel)?.downSince !== result.down_since)
+        downs.set(channel, { downSince: result.down_since, attempt: (Number(result.alert_attempts) || 0) + 1,
+          notBefore: Date.parse(result.down_since) + limits.alertAfterMs });
+      ups.delete(channel);  // down again: a recovery notice not sent yet is moot
+    } else {
+      downs.delete(channel);
+      if (result.up_due === true && text(result.alerted_since) && ups.get(channel)?.downSince !== result.alerted_since)
+        ups.set(channel, { downSince: result.alerted_since, attempt: 1, notBefore: 0 });
+    }
+    // A channel that connects may be the one an alert was waiting for.
+    if (status.connected) for (const pending of [...downs.values(), ...ups.values()]) pending.waitChannel = false;
+  };
+  const alertCheck = async () => {
+    if (typeof host.claimAlert !== 'function') return;
+    for (const [kind, pendings] of [['down', downs], ['up', ups]])
+      for (const [channel, pending] of [...pendings]) {
+        if (pending.done || pending.waitChannel || clock() < pending.notBefore) continue;
+        await claimAlert(kind, channel, pending, pendings);
+      }
+  };
+  const claimAlert = async (kind, channel, pending, pendings) => {
+    let answer;
+    try { answer = await host.claimAlert({ channel, kind, downSince: pending.downSince, attempt: pending.attempt }); }
+    catch (error) { log('channel_alert_claim_failed', { channel, kind, error: short(error) }); return; }  // the next poll asks again
+    if (answer?.refused) { pending.done = true; log('channel_alert_refused', { channel, kind, reason: String(answer.refused) }); return; }
+    if (text(answer?.held)) {
+      log('channel_alert_held', { channel, kind, reason: answer.held });
+      if (answer.held === 'no_channel') pending.waitChannel = true;
+      else pending.notBefore = Date.parse(answer.retry_at) || clock() + limits.statusMs;
+      return;
+    }
+    if (!text(answer?.via)) { pending.done = true; return; }  // empty: never for this outage
+    const error = await sendAlert(answer);
+    if (error && kind === 'down') {
+      pending.attempt = (Number(answer.attempt) || pending.attempt) + 1;
+      pending.notBefore = clock() + limits.alertRetryMs;
+    } else pending.done = true;
+    if (pending.done && kind === 'up') pendings.delete(channel);
+  };
+  // Sent straight to the bound account of `via` (not mirror(): that is the default channel's),
+  // then recorded with the host - retried like a delivery record, as one request.
+  const sendAlert = async claim => {
+    const { channel, kind, via } = claim;
+    let error;
+    try {
+      const bound = await binding(via);
+      const entry = registered.get(via);
+      if (!bound) error = 'not_bound';
+      else if (!entry) error = 'channel_not_connected';
+      else await within(Promise.resolve(entry.send(alertText(claim, clock(), limits.alertDetail), { to: bound.sender_ref })),
+        limits.sendMs, 'send_timeout');
+    } catch (failure) { error = short(failure); }
+    if (error) log('channel_alert_failed', { channel, kind, via, error });
+    else log('channel_alert_sent', { channel, kind, via });
+    const outcome = { channel, kind, downSince: claim.down_since, via, attempt: claim.attempt, ...(error ? { error } : {}) };
+    for (let attempt = 1; typeof host.recordAlert === 'function'; attempt++) {
+      try { await host.recordAlert(outcome); break; }
+      catch (failure) {
+        if (attempt >= limits.recordAttempts) { log('channel_alert_record_failed', { channel, kind, error: short(failure) }); break; }
+        try { await pause(limits.recordRetryMs * 2 ** (attempt - 1)); } catch { break; }
+      }
+    }
+    return error;
   };
 
   const service = {

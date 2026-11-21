@@ -1282,6 +1282,24 @@ class ReportChannelStatus(Project):
     qr_svg: str | None = None
 
 
+class ClaimChannelAlert(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    kind: Literal["down", "up"]
+    down_since: str = Field(min_length=1, max_length=64)
+
+
+class RecordChannelAlert(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    kind: Literal["down", "up"]
+    down_since: str = Field(min_length=1, max_length=64)
+    via: _CHANNEL
+    ok: bool = Field(strict=True)
+    # Cut to core.state_channels.ALERT_ERROR_MAX by the service.
+    error: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
 class CompleteOwnerChannelLoginRequest(Project):
     request_key: str = Field(min_length=1, max_length=320)
     request_id: str = Field(min_length=1, max_length=200)
@@ -1475,6 +1493,7 @@ WRITE_REQUESTS = {
     "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
     "record_channel_delivery": RecordChannelDelivery, "report_channel_status": ReportChannelStatus,
     "complete_owner_channel_login_request": CompleteOwnerChannelLoginRequest,
+    "claim_channel_alert": ClaimChannelAlert, "record_channel_alert": RecordChannelAlert,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1845,6 +1864,8 @@ def _handlers(service) -> dict:
         "message_sources": service.channels.message_sources,
         "list_owner_channel_login_requests": service.channels.list_login_requests,
         "complete_owner_channel_login_request": service.channels.complete_login_request,
+        "claim_channel_alert": service.channels.claim_channel_alert,
+        "record_channel_alert": service.channels.record_channel_alert,
     }
 
 
@@ -1932,6 +1953,10 @@ def _driver_defaults(service, action, arguments):
 # complete_owner_channel_login_request (also the host's, run in code) only records what
 # the WeChat bridge answered to the owner's request for a new login QR: {requested} or
 # {refused, retry_after_s?}, never the QR.
+# claim_channel_alert and record_channel_alert (design-steward 7.9.2) are called only by
+# the host's code after its status poll, never by the model (no steward tool maps onto
+# them): the backend decides whether a channel-down alert is due and through which bound,
+# connected channel; the host sends its fixed text and records how that went.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1945,7 +1970,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "acknowledge_driver_message",
     "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
     "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status",
-    "complete_owner_channel_login_request"})
+    "complete_owner_channel_login_request", "claim_channel_alert", "record_channel_alert"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

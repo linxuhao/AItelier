@@ -642,6 +642,38 @@ describe('reminders', () => {
     expect(view.container.querySelector('[data-schedule-tz]')?.textContent).toBe(browserZone);
   });
 
+  // Step 25 C5 (design 7.9.3): the daily brief is a preset that also fills the title and the
+  // instruction - only where they are still empty; what goes in the brief is steward.md's rule.
+  it('the daily-brief preset fills 08:00 daily, the title and the instruction', async () => {
+    const view = render(StewardScheduleForm, form());
+    await fireEvent.click(view.getByRole('button', {name: 'Daily brief at 8:00'}));
+    expect((view.container.querySelector('[data-schedule-expr]') as HTMLInputElement).value).toBe('0 8 * * *');
+    expect((view.getByLabelText('Title') as HTMLInputElement).value).toBe('Daily brief');
+    expect((view.getByLabelText('Instruction for the steward') as HTMLTextAreaElement).value)
+      .toBe("Write today's daily brief following the brief rules and send it to the owner with send_user_message.");
+  });
+
+  it('the daily-brief preset never overwrites a title or instruction the owner wrote; the others fill only the expression', async () => {
+    const view = render(StewardScheduleForm, form());
+    const title = view.getByLabelText('Title') as HTMLInputElement, instruction = view.getByLabelText('Instruction for the steward') as HTMLTextAreaElement;
+    await fireEvent.input(title, {target: {value: 'Morning'}});
+    await fireEvent.click(view.getByRole('button', {name: 'Daily brief at 8:00'}));
+    expect(title.value).toBe('Morning');
+    expect(instruction.value).toMatch(/^Write today's daily brief/);
+    await fireEvent.input(instruction, {target: {value: ''}});
+    await fireEvent.click(view.getByRole('button', {name: 'Every day at 9:00'}));
+    expect(instruction.value).toBe('');
+    expect((view.container.querySelector('[data-schedule-expr]') as HTMLInputElement).value).toBe('0 9 * * *');
+  });
+
+  it('the daily-brief texts are in Chinese for a Chinese owner', async () => {
+    langStore.set('zh-CN');
+    const view = render(StewardScheduleForm, form());
+    await fireEvent.click(view.getByRole('button', {name: '每日简报 8 点'}));
+    expect((view.container.querySelector('input[type="text"]') as HTMLInputElement).value).toBe('每日简报');
+    expect((view.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('按简报规则写今天的每日简报，用 send_user_message 发给业主。');
+  });
+
   it.each([
     ['too_frequent', 'Runs less than 15 minutes apart'],
     ['invalid_cron', 'Invalid cron expression'],

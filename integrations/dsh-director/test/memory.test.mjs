@@ -120,6 +120,26 @@ test('a message\'s channel is kept on its entry only when it is a non-empty stri
   await store.close();
 });
 
+test('memory-channel-at: an owner message\'s channel_at is kept beside at when it is a time, survives a reopen, and dates its recent-turn line', async () => {
+  const root = newRoot(); let store = await open(root);
+  // Sent from WeChat at 11:58, received by the backend at 12:00 (a delayed relay).
+  await store.recordTurn('c1', [{ role: 'owner', part: 'o', at: '2026-11-20T12:00:00.123456+00:00', channel_at: '2026-11-20T11:58:00+00:00',
+    text: 'from wechat', channel: 'wechat' }, { role: 'steward', part: 's', at: '2026-11-20T12:01:00Z', text: 'ok' }]);
+  await store.recordTurn('c2', [{ role: 'owner', part: 'o', at: '2026-11-20T12:02:00Z', channel_at: 'yesterday', text: 'not a time' }]);
+  await store.recordTurn('c3', [{ role: 'owner', part: 'o', at: '2026-11-20T12:03:00Z', channel_at: 42, text: 'a number' }]);
+  await store.flush(); await store.close();
+  store = await open(root);
+  const read = await store.read(['t-c1-o', 't-c1-s', 't-c2-o', 't-c3-o']);
+  assert.deepEqual(read.entries.map(e => [e.id, e.at, e.channel_at]), [
+    ['t-c1-o', '2026-11-20T12:00:00.123456+00:00', '2026-11-20T11:58:00+00:00'], ['t-c1-s', '2026-11-20T12:01:00Z', undefined],
+    ['t-c2-o', '2026-11-20T12:02:00Z', undefined], ['t-c3-o', '2026-11-20T12:03:00Z', undefined]]);
+  assert.deepEqual(read.entries.map(e => 'channel_at' in e), [true, false, false, false], 'no key without a usable channel time');
+  assert.deepEqual(store.recentTurns(), ['[2026-11-20T11:58:00+00:00] owner (wechat): from wechat\n[2026-11-20T12:01:00Z] steward: ok',
+    '[2026-11-20T12:02:00Z] owner: not a time', '[2026-11-20T12:03:00Z] owner: a number'],
+    'the owner\'s write time where it is known, the backend time otherwise');
+  await store.close();
+});
+
 test('one search, both answers, each naming its source and marking the other', async () => {
   const root = newRoot(); const store = await open(root);
   await store.recordTurn('t1', [{ role: 'owner', text: 'I want a small Ledger app for 记账' }]);

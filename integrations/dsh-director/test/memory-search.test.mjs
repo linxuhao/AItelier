@@ -8,7 +8,7 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bm25Index, documentTokens } from '../lib/memory/bm25.mjs';
-import { dateTokens, dateWords, formatLine, formatProfileLine, stamp } from '../lib/memory/render.mjs';
+import { dateTokens, dateWords, formatLine, formatProfileLine, stamp, writtenAt } from '../lib/memory/render.mjs';
 import { MemoryStore, SEARCH_CHARS } from '../lib/memory/store.mjs';
 import { openMemory, registerMemoryTools } from '../lib/memory/tools.mjs';
 import { memoryTimeZoneProblem, validateHost } from '../lib/host.mjs';
@@ -81,6 +81,30 @@ test('1: line shapes: roles, a note, the date-only mark, → 见, the remote lin
   assert.equal(formatLine({ role: 'remote', text: 'fact' }, 'UTC'), '[时间不明] 远端: fact');
   assert.equal(formatProfileLine(3, 'likes tea'), '[档案 第 3 行] likes tea');
   assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'a\n"b"\\' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: a\n"b"\\', 'the text as it is, not escaped');
+});
+
+test('memory-channel-at: a line is dated by channel_at when it is a time, else by at', () => {
+  const at = '2026-11-19T10:25:00Z';
+  assert.equal(formatLine({ id: 't-1-o', at, channel_at: '2026-11-19T10:20:00+00:00', role: 'owner', channel: 'wechat', text: 'x' }, PARIS),
+    '[2026-11-19 周四 11:20+01:00] 业主（wechat） {t-1-o}: x', 'the owner\'s write time in the chat app');
+  assert.equal(formatLine({ id: 't-1-o', at, channel_at: 'garbage', role: 'owner', text: 'x' }, PARIS), '[2026-11-19 周四 11:25+01:00] 业主 {t-1-o}: x');
+  assert.equal(writtenAt({ at }), at);
+  assert.equal(writtenAt({ at, channel_at: '2026-11-18T23:50:00+00:00' }), '2026-11-18T23:50:00+00:00');
+});
+
+test('memory-channel-at: a message written on the 18th and received on the 19th is the 18th in its line, its day group and its date words', async () => {
+  const root = newRoot(); const store = await open(root, { timeZone: PARIS });
+  // Written 23:50 Paris on the 18th, relayed past midnight; another plain message on the 19th.
+  await store.recordTurn('late', [{ role: 'owner', part: 'o', at: '2026-11-18T23:30:00+00:00', channel_at: '2026-11-18T22:50:00+00:00',
+    channel: 'wechat', text: 'the boiler is leaking' }]);
+  await store.recordTurn('next', [{ role: 'owner', part: 'o', at: '2026-11-19T08:00:00Z', text: 'the boiler man comes at ten' }]);
+  const r = await store.search('boiler');
+  assert.deepEqual(r.grep.text.split('\n').map(line => line.split(': ')[0]), ['[2026-11-19 周四 09:00+01:00] 业主 {t-next-o}', '',
+    '[2026-11-18 周三 23:50+01:00] 业主（wechat） {t-late-o}'], 'two days, each line in its own day group');
+  const day18 = await store.search('11月18日');
+  assert.deepEqual([day18.ranked.hits[0].id, day18.ranked.hits[0].date_only], ['t-late-o', true], 'the 18th\'s date words, not the 19th\'s');
+  assert.equal((await store.search('11月19日')).ranked.hits[0].id, 't-next-o');
+  await store.close();
 });
 
 test('1: an invalid memory.timeZone stops the memory module with an error; the host still loads', async () => {

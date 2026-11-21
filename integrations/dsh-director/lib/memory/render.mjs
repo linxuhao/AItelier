@@ -28,6 +28,14 @@ export function parseAt(at) {
   return typeof at === 'string' && AT.test(at) ? Date.parse(at) : NaN;
 }
 
+/** The time memory shows for an entry: when the owner wrote it in a chat app (`channel_at`,
+ *  kept from message_sources) when there is a usable one, else `at` (when the backend received
+ *  it; still what entries are kept and ordered by). A line's date, its day group and its index
+ *  date words all read this one time. */
+export function writtenAt({ at, channel_at }) {
+  return Number.isNaN(parseAt(channel_at)) ? at : channel_at;
+}
+
 /** The owner-time-zone calendar fields of `at`, or undefined when it does not parse. */
 export function zoned(at, tz = DEFAULT_TIME_ZONE) {
   const ms = parseAt(at);
@@ -71,13 +79,13 @@ export function dateTokens(at, tz) {
 
 const ROLE = { owner: '业主', steward: '管家' };
 
-/** One search line: `[2026-11-19 周四 11:25+01:00] 业主 {t-…-o}: <text>`. A note's role says
+/** One search line: `[2026-11-19 周四 11:25+01:00] 业主 {t-…-o}: <text>`, dated by writtenAt. A note's role says
  *  （笔记）; an entry with a chat channel names it after the role (`业主（slack）`); `dateOnly`
  *  marks a ranked hit that only its date words matched; `see` replaces the text with
  *  `→ 见 grep` / `→ 见 ranked` (the other answer has the whole entry). A hit with no local
  *  entry (remote) is `远端`, without an id. */
-export function formatLine({ id, at, role, source, channel, text }, tz, { dateOnly = false, see } = {}) {
-  const when = stamp(at, tz);
+export function formatLine({ id, at, channel_at, role, source, channel, text }, tz, { dateOnly = false, see } = {}) {
+  const when = stamp(writtenAt({ at, channel_at }), tz);
   const head = `[${when ?? '时间不明'}] ` + (id === undefined
     ? '远端'
     : `${ROLE[role] ?? role}${source === 'note' ? '（笔记）' : ''}${channel ? `（${channel}）` : ''} {${id}}${dateOnly ? '（日期命中）' : ''}`);

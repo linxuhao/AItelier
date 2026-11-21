@@ -383,6 +383,21 @@ test('sync: a failed sources read writes nothing, so no message is remembered wi
   await store.close();
 });
 
+test('memory-channel-at: sync keeps an owner message\'s channel_at beside its created_at; a dashboard one has neither', async () => {
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  const sources = { o1: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1', error: null,
+    channel_at: '2026-11-20T12:46:30+00:00' }, o2: { direction: 'in', channel: 'slack', sender_ref: 'U0', channel_message_ref: 'ts-2', error: null, channel_at: null } };
+  const state = fakeState([owner('o1', '2026-11-20T12:48:00.5+00:00', 'from wechat'), owner('o2', '2026-11-20T12:49:00Z', 'from slack, undated'),
+    owner('o3', '2026-11-20T12:50:00Z', 'from the dashboard')], { sources });
+  assert.deepEqual(await syncConversation({ request: state.request, project: 'aitelier-home', me: 'drv-home', memory: store }), { written: 3 });
+  const read = await store.read(['t-o1-o', 't-o2-o', 't-o3-o']);
+  assert.deepEqual(read.entries.map(e => [e.id, e.at, e.channel_at, e.channel]), [
+    ['t-o1-o', '2026-11-20T12:48:00.5+00:00', '2026-11-20T12:46:30+00:00', 'wechat'],
+    ['t-o2-o', '2026-11-20T12:49:00Z', undefined, 'slack'], ['t-o3-o', '2026-11-20T12:50:00Z', undefined, undefined]]);
+  assert.equal(store.recentTurns()[0], '[2026-11-20T12:46:30+00:00] owner (wechat): from wechat', 'the owner\'s write time');
+  await store.close();
+});
+
 test('owner-message check and handoff: only the owner\'s own message, never to the steward\'s project, one handoff per message and project', async () => {
   const state = fakeState([owner('o1', '2026-11-17T10:00:00Z', 'tell wuxia to pause the save rows'), mine('s1', '2026-11-17T10:01:00Z', 'ok', 'o1')]);
   const ops = stewardOps({ request: state.request, project: 'aitelier-home', me: 'drv-home' });
@@ -1292,8 +1307,8 @@ test('open threads name the chat channel each unanswered owner message came from
     if (path.endsWith('/message_sources')) {
       asked.push(body.message_ids);
       if (sourcesFail) throw new Error('state down');
-      return { result: { sources: { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1' },
-        o2: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1' } } } };
+      return { result: { sources: { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1', channel_at: null },
+        o2: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1', channel_at: '2026-11-20T12:48:41+00:00' } } } };
     }
     throw new Error('unexpected ' + path);
   };
@@ -1303,6 +1318,10 @@ test('open threads name the chat channel each unanswered owner message came from
   assert.deepEqual(asked, [['o1', 'o2', 'o3']], 'one sources read for the whole list');
   assert.deepEqual(threads.unanswered_owner_messages.map(m => m.source_channel), ['slack', 'wechat', undefined]);
   assert.equal('source_channel' in threads.unanswered_owner_messages[2], false, 'a dashboard message carries no source key');
+  // message-time review F2: the owner's write time on the channel rides beside `at` when the channel gave one.
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => [m.at, m.channel_at]), [['2026-11-20T12:48:00Z', undefined],
+    ['2026-11-20T12:49:00Z', '2026-11-20T12:48:41+00:00'], ['2026-11-20T12:50:00Z', undefined]]);
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => 'channel_at' in m), [false, true, false], 'no key without a channel time');
   assert.doesNotMatch(JSON.stringify(threads), /U0OWNER|ts-1|wxid|wx-1/, 'only the channel name, never the account or message ref');
   sourcesFail = true;
   threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });

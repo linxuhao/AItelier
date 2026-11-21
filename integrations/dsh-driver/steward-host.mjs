@@ -115,8 +115,9 @@ const older = (a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.cre
  *  message it replies to, else of the latest owner message before it, else opens its own;
  *  its part is its own message id, so a reply recorded later never renumbers anything.
  *  Messages from anyone else are not the owner's conversation with this steward. `sources`
- *  (message_sources' answer) names the chat channel an owner message came from; one with no
- *  inbound source row came from the dashboard and carries no channel. */
+ *  (message_sources' answer) names the chat channel an owner message came from and, when the
+ *  channel dated it, when the owner wrote it there (`channel_at`; `at` stays the backend's
+ *  time); one with no inbound source row came from the dashboard and carries neither. */
 export function conversationTurns(messages, me, sources = {}) {
   const turns = new Map();
   let current;
@@ -125,7 +126,8 @@ export function conversationTurns(messages, me, sources = {}) {
       current = m.message_id;
       const source = sources[m.message_id];
       turns.set(current, [{ role: 'owner', part: 'o', at: m.created_at, text: textOf(m),
-        ...(source?.direction === 'in' && source.channel ? { channel: source.channel } : {}) }]);
+        ...(source?.direction === 'in' && source.channel ? { channel: source.channel } : {}),
+        ...(source?.direction === 'in' && source.channel_at ? { channel_at: source.channel_at } : {}) }]);
     } else if (m.sender_kind === 'driver' && m.sender_driver_id === me) {
       // State lets a driver's message reply only to a user's message, so reply_to names an
       // owner message even when that message is older than the pages read.
@@ -402,14 +404,16 @@ export async function openThreads({ request, project, me, stateDir, now = Date.n
   const threads = {};
   try {
     const unanswered = await unansweredOwnerMessages({ request, project, me, signal });
-    // Which chat channel each came from (no inbound source row = the dashboard). Without the
-    // sources read the messages are still listed, only without a channel.
+    // Which chat channel each came from (no inbound source row = the dashboard) and, when the
+    // channel dated it, when the owner wrote it there. Without the sources read the messages
+    // are still listed, only without a channel.
     const sources = unanswered.length ? await request('/api/state/query/message_sources',
       { message_ids: unanswered.map(m => m.message_id) }, signal).then(r => (r?.result ?? r)?.sources ?? {}, () => ({})) : {};
     threads.unanswered_owner_messages = unanswered.map(m => {
       const source = sources[m.message_id];
       return { message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300),
-        ...(source?.direction === 'in' && source.channel ? { source_channel: source.channel } : {}) };
+        ...(source?.direction === 'in' && source.channel ? { source_channel: source.channel } : {}),
+        ...(source?.direction === 'in' && source.channel_at ? { channel_at: source.channel_at } : {}) };
     });
   } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
   try {

@@ -16,6 +16,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { stamp } from './memory/render.mjs';
+import { memoryTimeZoneProblem } from './host.mjs';
 
 /** Message source kinds and prompt-section names a host may rename. They are
  *  persisted in session logs and carried in request bodies, so a host that already
@@ -25,6 +27,7 @@ export const defaultLabels = Object.freeze({
   continue: 'dsh-director-continue',
   todoBrief: 'dsh-director-todo-brief',
   context: 'dsh-director-context',
+  clock: 'dsh-director-clock',
   contextSection: 'dsh-director:context',
   sectionPrefix: 'dsh-director',
 });
@@ -53,13 +56,83 @@ export function defaultTexts() {
   };
 }
 
+/** The tag every system clock line starts with: the steward's automatic reply strips it
+ *  and grep_chat_history skips it by this tag. */
+export const CLOCK_TAG = '[system clock]';
+/** A tool result gets a clock line when the last one is at least this old. */
+export const CLOCK_TOOL_GAP_MS = 10 * 60 * 1000;
+
+/** The one-line system clock (message-time design 2): `now` (ms) in UTC to the minute,
+ *  the owner's local time when `tz` is a time zone, and where it was written. */
+export function clockLine({ now, tz, where } = {}) {
+  const iso = new Date(now).toISOString();
+  const local = tz ? stamp(iso, tz) : undefined;
+  return `${CLOCK_TAG} now ${iso.slice(0, 16)}Z` + (local ? ` · owner's time ${tz} ${local}` : '')
+    + (where === 'snapshot' ? ' (context snapshot)' : where === 'tool' ? ' (after tool)' : '');
+}
+
+/** The root session's system clock (message-time design 3.2-3.4): a clock line in front
+ *  of each step's new input, at the end of a tool result once the last line is
+ *  CLOCK_TOOL_GAP_MS old, and in each context snapshot (ContextInjection). It is not
+ *  input: its kind is no wake source. Every site keeps its step or result going when the
+ *  clock fails - no line, the time of the last one kept, one log line per session. */
+export class Clock {
+  constructor({ session, createMessage, kind = defaultLabels.clock, notInput = [defaultLabels.context], tz,
+    now = Date.now, line = clockLine, log = () => {} }) {
+    // The owner's time zone (memory.timeZone): one that is not a zone leaves the clock in UTC.
+    const problem = memoryTimeZoneProblem(tz);
+    if (problem) log(`clock: ${problem}; UTC only`);
+    Object.assign(this, { session, createMessage, kind, tz: problem ? undefined : tz, now, line, log });
+    this.notInput = new Set([kind, ...notInput]);
+    this.lastAt = -Infinity;
+    this.failed = false;
+  }
+  /** The line for `where`, and the time it reads; the caller marks it written. */
+  read(where) {
+    const at = this.now();
+    return { at, text: this.line({ now: at, tz: this.tz, where }) };
+  }
+  written(at) { this.lastAt = at; }
+  failure(site, error) {
+    if (this.failed) return;
+    this.failed = true;
+    this.log(`clock: ${site} failed: ${String(error?.message ?? error).slice(0, 300)}`);
+  }
+  /** agent/pre-step: one clock line first among the step's new messages when the step
+   *  claimed real input (not only a clock line or a snapshot put back). */
+  async preStep(payload, next) {
+    const decision = await next();
+    try {
+      if (decision.kind !== 'enter' || payload.signal?.aborted || payload.agent?.session !== this.session) return decision;
+      if (!(payload.messages ?? []).some(message => !this.notInput.has(message?.source?.kind ?? 'user'))) return decision;
+      const { at, text } = this.read();
+      const clock = this.createMessage({ content: [{ type: 'text', text }], source: { kind: this.kind, form: 'notice', summary: text } });
+      this.written(at);
+      return { ...decision, messages: [clock, ...decision.messages] };
+    } catch (error) { this.failure('pre-step', error); return decision; }
+  }
+  /** tools/post-execute: a clock block at the end of an accepted, successful result whose
+   *  content is not replaced by a value, once the last clock line is old. */
+  async postExecute(exec, result, next) {
+    const decision = await next();
+    try {
+      if (exec?.agent?.session !== this.session || decision.kind !== 'accept' || Object.hasOwn(decision, 'value') || result?.isError) return decision;
+      if (this.now() - this.lastAt < CLOCK_TOOL_GAP_MS) return decision;
+      const { at, text } = this.read('tool');
+      const content = [...(decision.content ?? result.content ?? []), { type: 'text', text }];
+      this.written(at);
+      return { ...decision, content };
+    } catch (error) { this.failure('post-execute', error); return decision; }
+  }
+}
+
 /** One durable snapshot per session bootstrap / successful compaction epoch.
  *  `runtime` is the context source: `refresh()` then `render()` give the text after
- *  `header`. */
+ *  `header` (and the `clock` line, when there is a clock). */
 export class ContextInjection {
   constructor(session, runtime, createMessage, { kind = defaultLabels.context, section = defaultLabels.contextSection,
-    header = 'Director context — startup / post-compaction snapshot:\n' } = {}) {
-    Object.assign(this, { session, runtime, createMessage, kind, section, header });
+    header = 'Director context — startup / post-compaction snapshot:\n', clock } = {}) {
+    Object.assign(this, { session, runtime, createMessage, kind, section, header, clock });
     this.epoch = 0;
     this.injected = undefined;
     this.queued = undefined;
@@ -75,7 +148,15 @@ export class ContextInjection {
   async prepare() {
     if (this.injected === this.epoch) return;
     await this.runtime.refresh();
-    const text = this.header + this.runtime.render();
+    // A clock that fails leaves the snapshot without its line, never without the snapshot:
+    // a throw here would leave `injected` unset and throw again on every step.
+    let clock;
+    if (this.clock) {
+      try { clock = this.clock.read('snapshot'); }
+      catch (error) { this.clock.failure('snapshot', error); }
+    }
+    const text = this.header + (clock ? clock.text + '\n' : '') + this.runtime.render();
+    if (clock) this.clock.written(clock.at);
     const message = this.createMessage({ content: [{ type: 'text', text }], source: {
       kind: this.kind, form: 'snapshot', compaction_seq: this.epoch,
       sections: [{ name: this.section, text }],
@@ -618,8 +699,12 @@ export function rebindRefusal({ attempt_id, item_id, session_id, bound_session, 
   return null;
 }
 
-/** Grep the immutable raw log, including events shadowed by compaction. */
-export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}) {
+// A clock line's own text, up to the end of its line inside a JSON string (it holds no quote or backslash).
+const CLOCK_IN_JSON = /\[system clock\][^"\\]*/g;
+/** Grep the immutable raw log, including events shadowed by compaction. Clock lines are
+ *  not searched (they would fill a date search): neither the clock's own messages
+ *  (`clockKind`) nor a clock line inside another event. */
+export function grepHistory(events, pattern, { regex = false, ignore_case = false, after_seq = -1, limit = 20 } = {}, { clockKind = defaultLabels.clock } = {}) {
   if (!pattern) throw new Error('pattern must not be empty');
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('limit must be 1–100');
   const matcher = regex ? new RegExp(pattern, ignore_case ? 'i' : '') : null;
@@ -628,15 +713,18 @@ export function grepHistory(events, pattern, { regex = false, ignore_case = fals
   let more = false, next = after_seq;
   for (const event of events) {
     if (event.seq <= after_seq || !['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(event.type)) continue;
+    if (event.type === 'user/message' && event.data?.source?.kind === clockKind) continue;
     const body = JSON.stringify(event.data, null, 2);
-    const found = body.split('\n').flatMap((text, index) => {
+    const found = body.split('\n').flatMap((line, index) => {
+      const text = line.includes(CLOCK_TAG) ? line.replace(CLOCK_IN_JSON, '') : line;
       const hit = matcher ? (matcher.exec(text)?.index ?? -1) : (ignore_case ? text.toLocaleLowerCase() : text).indexOf(needle);
       const start = Math.max(0, hit - 200);
       return hit >= 0 ? [{ line: index + 1, column: hit + 1, text: text.slice(start, start + 1200), truncated: text.length > 1200 }] : [];
     });
     if (!found.length) continue;
     if (matches.length === limit) { more = true; break; }
-    matches.push({ seq: event.seq, type: event.type, matches: found.slice(0, 10), omitted_lines: Math.max(0, found.length - 10) });
+    matches.push({ seq: event.seq, type: event.type, time: event.time ? new Date(event.time).toISOString() : null,
+      matches: found.slice(0, 10), omitted_lines: Math.max(0, found.length - 10) });
     next = event.seq;
   }
   return { matches, next_after_seq: next, has_more: more };

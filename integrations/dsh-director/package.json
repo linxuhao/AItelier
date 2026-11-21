@@ -4,6 +4,6 @@
   "type": "module",
   "description": "A resident director and its native workers as a DSH plugin; work and memory come from a directorHost (built-in local host, or an external one).",
   "scripts": {
-    "test": "node --test test/host.test.mjs test/local-host.test.mjs test/outbox.test.mjs test/capacity.test.mjs test/resume.test.mjs test/boundary.test.mjs test/request-bodies.test.mjs test/memory.test.mjs test/memory-purge.test.mjs test/memory-recovery.test.mjs test/memory-remote.test.mjs test/memory-search.test.mjs test/memory-vector.test.mjs test/memory-perf.test.mjs test/memory-grep-helper.test.mjs test/steward-tools.test.mjs test/channels.test.mjs"
+    "test": "node --test test/host.test.mjs test/local-host.test.mjs test/outbox.test.mjs test/capacity.test.mjs test/resume.test.mjs test/boundary.test.mjs test/request-bodies.test.mjs test/memory.test.mjs test/memory-purge.test.mjs test/memory-recovery.test.mjs test/memory-remote.test.mjs test/memory-search.test.mjs test/memory-vector.test.mjs test/memory-perf.test.mjs test/memory-grep-helper.test.mjs test/steward-tools.test.mjs test/channels.test.mjs test/clock.test.mjs"
   }
 }

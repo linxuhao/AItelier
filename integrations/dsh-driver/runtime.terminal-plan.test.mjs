@@ -331,7 +331,8 @@ test('real pinned DSH: a settled attempt stops refusing idle_dormant, while a li
   // plan is not listed as awaiting work; the other two still are.
   const snapshot = run.events.map(e => e.event).find(e => e.type === 'user/message' && e.data?.source?.kind === 'aitelier-driver-state');
   assert.ok(snapshot, 'no driver-state snapshot was injected');
-  const state = JSON.parse(snapshot.data.content.map(block => block.text ?? '').join('').split('\n').slice(1).join('\n'));
+  // Header, the snapshot's system clock line (message time 3.4), then the State JSON.
+  const state = JSON.parse(snapshot.data.content.map(block => block.text ?? '').join('').split('\n').slice(2).join('\n'));
   assert.deepEqual((state.todo ?? []).map(plan => plan.attempt_id), [run.plans.running, run.plans.unreadable]);
 
   // 1. Before anything settles: the live attempt and the unanswerable one block.

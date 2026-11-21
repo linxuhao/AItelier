@@ -89,6 +89,7 @@ export const SHIPPED = [
   join('test', 'memory-grep-helper.test.mjs'),
   join('test', 'steward-tools.test.mjs'),
   join('test', 'channels.test.mjs'),
+  join('test', 'clock.test.mjs'),
   join('test', 'fixtures', 'memory-crash.mjs'),
   join('test', 'fixtures', 'embed-fake.mjs'),
   join('test', 'fixtures', 'grep-block-probe.mjs'),

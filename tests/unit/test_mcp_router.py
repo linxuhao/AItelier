@@ -1602,3 +1602,18 @@ def test_stop_pipeline_keeps_reporting_a_completed_stop_as_stopped(monkeypatch):
     assert out["status"] == "stopped"
     assert out["steps_closed"] == ["implement"]
     assert out["recovery_required"] is False
+
+
+def test_stop_pipeline_reconciles_the_checkout_lease(monkeypatch):
+    """The reconcile call sits inside `except Exception: pass`, so a broken import
+    or a renamed helper would be swallowed and the lease never released. Pin
+    both the import path and the call."""
+    import core.run_isolation as ri
+    calls = []
+    monkeypatch.setattr(ri, "reconcile_lease_after_stop",
+                        lambda *a: calls.append(a))
+    _stop_tool(monkeypatch, {
+        "run_id": "r1", "outcome": "stopped", "status": "failed",
+        "steps_closed": [], "admitted_operations": [],
+        "admitted_owner_state": {}, "recovery_required": False})
+    assert calls == [(None, "r1")]

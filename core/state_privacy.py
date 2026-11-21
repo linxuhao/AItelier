@@ -122,6 +122,12 @@ PRIVATE_STATE_TABLES = frozenset({
     # The owner's requests for a new WeChat login QR and what the bridge answered (never
     # the QR itself). No projection.
     "state_owner_channel_login_requests",
+    # Step 23: the family group (core.state_groups): the bound group per channel, its
+    # @-messages and the steward's replies (withheld originals included), its members'
+    # dashboard names, the family memory and the owner's note to the family, whose turn the
+    # steward is in, and the groups awaiting the owner's pick. No projection: never public.
+    "state_owner_groups", "state_group_messages", "state_group_members", "state_family_memory",
+    "state_family_note", "state_steward_turn_audience", "state_pending_groups",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

@@ -141,7 +141,7 @@ _GUIDANCE_BUDGET = 3000
 class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator",
                  runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST, driver_id=None,
-                 is_admin=False):
+                 is_admin=False, public_view=False):
         # Whether the caller behind THIS service may read a project nobody opened.
         # The State HTTP transport derives it from the raw request credential; the
         # internal driver, MCP and every embedder pass it EXPLICITLY. There is no
@@ -195,6 +195,13 @@ class StateService:
         from core.state_channels import StateChannels
         self.channels = StateChannels(self.store, actor, driver_id, steward=self.steward,
                                       inbox=self.driver_inbox)
+        # Step 23: the request carried X-AItelier-Read-As (api.state_graph_routers.get_service):
+        # a steward's group turn. It only narrows: core.state_commands.execute refuses every
+        # write but the family memory's, which core.state_groups judges by the turn audience.
+        self.public_view = public_view is True
+        from core.state_groups import StateGroups
+        self.groups = StateGroups(self.store, actor, driver_id, steward=self.steward, channels=self.channels,
+                                  public_view=self.public_view)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

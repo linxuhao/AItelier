@@ -1293,6 +1293,55 @@ class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
 
+# Step 23: the steward in the owner's family group (core.state_groups, design-steward 7.7).
+# The first four writes are the steward's HOST's, called in code with what the bridge
+# received or what a group turn ended with; note_family_memory is the steward's family
+# memory tool, accepted only from a group turn (public-read header + recorded audience).
+class BindOwnerGroup(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    group_ref: str = Field(min_length=1, max_length=200)
+    sender_ref: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=40)
+    mention_prefix: str = Field(min_length=1, max_length=100)
+    channel_message_ref: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class RelayGroupMessage(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    group_ref: str = Field(min_length=1, max_length=200)
+    sender_ref: str = Field(min_length=1, max_length=200)
+    channel_message_ref: str = Field(min_length=1, max_length=200)
+    body: str
+    channel_at: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class PostGroupReply(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    question_id: str = Field(min_length=1, max_length=64)
+    body: str = Field(min_length=1, max_length=8000)
+    also_answers: list[str] | None = Field(default=None, max_length=10)
+
+
+class SetStewardTurnAudience(Project):
+    turn: str = Field(min_length=1, max_length=64)
+    audience: Literal["owner", "group"]
+    group: dict[str, Any] | None = None
+    sender_refs: list[str] | None = Field(default=None, max_length=10)
+
+
+class NoteFamilyMemory(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class ListGroupRecent(Request):
+    channel: _CHANNEL
+    group_ref: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=6, ge=1, le=20)
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1328,6 +1377,7 @@ READ_REQUESTS = {
     "list_steward_schedules": ListStewardSchedules,
     "list_owner_channels": Empty, "message_sources": MessageSources,
     "list_owner_channel_login_requests": Empty,
+    "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": Empty,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1409,6 +1459,9 @@ WRITER_ONLY_READS = frozenset({
     "list_owner_channels", "message_sources",
     # Step 19: the owner's pending requests for a new WeChat login QR. A private table.
     "list_owner_channel_login_requests",
+    # Step 23: the bound family groups, a group's recent exchanges and the family memory.
+    # Private tables.
+    "list_owner_groups", "list_group_recent", "list_family_memory",
 })
 
 
@@ -1475,6 +1528,9 @@ WRITE_REQUESTS = {
     "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
     "record_channel_delivery": RecordChannelDelivery, "report_channel_status": ReportChannelStatus,
     "complete_owner_channel_login_request": CompleteOwnerChannelLoginRequest,
+    "bind_owner_group": BindOwnerGroup, "relay_group_message": RelayGroupMessage,
+    "post_group_reply": PostGroupReply, "set_steward_turn_audience": SetStewardTurnAudience,
+    "note_family_memory": NoteFamilyMemory,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1845,6 +1901,14 @@ def _handlers(service) -> dict:
         "message_sources": service.channels.message_sources,
         "list_owner_channel_login_requests": service.channels.list_login_requests,
         "complete_owner_channel_login_request": service.channels.complete_login_request,
+        "bind_owner_group": service.groups.bind_owner_group,
+        "relay_group_message": service.groups.relay_group_message,
+        "post_group_reply": service.groups.post_group_reply,
+        "set_steward_turn_audience": service.groups.set_steward_turn_audience,
+        "note_family_memory": service.groups.note_family_memory,
+        "list_owner_groups": service.groups.list_owner_groups,
+        "list_group_recent": service.groups.list_group_recent,
+        "list_family_memory": service.groups.list_family_memory,
     }
 
 
@@ -1932,6 +1996,12 @@ def _driver_defaults(service, action, arguments):
 # complete_owner_channel_login_request (also the host's, run in code) only records what
 # the WeChat bridge answered to the owner's request for a new login QR: {requested} or
 # {refused, retry_after_s?}, never the QR.
+# Step 23 (design-steward 7.7): bind_owner_group, relay_group_message, post_group_reply and
+# set_steward_turn_audience are the steward's HOST's, called in code (the model has no tool
+# for them): a group code posted by the bound account, a group @-message the bridge passed,
+# the reply a group turn ended with (exit-checked, to the question's own group) and whose turn
+# this is. note_family_memory is the model's family memory tool, accepted only from a group
+# turn: the public-read header plus a recorded group audience (core.state_groups).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1945,7 +2015,16 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "acknowledge_driver_message",
     "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
     "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status",
-    "complete_owner_channel_login_request"})
+    "complete_owner_channel_login_request",
+    "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
+    "note_family_memory"})
+# Step 23: the one write a public-view service (a group turn's tool request, carrying
+# X-AItelier-Read-As) may make; every other write is public_view_read_only. Its handler
+# judges the recorded turn audience (core.state_groups.StateGroups._family_group).
+PUBLIC_VIEW_WRITES = frozenset({"note_family_memory"})
+# ... and the reads it is made trusted for (api.state_graph_routers.get_service): the family
+# memory pair, both refused there without a group audience.
+FAMILY_MEMORY_ACTIONS = frozenset({"note_family_memory", "list_family_memory"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is
@@ -2063,6 +2142,13 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("unknown state graph action; use state_graph_help")
     if action in WRITE_REQUESTS and not allow_write:
         raise StateGraphError("mutating action is not available on the read surface")
+    if getattr(service, "public_view", False) is True:
+        # Step 23: X-AItelier-Read-As narrows the request to an anonymous reader. A service
+        # made trusted for it (the family memory pair only) serves nothing else.
+        if action in WRITE_REQUESTS and action not in PUBLIC_VIEW_WRITES:
+            raise StateGraphError(f"public_view_read_only: {action} is not available to a public-view request")
+        if not _anonymous(service) and action not in FAMILY_MEMORY_ACTIONS:
+            raise ProjectPrivate()
     if action in WRITE_REQUESTS:
         # Write allowed; before validation and dispatch, the steward restriction.
         _refuse_steward_write(service, action, arguments)

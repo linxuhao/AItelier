@@ -152,7 +152,12 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "report_channel_status",
         # ...and records what the WeChat bridge answered to the owner's request for a new
         # login QR ({requested} or {refused}; never the QR), run by the host in code.
-        "complete_owner_channel_login_request"}
+        "complete_owner_channel_login_request",
+        # Step 23 (design-steward 7.7): the host's group commands (a group code from the bound
+        # account, a group @-message, the exit-checked reply, the turn audience) and the family
+        # memory tool, accepted only from a group turn (tests/unit/test_steward_groups.py).
+        "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
+        "note_family_memory"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

@@ -1327,8 +1327,12 @@ def test_platform_and_wuxia_bindings_query_only_their_own_project_on_tracked_ent
         assert "STANDING-ONLY-PROJECT-LINE" in context
         reads = [r["params"]["arguments"] for r in StateStub.requests[before:]
                  if r["params"]["name"] == "state_graph_read"]
-        assert len(reads) == 4
+        # note, overview, and the advertised standing-only guidance: re-derived
+        # from the delivered code path, where the advertisement precedes the
+        # standing read, so the fallback page walk this used to count is gone.
+        assert len(reads) == 3
         assert {read["arguments"]["project_id"] for read in reads} == {project}
+        assert _list_reads() == []
     # A guidance envelope for the other project is refused, never injected.
     StateStub.guidance = {**GUIDANCE_V1, "project_id": "wuxia-myth"}
     write_binding(codex_home, "platform-session-2", project_id="aitelier")
@@ -1404,9 +1408,18 @@ def test_credential_priority_without_driver_admin_mixing_on_every_tracked_read(
     env = _credential_case(tmp_path, state_server, case)
     context = invoke(tmp_path, state_server, tracked=True, env=env)["hookSpecificOutput"]["additionalContext"]
     assert "driver_note_revision=1" in context
-    # note, overview, help, standing (+ whoami, guidance when advertised)
-    reads = 6 if advertised else 5
+    # whoami, note, overview, help, then exactly ONE standing read: the typed
+    # standing-only guidance when the server advertises the selector, otherwise
+    # the single (0, 100) page of the bounded fallback walk. Re-derived from the
+    # delivered code path, which decides the advertisement before any standing
+    # read: the advertised branch used to pay the walk too and then overwrite it,
+    # so this pinned 6 and that page request is now gone.
+    reads = 5
     assert len(StateStub.requests) == reads
+    if advertised:
+        assert _list_reads() == []
+    else:
+        assert _fallback_page_reads() == [(0, 100)]
     assert StateStub.credentials == [expected] * reads
     for secret in ("helper-secret", "env-driver-token", "env-admin-token",
                    "driver-file-token", "home-driver-token"):
@@ -1664,6 +1677,18 @@ def _fallback_page_reads():
     return reads
 
 
+def _list_reads():
+    """Every list_director_messages request recorded, page walk or not.
+
+    The advertisement must be decided before the walk is owed, so this is the
+    ABSENCE witness an advertising server has to satisfy: no page of the v2
+    reader may be requested at all, not merely fewer of them.
+    """
+    return [request for request in StateStub.requests
+            if request["params"]["name"] == "state_graph_read"
+            and request["params"]["arguments"].get("action") == "list_director_messages"]
+
+
 def test_fallback_projection_reaches_the_newest_standing_rows(tmp_path, state_server):
     StateStub.standing_rows = _standing_page_rows(12)
     context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
@@ -1708,6 +1733,73 @@ def test_fallback_projection_fails_closed_when_a_later_page_is_unavailable(tmp_p
     assert "could not be loaded within the bounded PostCompact hook request" in context
     assert "standing 105" not in context
     assert len(context) <= 12_000
+
+
+def _advertised_guidance(rows):
+    """A v1 envelope whose projection is exactly these whole producer rows."""
+    return {
+        "schema": "aitelier.driver-guidance.v1", "project_id": "aitelier",
+        "driver_id": "stub", "standing_only": True,
+        "projection": "\n".join(rows), "included": len(rows), "omitted": 0,
+    }
+
+
+def test_advertised_selector_never_issues_a_standing_page_read(tmp_path, state_server):
+    # The pending standing set spans MORE than one 100-row reader page, so on the
+    # fallback path this inbox costs two list_director_messages calls: a walk is
+    # unmistakable here rather than invisible at one page.
+    StateStub.standing_rows = _standing_page_rows(105)
+    assert len(StateStub.standing_rows) > 100
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    advertised_rows = [_v1_row(delivery_seq) for delivery_seq in range(201, 209)]
+    StateStub.guidance = _advertised_guidance(advertised_rows)
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+
+    # ABSENCE, not a lower total: the advertisement is decided before the walk is
+    # owed, so this server is never asked for a single page of the v2 reader.
+    assert _list_reads() == []
+    assert "list_director_messages" not in json.dumps(StateStub.requests)
+    assert [(request["params"]["name"], request["params"]["arguments"].get("action"))
+            for request in StateStub.requests] == [
+        ("driver_whoami", None),
+        ("state_graph_read", "get_driver_note"), ("state_graph_read", "project_overview"),
+        ("state_graph_help", None), ("state_graph_read", "driver_postcompact_guidance")]
+
+    # The section is the advertised answer itself: whole rows, ascending, with no
+    # row of the unread inbox the discarded walk would have drained.
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert section == "\n".join(advertised_rows)
+    assert [json.loads(line)["delivery_seq"] for line in section.splitlines()] == list(range(201, 209))
+    assert "standing 105" not in section
+    assert OWN_STANDING_UNAVAILABLE not in context
+
+
+def test_later_page_fail_closed_only_where_the_walk_is_reachable(tmp_path, state_server):
+    StateStub.standing_rows = _standing_page_rows(105)
+    StateStub.standing_error_after = 0  # the cursor-100 page answers an MCP error
+    # Non-advertising server: the walk is the only path to standing rows, so the
+    # unavailable second page still degrades to the bounded, honest notice.
+    legacy = invoke(tmp_path, state_server, session_id="legacy-page", tracked=True)
+    legacy_context = legacy["hookSpecificOutput"]["additionalContext"]
+    assert _fallback_page_reads() == [(0, 100), (100, 100)]
+    assert "recovery required" in legacy_context
+    assert "could not be loaded within the bounded PostCompact hook request" in legacy_context
+    assert "standing 105" not in legacy_context
+
+    # Advertising server, same unavailable page: it is never requested, so the
+    # fail-closed branch is unreachable and the projection is the typed answer.
+    StateStub.requests = []
+    StateStub.operations = {"driver_postcompact_guidance": STANDING_ONLY_OPERATION}
+    advertised_rows = [_v1_row(delivery_seq) for delivery_seq in range(301, 305)]
+    StateStub.guidance = _advertised_guidance(advertised_rows)
+    advertised = invoke(tmp_path, state_server, session_id="advertised-page", tracked=True)
+    advertised_context = advertised["hookSpecificOutput"]["additionalContext"]
+    assert _list_reads() == []
+    assert "recovery required" not in advertised_context
+    section = advertised_context.split(
+        "## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert section == "\n".join(advertised_rows)
+    assert "standing 105" not in advertised_context
 
 
 @pytest.mark.parametrize("event", ["PostCompact", "SessionStart", "UserPromptSubmit", "Stop"])

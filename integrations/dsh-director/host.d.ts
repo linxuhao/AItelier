@@ -119,6 +119,11 @@ export interface DirectorApi {
    *  QR itself, which reaches the owner only through channels.reportStatus. Never rejects;
    *  without channels it resolves {refused: 'no_channels'}. */
   ownerChannelLogin(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
+  /** Step 25 C11 (capability `groups`): send one line into a bound group (a group reminder the
+   *  host posted with post_group_notice) through the channel's group send and the bridge's one
+   *  queue, like a group reply. true when the channel took it; never rejects; false without
+   *  channels. */
+  groupSend(channel: string, groupRef: string, text: string): Promise<boolean>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -332,6 +337,13 @@ export interface GroupsHost {
    *  the host refuses a request that does not name the recorded turn. */
   familyNote(text: string, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
   familyShow(signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  /** Step 25 C4: the family lists. `turn` as for the family memory: required by the host in a
+   *  group turn (the public-read header), ignored in an owner turn. listRemove is an owner
+   *  turn's alone (the guard refuses it in a group turn). */
+  listShow(a: { list?: 'shopping' | 'todo' }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listAdd(a: { list: 'shopping' | 'todo'; items: string[] }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listCheck(a: { itemIds: string[]; done?: boolean }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listRemove(a: { itemIds: string[] }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
 }
 
 export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };

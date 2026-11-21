@@ -50,9 +50,10 @@ test('the director presents every runtime tool but the workspace-only project_wo
   const registered = ['./runtime.mjs', '../dsh-director/index.mjs'].flatMap(file => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
   assert.ok(registered.length >= 14, 'could not read the registrations: ' + registered.length);
   // reply_to_director is registered for the steward only.
-  // family_memory_note / family_memory_show are the steward's, registered only with a family group (step 23).
+  // family_memory_note / family_memory_show are the steward's, registered only with a family group (step 23);
+  // so are the family list tools (step 25 C4).
   assert.deepEqual(registered.filter(name => !['project_work', 'reply_to_director', 'schedule_list', 'schedule_set', 'schedule_delete',
-    'family_memory_note', 'family_memory_show'].includes(name) && !effective.director.presented.includes(name)), [], 'a runtime tool would be hidden from the director');
+    'family_memory_note', 'family_memory_show', 'list_show', 'list_add', 'list_check', 'list_remove'].includes(name) && !effective.director.presented.includes(name)), [], 'a runtime tool would be hidden from the director');
   const tools = ['bash', 'glob', 'web_fetch', 'workflow', 'subagent', 'todo_plan', 'mcp__aitelier__state_graph_write', 'mcp__aitelier__state_graph_read', 'mcp__devmcp__x']
     .map(name => ({ name }));
   assert.deepEqual(presentTools(tools, effective.director).map(t => t.name), ['bash', 'subagent', 'todo_plan', 'mcp__aitelier__state_graph_write']);

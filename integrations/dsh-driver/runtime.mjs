@@ -697,9 +697,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (_args, exec) => listSchedules(toolRequest, exec.signal).then(schedules => ({ schedules })),
         }));
         scope.tools.register(defineTool({ name: 'schedule_set',
-          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner.',
+          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner. target "family_group" (only when your owner asks for a reminder to the family group): the instruction is then the exact words posted into the bound family group when due, at most 500 characters, not an instruction to you - you are not woken; channel names the group when both channels have one. Refused no_group_bound when no group is bound, withheld when the words name something the group may not see.',
           parameters: { schedule_id: { type: 'string' }, expected_version: { type: 'integer' }, title: { type: 'string' }, instruction: { type: 'string' },
-            schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' } }, output: json,
+            schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' },
+            target: { type: 'string', enum: ['owner', 'family_group'] }, channel: { type: 'string', enum: ['wechat', 'slack'] } }, output: json,
           execute: (args, exec) => setSchedule(toolRequest, args, exec.signal).then(changed),
         }));
         scope.tools.register(defineTool({ name: 'schedule_delete',
@@ -772,7 +773,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // compaction it must still know what its owner has yet to decide.
       const proposals = await openProposals(request).catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
       const schedules = await listSchedules(request).then(rows => rows.filter(r => r.enabled)
-        .map(r => ({ schedule_id: r.schedule_id, title: r.title, schedule: r.schedule, tz: r.tz, next_run_at: r.next_run_at })))
+        .map(r => ({ schedule_id: r.schedule_id, title: r.title, schedule: r.schedule, tz: r.tz, next_run_at: r.next_run_at,
+          ...(r.target === 'family_group' ? { target: r.target } : {}) })))
         .catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
       // Design-steward 7.3 layer 2: what is open, from data, not from the model's memory.
       const threads = await openThreads({ request, project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR });
@@ -854,7 +856,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent, ownerChannelLogin }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
@@ -871,8 +873,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       await loginRequests();
       // Step 16: the reminder clock. Each wake it gives is delivered once per (row, due time).
       if (steward) {
+        // Step 25 C11: a family-group reminder goes out through the plugin's group send (the
+        // bridge's queue), never through a wake; only what did not go out wakes the steward.
         scheduleTimer = new ScheduleTimer({ request, log: line => ctx.logger.warn(line),
-          deliver: (text, id) => notify(text, { id }) });
+          deliver: (text, id) => notify(text, { id }), sendGroup: typeof groupSend === 'function' ? groupSend : undefined });
         await scheduleTimer.refresh();
       }
       // Every owner message gets an answer: when a turn ends with the owner still waiting,

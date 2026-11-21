@@ -58,6 +58,28 @@ test('the group operations are the host\'s own requests; only the family memory 
   assert.deepEqual(tool.calls.map(c => c.body.turn), ['3', '3']);
 });
 
+test('step 25 C4: the four list operations go through the tools\' request, naming the turn they run in', async () => {
+  const host = recorder();
+  const tool = recorder();
+  const ops = groupOps({ request: host.request, toolRequest: (p, b, s) => tool.request(p, b, s, { readAs: 'public' }), project: 'aitelier-home', me: 'drv' });
+  await ops.listShow({ list: 'shopping' }, undefined, { turn: '7' });
+  await ops.listAdd({ list: 'shopping', items: ['牛奶', '鸡蛋'] }, undefined, { turn: '7' });
+  await ops.listCheck({ itemIds: ['li-1'], done: true }, undefined, { turn: '7' });
+  await ops.listRemove({ itemIds: ['li-2'] }, undefined, { turn: '8' });
+  assert.deepEqual(host.calls, []);
+  assert.deepEqual(tool.calls.map(c => [c.path.split('/').at(-1), c.readAs, c.body.turn]), [
+    ['list_list_items', 'public', '7'], ['add_list_items', 'public', '7'], ['check_list_items', 'public', '7'],
+    ['remove_list_items', 'public', undefined]]);
+  assert.deepEqual({ ...tool.calls[1].body, request_key: undefined }, { request_key: undefined, list: 'shopping', items: ['牛奶', '鸡蛋'], turn: '7' });
+  assert.deepEqual({ ...tool.calls[2].body, request_key: undefined }, { request_key: undefined, item_ids: ['li-1'], done: true, turn: '7' });
+  // Each call its own key: the same item can be added again after it was removed.
+  await ops.listAdd({ list: 'shopping', items: ['牛奶', '鸡蛋'] }, undefined, { turn: '7' });
+  assert.notEqual(tool.calls[1].body.request_key, tool.calls.at(-1).body.request_key);
+  // A refusal is an answer the model reads, never a thrown tool error.
+  const refusing = groupOps({ request: host.request, toolRequest: async () => { throw new Error('AItelier: HTTP 422 "withheld: private_project"'); } });
+  assert.equal((await refusing.listAdd({ list: 'todo', items: ['x'] }, undefined, { turn: '1' })).refused, 'state_refused');
+});
+
 test('the runtime: in a group turn every tool request carries the header, the host\'s requests never; in an owner turn none', async () => {
   const { aitelierHost } = await import('./runtime.mjs');
   const { calls, request } = recorder({ '/api/state/query/project_catalog': { result: { projects: [] } },

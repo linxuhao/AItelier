@@ -332,6 +332,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     turnAudience: () => groupTurns?.audience(),
     ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
+    /** Step 25 C11: one line into a bound group (a group reminder the host posted), through the
+     *  same channel send and bridge queue as a group reply: true when the channel took it. */
+    groupSend: (channel, groupRef, text) => channels ? channels.sendGroup(channel, groupRef, text) : Promise.resolve(false),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
@@ -669,6 +672,29 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       scope.tools.register(defineTool({ name: 'family_memory_show',
         description: 'Group turns only. This group\'s family memory (newest first) and your owner\'s note to the family.',
         parameters: {}, output: jsonOutput, execute: (_args, exec) => host.groups.familyShow(exec.signal, { turn: groupTurns.open()?.turn }) }));
+    }
+    // Step 25 C4 (design-steward 7.9.5): the family lists, shopping and to-do. Show, add and check
+    // in a group turn too (the guard's whitelist; the host's request then carries the public-read
+    // header, and this code - never the model - names the open turn the backend checks against
+    // the recorded audience); remove in an owner turn only.
+    if (groupTurns && host.groups?.listShow) {
+      const turn = () => ({ turn: groupTurns.open()?.turn });
+      const list = { type: 'string', enum: ['shopping', 'todo'] };
+      scope.tools.register(defineTool({ name: 'list_show',
+        description: 'The family lists (shopping and to-do; or one, with list): each item\'s item_id, text, who added it and when, and whether it is checked. Everyone in the family group can see everything on them, whoever added it.',
+        parameters: { list }, output: jsonOutput, execute: (args, exec) => host.groups.listShow({ list: args.list }, exec.signal, turn()) }));
+      scope.tools.register(defineTool({ name: 'list_add',
+        description: 'Add up to 10 items (each at most 100 characters) to the family shopping or to-do list. An item already open on that list is not added twice. Refused withheld when an item names something the family group may not see; list_full at 100 open items.',
+        parameters: { list: { ...list, required: true }, items: { type: 'array', items: { type: 'string' }, required: true } }, output: jsonOutput,
+        execute: (args, exec) => host.groups.listAdd({ list: args.list, items: args.items }, exec.signal, turn()) }));
+      scope.tools.register(defineTool({ name: 'list_check',
+        description: 'Check off (done: true, the default) or uncheck (done: false) family list items by the item_id list_show gave.',
+        parameters: { item_ids: { type: 'array', items: { type: 'string' }, required: true }, done: { type: 'boolean' } }, output: jsonOutput,
+        execute: (args, exec) => host.groups.listCheck({ itemIds: args.item_ids, done: args.done ?? true }, exec.signal, turn()) }));
+      scope.tools.register(defineTool({ name: 'list_remove',
+        description: 'Your owner\'s turns only: remove family list items by item_id (in the family group items are only checked off; only your owner removes).',
+        parameters: { item_ids: { type: 'array', items: { type: 'string' }, required: true } }, output: jsonOutput,
+        execute: (args, exec) => host.groups.listRemove({ itemIds: args.item_ids }, exec.signal, turn()) }));
     }
   };
   // Step 23: the first step of every steward turn decides its audience, puts input of another

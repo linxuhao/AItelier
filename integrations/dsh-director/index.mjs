@@ -363,7 +363,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // result and every snapshot (lib/core.mjs Clock); children and workers get none. Its
     // local time is the owner's time zone, which only a host with an owner's memory sets.
     const clock = new Clock({ session: subject.session, createMessage: createUserMessage, kind: labels.clock,
-      notInput: [labels.context], tz: config.memory?.timeZone, log: line => ctx.logger.warn(line) });
+      notInput: [labels.context], tz: config.memory?.timeZone, log: line => ctx.logger.warn(line),
+      // Tests shrink the gap before a tool result's clock; production never sets it.
+      ...(Number(config.clockToolGapMs) > 0 ? { gapMs: Number(config.clockToolGapMs) } : {}) });
     const injection = new ContextInjection(subject.session, contextSource, createUserMessage,
       { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock });
     // The director prompt section and the snapshot hooks are the director's own; a

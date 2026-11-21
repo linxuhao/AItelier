@@ -166,6 +166,23 @@ test('tool result (E2): a clock that throws leaves the result accepted and uncha
   assert.deepEqual(logs, ['clock: post-execute failed: clock broke']);
 });
 
+test('a failure of the step or the tool itself is not the clock\'s: it propagates, and nothing is logged', async () => {
+  const { clock, logs } = clockOf();
+  const inner = async () => { throw new Error('inner'); };
+  await assert.rejects(clock.preStep(step([event('hello')]), inner), /inner/);
+  await assert.rejects(clock.postExecute(tool(), result, inner), /inner/);
+  assert.deepEqual(logs, []);
+});
+
+test('tool result: gapMs (tests only) replaces the ten-minute gap', async () => {
+  const { clock, at } = clockOf({ gapMs: 5 });
+  await clock.preStep(step([event('hello')]), enter([event('hello')]));
+  at(T + 4);
+  assert.deepEqual(await clock.postExecute(tool(), result, accept), { kind: 'accept' });
+  at(T + 5);
+  assert.equal((await clock.postExecute(tool(), result, accept)).content.at(-1).text, '[system clock] now 2026-11-20T10:14Z (after tool)');
+});
+
 // ---- 7. snapshot and history
 const fakeSession = () => {
   const appended = [];

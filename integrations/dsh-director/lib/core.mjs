@@ -73,16 +73,16 @@ export function clockLine({ now, tz, where } = {}) {
 
 /** The root session's system clock (message-time design 3.2-3.4): a clock line in front
  *  of each step's new input, at the end of a tool result once the last line is
- *  CLOCK_TOOL_GAP_MS old, and in each context snapshot (ContextInjection). It is not
+ *  CLOCK_TOOL_GAP_MS (`gapMs`; tests shrink it) old, and in each context snapshot (ContextInjection). It is not
  *  input: its kind is no wake source. Every site keeps its step or result going when the
  *  clock fails - no line, the time of the last one kept, one log line per session. */
 export class Clock {
   constructor({ session, createMessage, kind = defaultLabels.clock, notInput = [defaultLabels.context], tz,
-    now = Date.now, line = clockLine, log = () => {} }) {
+    now = Date.now, line = clockLine, log = () => {}, gapMs = CLOCK_TOOL_GAP_MS }) {
     // The owner's time zone (memory.timeZone): one that is not a zone leaves the clock in UTC.
     const problem = memoryTimeZoneProblem(tz);
     if (problem) log(`clock: ${problem}; UTC only`);
-    Object.assign(this, { session, createMessage, kind, tz: problem ? undefined : tz, now, line, log });
+    Object.assign(this, { session, createMessage, kind, tz: problem ? undefined : tz, now, line, log, gapMs });
     this.notInput = new Set([kind, ...notInput]);
     this.lastAt = -Infinity;
     this.failed = false;
@@ -117,7 +117,7 @@ export class Clock {
     const decision = await next();
     try {
       if (exec?.agent?.session !== this.session || decision.kind !== 'accept' || Object.hasOwn(decision, 'value') || result?.isError) return decision;
-      if (this.now() - this.lastAt < CLOCK_TOOL_GAP_MS) return decision;
+      if (this.now() - this.lastAt < this.gapMs) return decision;
       const { at, text } = this.read('tool');
       const content = [...(decision.content ?? result.content ?? []), { type: 'text', text }];
       this.written(at);

@@ -552,8 +552,8 @@ class StateOwnerQuestions:
         """The owner's channel message: the owner's half of the steward's conversation, with
         its inbound source row; else not_from_channel."""
         row = conn.execute(
-            "SELECT m.message_id,m.body,m.created_at,s.channel,s.sender_ref,s.at FROM driver_inbox_messages m "
-            "JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' "
+            "SELECT m.message_id,m.body,m.created_at,s.channel,s.sender_ref,s.at,s.rowid AS source_rowid "
+            "FROM driver_inbox_messages m JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' "
             "WHERE m.message_id=? AND m.project_id=? AND m.channel='user' AND m.sender_driver_id IS NULL",
             (message_id, home)).fetchone()
         if row is None:
@@ -564,13 +564,15 @@ class StateOwnerQuestions:
     def _previous(self, conn, home, source):
         """For a message of codes alone: the same sender's inbound message right before it on
         the same channel, when it names no code, was never relayed, and came at most
-        CODES_ONLY_WINDOW earlier; else None."""
+        CODES_ONLY_WINDOW earlier; else None. At the same received time, only one received
+        before it (lower rowid) counts."""
         row = conn.execute(
             "SELECT m.message_id,m.body,m.created_at,s.channel,s.sender_ref,s.at FROM state_message_sources s "
             "JOIN driver_inbox_messages m ON m.message_id=s.message_id WHERE s.direction='in' AND s.channel=? "
-            "AND s.sender_ref=? AND s.message_id<>? AND s.at<=? AND m.project_id=? "
+            "AND s.sender_ref=? AND s.message_id<>? AND (s.at<? OR (s.at=? AND s.rowid<?)) AND m.project_id=? "
             "ORDER BY s.at DESC, s.rowid DESC LIMIT 1",
-            (source["channel"], source["sender_ref"], source["message_id"], source["at"], home)).fetchone()
+            (source["channel"], source["sender_ref"], source["message_id"], source["at"], source["at"],
+             source["source_rowid"], home)).fetchone()
         if row is None:
             return None
         row = dict(row)

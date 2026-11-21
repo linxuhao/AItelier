@@ -686,9 +686,9 @@ def test_a_message_of_codes_alone_relays_the_message_right_before_it(world):
     assert out["relayed_message_id"] == words and out["results"][0]["outcome"] == "relayed"
     assert deliveries(world, world.rows["alpha"])[0]["body"] == "用方案 A"
     # The previous one names a code itself, or was already relayed, or is more than 10 minutes back: no_code.
-    tick(world, minutes=1)
+    # wx-3 comes in the same second as wx-2.
     assert relay(world, channel_message(world, f"Q{code}", "wx-3"))["refused"] == "no_code"
-    with world.db.get_connection() as conn:   # wx-2 again: its previous (wx-1) was already relayed
+    with world.db.get_connection() as conn:   # wx-2 again: its previous is wx-1 (already relayed), not wx-3
         relayed_from = conn.execute("SELECT message_id FROM driver_inbox_messages WHERE body=? ORDER BY rowid LIMIT 1",
                                     (f"Q{code}",)).fetchone()[0]
     assert relay(world, relayed_from, key="again")["refused"] == "no_code"
@@ -699,6 +699,13 @@ def test_a_message_of_codes_alone_relays_the_message_right_before_it(world):
     channel_message(world, "用 B", "wx-4")
     tick(world, minutes=11)
     assert relay(world, channel_message(world, f"Q{code2}", "wx-5"))["refused"] == "no_code"
+    # All in one second: the words before the codes are relayed, never words received after them.
+    words2 = channel_message(world, "用 C", "wx-6")
+    codes2 = channel_message(world, f"Q{code2}", "wx-7")
+    channel_message(world, "还是用 D", "wx-8")
+    out = relay(world, codes2)
+    assert out["relayed_message_id"] == words2 and out["results"][0]["outcome"] == "relayed"
+    assert deliveries(world, world.rows["alpha"])[-1]["body"] == "用 C"
 
 
 def test_codes_only_times_received_before_the_push_and_superseded_use_the_relayed_message(world):

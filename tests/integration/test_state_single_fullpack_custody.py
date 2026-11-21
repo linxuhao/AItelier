@@ -6,6 +6,7 @@ their bytes and path. Corrupt rows are made by dropping the immutability
 triggers of a disposable test database only, never of a production database.
 """
 import hashlib
+import inspect
 import json
 import os
 import sqlite3
@@ -18,7 +19,7 @@ import core.state_git_artifacts as sga
 from core import datadir
 from core.state_commands import ProjectPrivate, execute
 from core.state_database import StateDatabase
-from core.state_git_artifacts import git_custody, materialize_candidate
+from core.state_git_artifacts import custody_metadata, git_custody, materialize_candidate
 from core.state_graph import StateConflict
 from core.state_service import StateService
 from tests.integration.test_state_git_artifact_durability import fixture, prune_producer
@@ -292,3 +293,25 @@ def test_backup_only_database_materializes_exact_candidate(tmp_path):
     git(tmp_path, "init", "-q", "--bare", str(fresh))
     with pytest.raises(StateConflict):
         materialize_candidate(receiver.store, commit2, str(fresh))
+
+
+def test_custody_labels_describe_a_row_shape_not_a_live_file():
+    """A legacy CAS path that no longer exists is still labelled legacy.
+
+    ``git_custody`` is a pure classifier over the STORED reference, so an
+    absolute path classifies as ``legacy_db_plus_cas_path`` whether or not the
+    file is there - after the owner released the legacy host CAS copies, it is
+    not. The docstrings are the served contract for those two fields, and they
+    must say so: ``legacy_cas_path`` is a HISTORICAL location, not a live custody
+    promise, and only the release ledger says whether bytes are still held.
+    """
+    missing = "/legacy/report-store/ab/" + "f" * 64
+    assert not os.path.exists(missing)
+    assert git_custody(missing) == ("legacy_db_plus_cas_path", missing, None)
+    for doc in (inspect.getdoc(git_custody), inspect.getdoc(custody_metadata)):
+        flat = " ".join(doc.split())
+        assert "shape" in flat.lower()
+        assert "never that a file exists" in flat
+        assert "HISTORICAL location" in flat
+        assert "not a live custody promise" in flat
+        assert "never open it as custody" in flat

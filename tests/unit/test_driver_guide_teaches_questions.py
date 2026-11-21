@@ -105,3 +105,12 @@ def test_the_driver_inbox_teaches_the_reader_page_shape():
     assert ("a call passing neither `newest` nor `statuses` keeps the ascending "
             "forward-keyset answer older clients rely on") in text, (
         "the guide must say the unflagged call is still the ascending forward page")
+
+
+def test_the_inbox_paragraph_says_every_row_is_dated_and_to_read_the_clock():
+    """Message time (2026-11-20): an external driver has no system clock line; the guide
+    names the row's times and tells it to read `date -u` before writing a time."""
+    text = _served_text()
+    assert "Every row carries created_at (UTC, when the message was written)" in text
+    assert "may also carry channel_at, the app's own send time" in text
+    assert "Before you write a clock time anywhere, read it with `date -u`; never estimate it." in text

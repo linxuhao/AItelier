@@ -968,6 +968,8 @@ export function setDefaultOwnerChannel(channel: OwnerChannelName | null): Promis
 export interface MessageSource {
   direction: 'in' | 'out'; channel: OwnerChannelName; sender_ref: string | null;
   channel_message_ref: string | null; at: string; error: string | null;
+  /** When the owner sent it from the chat app (the platform's time, UTC); inbound only. */
+  channel_at?: string | null;
 }
 /** At most this many ids per request (the backend's bound). */
 export const MESSAGE_SOURCES_BATCH = 200;

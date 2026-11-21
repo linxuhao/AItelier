@@ -953,11 +953,14 @@ class DriverInbox:
         message that carries tagged blocks or answers a question reaches the
         driver with the SAME `segments`/`answers` the conversation read projects
         for it - both are built by `citation_fields`. Those two keys appear only
-        on a row that carries them: a plain message keeps exactly the shape it
-        had before, with no empty list and no raw `*_json` string. By the same
+        on a row that carries them: a plain message gets no empty list and no
+        raw `*_json` string. By the same
         rule, an owner message relayed from a chat channel carries
         `source_channel` ('slack' / 'wechat', from the inbound row of
-        `state_message_sources`); a dashboard message has no such key.
+        `state_message_sources`) and, when the channel gave one, `channel_at`
+        (the channel's own send time, UTC); a dashboard message has neither key.
+        Every row carries the message's `created_at` (UTC, when the backend wrote
+        it): the time a reader compares its own clock with.
 
         The page is the OLDEST `limit` deliveries above `after` (the ascending
         forward keyset a waiting driver polls with) unless `newest` is true, which
@@ -1013,15 +1016,16 @@ class DriverInbox:
             # COUNT(*) over the same WHERE clause, never a page fetched into Python:
             # the answer must not cost the caller the whole backlog.
             matched_total=conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE "+where, bound).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,s.channel AS source_channel FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)
             # The storage columns are not payload: the citation part above is the
             # only shape a reader sees them in.
             del row["segments_json"], row["answers_json"], row["withdraws_json"]
-            if row["source_channel"] is None:
-                del row["source_channel"]
+            for key in ("source_channel", "channel_at"):
+                if row[key] is None:
+                    del row[key]
             row.update(citation)
         truncated=len(rows)>limit
         next_after = max(after,high) if newest else (page[-1]["seq"] if truncated else max(after,high))

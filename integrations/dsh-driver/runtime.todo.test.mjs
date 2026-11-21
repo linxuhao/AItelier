@@ -675,7 +675,8 @@ test('real pinned DSH: plans walked by native children, runtime handback, State-
     assert.ok(!events.some(e => e.session === partial && e.event.data.source?.kind === todoBriefSource), 'brief without a compaction');
     assert.ok(events.some(e => e.session === 'fixture-root' && e.event.type === 'compaction/end' && !e.event.data.error), 'root never compacted');
     const snapshots = events.filter(e => e.session === 'fixture-root' && e.event.type === 'user/message' && e.event.data.source?.kind === stateInjectionSource);
-    const state = s => JSON.parse(s.event.data.content[0].text.split('\n').slice(1).join('\n'));
+    // Header, the snapshot's system clock line (message time 3.4), then the State JSON.
+    const state = s => JSON.parse(s.event.data.content[0].text.split('\n').slice(2).join('\n'));
     assert.equal(state(snapshots[0]).todo, undefined, 'bootstrap snapshot predates any plan');
     const after = snapshots.filter(s => s.event.data.source.compaction_seq > 0).at(-1);
     assert.ok(after, 'no post-compaction snapshot');

@@ -20,6 +20,8 @@ export const labels = Object.freeze({
   continue: continueSource,
   todoBrief: todoBriefSource,
   context: stateInjectionSource,
+  // The system clock line (message-time design 3.2): not input, never a wake source.
+  clock: 'aitelier-clock',
   contextSection: 'aitelier:state',
   sectionPrefix: 'aitelier',
 });

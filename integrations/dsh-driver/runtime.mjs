@@ -849,10 +849,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // Every owner message gets an answer: when a turn ends with the owner still waiting,
       // the steward's last words go to them as the reply (owner 2026-11-17).
       if (steward) {
-        // Each automatic reply is recorded (log line + auto-replies.jsonl in the state dir).
+        // Each automatic reply is recorded (log line + auto-replies.jsonl in the state dir), and so
+        // is one that was not sent because the last words were only system clock lines.
         const record = async sent => {
-          if (!sent.forwarded && !sent.already_replied) return;
-          ctx.logger.info('auto-reply ' + JSON.stringify(sent));
+          if (!sent.forwarded && !sent.already_replied && !sent.reason) return;
+          if (sent.reason) ctx.logger.warn('auto-reply not sent ' + JSON.stringify(sent));
+          else ctx.logger.info('auto-reply ' + JSON.stringify(sent));
           await appendFile(join(env.AITELIER_DSH_STATE_DIR, 'auto-replies.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...sent }) + '\n', { mode: 0o600 });
           if (sent.forwarded) await sync();
         };

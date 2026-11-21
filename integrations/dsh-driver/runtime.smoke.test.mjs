@@ -49,7 +49,10 @@ function assertInjectionCadence(events) {
       assert.equal(event.data.source.compaction_seq, epoch);
       assert.ok(!injected.has(epoch), `State was injected twice in compaction epoch ${epoch}`);
       injected.add(epoch);
-      const state = JSON.parse(event.data.content[0].text.split('\n').slice(1).join('\n'));
+      // Header, the snapshot's system clock line (message time 3.4), then the State JSON.
+      const [, clock, ...rest] = event.data.content[0].text.split('\n');
+      assert.match(clock, /^\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ \(context snapshot\)$/);
+      const state = JSON.parse(rest.join('\n'));
       assert.deepEqual(Object.keys(state).sort(), ['driver_id','nodes','private_note','project_id','project_note']);
     }
     assert.ok(!event.data.source?.sections?.some(s => s.name === 'aitelier:state') || event.data.source.kind === stateInjectionSource,

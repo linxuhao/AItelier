@@ -85,6 +85,7 @@ from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_schema_migration import add_column_if_missing
 from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, _proposal, impact_is_empty,
                                 steward_project, stop_impact)
 
@@ -110,7 +111,7 @@ CREATE TABLE IF NOT EXISTS state_message_sources (
  channel TEXT NOT NULL CHECK(channel IN ('slack','wechat')),
  sender_ref TEXT CHECK(sender_ref IS NULL OR sender_ref<>''),
  channel_message_ref TEXT CHECK(channel_message_ref IS NULL OR channel_message_ref<>''),
- at TEXT NOT NULL, error TEXT);
+ at TEXT NOT NULL, error TEXT, channel_at TEXT);
 DROP INDEX IF EXISTS state_message_sources_inbound;
 CREATE UNIQUE INDEX IF NOT EXISTS state_message_sources_inbound_by_sender
  ON state_message_sources(channel,sender_ref,channel_message_ref) WHERE direction='in';
@@ -155,6 +156,11 @@ APPROVAL_MAX_AGE = timedelta(minutes=10)
 # (approval_clock_skew): without a bound on that side a skewed or wrong channel time
 # (now + 365 days) would pass the age check forever and quietly switch it off.
 APPROVAL_CLOCK_SKEW = timedelta(minutes=2)
+# Only for storing an inbound message's `channel_at` (its channel's send time, shown to
+# the steward and the dashboard): one dated more than this AHEAD of the backend's time
+# is a fast channel clock, and is stored as NULL. Not the approval bound above, on
+# purpose: retuning when an approval expires must not change what is stored.
+CHANNEL_AT_MAX_AHEAD = timedelta(minutes=2)
 # Both bounds need the channel's time: an approval phrase relayed WITHOUT channel_at
 # decides nothing (approval_undated) - undated, it would execute however late it came.
 # The message is written either way; an ordinary message needs no time.
@@ -410,6 +416,9 @@ class StateChannels:
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
+                # Additive (message time): every source row written before it has no
+                # channel time, which is what NULL means.
+                add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
                 conn.commit()
             if inbox is not None:  # the inbox's owner writers scan their text first
                 inbox.owner_text_guard = self.owner_text_guard
@@ -650,9 +659,15 @@ class StateChannels:
                                       f"{int(window.total_seconds())} s; at most {limit}")
         self.store._project(conn, home)
         message_id, _, _ = self.inbox.write_user_half(conn, home, USER_SUBJECT, body)
+        channel_at = None
+        if written_at is not None and written_at - moment > CHANNEL_AT_MAX_AHEAD:
+            log.warning("channel_at not stored: %s ahead of the backend's time channel=%s",
+                        written_at - moment, channel)
+        elif written_at is not None:
+            channel_at = written_at.astimezone(timezone.utc).isoformat()
         conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
-                     "channel_message_ref,at) VALUES(?,'in',?,?,?,?)",
-                     (message_id, channel, sender_ref, channel_message_ref, moment.isoformat()))
+                     "channel_message_ref,at,channel_at) VALUES(?,'in',?,?,?,?,?)",
+                     (message_id, channel, sender_ref, channel_message_ref, moment.isoformat(), channel_at))
         matched = match_phrase(conn, body)
         result = {"message_id": message_id, "duplicate": False, "approval": None}
         if matched is not None and written_at is None:
@@ -1095,7 +1110,7 @@ class StateChannels:
         return {"sources": {r["message_id"]: {"direction": r["direction"], "channel": r["channel"],
                                               "sender_ref": r["sender_ref"],
                                               "channel_message_ref": r["channel_message_ref"], "at": r["at"],
-                                              "error": r["error"]} for r in rows}}
+                                              "error": r["error"], "channel_at": r["channel_at"]} for r in rows}}
 
     # ---------------------------------------------------------------- the owner (dashboard)
     def issue_code(self, channel):

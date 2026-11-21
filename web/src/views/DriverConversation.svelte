@@ -7,6 +7,8 @@
   import { renderMarkdown } from '../lib/markdown';
   import type { ConversationDraft } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
+  import { langStore } from '../stores/i18n';
+  import { formatFullTime, formatMessageTime } from '../lib/format';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null, ack = null, sources = false }: {
     projectId: string; projectTitle?: string; driverId?: string;
     // The steward's receipt (owner 2026-11-18: "收到消息先ack，再处理/回复"): a host that
@@ -318,6 +320,12 @@
   // "WeChat" came in from it; "→ Slack" was mirrored out to it; ⚠ the mirror failed.
   const sourceLabel = (source: MessageSource) =>
     (source.direction === 'out' ? '→ ' : '') + channelName(source.channel) + (source.error ? ' ⚠' : '');
+  // The failure, or when the owner sent it from the chat app (the platform's own time).
+  function sourceTitle(source: MessageSource): string | undefined {
+    if (source.error) return st('messageSourceFailed').replace('{channel}', channelName(source.channel)) + ': ' + source.error;
+    const sent = formatFullTime(source.channel_at, $langStore);
+    return sent ? st('messageSourceSentAt').replace('{channel}', channelName(source.channel)).replace('{time}', sent) : undefined;
+  }
 
   // ── the thread refreshes itself ───────────────────────────────────────────
   // A message the driver sends while this pane is open used to need the Refresh
@@ -448,14 +456,14 @@
         <article class="message" data-message-id={entry.message_id} class:mine={entry.sender_kind === 'user'}>
           <header>
             <span class="sender">{entry.sender_kind === 'user' ? st('driverConversationYou') : (entry.sender_driver_id ?? st('driverConversationDriver'))}</span>
-            <time class="identity" datetime={entry.created_at} title={new Date(entry.created_at).toLocaleString()}>{new Date(entry.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</time>
+            <time class="identity" datetime={entry.created_at} title={formatFullTime(entry.created_at, $langStore) || undefined}>{formatMessageTime(entry.created_at, $langStore)}</time>
             {#if entry.sender_kind === 'driver'}
               <button class="outline" type="button" aria-label="{st('driverConversationReply')}: {entry.subject}" onclick={() => reply(entry)}>{st('driverConversationReply')}</button>
             {/if}
             {#if sourceMap[entry.message_id]}
               {@const source = sourceMap[entry.message_id]}
               <span class="source" class:failed={!!source.error} data-message-source={source.channel} data-direction={source.direction}
-                title={source.error ? st('messageSourceFailed').replace('{channel}', channelName(source.channel)) + ': ' + source.error : undefined}
+                title={sourceTitle(source)}
                 >{sourceLabel(source)}</span>
             {/if}
             {#if entry.segments?.some((segment) => segment.kind === 'question')}

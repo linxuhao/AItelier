@@ -40,12 +40,13 @@ from core.state_database import StateDatabase
 from core.state_service import StateService
 
 # The inbox row as deployed before this card: `d.*` plus the message's readable
-# columns. Pinned as a literal, so an accidental extra key (or a missing one)
-# fails here rather than sliding through a superset comparison.
+# columns, and (message time, 2026-11-20) the message's `created_at`. Pinned as a
+# literal, so an accidental extra key (or a missing one) fails here rather than
+# sliding through a superset comparison.
 BASE_ROW_KEYS = {
     "delivery_id", "message_id", "target_driver_id", "seq", "status", "version",
     "thread_id", "sender_driver_id", "project_id", "kind", "delivery_mode",
-    "subject", "body", "refs_json"}
+    "subject", "body", "refs_json", "created_at"}
 
 
 @pytest.fixture
@@ -190,7 +191,10 @@ def test_a_plain_inbox_row_keeps_its_exact_base_shape(world):
                    "delivery_mode": "transient",
                    "subject": "Message from the user",
                    "body": "no blocks here",
-                   "refs_json": "{}"}
+                   "refs_json": "{}",
+                   "created_at": sent["created_at"]}
+    # The message's own time, the same value the conversation read shows.
+    assert row["created_at"] == conversation_row(world, sent["message_id"])["created_at"]
     assert "segments" not in row and "answers" not in row
     # The conversation keeps its own contract: it renders the blocks area, so it
     # always carries `segments` (empty here) and still omits `answers`.
@@ -219,7 +223,8 @@ def test_a_citing_inbox_row_gains_exactly_the_two_citation_keys(world):
         "delivery_mode": "transient",
         "subject": "Message from the user",
         "body": "yes, restart",
-        "refs_json": "{}"}
+        "refs_json": "{}",
+        "created_at": reply["created_at"]}
     assert row["segments"] == own
     assert row["answers"] == [{"message_id": asked["message_id"], "segment_id": "q1"}]
     # The storage columns are not payload.

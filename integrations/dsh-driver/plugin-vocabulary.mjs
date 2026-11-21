@@ -21,7 +21,7 @@ export function adapterVocabulary() {
   const prefixes = [...added].map(n => /^(mcp__[a-z0-9]+__)/.exec(n)?.[1]).filter(Boolean);
   const bare = [...added].map(n => n.replace(/^mcp__[a-z0-9]+__/, ''));
   const words = new Set([...registered, ...added, ...bare, ...prefixes, labels.runtimeEvent, labels.continue,
-    labels.todoBrief, labels.context, labels.contextSection, labels.sectionPrefix + ':']);
+    labels.todoBrief, labels.context, labels.clock, labels.contextSection, labels.sectionPrefix + ':']);
   return [...words].filter(Boolean).sort();
 }
 

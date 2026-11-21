@@ -2,10 +2,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -308,6 +310,32 @@ def test_hook_projects_only_bounded_redacted_active_standing_without_mutation(tm
         json.loads(line)
     assert "abcdefghijklmnopqrstuvwxyz" not in section
     assert StateStub.standing == before
+
+
+def test_hook_dates_its_own_output_and_each_letter_without_calling_it_now(tmp_path, state_server):
+    """Message time (2026-11-20): the output stays in context for hours, so its time is
+    when it was BUILT, never "now", and every director letter carries its created_at."""
+    message_id, delivery_id = "00000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000001"
+    StateStub.standing = {"schema": "aitelier.director-messaging.v2", "result": {
+        "project_id": "aitelier", "matched_total": 1, "has_more": False, "next_after": 1, "items": [{
+            "message": {"message_id": message_id, "thread_id": message_id, "sender_project_id": "other",
+                        "director_identity": "director", "actor": "actor", "subject": "s", "body": "b",
+                        "created_at": "2026-11-20T10:14:23.123456+00:00", "reply_to_delivery_id": None,
+                        "delivery_mode": "standing"},
+            "delivery": {"delivery_id": delivery_id, "message_id": message_id, "target_project_id": "aitelier",
+                         "delivery_seq": 1, "status": "unread", "version": 1}}]}}
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    after = datetime.now(timezone.utc)
+    [line] = [line for line in context.splitlines() if line.startswith("context_built_at_utc=")]
+    built = re.fullmatch(r"context_built_at_utc=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) "
+                         r"\(run date -u for the current time\)", line)
+    assert built, line
+    assert before <= datetime.strptime(built.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) <= after
+    assert "now_utc" not in context
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    [row] = [json.loads(text) for text in section.splitlines() if text.startswith("{")]
+    assert row["created_at"] == "2026-11-20T10:14:23.123456+00:00"
 
 
 def test_hook_rejects_malformed_standing_response_into_recovery_context(tmp_path, state_server):

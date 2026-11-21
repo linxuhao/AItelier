@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
-import { defaultLabels, defaultTexts, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
+import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
   Continuation, processSession, processAlive, backgroundProcesses, watchRefusal, dormancyRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, LiveChildren, phaseReport, continuationWaitKey, DORMANT_COMPACT_MIN_TOKENS,
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
@@ -359,8 +359,15 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     agentCtx = scope;
     // The host's director-scope pieces come first: its sections, model selection,
     // the snapshot hooks and its own tools, exactly where they always were.
+    // The root session's system clock: it marks each step's new input, an old tool
+    // result and every snapshot (lib/core.mjs Clock); children and workers get none. Its
+    // local time is the owner's time zone, which only a host with an owner's memory sets.
+    const clock = new Clock({ session: subject.session, createMessage: createUserMessage, kind: labels.clock,
+      notInput: [labels.context], tz: config.memory?.timeZone, log: line => ctx.logger.warn(line),
+      // Tests shrink the gap before a tool result's clock; production never sets it.
+      ...(Number(config.clockToolGapMs) > 0 ? { gapMs: Number(config.clockToolGapMs) } : {}) });
     const injection = new ContextInjection(subject.session, contextSource, createUserMessage,
-      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n' });
+      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock });
     // The director prompt section and the snapshot hooks are the director's own; a
     // host that registers sections of its own calls these at the point it wants them
     // (the backend adapter: after its goal and protocol sections and its model selection), and
@@ -384,6 +391,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
         await injection.beforeRequest();
         return config;
       });
+      scope.on('agent/pre-step', (payload, next) => clock.preStep(payload, next));
+      scope.on('tools/post-execute', (exec, result, next) => clock.postExecute(exec, result, next));
     };
     await op('setup')(scope, subject, { ...api, injection, runtimeSection, contextHooks });
     runtimeSection();
@@ -572,7 +581,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       async execute(args, exec) {
         const observation = await ctx.sessionQuery.observeSession(subject.session.id, { signal: exec.signal, projectionMode: 'none' });
-        try { return { session_id: subject.session.id, ...grepHistory(observation.events, args.pattern, args) }; }
+        try { return { session_id: subject.session.id, ...grepHistory(observation.events, args.pattern, args, { clockKind: labels.clock }) }; }
         finally { observation[Symbol.dispose](); }
       },
     }));

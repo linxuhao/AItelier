@@ -75,6 +75,7 @@ export function localHost(options = {}) {
       todo: { python: 'python3', cwd: fileURLToPath(new URL('../todo', import.meta.url)), module: 'dsh_todo',
         stateDirEnv: 'DSH_TODO_STATE_DIR', ...(options.todo ?? {}) },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
+      clockToolGapMs: options.clockToolGapMs,
       dormantCompactMinTokens: options.dormantCompactMinTokens,
       maxActiveSubagents: options.maxActiveSubagents, reservedSlots: options.reservedSlots,
       // Plugin step 11: the owner's memory, passed through as given (absent: none).

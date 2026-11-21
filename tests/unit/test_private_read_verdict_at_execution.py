@@ -69,6 +69,11 @@ _ARGS = {
     "list_owner_channel_login_requests": {},
     "due_channel_alerts": {},
     "message_sources": {"message_ids": [C.CHANNEL_MESSAGE]},
+    # Step 23: the family group's reads (core/state_groups.py).
+    "list_owner_groups": {},
+    "list_group_recent": {"channel": "wechat", "group_ref": "room-canary"},
+    # The turn the reader's request is made in: the one _family_reader records (477 N1).
+    "list_family_memory": {"turn": "1"},
 }
 
 
@@ -111,7 +116,25 @@ def _steward_reader(trusted, tmp_path):
 
 # Step 19: the channel reads answer the owner's session or the steward too.
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
-                       "list_owner_channel_login_requests", "message_sources", "due_channel_alerts"}
+                       "list_owner_channel_login_requests", "message_sources", "due_channel_alerts",
+                       # Step 23: the steward's host reads its groups and a group's recent exchanges.
+                       "list_owner_groups", "list_group_recent"}
+
+
+def _family_reader(steward):
+    """Step 23: the one caller list_family_memory answers - the steward's tool in a group
+    turn: the public-read header (a service made trusted for this pair alone) and a
+    recorded turn audience naming a bound group."""
+    with steward.db.get_connection() as conn:
+        live = conn.execute("SELECT group_ref FROM state_owner_groups WHERE channel='wechat' AND revoked_at IS NULL").fetchone()
+        if live is None:
+            conn.execute("INSERT INTO state_owner_groups(channel,group_ref,mention_prefix,bound_at) "
+                         "VALUES('wechat','room-canary','@x','2026-01-01T00:00:00+00:00')")
+        conn.execute("INSERT OR REPLACE INTO state_steward_turn_audience(id,turn,audience,channel,group_ref,sender_refs_json,at) "
+                     "VALUES(1,'1','group','wechat',?,'[]','2026-01-01T00:00:00+00:00')", (live[0] if live else "room-canary",))
+        conn.commit()
+    return StateService(steward.db, actor=steward.actor, driver_id=steward.driver_id, project_read_trusted=True,
+                        public_view=True)
 
 
 def _classify(call):
@@ -167,8 +190,9 @@ class TestEveryNonPublicReadIsJudgedAtExecution:
         trusted, _ = _services(tmp_path)
         steward = _steward_reader(trusted, tmp_path)
         invalid = {}
+        family = _family_reader(steward)
         for action in NON_PUBLIC_READS:
-            reader = steward if action in _STEWARD_ONLY_READS else trusted
+            reader = family if action == "list_family_memory" else steward if action in _STEWARD_ONLY_READS else trusted
             result, detail = _classify(lambda: execute(reader, action, _args(action)))
             print(f"TRUSTED action={action} outcome={'answered' if result == 'leaked' else result}")
             if result != "leaked":

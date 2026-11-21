@@ -267,6 +267,8 @@ describe('the channels tab', () => {
       return el;
     });
     expect(qr.textContent).toContain('用要绑定的微信小号扫码登录');
+    // 7.7.13: the intro says what a bound family group may do, in the owner's language.
+    expect(view.container.textContent).toContain('绑定的家庭群只能问公开项目，不能改任何东西');
     expect(view.container.querySelector('script, svg, [onload]')).toBeNull();
     expect(view.container.innerHTML).not.toContain('<script');
     expect((window as unknown as {pwned?: number}).pwned).toBeUndefined();
@@ -356,6 +358,8 @@ describe('the channels tab', () => {
     });
     expect(code.querySelector('.digits')?.textContent).toBe('482913');
     expect(code.textContent).toContain('Send this code to the bot from the account you want to bind.');
+    // Risk (j), 7.7.9: the code is for the 1:1 chat only - never a group.
+    expect(code.querySelector('[data-code-no-group]')?.textContent).toBe('Send it only in a 1:1 chat with the bot; never paste it into a group.');
     expect(code.querySelector('[data-code-countdown]')?.textContent).toBe('Expires in 10:00');
     await vi.advanceTimersByTimeAsync(61000);
     expect(code.querySelector('[data-code-countdown]')?.textContent).toBe('Expires in 8:59');

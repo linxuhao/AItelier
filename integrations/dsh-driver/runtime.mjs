@@ -524,6 +524,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
   let request = suppliedRequest, runtime = suppliedRuntime, schema, installModelSelection;
+  // Step 23 (design-steward 7.7.6): whose turn the steward is in (the plugin's
+  // DirectorApi.turnAudience, from install() on). Unknown reads as a group: a tool's State
+  // request then carries the public-read header, which only narrows.
+  let turnAudience = () => undefined;
+  const groupTurn = () => steward && (turnAudience()?.kind ?? 'group') !== 'owner';
+  // The request a TOOL makes: in a group turn it reads as an anonymous reader. The host's own
+  // requests (memory sync, polling, the reminder clock, the snapshot, channels and groups) use
+  // `request` and never carry the header.
+  const toolRequest = (path, body, signal) => request(path, body, signal, groupTurn() ? { readAs: 'public' } : undefined);
   // Step 16: the steward's reminder clock (created in events(), refreshed by the tools).
   let scheduleTimer;
   // Step 19: the director's ownerMessageSent, kept from install() for attention.ask (the
@@ -532,7 +541,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels'] : [])],
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -558,18 +567,36 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     /** The effective table: roles.json plus AItelier's State additions. */
     roles: table => aitelierRoles(table),
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
-    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent }) {
+    async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf }) {
       if (steward) mirrorOwnerMessage = ownerMessageSent;
+      if (typeof audienceOf === 'function') turnAudience = audienceOf;
       const require = createRequire(env.AITELIER_DSH_ENTRY);
       ({ installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent')));
       const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
-      request = suppliedRequest ?? (async (path, body, signal) => {
+      request = suppliedRequest ?? (async (path, body, signal, { readAs } = {}) => {
         const response = await fetch(new URL(path, env.AITELIER_URL), {
           method: body === undefined ? 'GET' : 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-AItelier-Driver-Token': token },
+          headers: { 'Content-Type': 'application/json', 'X-AItelier-Driver-Token': token,
+            ...(readAs === 'public' ? { 'X-AItelier-Read-As': 'public' } : {}) },
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: signal ?? AbortSignal.timeout(30000),
         });
+        if (readAs === 'public') {
+          // Step 23 (design-steward 7.7.6): every public-read request of a group turn is logged by
+          // path, status and the answer's sha256 - never its text - so the anonymous answer can be
+          // measured in production against an unauthenticated reader's.
+          const bytes = Buffer.from(await response.arrayBuffer());
+          ctx.logger.info('public-read ' + JSON.stringify({ path, status: response.status,
+            sha256: createHash('sha256').update(bytes).digest('hex') }));
+          let parsed = null;
+          try { parsed = JSON.parse(bytes.toString('utf8')); } catch { parsed = null; }
+          if (!response.ok) {
+            const error = new Error(`AItelier ${path}: HTTP ${response.status}` + (parsed?.detail ? ' ' + JSON.stringify(parsed.detail).slice(0, 1200) : ''));
+            error.status = response.status;
+            throw error;
+          }
+          return parsed;
+        }
         if (!response.ok) {
           const error = new Error(`AItelier ${path}: HTTP ${response.status}`);
           const detail = await response.json().catch(() => null);
@@ -667,23 +694,23 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         scope.tools.register(defineTool({ name: 'schedule_list',
           description: 'Your reminders: each one\'s id, version, title, instruction, schedule, timezone, whether it is on, next and last run, and who created or last changed it (your owner can change them too).',
           parameters: {}, output: json,
-          execute: (_args, exec) => listSchedules(request, exec.signal).then(schedules => ({ schedules })),
+          execute: (_args, exec) => listSchedules(toolRequest, exec.signal).then(schedules => ({ schedules })),
         }));
         scope.tools.register(defineTool({ name: 'schedule_set',
           description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner.',
           parameters: { schedule_id: { type: 'string' }, expected_version: { type: 'integer' }, title: { type: 'string' }, instruction: { type: 'string' },
             schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' } }, output: json,
-          execute: (args, exec) => setSchedule(request, args, exec.signal).then(changed),
+          execute: (args, exec) => setSchedule(toolRequest, args, exec.signal).then(changed),
         }));
         scope.tools.register(defineTool({ name: 'schedule_delete',
           description: 'Delete one reminder (schedule_id with the expected_version schedule_list showed).',
           parameters: { schedule_id: { type: 'string', required: true }, expected_version: { type: 'integer', required: true } }, output: json,
-          execute: (args, exec) => deleteSchedule(request, args, exec.signal).then(changed),
+          execute: (args, exec) => deleteSchedule(toolRequest, args, exec.signal).then(changed),
         }));
         scope.tools.register(defineTool({ name: 'reply_to_director',
           description: 'Answer a letter a director sent you, back to its sender: inbox "project" for your project inbox (the letters a wake shows, portfolio_inbox; mark them read with portfolio_inbox_acknowledge), "private" for your private inbox (mark them read with private_inbox_acknowledge, in the answer or once you are done with it). delivery_id is that letter\'s delivery. You can only reply; to pass your owner\'s words on, use handoff.',
           parameters: { inbox, delivery_id: { type: 'string', required: true }, text: { type: 'string', required: true } }, output: json,
-          execute: (args, exec) => replyToLetter({ request, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal }),
+          execute: (args, exec) => replyToLetter({ request: toolRequest, project, me, inbox: args.inbox, deliveryId: args.delivery_id, text: args.text, signal: exec.signal }),
         }));
       }
       scope.tools.register(defineTool({ name: 'send_user_message',
@@ -724,7 +751,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           // (the service assigns the id in that case), and an absent or null id
           // is never sent as a key of its own.
           if (segments !== undefined) body.segments = segments.map(({ kind, text, id }) => (id == null ? { kind, text } : { kind, text, id }));
-          const result = await request('/api/state/commands/send_user_message', body, exec.signal);
+          const result = await (steward ? toolRequest : request)('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);
           // The steward's message also goes to the owner's chat channel it answers (or the
@@ -779,7 +806,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     attention: {
       async ask({ id, text, context }, signal) {
         const body = askOwnerRequest(project, { id, text, context });
-        const result = await request('/api/state/commands/send_user_message', body, signal)
+        // Step 23 (7.7.5): a tool's request - in a group turn it carries the public-read header,
+        // so a guard slip still cannot write.
+        const result = await toolRequest('/api/state/commands/send_user_message', body, signal)
           .catch(error => ({ error: String(error?.message ?? error) }));
         if (result.error) return /idempotency_conflict/.test(result.error)
           ? { refused: 'question_id_reused', reason: `question ${id} already asks something else; give this question its own id` }
@@ -790,13 +819,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         return { asked: true, question_id: id, message_id: result.message_id };
       },
       async close({ id, reason }, signal) {
-        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
+        const listed = await toolRequest('/api/state/query/list_user_questions', { project_id: project, status: 'all', limit: 200 }, signal);
         // Another director in the project may use the same id: the list carries no
         // sender, so try the matches newest first and let State say whose each is.
         const matches = ((listed.result ?? listed).questions ?? []).filter(q => q.segment_id === id);
         let answered = false, foreign = false;
         for (const question of matches) {
-          const result = await request('/api/state/commands/withdraw_user_question', { request_key: `close-question:${project}:${question.message_id}:${id}`,
+          const result = await toolRequest('/api/state/commands/withdraw_user_question', { request_key: `close-question:${project}:${question.message_id}:${id}`,
             project_id: project, message_id: question.message_id, segment_id: id, reason }, signal).catch(error => ({ error: String(error?.message ?? error) }));
           if (!result.error) return result.withdrawn ? { closed: true, question_id: id, message_id: question.message_id }
             : { closed: false, already_closed: true, question_id: id, message_id: question.message_id };
@@ -817,7 +846,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           reason: foreign ? `question ${id} in this project is another director's` : `no question ${id} among this project's newest 200 questions` };
       },
       async list(signal) {
-        const listed = await request('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
+        const listed = await toolRequest('/api/state/query/list_user_questions', { project_id: project, status: 'open', limit: 200 }, signal);
         const page = listed.result ?? listed;
         const open = (page.questions ?? []).map(q => ({ id: q.segment_id, text: q.text, message_id: q.message_id }));
         if (page.has_more) open.truncated = true;   // more than the newest 200 are open: said, not hidden
@@ -853,7 +882,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // is one that was not sent because the last words were only system clock lines. The
         // recorder lives in steward-host.mjs so that branch is testable without a DSH boot.
         const record = sent => recordAutoReply({ sent, stateDir: env.AITELIER_DSH_STATE_DIR, log: ctx.logger, sync });
-        const watch = turnWatcher((text, input) => void forwardFinalText({ request, project, me: env.AITELIER_DRIVER_ID, text, input })
+        // Only an owner turn's last words answer the owner; a group turn's go to its group
+        // (the plugin, through the host's post_group_reply) - never here (step 23, 7.7.7).
+        const watch = turnWatcher((text, input) => turnAudience()?.kind === 'owner' && void forwardFinalText({ request, project, me: env.AITELIER_DRIVER_ID, text, input })
           // An automatic reply is the steward's message too: it goes where the answered message came from.
           .then(sent => { if (sent.forwarded) void ownerMessageSent(sent.message_id, autoReplyBody(text), sent.reply_to); return record(sent); })
           .catch(error => ctx.logger.warn('auto-reply: ' + String(error?.message ?? error).slice(0, 300))));
@@ -961,8 +992,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   };
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a
   // director's host does not have them (implemented-but-undeclared is refused).
-  if (steward) Object.assign(host, stewardOps({ request: (...args) => request(...args), project, me: env.AITELIER_DRIVER_ID,
-    stateDir: env.AITELIER_DSH_STATE_DIR }));
+  if (steward) Object.assign(host, stewardOps({ request: (...args) => toolRequest(...args), rawRequest: (...args) => request(...args),
+    project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR, groupTurn }));
   return host;
 }
 

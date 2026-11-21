@@ -156,7 +156,12 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # Step 25 C12 (design-steward 7.9.2): the channel-down alert, called ONLY by the host's
         # code after its status poll (no steward tool maps onto them): the backend decides if an
         # alert is due and through which channel; the host records how its fixed text went.
-        "claim_channel_alert", "record_channel_alert"}
+        "claim_channel_alert", "record_channel_alert",
+        # Step 23 (design-steward 7.7): the host's group commands (a group code from the bound
+        # account, a group @-message, the exit-checked reply, the turn audience) and the family
+        # memory tool, accepted only from a group turn (tests/unit/test_steward_groups.py).
+        "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
+        "note_family_memory"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

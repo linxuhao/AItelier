@@ -240,6 +240,15 @@ export function alertText({ channel, kind, minutes, detail }, max = CHANNEL_LIMI
  *  that, to be measured at go-live (design-steward 7.9.7 item 1). */
 const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
 
+/** Step 23 (design-steward 7.7.10, the platform director's ruling of 2026-11-20): the group
+ *  bounds the plugin enforces are code constants, pinned by a test. A group turn merges at most
+ *  mergeMax questions of its group and may make at most turnToolCalls tool calls; a group wake's
+ *  `recent` (that group's last exchanges, as data) is at most recentChars characters. The
+ *  question quotas and the reply's length are the backend's (core/state_groups.py
+ *  GROUP_LIMITS), the send gap and backstop the bridge's (wechat-bridge GROUP_SEND_LIMITS); no
+ *  key is in two places. */
+export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500 });
+
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
  *  @param log   (event, fields) => void; fields never carry a body.
@@ -252,7 +261,7 @@ const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
  *    timers. The service exists from the plugin's apply on, so a channel plugin can hand a
  *    message in before the host has installed itself (measured: its caller did not exist
  *    yet); every call to the host waits for ready(). */
-export function createOwnerChannels({ host, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
+export function createOwnerChannels({ host, groups, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
   owedFile = defaultOwedFile(), clock = Date.now }) {
   const registered = new Map(), told = new Map(), sending = new Map(), binds = new Map(), lanes = new Map(),
     answeredRefs = new Set();
@@ -401,7 +410,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         && text(record.refusal) && refusalThrottle(record.channel, record.refusal) === throttle) count++;
     return count;
   };
-  let ready;
+  let ready, isReady = false;
   const started = new Promise(resolve => { ready = resolve; });
   const hostReady = () => within(started, limits.readyMs, 'host_not_ready');
   // A reply goes out on the channel it is about, at most once per channel message (a
@@ -543,6 +552,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return statusQueue;
   };
   const pollStatus = () => {
+    // A bridge that restarted lost its whitelist: it is set again with every status poll.
+    if (isReady) void refreshRooms();
     for (const [channel, entry] of registered) void reportStatus(channel, statusOf(channel, entry));
     // The alert pass runs after this poll's reports, outside the status queue: a send may take
     // sendMs and its record half a minute more, and the next poll's reports must not wait.
@@ -620,8 +631,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         throw new Error('ownerChannels.register: send and status must be functions');
       if (channel.login !== undefined && typeof channel.login !== 'function')
         throw new Error('ownerChannels.register: login, when given, must be a function');
+      for (const optional of ['sendGroup', 'setRooms'])
+        if (channel[optional] !== undefined && typeof channel[optional] !== 'function')
+          throw new Error(`ownerChannels.register: ${optional}, when given, must be a function`);
       if (registered.has(channel.name)) throw new Error(`ownerChannels.register: ${channel.name} is already registered`);
-      const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}) };
+      const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}),
+        ...(channel.sendGroup ? { sendGroup: channel.sendGroup } : {}), ...(channel.setRooms ? { setRooms: channel.setRooms } : {}) };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
       void reportStatus(channel.name, statusOf(channel.name, entry));
@@ -641,10 +656,82 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         log('channel_inbound_invalid', { channel: String(channel), length: typeof body === 'string' ? body.length : null });
         return Promise.resolve({ accepted: false, reason: 'invalid_inbound' });
       }
+      // Step 23: a group message never enters the owner's lane or the owed store, is never a
+      // 6-digit binding attempt and is never answered bindRefused (design-steward 7.7.11).
+      if (message.conversationRef !== undefined) return groupInbound(message);
       const run = (lanes.get(channel) ?? Promise.resolve()).then(() => handle(message));
       lanes.set(channel, run);
       return run;
     },
+  };
+
+  // ---- the family group (step 23) ----
+  // Each group's messages reach the host one at a time, in their own lane; the host's answer is
+  // final (accepted or refused), so the channel's cursor never waits on a group message -
+  // except `unavailable`, when the host could not be reached at all.
+  const groupLanes = new Map();
+  let groupWake;
+  const sendGroupLine = async (channel, groupRef, line) => {
+    const entry = registered.get(channel);
+    if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return false; }
+    try {
+      await within(Promise.resolve(entry.sendGroup(groupRef, line)), limits.sendMs, 'send_timeout');
+      log('group_sent', { channel, group_ref: groupRef, length: line.length });
+      return true;
+    } catch (error) { log('group_send_failed', { channel, group_ref: groupRef, error: short(error) }); return false; }
+  };
+  /** The bridge's whitelist from the host: each channel's bound account and its bound group. */
+  const refreshRooms = async () => {
+    if (typeof groups?.list !== 'function') return;
+    try {
+      await hostReady();
+      const listed = await groups.list();
+      for (const [channel, entry] of registered) {
+        if (!entry.setRooms) continue;
+        await entry.setRooms({ ownerRef: listed?.owner_refs?.[channel] ?? null,
+          rooms: (listed?.groups ?? []).filter(g => g.channel === channel).map(g => ({ room_ref: g.group_ref, prefix: g.mention_prefix })) });
+      }
+    } catch (error) { log('group_rooms_failed', { error: short(error) }); }
+  };
+  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind }) => {
+    const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
+    if (!groups || !text(groupRef)) return { accepted: false, reason: 'no_groups' };
+    let result;
+    try {
+      await hostReady();
+      result = groupBind
+        ? await groups.bind({ channel, groupRef, senderRef, messageRef, prefix: groupBind.prefix, code: groupBind.code })
+        : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}) });
+    } catch (error) {
+      log('group_inbound_failed', { ...seen, error: short(error) });
+      return { accepted: false, reason: 'unavailable' };
+    }
+    if (groupBind) {
+      if (result?.bound && !result.duplicate) {
+        log('group_bound', seen);
+        await refreshRooms();
+        await sendGroupLine(channel, groupRef, result.notice);
+      } else log('group_bind_refused', { ...seen, reason: String(result?.refused ?? 'duplicate') });
+      return { accepted: result?.bound === true };
+    }
+    if (result?.refused) {
+      log('group_message_refused', { ...seen, reason: String(result.refused) });
+      if (result.notice) await sendGroupLine(channel, groupRef, result.notice);
+      return { accepted: false, reason: String(result.refused) };
+    }
+    if (result?.duplicate) return { accepted: true, duplicate: true };
+    log('group_message_accepted', seen);
+    // Taken by the host and not yet steered: a failure here loses the question (never
+    // doubles it); the dashboard shows it unanswered.
+    try { await groupWake?.({ channel, groupRef, senderRef, text: body, at, ...result }); }
+    catch (error) { log('group_wake_failed', { ...seen, error: short(error) }); }
+    return { accepted: true };
+  };
+  const groupInbound = message => {
+    const key = message.channel + '\n' + message.conversationRef;
+    const run = (groupLanes.get(key) ?? Promise.resolve()).then(() => handleGroup(message));
+    groupLanes.set(key, run.catch(() => {}));
+    return run;
   };
 
   // Never rejects: every failure is an answer. A transient answer marks the message `held`
@@ -1056,8 +1143,16 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
 
   return {
     service, ownerMessageSent, login,
+    /** Step 23: one line into a bound group (the steward's reply, as the host formatted it). */
+    sendGroup: sendGroupLine,
+    /** Step 23: who steers an accepted group question into the steward (the director, once
+     *  its session exists). */
+    setGroupWake: fn => { groupWake = fn; },
+    refreshRooms,
     ready() {
       ready();
+      isReady = true;
+      void refreshRooms();
       if (!statusTimer && typeof host.reportStatus === 'function') {
         statusTimer = setInterval(pollStatus, limits.statusMs);
         statusTimer.unref?.();

@@ -257,7 +257,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
-  assert.deepEqual(steward.capabilities.slice(-5), ['memory', 'portfolio', 'handoff', 'proposals', 'channels']);
+  assert.deepEqual(steward.capabilities.slice(-6), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
@@ -269,7 +269,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(director.config.memory, undefined);
   assert.equal(director.config.permissionPreset, 'danger-full-access');
   assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention']);
-  for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels']) assert.equal(director[op], undefined, op);
+  for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups']) assert.equal(director[op], undefined, op);
   assert.doesNotThrow(() => validateHost(director));
   // A root role the table does not have is refused when the host is loaded.
   const rolesFile = join(mkdtempSync(join(tmpdir(), 'roles-')), 'roles.json');

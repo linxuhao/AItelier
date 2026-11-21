@@ -231,6 +231,37 @@ def _plan():
              "result_json) VALUES(?,'wechat','2999-01-01T00:00:00+00:00',?,'pending',?)"),
             (c("state_owner_channel_login_requests"), c("state_owner_channel_login_requests"),
              '{"refused": "%s"}' % c("state_owner_channel_login_requests"))),
+        # Step 23 (core/state_groups.py): the bound family group, one of its @-messages, a
+        # member's dashboard name, a family memory entry, the owner's family note, whose turn
+        # the steward is in, and a group awaiting the owner's pick - the canary in each.
+        "state_owner_groups": (
+            ("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at) "
+             "VALUES('wechat',?,?,?,?)"),
+            (c("state_owner_groups"), c("state_owner_groups"), c("state_owner_groups"), now)),
+        "state_group_messages": (
+            ("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,sender_ref,"
+             "sender_role,channel_message_ref,body,at) VALUES(?,'wechat',?,'in','question',1,?,'member',?,?,?)"),
+            (c("state_group_messages"), c("state_owner_groups"), c("state_group_messages"),
+             c("state_group_messages"), c("state_group_messages"), "2999-01-01T00:00:00+00:00")),
+        "state_group_members": (
+            ("INSERT INTO state_group_members(channel,group_ref,sender_ref,ordinal,label) VALUES('wechat',?,?,1,?)"),
+            (c("state_owner_groups"), c("state_group_members"), c("state_group_members"))),
+        "state_family_memory": (
+            ("INSERT INTO state_family_memory(entry_id,channel,group_ref,text,added_by_role,added_by_ref,at) "
+             "VALUES(?,'wechat',?,?,'member',?,?)"),
+            (c("state_family_memory"), c("state_owner_groups"), c("state_family_memory"), c("state_family_memory"),
+             "2999-01-01T00:00:00+00:00")),
+        "state_family_note": (
+            ("INSERT INTO state_family_note(channel,group_ref,text,updated_at) VALUES('wechat',?,?,?)"),
+            (c("state_owner_groups"), c("state_family_note"), now)),
+        "state_steward_turn_audience": (
+            ("INSERT INTO state_steward_turn_audience(id,turn,audience,channel,group_ref,sender_refs_json,at) "
+             "VALUES(1,?,'group','wechat',?,?,?)"),
+            (c("state_steward_turn_audience"), c("state_owner_groups"), '["%s"]' % c("state_steward_turn_audience"),
+             now)),
+        "state_pending_groups": (
+            ("INSERT INTO state_pending_groups(channel,room_ref,mention_prefix,code_hash,at) VALUES('wechat',?,?,?,?)"),
+            (c("state_pending_groups"), c("state_pending_groups"), c("state_pending_groups"), now)),
     }
 
 

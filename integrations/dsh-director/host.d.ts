@@ -312,6 +312,28 @@ export interface DirectorHost {
 }
 
 /** What a channel's login (a new WeChat QR) answers: never the QR itself. */
+/** v1.2, capability `groups` (step 23, design-steward 7.7): the family group's host side.
+ *  list: the bound account per channel and the bound groups with their @ prefix; bind: a group
+ *  code posted in a group; relay: a group @-message ({message_id, sender_role, sender_label} or
+ *  {refused, notice?} or {duplicate}); reply: the group turn's last words (exit-checked, to the
+ *  question's group: {text, channel, group_ref, withheld}); recent: that group's last exchanges;
+ *  audience: record whose turn this is before its first step; ownerSpokeSince: an owner message
+ *  newer than `since` is among a turn's input (lifts the pause); familyNote / familyShow: the
+ *  family memory tools, accepted by the host only from a group turn. */
+export interface GroupsHost {
+  list(signal?: AbortSignal): Promise<{ owner_refs: Record<string, string>; groups: Array<{ channel: string; group_ref: string; label: string | null; mention_prefix: string }> }>;
+  bind(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; prefix: string; code: string }, signal?: AbortSignal): Promise<unknown>;
+  relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal): Promise<unknown>;
+  reply(a: { questionId: string; alsoAnswers: string[]; body: string }, signal?: AbortSignal): Promise<unknown>;
+  recent(a: { channel: string; groupRef: string }, signal?: AbortSignal): Promise<{ recent: unknown[] }>;
+  audience(a: { turn: string; audience: 'owner' | 'group'; group?: { channel: string; group_ref: string }; senderRefs: string[] }, signal?: AbortSignal): Promise<unknown>;
+  ownerSpokeSince(since: string, input: string, signal?: AbortSignal): Promise<boolean>;
+  /** `turn`: the turn the tool runs in (the plugin's open turn, the one `audience` recorded);
+   *  the host refuses a request that does not name the recorded turn. */
+  familyNote(text: string, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  familyShow(signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+}
+
 export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };
 
 /** The cordis service `ownerChannels` (provided only with the host's `channels`), what a

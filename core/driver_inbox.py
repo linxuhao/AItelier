@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS driver_user_conversation_reads (
 """
 KINDS = {"note", "request", "review_request", "handoff_offer", "handoff_reply"}
 SYSTEM_KINDS = {"lease_notice", "takeover_notice", "subagent_orphaned", "handoff_offer"}
+# Every delivery status the schema's CHECK admits, and so every value an inbox
+# reader's `statuses` filter may name: one list, so a filter cannot ask for a
+# status no row can carry.
+DELIVERY_STATUSES = ("unread", "acknowledged", "resolved")
 
 # The user's conversation: ONE thread per project holding BOTH directions.
 # A driver -> user message is recognised by `audience='user'`; a user -> driver
@@ -942,7 +946,7 @@ class DriverInbox:
         return self.send_driver_message(_system=True, **kwargs)
 
     @writer_only_read('list_driver_messages')
-    def list_driver_messages(self, driver_id=None, after=0, limit=100):
+    def list_driver_messages(self, driver_id=None, after=0, limit=100, newest=False, statuses=None):
         """One page of the deliveries addressed to this driver, ordered by seq.
 
         A row is the delivery (`d.*`) plus the message's readable columns, so a
@@ -954,17 +958,62 @@ class DriverInbox:
         rule, an owner message relayed from a chat channel carries
         `source_channel` ('slack' / 'wechat', from the inbound row of
         `state_message_sources`); a dashboard message has no such key.
+
+        The page is the OLDEST `limit` deliveries above `after` (the ascending
+        forward keyset a waiting driver polls with) unless `newest` is true, which
+        answers the NEWEST `limit` deliveries instead, newest first. `newest` is
+        the one call a driver needs to ask "what did I miss, most recent first"
+        without walking the whole backlog; `after` still bounds that window, so
+        the same flag can also mean "the newest of what I have not read yet".
+        The two modes differ ONLY in which end of the window they take and the
+        order they return it in: the rows themselves are identical, and with
+        `newest` false every field is what it was before the flag existed.
+
+        `matched_total` is how many deliveries match the filters - not how many
+        this page returned - so a driver can tell 3 rows from 3,000 in the same
+        answer, and `has_more` says whether any matched row is outside the page.
+        Both are a COUNT(*) over the SAME WHERE clause the page is read with, so
+        neither can drift from the other mode's, the `after` window's, or a
+        `statuses` filter's meaning. `truncated` is kept as the same statement
+        `has_more` makes (today's callers read it) and `next_after` keeps its
+        forward meaning: the seq a polling caller continues from, which in the
+        newest mode is the newest delivery (the descending page has nothing
+        newer to hand back).
+
+        `statuses` optionally narrows the page AND `matched_total` to deliveries
+        whose delivery status is one of them, so "the newest 5 unread" is one
+        call and its total is the number of unread ones, not the size of the
+        whole inbox.
         """
         driver_id = driver_id or self.driver_id
         self._authorize(driver_id)
         if type(after) is not int or after<0 or type(limit) is not int or not 1<=limit<=100:
             raise StateGraphError("invalid_request")
+        if type(newest) is not bool:
+            raise StateGraphError("invalid_request")
+        if statuses is not None:
+            if (not isinstance(statuses,(list,tuple)) or not statuses
+                    or any(type(status) is not str for status in statuses)
+                    or len(set(statuses)) != len(statuses)
+                    or any(status not in DELIVERY_STATUSES for status in statuses)):
+                raise StateGraphError("invalid_request")
+        # The page and the total share ONE WHERE clause, so matched_total can
+        # never count a different set than the page was drawn from.
+        where = "d.target_driver_id=? AND d.seq>?"
+        bound = [driver_id, after]
+        if statuses is not None:
+            where += " AND d.status IN (" + ",".join("?" for _ in statuses) + ")"
+            bound.extend(statuses)
+        bound = tuple(bound)
         # Reading your inbox is activity; wait_for_driver_inbox loops through here.
         touch_driver(self.store.db, self.driver_id)
         with self.store.transaction() as conn:
             self._driver(conn, driver_id)
             high=conn.execute("SELECT COALESCE(MAX(seq),0) FROM driver_inbox_deliveries WHERE target_driver_id=?", (driver_id,)).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,s.channel AS source_channel FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
+            # COUNT(*) over the same WHERE clause, never a page fetched into Python:
+            # the answer must not cost the caller the whole backlog.
+            matched_total=conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE "+where, bound).fetchone()[0]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,s.channel AS source_channel FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)
@@ -974,7 +1023,10 @@ class DriverInbox:
             if row["source_channel"] is None:
                 del row["source_channel"]
             row.update(citation)
-        return {"driver_id":driver_id,"messages":page,"next_after":page[-1]["seq"] if len(rows)>limit else max(after,high),"truncated":len(rows)>limit}
+        truncated=len(rows)>limit
+        next_after = max(after,high) if newest else (page[-1]["seq"] if truncated else max(after,high))
+        return {"driver_id":driver_id,"messages":page,"next_after":next_after,"truncated":truncated,
+                "matched_total":matched_total,"has_more":matched_total>len(page)}
 
     def transition(self, delivery_id, expected_version, request_key, target_status, break_glass_reason=None):
         if target_status not in ("acknowledged","resolved") or type(expected_version) is not int or expected_version<1:

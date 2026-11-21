@@ -222,21 +222,31 @@ test('local host, step 15: /questions and /answer - the answer is recorded as ow
   assert.equal(api.notified.length, 2);
 });
 
-test('local host, step 15: /answer writes the wake file first - a crash before questions.json still records and delivers it', async () => {
+test('local host, step 15: /answer writes the wake file first - when questions.json cannot be written, the next start records and delivers it', async () => {
   const root = await freshRoot();
-  const host = localHost({ root, ...required, pollMs: 10 });
+  const host = localHost({ root, ...required, pollMs: 60000 });
   await host.attention.ask({ id: 'q-1', text: 'Restart now?' });
-  // What /answer leaves when the process dies right after the answer file: the file only.
-  await mkdir(join(root, 'inbox'), { recursive: true });
-  await writeFile(join(root, 'inbox', 'answer-q-1.json'), JSON.stringify({ answer: 'yes', answered_by: LOCAL_OWNER }));
+  await host.attention.ask({ id: 'q-2', text: 'Which colour?' });
   const commands = fakeCommands();
-  const api = commandApi(commands);
-  const events = await host.events(api);
-  assert.equal(api.notified.length, 1, 'the next start delivered the answer');
-  const stored = JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'))['q-1'];
-  assert.deepEqual([stored.status, stored.answer, stored.answered_by], ['answered', 'yes', 'owner:local']);
-  assert.match((await commands.run('answer', ' q-1 again')).text, /question_answered/);
+  const events = await host.events(commandApi(commands));
+  // An answer the owner dropped, still waiting in the inbox, is not answered over.
+  await writeFile(join(root, 'inbox', 'answer-q-2.json'), JSON.stringify({ answer: 'blue' }));
+  assert.match((await commands.run('answer', ' q-2 red')).text, /answer_waiting/);
+  // questions.json cannot be written (a directory where its tmp file goes): /answer fails after the answer file.
+  await mkdir(join(root, 'questions.json.tmp'));
+  await assert.rejects(commands.run('answer', ' q-1 yes'));
   events.stop(); await events.done;
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'inbox', 'answer-q-1.json'), 'utf8')), { answer: 'yes', answered_by: LOCAL_OWNER });
+  const before = JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'));
+  assert.deepEqual([before['q-1'].status, before['q-2'].status], ['open', 'open']);
+  await rm(join(root, 'questions.json.tmp'), { recursive: true });
+  const api = commandApi(fakeCommands());
+  const restarted = await localHost({ root, ...required, pollMs: 60000 }).events(api);
+  assert.equal(api.notified.length, 2, 'the next start delivered both answers');
+  const stored = JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'));
+  assert.deepEqual([stored['q-1'].status, stored['q-1'].answer, stored['q-1'].answered_by], ['answered', 'yes', 'owner:local']);
+  assert.deepEqual([stored['q-2'].status, stored['q-2'].answer, stored['q-2'].answered_by], ['answered', 'blue', 'owner:local']);
+  restarted.stop(); await restarted.done;
 });
 
 test('local host, step 15: without a command registry nothing is registered and nothing breaks', async () => {

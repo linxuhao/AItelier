@@ -963,7 +963,7 @@ export interface OwnerChannelAlertLimits {
   down_every_minutes: number; quiet_from_hour: number; quiet_until_hour: number;
 }
 export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null;
-  /** Design 7.9.2: the server's clock, the owner's quiet hours now (until the next 08:00) and zone,
+  /** Design 7.9.2: the server's clock, the owner's quiet hours now (until their next end) and zone,
    *  and the alert's rules the card's times are computed with. */
   now?: string; quiet_now?: boolean; quiet_until?: string | null; owner_tz?: string;
   alert_limits?: OwnerChannelAlertLimits }

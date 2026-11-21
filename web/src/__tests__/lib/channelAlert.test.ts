@@ -13,6 +13,8 @@ const NOW = Date.parse('2026-11-23T11:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
 const ago = (minutes: number) => iso(NOW - minutes * MIN);
 const CLOCK: ChannelClock = {now: iso(NOW), owner_tz: 'Europe/Paris'};
+// The end of the quiet hours a clock built without the answer's rules names (HH:00).
+const QUIET_END = String(TEST_ALERT_LIMITS.quiet_until_hour).padStart(2, '0') + ':00';
 
 type Status = NonNullable<OwnerChannel['status']>;
 const channel = (name: 'slack' | 'wechat', status: Partial<Status> | null, over: Partial<OwnerChannel> = {}): OwnerChannel => ({
@@ -86,19 +88,19 @@ describe('a down channel', () => {
       .toBe('First alert not sent (the host never reported back); Down 30 min; alert at 12:15 if still down');
   });
 
-  it('9: a time in the quiet hours is pushed to 08:00', () => {
+  it('9: a time in the quiet hours is pushed to their end', () => {
     const late: ChannelClock = {now: '2026-11-23T21:55:00Z', owner_tz: 'Europe/Paris'};  // 22:55 local
     const status = {connected: false, detail: 'x', down_since: '2026-11-23T21:50:00Z'};
-    expect(channelAlertText(line(status, slackUp, {}, late), late, t)).toBe('Down 5 min; alert at 08:00 if still down');
+    expect(channelAlertText(line(status, slackUp, {}, late), late, t)).toBe(`Down 5 min; alert at ${QUIET_END} if still down`);
   });
 
   it('several hold: the one that holds the alert back wins over one that only moves its time', () => {
     // The six hours and under ten minutes: the six hours.
     expect(words(downFor(3, {last_down_sent_at: ago(60)}))).toBe('Down 3 min; alert at 17:00 if still down');
-    // The six hours and the quiet hours: the later, 08:00.
+    // The six hours and the quiet hours: the later, the quiet hours' end.
     const late: ChannelClock = {now: '2026-11-23T20:00:00Z', owner_tz: 'Europe/Paris'};  // 21:00 local
     const status = {connected: false, detail: 'x', down_since: '2026-11-23T19:00:00Z', last_down_sent_at: '2026-11-23T18:00:00Z'};
-    expect(channelAlertText(line(status, slackUp, {}, late), late, t)).toBe('Down 60 min; alert at 08:00 if still down');
+    expect(channelAlertText(line(status, slackUp, {}, late), late, t)).toBe(`Down 60 min; alert at ${QUIET_END} if still down`);
     // No other channel and the quiet hours: no other channel.
     const quiet: ChannelClock = {now: '2026-11-23T23:00:00Z', owner_tz: 'Europe/Paris'};
     expect(line({connected: false, detail: 'x', down_since: '2026-11-23T21:00:00Z'}, channel('slack', {connected: false, down_since: ago(1)}), {}, quiet))
@@ -154,7 +156,7 @@ describe('a connected channel', () => {
       .toBe('Recovery notice not sent the first time (409); Recovery notice at 12:20');
     const quiet: ChannelClock = {now: '2026-11-23T22:30:00Z', owner_tz: 'Europe/Paris'};  // 23:30 local
     expect(channelAlertText(line({...told, up_since: '2026-11-23T22:00:00Z'}, slackUp, {}, quiet), quiet, t))
-      .toBe('Recovery notice at 08:00');
+      .toBe(`Recovery notice at ${QUIET_END}`);
   });
 
   it('a connected channel past 24 hours at 23:30 has no line', () => {
@@ -190,7 +192,17 @@ describe('the backend\'s rules', () => {
     const status = {connected: false, detail: 'x', down_since: '2026-11-23T20:25:00Z'};
     expect(channelAlertText(line(status, slackUp, {}, evening), evening, t)).toBe('Down 5 min; alert at 21:35 if still down');
     const early = {...evening, limits: {...TEST_ALERT_LIMITS, quiet_from_hour: 21}};
-    expect(channelAlertText(line(status, slackUp, {}, early), early, t)).toBe('Down 5 min; alert at 08:00 if still down');
+    expect(channelAlertText(line(status, slackUp, {}, early), early, t)).toBe(`Down 5 min; alert at ${QUIET_END} if still down`);
+  });
+
+  it('the answer\'s quiet_until_hour is the time the card names, never a copy of it', () => {
+    // 22:55 local, down since 22:50: the alert falls at 23:00 local, in the quiet hours.
+    const late: ChannelClock = {now: '2026-11-23T21:55:00Z', owner_tz: 'Europe/Paris', limits: {...TEST_ALERT_LIMITS, quiet_until_hour: 7}};
+    const status = {connected: false, detail: 'x', down_since: '2026-11-23T21:50:00Z'};
+    expect(channelAlertText(line(status, slackUp, {}, late), late, t)).toBe('Down 5 min; alert at 07:00 if still down');
+    const quiet: ChannelClock = {now: '2026-11-23T22:30:00Z', owner_tz: 'Europe/Paris', limits: {...TEST_ALERT_LIMITS, quiet_until_hour: 7}};
+    const told = {last_told: {kind: 'down' as const, down_since: '2026-11-23T21:00:00Z', at: '2026-11-23T21:10:00Z'}};
+    expect(channelAlertText(line({...told, up_since: '2026-11-23T22:00:00Z'}, slackUp, {}, quiet), quiet, t)).toBe('Recovery notice at 07:00');
   });
 });
 

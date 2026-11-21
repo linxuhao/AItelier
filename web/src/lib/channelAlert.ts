@@ -23,7 +23,7 @@ const UP_SHOWN = 24 * 60 * MIN;
 
 /** `first`: the first attempt's error when it failed (null: the host never reported it),
  *  absent when there was no failed first attempt. `at` is an ISO time; `quiet` means it falls
- *  in the quiet hours, so the line names their end (08:00). */
+ *  in the quiet hours, so the line names their end (the limits' quiet_until_hour, HH:00). */
 export type ChannelAlertLine =
   | {key: 'none'}
   | {key: 'notLive'; detail: string}
@@ -110,7 +110,8 @@ export function channelAlertText(line: ChannelAlertLine, clock: ChannelClock, tr
   const reason = (error: string | null | undefined) => error ?? tr('steward.chanAlert.noReport');
   const fill = (key: string, values: Record<string, string | number>) =>
     Object.entries(values).reduce((text, [name, value]) => text.split(`{${name}}`).join(String(value)), tr('steward.chanAlert.' + key));
-  const time = 'at' in line ? ('quiet' in line && line.quiet ? '08:00' : ownerTime(line.at, clock.owner_tz)) : '';
+  const quietEnd = String((clock.limits ?? TEST_ALERT_LIMITS).quiet_until_hour).padStart(2, '0') + ':00';
+  const time = 'at' in line ? ('quiet' in line && line.quiet ? quietEnd : ownerTime(line.at, clock.owner_tz)) : '';
   const values: Record<string, string | number> = {
     minutes: 'minutes' in line ? line.minutes : '', time,
     via: 'via' in line ? tr('steward.chan.' + line.via) : '',

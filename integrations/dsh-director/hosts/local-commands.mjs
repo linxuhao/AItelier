@@ -14,7 +14,9 @@
  *                               purges (with memory only)
  *
  *  A DSH command carries no user identity (CommandInvocation: commandId, agent, rawInput,
- *  attachments, signal), so every decision taken here is the owner's as owner:local. */
+ *  attachments, signal), so every decision taken here is the owner's as owner:local. The
+ *  registry is the process's: every agent's UI lists these commands, and each answers only in
+ *  the root session's UI (`isRoot(invocation.agent)`), where the owner talks to the director. */
 
 export const PURGE_WORD = 'PURGE';
 /** How long a /purge warning stands for its confirmation. */
@@ -25,17 +27,31 @@ const fail = text => ({ kind: 'error', text });
 /** The first word of a command's input, and the rest (trimmed). */
 const split = raw => { const m = /^\s*(\S+)(?:\s+([\s\S]*))?$/.exec(raw); return m ? [m[1], (m[2] ?? '').trim()] : ['', '']; };
 const refusal = (what, result) => fail(`${what}: ${result.refused}${result.reason ? ' - ' + result.reason : ''}`);
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+/** Oldest first by the given time field, then by id: the order things were asked or proposed in. */
+const byTime = field => ([a, x], [b, y]) => String(x[field] ?? '').localeCompare(String(y[field] ?? '')) || a.localeCompare(b);
+/** One open proposal as the owner reads it; a record edited by hand into another shape is
+ *  shown for what it is, never thrown on (it would hide every other proposal). */
+function proposalLine(id, p) {
+  const payload = isRecord(p.payload) ? p.payload : {};
+  const seeds = Array.isArray(payload.seed_nodes) ? payload.seed_nodes.length : 0;
+  const shape = typeof payload.project_id === 'string' && typeof payload.title === 'string' && typeof payload.goal === 'string'
+    ? '' : '\n  (this record is not a whole create_project: approving it fails, decline it)';
+  return `- ${id} ${p.kind}: ${payload.project_id ?? '?'} "${payload.title ?? ''}" (${seeds} work item(s))\n  goal: ${payload.goal ?? ''}\n  reason: ${p.reason ?? ''}${shape}`;
+}
 
 /** @param commands the registry (ctx.commands): register(definition) -> unregister
  *  @param o questions(): the questions.json map; answer({id, text, by}); proposals(): the
  *    proposals.json map and decide({id, approve, reason, by}), both absent without projectsDir;
- *    memory: the owner's memory store (absent without memory).
+ *    memory: the owner's memory store (absent without memory); memoryError: why a configured
+ *    memory is not open (then /profile and /purge say so); isRoot(agent): whether a command
+ *    came from the root session's UI (absent: every UI).
  *  @returns the unregister functions. */
-export function registerOwnerCommands(commands, { questions, answer, proposals, decide, memory }) {
+export function registerOwnerCommands(commands, { questions, answer, proposals, decide, memory, memoryError, isRoot }) {
   const defs = [
     { name: 'questions', description: 'List the open questions your director or steward asked you.',
       async handler() {
-        const open = Object.entries(await questions()).filter(([, q]) => q.status === 'open');
+        const open = Object.entries(await questions()).filter(([, q]) => isRecord(q) && q.status === 'open').sort(byTime('asked_at'));
         if (!open.length) return ok('No open questions.');
         return ok([`Open questions (${open.length}):`, ...open.map(([id, q]) => `- ${id}: ${q.text}`
           + (q.context ? `\n  context: ${q.context}` : '') + `\n  asked: ${q.asked_at}`), '', 'Answer with: /answer <id> <text>'].join('\n'));
@@ -52,10 +68,9 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
   if (proposals && decide) defs.push(
     { name: 'proposals', description: 'List the open proposals your steward made.',
       async handler() {
-        const open = Object.values(await proposals()).filter(p => p.status === 'open');
+        const open = Object.entries(await proposals()).filter(([, p]) => isRecord(p) && p.status === 'open').sort(byTime('created_at'));
         if (!open.length) return ok('No open proposals.');
-        return ok([`Open proposals (${open.length}):`, ...open.map(p => `- ${p.id} ${p.kind}: ${p.payload.project_id} "${p.payload.title}"`
-          + ` (${p.payload.seed_nodes.length} work item(s))\n  goal: ${p.payload.goal}\n  reason: ${p.reason}`),
+        return ok([`Open proposals (${open.length}):`, ...open.map(([id, p]) => proposalLine(id, p)),
         '', 'Approve with /approve <id>, decline with /decline <id> [reason].'].join('\n'));
       } },
     { name: 'approve', description: 'Approve one open proposal and run it now: /approve <id>.', input: { hint: '<id>' },
@@ -65,8 +80,8 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         const result = await decide({ id, approve: true, by: OWNER });
         if (result.refused) return refusal(`Not approved ${id}`, result);
         return result.status === 'done'
-          ? ok(`Approved ${id}: created project ${result.result.project_id} at ${result.result.root} with ${result.result.work_items} work item(s).`)
-          : fail(`Approved ${id}, but it failed: ${result.result.error} - ${result.result.reason}`);
+          ? ok(`Approved ${id}: created project ${result.result?.project_id} at ${result.result?.root} with ${result.result?.work_items} work item(s).`)
+          : fail(`Approved ${id}, but it failed: ${result.result?.error} - ${result.result?.reason}`);
       } },
     { name: 'decline', description: 'Decline one open proposal: /decline <id> [reason].', input: { hint: '<id> [reason]' },
       async handler({ rawInput }) {
@@ -100,5 +115,13 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         const result = await memory.purge([id], { by: OWNER });
         return result.purged === true ? ok(`Purged ${id}: ${JSON.stringify(result)}`) : fail(`Not purged ${id}: ${JSON.stringify(result)}`);
       } });
-  return defs.map(def => commands.register(def));
+  else if (memoryError) {
+    // Configured but not open: the commands stay, and say why, instead of vanishing.
+    const unavailable = async () => fail(`Your memory is not available: ${memoryError}`);
+    defs.push({ name: 'profile', description: 'Show your resident profile (your memory is not available now).', handler: unavailable },
+      { name: 'purge', description: 'Purge one memory entry (your memory is not available now).', input: { hint: '<id>' }, handler: unavailable });
+  }
+  const rootOnly = handler => async invocation => isRoot && !isRoot(invocation?.agent)
+    ? fail('This command answers only in your director\'s own session, where you talk to it.') : handler(invocation);
+  return defs.map(def => commands.register({ ...def, handler: rootOnly(def.handler) }));
 }

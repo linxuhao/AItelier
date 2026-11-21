@@ -18,7 +18,9 @@ const PAYLOADS = {
  *    the built-in local host offers create_project only); absent, every kind. */
 export function registerProposalTools(scope, { defineTool, jsonOutput, proposals }) {
   const kinds = Array.isArray(proposals.kinds) ? PROPOSAL_KINDS.filter(kind => proposals.kinds.includes(kind)) : PROPOSAL_KINDS;
-  scope.tools.register(defineTool({ name: 'propose',
+  // A host that can execute none of the kinds offers no propose at all (a tool that said
+  // "kind is one of ." would only be refused); withdraw stays for proposals already made.
+  if (kinds.length) scope.tools.register(defineTool({ name: 'propose',
     description: `Propose an action only your owner may approve; you never run it yourself. kind is one of ${kinds.join(', ')}. payload: ${kinds.map(kind => PAYLOADS[kind]).join('; ')}. reason says why, in your owner's terms. Your owner sees a card and approves, declines or asks you to change it; the result comes back to you as an event. To change an open proposal, propose again with supersedes = its id.`,
     parameters: { kind: { type: 'string', required: true, enum: kinds }, payload: { type: 'object', additionalProperties: true, required: true },
       reason: { type: 'string', required: true }, supersedes: { type: 'string' } },

@@ -135,3 +135,9 @@ test('request_wechat_qr asks the WeChat channel for a login and answers only {re
   assert.ok(!roles.director.presented.includes('request_wechat_qr') && !roles.worker.presented.includes('request_wechat_qr'));
   assert.match(readFileSync(new URL('../steward.md', import.meta.url), 'utf8'), /request_wechat_qr[\s\S]*only on the dashboard's Channels tab/);
 });
+
+test('proposals, review 467: a host that can execute none of the kinds is offered no propose (never "kind is one of .")', () => {
+  const proposals = { kinds: [], propose: async () => ({}), withdraw: async () => ({}) };
+  const tools = collect(registerProposalTools, { proposals });
+  assert.deepEqual([...tools.keys()], ['withdraw_proposal']);
+});

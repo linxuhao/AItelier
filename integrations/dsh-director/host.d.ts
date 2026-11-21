@@ -95,6 +95,8 @@ export interface DirectorApi {
    *  [{role: 'owner'|'steward', text}]) and runs the owner's own operations (forget,
    *  restore, purge, profile edits) through it - purge exists only here, never as a tool. */
   readonly memory?: unknown;
+  /** Plugin step 15: why config.memory is set but the store did not open, else undefined. */
+  readonly memoryError?: string;
   /** v1.2, capability `channels`: the host calls this after the root wrote message
    *  `messageId` to its owner (replying to `replyTo` when given), with the text it wrote.
    *  The director sends the same text on the owner's chat channel, shaped for a phone chat

@@ -298,6 +298,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
     liveSessions, planWork, todoPlans, batchRedispatch, notify: notifyEvent, eventMessage, report, currentPhase,
     memory: memory?.store,
+    memoryError: memory?.error,
     ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),

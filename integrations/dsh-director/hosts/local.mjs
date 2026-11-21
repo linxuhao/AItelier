@@ -27,7 +27,11 @@
  *                    reason? } }; the owner answers with /answer (below) or by dropping
  *                    inbox/answer-<id>.json ({ "answer": "...", "answered_by"?: "..." }); an
  *                    answer without answered_by is recorded as owner:local
- *    proposals.json  the steward's proposals, with `projectsDir` only (below)
+ *    proposals.json  the steward's proposals, with `projectsDir` only (below); each records the
+ *                    request_key it was made under (a digest of its body: a retried propose is
+ *                    answered with the proposal it made, never a second open card)
+ *    proposals-seq.json the last proposal number given out: an id is never given twice, even
+ *                    after a proposal is deleted from proposals.json by hand
  *    state/          the director's own state (todo plans)
  *
  *  Plugin step 15 (standalone DSH): the owner's commands, registered in DSH's command registry
@@ -63,6 +67,16 @@ export const LOCAL_OWNER = 'owner:local';
 const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
 const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
   + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
+/** One page of a portfolio answer, as the AItelier steward host pages one (steward-host.mjs
+ *  NODES_CHARS): as many entries as fit while the whole answer stays under this many characters,
+ *  and at least one, so a walk always moves forward. */
+export const PAGE_CHARS = 9000;
+/** Open questions shown in portfolio.project: the newest, with their total. */
+export const OPEN_QUESTIONS_SHOWN = 20;
+/** A proposal whose request_key comes again in one of these states answers the retry with
+ *  itself; after a decline, a failure or a withdrawal the same proposal makes a new card. */
+const REPLAYED = new Set(['open', 'executing', 'done', 'superseded']);
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** A local project id is a directory name: the backend's key rule, so a project keeps its id elsewhere. */
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const ANSWER_FILE = /^answer-([A-Za-z0-9._:-]{1,64})\.json$/;
@@ -96,7 +110,7 @@ export function localHost(options = {}) {
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
     done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json'),
-    questions: join(root, 'questions.json'), proposals: join(root, 'proposals.json') };
+    questions: join(root, 'questions.json'), proposals: join(root, 'proposals.json'), proposalSeq: join(root, 'proposals-seq.json') };
   const questions = async () => readJson(files.questions, {});
   // questions.json is read-modified-written by ask, close and an arriving answer; one
   // at a time, so two asks in one director turn cannot lose one. The lock also guards
@@ -152,7 +166,7 @@ export function localHost(options = {}) {
     const last = text.trim().split('\n').at(-1);
     try { const { phase, at } = JSON.parse(last); return { phase, at }; } catch { return null; }
   };
-  const questionsOf = async dir => Object.entries(await readJson(join(dir, 'questions.json'), {})).map(([id, q]) => ({ id, ...q }));
+  const questionsOf = async dir => Object.entries(await readJson(join(dir, 'questions.json'), {})).map(([id, q]) => ({ ...q, id }));
   const portfolio = {
     async projects() {
       // One project whose files do not parse (edited by hand) is reported as such; it does
@@ -168,32 +182,77 @@ export function localHost(options = {}) {
         }
       })) };
     },
-    async project(id) {
+    /** One project, its open work one page at a time (the AItelier arm's shape): in work-item id
+     *  order, as many as fit under PAGE_CHARS, then nodes_shown.open_next_after to pass back as
+     *  open_after (null: there is no more, an empty list included). The cursor is the last id
+     *  shown (a keyset), so an item that closes between two pages moves nothing else. */
+    async project(id, _signal, { openAfter } = {}) {
       const dir = await projectOf(id);
       if (!dir) return unknownProject(id);
       const meta = await readJson(join(dir, 'project.json'), {});
       const work = (await readJson(join(dir, 'work.json'), { items: [] })).items ?? [];
       const counts = {};
       for (const item of work) counts[item.state] = (counts[item.state] ?? 0) + 1;
-      return { project_id: id, title: meta.title ?? null, goal: meta.goal ?? null, director: await lastPhase(dir), work_counts: counts,
-        open_work: work.filter(item => !isSettled(item.state)),
-        open_questions: (await questionsOf(dir)).filter(q => q.status === 'open').map(({ id: qid, text, asked_at }) => ({ id: qid, text, asked_at })) };
+      const asked = (await questionsOf(dir)).filter(q => q.status === 'open')
+        .sort((a, b) => String(b.asked_at ?? '').localeCompare(String(a.asked_at ?? '')) || a.id.localeCompare(b.id));
+      const base = { project_id: id, title: meta.title ?? null, goal: meta.goal ?? null, director: await lastPhase(dir), work_counts: counts,
+        open_work: [], open_questions: asked.slice(0, OPEN_QUESTIONS_SHOWN).map(({ id: qid, text, asked_at }) => ({ id: qid, text, asked_at })),
+        open_questions_total: asked.length };
+      // A cursor is the id a previous page ended on; anything else is refused by name, never
+      // read as "start again".
+      if (openAfter !== undefined && openAfter !== null && (typeof openAfter !== 'string' || !openAfter))
+        return { ...base, open_work: { refused: 'invalid_open_after', reason: 'open_after is the open_next_after string a previous answer gave' } };
+      const key = item => String(item.id);
+      const open = work.filter(item => !isSettled(item.state)).sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+      const rest = openAfter ? open.filter(item => key(item) > openAfter) : open;
+      const shown = () => ({ open_after: openAfter ?? null, open: base.open_work.length, open_total: open.length,
+        open_remaining_after_page: rest.length - base.open_work.length,
+        open_next_after: base.open_work.length < rest.length ? key(base.open_work.at(-1)) : null });
+      for (const item of rest) {
+        base.open_work.push(item);
+        if (base.open_work.length > 1 && JSON.stringify({ ...base, nodes_shown: shown() }).length > PAGE_CHARS) { base.open_work.pop(); break; }
+      }
+      return { ...base, nodes_shown: shown() };
     },
     /** The local host keeps no owner/director conversation (it is in that director's DSH
-     *  session); what it has is the questions and their answers, newest first. */
-    async conversation(id) {
+     *  session); what it has is the questions and their answers, newest first (by when each
+     *  was answered, else asked), one page at a time under PAGE_CHARS. next_cursor is the
+     *  last message shown, to pass back as cursor; null (has_more false) means there is no
+     *  more, an empty list included. A question answered between two pages moves to the
+     *  top, so it is on the next walk's first page. */
+    async conversation(id, cursor) {
       const dir = await projectOf(id);
       if (!dir) return unknownProject(id);
-      const asked = (await questionsOf(dir)).sort((a, b) => String(b.answered_at ?? b.asked_at).localeCompare(String(a.answered_at ?? a.asked_at)));
-      return { project_id: id, messages: asked, next_cursor: null,
+      const at = q => String(q.answered_at ?? q.asked_at ?? '');
+      const order = (a, b) => at(b).localeCompare(at(a)) || a.id.localeCompare(b.id);
+      let after;
+      if (cursor !== undefined && cursor !== null && cursor !== '') {
+        try { after = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8')); } catch { after = undefined; }
+        if (!Array.isArray(after) || after.length !== 2 || !after.every(v => typeof v === 'string'))
+          return { refused: 'invalid_cursor', reason: 'cursor is the next_cursor a previous answer gave' };
+      }
+      const asked = (await questionsOf(dir)).sort(order);
+      const rest = after ? asked.filter(q => order(q, { id: after[1], answered_at: after[0] }) > 0) : asked;
+      const page = { project_id: id, messages: [], messages_total: asked.length,
         note: 'the local host keeps only the questions to the owner and their answers; the conversation itself is in that director\'s DSH session' };
+      const answer = () => {
+        const more = page.messages.length < rest.length, last = page.messages.at(-1);
+        return { ...page, remaining_after_page: rest.length - page.messages.length, has_more: more,
+          next_cursor: more ? Buffer.from(JSON.stringify([at(last), last.id])).toString('base64url') : null };
+      };
+      for (const q of rest) {
+        page.messages.push(q);
+        if (page.messages.length > 1 && JSON.stringify(answer()).length > PAGE_CHARS) { page.messages.pop(); break; }
+      }
+      return answer();
     },
   };
   const proposalList = async () => readJson(files.proposals, {});
   /** A proposal's result, as a wake event for the steward: one file in its own inbox. */
   const wakeSteward = async proposal => {
     await mkdir(files.inbox, { recursive: true });
-    const file = join(files.inbox, `proposal-${proposal.id}-${proposal.status}.json`);
+    // Encoded: a hand-edited id never names a file outside the inbox.
+    const file = join(files.inbox, `proposal-${encodeURIComponent(proposal.id)}-${proposal.status}.json`);
     await writeFile(file + '.tmp', JSON.stringify({ proposal_id: proposal.id, kind: proposal.kind, status: proposal.status,
       decided_by: proposal.decided_by ?? null, ...(proposal.decline_reason ? { reason: proposal.decline_reason } : {}),
       ...(proposal.result ? { result: proposal.result } : {}) }) + '\n');
@@ -227,13 +286,25 @@ export function localHost(options = {}) {
       if (problem) return { refused: 'invalid_payload', reason: problem };
       if (typeof reason !== 'string' || !reason.trim()) return { refused: 'reason_required', reason: 'say why, in your owner\'s terms' };
       const all = await proposalList();
+      const stored = { project_id: payload.project_id, title: payload.title, goal: payload.goal, seed_nodes: payload.seed_nodes ?? [] };
+      // The request key is the proposal's digest, as the AItelier arm's (steward-host.mjs): a
+      // retried call is answered with the proposal it made, not a second open card.
+      const requestKey = 'proposal:' + createHash('sha256').update(JSON.stringify({ kind, payload: stored, reason: reason.trim(),
+        ...(supersedes !== undefined ? { supersedes } : {}) })).digest('hex').slice(0, 40);
+      const made = Object.entries(all).find(([, p]) => isRecord(p) && p.request_key === requestKey && REPLAYED.has(p.status));
+      if (made) return { proposed: false, duplicate: true, proposal_id: made[0], status: made[1].status };
       if (supersedes !== undefined && own(all, supersedes)?.status !== 'open') return { refused: 'not_open', reason: `${supersedes} is not an open proposal` };
-      const id = 'p-' + (Object.keys(all).length + 1);
+      // A number is never given twice: the last one given is kept apart from proposals.json
+      // (written first), so a proposal deleted from it by hand does not free its id.
+      const numbers = Object.keys(all).map(key => /^p-(\d+)$/.exec(key)?.[1]).filter(Boolean).map(Number);
+      const last = Math.max(0, Number((await readJson(files.proposalSeq, {})).last) || 0, ...numbers);
+      const id = 'p-' + (last + 1);
       const at = new Date().toISOString();
-      if (supersedes !== undefined) all[supersedes] = { ...all[supersedes], status: 'superseded', superseded_by: id, decided_at: at };
-      all[id] = { id, kind, payload: { project_id: payload.project_id, title: payload.title, goal: payload.goal, seed_nodes: payload.seed_nodes ?? [] },
-        reason: reason.trim(), status: 'open', created_at: at, ...(supersedes !== undefined ? { supersedes } : {}) };
       await mkdir(root, { recursive: true });
+      await writeJson(files.proposalSeq, { last: last + 1 });
+      if (supersedes !== undefined) all[supersedes] = { ...all[supersedes], status: 'superseded', superseded_by: id, decided_at: at };
+      all[id] = { id, kind, payload: stored, reason: reason.trim(), status: 'open', created_at: at, request_key: requestKey,
+        ...(supersedes !== undefined ? { supersedes } : {}) };
       await writeJson(files.proposals, all);
       return { proposed: true, proposal_id: id, status: 'open' };
     }),
@@ -252,15 +323,19 @@ export function localHost(options = {}) {
   const decide = ({ id, approve, reason, by = LOCAL_OWNER }) => lockedProposals(async () => {
     const all = await proposalList();
     const proposal = own(all, id);
-    if (!proposal) return { refused: 'unknown_proposal', reason: `no proposal ${id}` };
+    if (!isRecord(proposal)) return { refused: 'unknown_proposal', reason: `no proposal ${id}` };
     if (proposal.status !== 'open') return { refused: 'not_open', reason: `${id} is ${proposal.status}`, status: proposal.status };
-    const decided = { ...proposal, decided_at: new Date().toISOString(), decided_by: by };
+    // The map key is the id (a record's own id field could name another file in the inbox).
+    const decided = { ...proposal, id, decided_at: new Date().toISOString(), decided_by: by };
     if (!approve) {
       all[id] = { ...decided, status: 'declined', ...(reason ? { decline_reason: reason } : {}) };
     } else {
       all[id] = { ...decided, status: 'executing' };
       await writeJson(files.proposals, all);
-      const result = await createProject(id, proposal.payload);
+      // A record edited by hand into something no proposal could be fails by name; it does
+      // not throw the approval away half-done.
+      const problem = proposal.kind === 'create_project' ? createProjectProblem(proposal.payload) : `the local host cannot run ${proposal.kind}`;
+      const result = problem ? { error: 'invalid_proposal', reason: problem } : await createProject(id, proposal.payload);
       all[id] = { ...all[id], status: result.error ? 'failed' : 'done', result };
     }
     // The wake file first, as /answer does: a crash before the final status leaves the
@@ -273,14 +348,17 @@ export function localHost(options = {}) {
   /** A proposal a crash left executing: done when its project is there and names it, else failed. */
   const recoverProposals = () => lockedProposals(async () => {
     const all = await proposalList();
-    for (const proposal of Object.values(all).filter(p => p.status === 'executing')) {
+    for (const [key, proposal] of Object.entries(all).filter(([, p]) => isRecord(p) && p.status === 'executing')) {
       const id = proposal.payload?.project_id;
-      const meta = PROJECT_ID.test(String(id)) ? await readJson(join(projectsDir, id, 'project.json'), {}).catch(() => ({})) : {};
-      all[proposal.id] = meta.proposal_id === proposal.id
-        ? { ...proposal, status: 'done', result: { project_id: id, root: join(projectsDir, id), recovered: true } }
-        : { ...proposal, status: 'failed', result: { error: 'interrupted', reason: 'the run was interrupted; propose it again' } };
-      await rm(join(projectsDir, `.${id}.creating-${proposal.id}`), { recursive: true, force: true }).catch(() => {});
-      await wakeSteward(all[proposal.id]);
+      // Only names the host itself could have built are touched: a hand-edited id never
+      // reaches a path outside projectsDir.
+      const safe = typeof id === 'string' && PROJECT_ID.test(id) && PROJECT_ID.test(key);
+      const meta = safe ? await readJson(join(projectsDir, id, 'project.json'), {}).catch(() => ({})) : {};
+      all[key] = meta.proposal_id === key
+        ? { ...proposal, id: key, status: 'done', result: { project_id: id, root: join(projectsDir, id), recovered: true } }
+        : { ...proposal, id: key, status: 'failed', result: { error: 'interrupted', reason: 'the run was interrupted; propose it again' } };
+      if (safe) await rm(join(projectsDir, `.${id}.creating-${key}`), { recursive: true, force: true }).catch(() => {});
+      await wakeSteward(all[key]);
       await writeJson(files.proposals, all);
     }
   });
@@ -438,8 +516,14 @@ export function localHost(options = {}) {
       if (projectsDir) await recoverProposals();
       await sweep();
       // Plugin step 15: the owner's commands, when this DSH has a command registry.
+      // They are registered in the process-wide registry (every agent's UI lists them), so each
+      // answers only in the root session's UI, where the owner talks to this director.
       const commands = ctx.get?.('commands');
-      const unregister = commands ? registerOwnerCommands(commands, { questions, answer, memory: api.memory,
+      const isRoot = invoked => { const mine = api.agent?.session?.id, theirs = invoked?.session?.id;
+        return invoked === api.agent || mine === undefined || theirs === undefined || mine === theirs; };
+      const unregister = commands ? registerOwnerCommands(commands, { questions, answer, isRoot, memory: api.memory,
+        // Memory configured but not open: /profile and /purge say so instead of vanishing.
+        ...(api.memory ? {} : api.memoryError || options.memory ? { memoryError: api.memoryError ?? 'it did not open (see the DSH log)' } : {}),
         ...(projectsDir ? { proposals: proposalList, decide } : {}) }) : [];
       const done = new Promise((resolve, reject) => {
         finish = resolve;
@@ -453,7 +537,8 @@ export function localHost(options = {}) {
         }, Number(options.pollMs) > 0 ? Number(options.pollMs) : 2000);
         timer.unref?.();
       });
-      return { done, stop: () => { clearInterval(timer); for (const off of unregister) off(); finish?.(); } };
+      // A registry whose register returns no disposer leaves nothing to undo.
+      return { done, stop: () => { clearInterval(timer); for (const off of unregister ?? []) if (typeof off === 'function') off(); finish?.(); } };
     },
     ...(projectsDir ? { portfolio, proposals } : {}),
   };

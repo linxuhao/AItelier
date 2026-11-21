@@ -484,3 +484,221 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     events.stop(); await events.done;
   } finally { await store.close(); }
 });
+
+// ---- Review 467 (s15 section 2): bounded portfolio pages, tolerant proposal records,
+// replayed and never-reused proposal ids, and the nits.
+
+test('local host, review 467 F1: portfolio.project pages 2000 open work items under 9000 characters, by id cursor, and says when there is no more', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const items = Array.from({ length: 2000 }, (_, i) => ({ id: `n${String(i).padStart(4, '0')}`, title: `item ${i} `.repeat(4), state: i % 10 === 0 ? 'completed' : 'working' }));
+  await writeFile(join(projectsDir, 'alpha', 'work.json'), JSON.stringify({ items: [...items].reverse() }));
+  const host = localHost({ root, projectsDir });
+  const seen = [];
+  let after, pages = 0;
+  do {
+    const page = await host.portfolio.project('alpha', undefined, { openAfter: after });
+    pages++;
+    assert.ok(JSON.stringify(page).length <= 9000, `page ${pages} is ${JSON.stringify(page).length} characters`);
+    assert.ok(page.open_work.length >= 1);
+    assert.equal(page.nodes_shown.open_total, 1800);
+    assert.equal(page.nodes_shown.open, page.open_work.length);
+    assert.equal(page.nodes_shown.open_after, after ?? null);
+    assert.equal(page.nodes_shown.open_remaining_after_page, 1800 - seen.length - page.open_work.length);
+    seen.push(...page.open_work.map(item => item.id));
+    after = page.nodes_shown.open_next_after;
+    if (after !== null) assert.equal(after, seen.at(-1), 'the cursor is the last id shown');
+  } while (after !== null && pages < 1000);
+  assert.ok(pages > 10, `only ${pages} page(s)`);
+  assert.deepEqual(seen, items.filter(item => item.state === 'working').map(item => item.id), 'every open item once, in id order');
+  assert.deepEqual((await host.portfolio.project('alpha')).work_counts, { working: 1800, completed: 200 });
+  // An empty list says "no more" too; a bad cursor is refused by name, never read as "start again".
+  const empty = await host.portfolio.project('beta');
+  assert.deepEqual([empty.open_work, empty.nodes_shown.open_next_after, empty.nodes_shown.open_remaining_after_page], [[], null, 0]);
+  assert.equal((await host.portfolio.project('alpha', undefined, { openAfter: 7 })).open_work.refused, 'invalid_open_after');
+});
+
+test('local host, review 467 F1: portfolio.conversation pages 500 questions and answers newest first, with a cursor and has_more', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const qs = {};
+  for (let i = 0; i < 500; i++) {
+    const asked = new Date(Date.UTC(2026, 10, 1) + i * 60000).toISOString();
+    qs[`q-${i}`] = i % 2 ? { text: `Question ${i}? `.repeat(5), status: 'open', asked_at: asked }
+      : { text: `Question ${i}?`, status: 'answered', asked_at: asked, answer: `answer ${i} `.repeat(5), answered_by: 'owner:local',
+        answered_at: new Date(Date.UTC(2026, 10, 1) + i * 60000 + 30000).toISOString() };
+  }
+  await writeFile(join(projectsDir, 'alpha', 'questions.json'), JSON.stringify(qs));
+  const host = localHost({ root, projectsDir });
+  const seen = [];
+  let cursor, pages = 0, page;
+  do {
+    page = await host.portfolio.conversation('alpha', cursor);
+    pages++;
+    assert.ok(JSON.stringify(page).length <= 9000, `page ${pages} is ${JSON.stringify(page).length} characters`);
+    assert.equal(page.messages_total, 500);
+    assert.equal(page.has_more, page.next_cursor !== null);
+    assert.equal(page.remaining_after_page, 500 - seen.length - page.messages.length);
+    seen.push(...page.messages.map(m => m.id));
+    cursor = page.next_cursor;
+  } while (cursor !== null && pages < 1000);
+  assert.ok(pages > 10, `only ${pages} page(s)`);
+  assert.deepEqual(seen, Array.from({ length: 500 }, (_, i) => `q-${499 - i}`), 'every message once, newest first');
+  const none = await host.portfolio.conversation('beta');
+  assert.deepEqual([none.messages, none.has_more, none.next_cursor], [[], false, null], 'an empty conversation says there is no more');
+  assert.equal((await host.portfolio.conversation('alpha', 'not-a-cursor')).refused, 'invalid_cursor');
+  // The open questions in the project summary are bounded too: the newest 20, with their total.
+  const alpha = await host.portfolio.project('alpha');
+  assert.equal(alpha.open_questions.length, 20);
+  assert.equal(alpha.open_questions_total, 250);
+  assert.equal(alpha.open_questions[0].id, 'q-499');
+});
+
+test('local host, review 467 F2: a proposal record edited into another shape is shown for what it is; /approve fails it by name, the others still list', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const good = { project_id: 'gamma', title: 'Gamma', goal: 'try gamma', seed_nodes: [] };
+  await writeFile(join(root, 'proposals.json'), JSON.stringify({
+    'p-1': { id: 'p-1', kind: 'create_project', payload: null, reason: 'hand-edited', status: 'open', created_at: '2026-11-01T00:00:00Z' },
+    'p-2': { id: 'p-2', kind: 'create_project', payload: { project_id: 'delta' }, reason: 'half', status: 'open', created_at: '2026-11-02T00:00:00Z' },
+    'p-3': null,
+    'p-4': { id: 'p-4', kind: 'create_project', payload: good, reason: 'whole', status: 'open', created_at: '2026-11-03T00:00:00Z' } }));
+  const commands = fakeCommands();
+  const api = commandApi(commands);
+  const events = await localHost({ root, projectsDir, pollMs: 10 }).events(api);
+  const listed = await commands.run('proposals');
+  assert.equal(listed.kind, 'success', listed.text);
+  assert.match(listed.text, /Open proposals \(3\):/);
+  assert.match(listed.text, /- p-1 create_project: \? "" \(0 work item\(s\)\)[\s\S]*not a whole create_project/);
+  assert.match(listed.text, /- p-4 create_project: gamma "Gamma"/);
+  for (const id of ['p-1', 'p-2']) {
+    const approved = await commands.run('approve', ` ${id}`);
+    assert.equal(approved.kind, 'error'); assert.match(approved.text, /invalid_proposal/);
+  }
+  assert.match((await commands.run('approve', ' p-3')).text, /unknown_proposal/);
+  assert.equal((await commands.run('approve', ' p-4')).kind, 'success');
+  const stored = JSON.parse(await readFile(join(root, 'proposals.json'), 'utf8'));
+  assert.deepEqual([stored['p-1'].status, stored['p-2'].status, stored['p-4'].status], ['failed', 'failed', 'done']);
+  assert.deepEqual((await readdir(projectsDir)).sort(), ['.hidden', 'alpha', 'beta', 'gamma', 'not-a-dir'], 'nothing half-built');
+  await until('the failures never woke the steward', () => api.notified.length === 3);
+  events.stop(); await events.done;
+});
+
+test('local host, review 467 F3: a retried propose answers with the proposal it made; after a decline the same proposal is a new card', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const host = localHost({ root, projectsDir, pollMs: 60000 });
+  const call = { kind: 'create_project', payload: { project_id: 'gamma', title: 'Gamma', goal: 'try gamma' }, reason: 'the owner asked' };
+  assert.deepEqual(await host.proposals.propose(call), { proposed: true, proposal_id: 'p-1', status: 'open' });
+  assert.deepEqual(await host.proposals.propose(call), { proposed: false, duplicate: true, proposal_id: 'p-1', status: 'open' });
+  const changed = { ...call, payload: { ...call.payload, title: 'Gamma 2' }, supersedes: 'p-1' };
+  assert.equal((await host.proposals.propose(changed)).proposal_id, 'p-2');
+  assert.deepEqual(await host.proposals.propose(changed), { proposed: false, duplicate: true, proposal_id: 'p-2', status: 'open' }, 'a retried supersede is not refused');
+  assert.deepEqual(await host.proposals.propose(call), { proposed: false, duplicate: true, proposal_id: 'p-1', status: 'superseded' });
+  const commands = fakeCommands();
+  const events = await host.events(commandApi(commands));
+  await commands.run('decline', ' p-2 not now');
+  events.stop(); await events.done;
+  assert.equal((await host.proposals.propose(changed)).refused, 'not_open', 'after the decline it is proposed again, and p-1 is no longer open');
+  assert.equal((await host.proposals.propose({ ...changed, supersedes: undefined })).proposal_id, 'p-3');
+  const stored = JSON.parse(await readFile(join(root, 'proposals.json'), 'utf8'));
+  assert.equal(Object.values(stored).filter(p => p.status === 'open').length, 1, 'one open card');
+  assert.match(stored['p-1'].request_key, /^proposal:[0-9a-f]{40}$/);
+});
+
+test('local host, review 467 F3: a proposal id is never given twice, even after proposals are deleted by hand', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const host = localHost({ root, projectsDir });
+  const call = id => ({ kind: 'create_project', payload: { project_id: id, title: id, goal: 'g' }, reason: 'r' });
+  for (const id of ['a1', 'a2', 'a3']) await host.proposals.propose(call(id));
+  const file = join(root, 'proposals.json');
+  const edit = async drop => { const all = JSON.parse(await readFile(file, 'utf8')); for (const id of drop) delete all[id]; await writeFile(file, JSON.stringify(all)); };
+  await edit(['p-1']);
+  assert.equal((await host.proposals.propose(call('b1'))).proposal_id, 'p-4', 'deleting an old one does not overwrite p-3');
+  await edit(['p-4']);
+  assert.equal((await host.proposals.propose(call('b2'))).proposal_id, 'p-5', 'deleting the newest does not give its id again');
+  const all = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual(Object.keys(all).sort(), ['p-2', 'p-3', 'p-5']);
+  assert.equal(all['p-3'].payload.project_id, 'a3');
+});
+
+test('local host, review 467: recovery touches no path a hand-edited project id names', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  await writeFile(join(root, 'proposals.json'), JSON.stringify({
+    'p-1': { id: 'p-1', kind: 'create_project', payload: { project_id: '/../victim', title: 't', goal: 'g' }, reason: 'r', status: 'executing' },
+    '../p-2': { id: '../p-2', kind: 'create_project', payload: { project_id: 'x', title: 't', goal: 'g' }, reason: 'r', status: 'executing' } }));
+  await mkdir(join(root, 'victim.creating-p-1'));
+  await mkdir(join(projectsDir, '.x.creating-..', 'p-2'), { recursive: true });
+  const api = fakeApi();
+  const events = await localHost({ root, projectsDir, pollMs: 60000 }).events(api);
+  events.stop(); await events.done;
+  assert.ok((await readdir(root)).includes('victim.creating-p-1'), 'a directory outside projectsDir was removed');
+  assert.deepEqual(await readdir(join(projectsDir, '.x.creating-..')), ['p-2'], 'a path named by a hand-edited proposal id was removed');
+  assert.equal(api.notified.length, 2, 'both are announced, each from a file inside the inbox');
+  const stored = JSON.parse(await readFile(join(root, 'proposals.json'), 'utf8'));
+  assert.deepEqual([stored['p-1'].status, stored['../p-2'].status], ['failed', 'failed']);
+});
+
+test('local host, review 467: stop() is safe when the registry\'s register returns no disposer', async () => {
+  const root = await freshRoot();
+  const registered = [];
+  const commands = { register: def => { registered.push(def.name); } };
+  const events = await localHost({ root, pollMs: 60000 }).events(commandApi(commands));
+  assert.deepEqual(registered.sort(), ['answer', 'questions']);
+  events.stop(); await events.done;
+});
+
+test('local host, review 467: /profile and /purge tell the owner when the configured memory did not open', async () => {
+  const root = await freshRoot();
+  const commands = fakeCommands();
+  const events = await localHost({ root, pollMs: 60000, memory: { userId: 'owner' } })
+    .events({ ...commandApi(commands), memoryError: 'unknown time zone Mars/Base' });
+  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'profile', 'purge', 'questions']);
+  for (const name of ['profile', 'purge']) {
+    const said = await commands.run(name, ' t-1');
+    assert.equal(said.kind, 'error');
+    assert.match(said.text, /memory is not available: unknown time zone Mars\/Base/);
+  }
+  events.stop(); await events.done;
+  // No memory configured: no memory commands, as before.
+  const plain = fakeCommands();
+  const again = await localHost({ root, pollMs: 60000 }).events(commandApi(plain));
+  assert.deepEqual([...plain.defs.keys()].sort(), ['answer', 'questions']);
+  again.stop(); await again.done;
+});
+
+test('local host, review 467: /questions and /proposals list oldest first by time, not by file order', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  await writeFile(join(root, 'questions.json'), JSON.stringify({
+    'q-b': { text: 'later', status: 'open', asked_at: '2026-11-02T00:00:00Z' },
+    'q-a': { text: 'earlier', status: 'open', asked_at: '2026-11-01T00:00:00Z' } }));
+  const proposal = (project_id, created_at) => ({ kind: 'create_project', payload: { project_id, title: project_id, goal: 'g', seed_nodes: [] },
+    reason: 'r', status: 'open', created_at });
+  await writeFile(join(root, 'proposals.json'), JSON.stringify({
+    'p-9': proposal('late', '2026-11-05T00:00:00Z'), 'p-10': proposal('early', '2026-11-04T00:00:00Z') }));
+  const commands = fakeCommands();
+  const events = await localHost({ root, projectsDir, pollMs: 60000 }).events(commandApi(commands));
+  const questions = (await commands.run('questions')).text;
+  assert.ok(questions.indexOf('q-a') < questions.indexOf('q-b'), questions);
+  const proposals = (await commands.run('proposals')).text;
+  assert.ok(proposals.indexOf('p-10') < proposals.indexOf('p-9'), proposals);
+  events.stop(); await events.done;
+});
+
+test('local host, review 467: the owner\'s commands answer only in the root session\'s UI', async () => {
+  const root = await freshRoot();
+  await localHost({ root }).attention.ask({ id: 'q-1', text: 'Restart now?' });
+  const commands = fakeCommands();
+  const api = { ...commandApi(commands), agent: { session: { id: 'root-session' } } };
+  const events = await localHost({ root, pollMs: 60000 }).events(api);
+  const run = (name, input, agent) => commands.defs.get(name).handler({ rawInput: input, agent, attachments: [], signal: AbortSignal.timeout(5000) });
+  const elsewhere = await run('answer', ' q-1 yes', { session: { id: 'worker-7' } });
+  assert.equal(elsewhere.kind, 'error');
+  assert.match(elsewhere.text, /only in your director's own session/);
+  assert.equal(JSON.parse(await readFile(join(root, 'questions.json'), 'utf8'))['q-1'].status, 'open', 'nothing was answered from another UI');
+  assert.equal((await run('answer', ' q-1 yes', { session: { id: 'root-session' } })).kind, 'success');
+  events.stop(); await events.done;
+});
+
+test('local host, review 467: steward.md tells a standalone steward to use its owner_commands, and keeps the AItelier phrase', async () => {
+  const md = await readFile(new URL('../steward.md', import.meta.url), 'utf8');
+  assert.match(md, /`同意 proposal <id>` to approve, `拒绝 proposal <id>` to decline/);
+  assert.match(md, /send that line back from Slack or WeChat as\s+well as decide on the dashboard/);
+  assert.match(md, /If your context snapshot has owner_commands, your owner has no Slack, WeChat or\s+dashboard: give them the commands it names instead of that line/);
+});

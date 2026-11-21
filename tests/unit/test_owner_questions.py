@@ -172,6 +172,20 @@ def test_the_push_and_its_ledger_commit_together_and_an_unmirrored_push_is_hande
     assert sync(world)["unmirrored"] == []
 
 
+def test_a_steward_reply_under_the_push_subject_is_not_handed_back_as_unmirrored(world):
+    # A reply to a dashboard message stays on the dashboard (the mirror records nothing for it).
+    dash = execute(world.owner, "send_user_conversation_message",
+                   {"request_key": "d1", "project_id": HOME, "body": "有什么要我答的？"}, allow_write=True)["message_id"]
+    reply = execute(world.steward, "send_user_message", {"request_key": "r1", "project_id": HOME,
+                                                         "subject": oq.PUSH_SUBJECT, "body": "没有",
+                                                         "reply_to_message_id": dash}, allow_write=True)["message_id"]
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE driver_inbox_messages SET created_at=? WHERE message_id=?", (T0.isoformat(), reply))
+        conn.commit()
+    tick(world, minutes=3)
+    assert sync(world)["unmirrored"] == []
+
+
 def test_codes_are_monotonic_never_reused_and_one_per_message_and_segment(world):
     ask(world, world.alpha, "alpha", "same", "第一个")
     ask(world, world.alpha, "alpha", "same", "第二个，同一个段 id", ago=timedelta(minutes=4))
@@ -194,10 +208,22 @@ def test_a_backlog_older_than_a_day_is_one_line_each_once_at_most_twenty_and_nev
     out = sync(world)
     text = "\n".join(m["body"] for m in out["messages"])
     assert "较早的问题：" in text and "另有 3 个，见面板。" in text and "第二行不出现" not in text
-    rows = ledger(world)
+    rows = [r for r in ledger(world) if r["pushed_at"] is not None]
     assert len(rows) == 20 and all(r["older"] == 1 for r in rows)
     assert out["messages"][0]["body"].startswith(f"【待你回答】20 个较早的问题。回复时以编号开头，例如「Q{rows[0]['code_no']} 用方案 A」")
     assert all(len(m["body"]) <= oq.PUSH_CHARS for m in out["messages"])
+    # Once: the 3 named only as a count are never pushed later, listed, or noticed.
+    rest = [r for r in ledger(world) if r["pushed_at"] is None]
+    assert len(rest) == 3 and all(r["older"] == 1 and r["push_message_id"] is None for r in rest)
+    assert not any(f"Q{r['code_no']} " in text for r in rest)
+    tick(world, minutes=1)
+    assert sync(world)["messages"] == [], "the rest stay on the dashboard"
+    assert len(execute(world.steward, "list_pushed_owner_questions", {})["questions"]) == 20
+    execute(world.owner, "send_user_conversation_message", {
+        "request_key": "dash-rest", "project_id": "alpha", "body": "面板上答",
+        "answers": [{"message_id": rest[0]["message_id"], "segment_id": rest[0]["segment_id"]}]}, allow_write=True)
+    tick(world, minutes=20)
+    assert sync(world)["messages"] == [], "no notice for a code never shown"
     tick(world, hours=25)
     later = sync(world)
     assert "【提醒】" not in "\n".join(m["body"] for m in later["messages"]), "an older question is never reminded"
@@ -330,6 +356,19 @@ def test_a_failed_push_is_resent_in_full_on_the_next_inbound_message_or_at_its_r
     assert "【提醒】" in body and "｜背景一" in body, "owed at its reminder: in full"
 
 
+def test_a_failed_push_resent_when_its_reminder_is_due_is_that_reminder(world):
+    ask(world, world.alpha, "alpha", "q1", "问题一", context="背景一")
+    message = sync(world)["messages"][0]
+    record_delivery(world, message["message_id"], error="recipient_unknown")
+    tick(world, hours=4, minutes=1)
+    channel_message(world, "在吗", "wx-1")   # owed now, and its 4 h reminder is due
+    resent = sync(world)["messages"][0]["body"]
+    assert "｜背景一" in resent
+    assert ledger(world)[0]["reminders_sent"] == 1 and ledger(world)[0]["last_reminded_at"] is not None
+    tick(world, minutes=1)
+    assert sync(world)["messages"] == [], "the resend was the reminder: none a minute later"
+
+
 # --------------------------------------------------------------------------- notices
 def test_closed_notices_say_where_once_and_wait_for_a_message_or_fifteen_minutes(world):
     ask(world, world.alpha, "alpha", "q1", "问题一", ago=timedelta(minutes=7))
@@ -456,6 +495,20 @@ def test_a_live_binding_code_in_the_message_is_refused(world, monkeypatch):
     assert deliveries(world, world.rows["alpha"]) == []
 
 
+def test_a_live_binding_code_in_the_words_a_codes_only_message_relays_is_refused(world):
+    ask(world, world.alpha, "alpha", "q1", "问题一")
+    sync(world)
+    code = ledger(world)[0]["code_no"]
+    words = channel_message(world, "用方案 A", "wx-1")
+    live = world.owner.channels.issue_code("slack")["code"]
+    with world.db.get_connection() as conn:   # the words to be relayed now carry a live code
+        conn.execute("UPDATE driver_inbox_messages SET body=? WHERE message_id=?", (f"用方案 A {live}", words))
+        conn.commit()
+    tick(world, minutes=1)
+    refused(lambda: relay(world, channel_message(world, f"Q{code}", "wx-2")), "code_sent_to_bound_account")
+    assert deliveries(world, world.rows["alpha"]) == []
+
+
 def test_a_withdrawn_question_is_refused_with_its_reason_and_the_askers_new_code(world):
     ask(world, world.alpha, "alpha", "q1", "问题一")
     sync(world)
@@ -577,7 +630,11 @@ def test_m2_an_approval_phrase_closes_no_question_and_its_reminder_still_fires(w
     ask(world, world.alpha, "alpha", "q1", "可以合并吗？")
     sync(world)
     (one,) = ledger(world)
-    phrase = channel_message(world, "同意 proposal p-1", "wx-1")
+    sent = execute(world.steward, "relay_owner_message", {
+        "request_key": "relay-wx-1", "channel": "wechat", "sender_ref": WX, "channel_message_ref": "wx-1",
+        "body": "同意 proposal p-1", "channel_at": world.clock["now"].isoformat()}, allow_write=True)
+    assert sent["approval"]["outcome"] == "executed", "it really was the 7.2 phrase, deciding p-1"
+    phrase = sent["message_id"]
     assert [q["segment_id"] for q in open_questions(world, "alpha")] == ["q1"]
     assert ledger(world)[0]["closed_at"] is None
     out = relay(world, phrase)
@@ -628,8 +685,13 @@ def test_a_message_of_codes_alone_relays_the_message_right_before_it(world):
     out = relay(world, channel_message(world, f"Q{code}", "wx-2"))
     assert out["relayed_message_id"] == words and out["results"][0]["outcome"] == "relayed"
     assert deliveries(world, world.rows["alpha"])[0]["body"] == "用方案 A"
-    # The previous one already relayed, or more than 10 minutes back: no_code.
+    # The previous one names a code itself, or was already relayed, or is more than 10 minutes back: no_code.
+    tick(world, minutes=1)
     assert relay(world, channel_message(world, f"Q{code}", "wx-3"))["refused"] == "no_code"
+    with world.db.get_connection() as conn:   # wx-2 again: its previous (wx-1) was already relayed
+        relayed_from = conn.execute("SELECT message_id FROM driver_inbox_messages WHERE body=? ORDER BY rowid LIMIT 1",
+                                    (f"Q{code}",)).fetchone()[0]
+    assert relay(world, relayed_from, key="again")["refused"] == "no_code"
     ask(world, world.alpha, "alpha", "q2", "问题二")
     tick(world, minutes=3)
     sync(world)
@@ -637,6 +699,35 @@ def test_a_message_of_codes_alone_relays_the_message_right_before_it(world):
     channel_message(world, "用 B", "wx-4")
     tick(world, minutes=11)
     assert relay(world, channel_message(world, f"Q{code2}", "wx-5"))["refused"] == "no_code"
+
+
+def test_codes_only_times_received_before_the_push_and_superseded_use_the_relayed_message(world):
+    """7.6.5 step 8: 'received before the push' judges the codes-only message; the subject time
+    and `superseded` use the relayed (previous) message."""
+    world.clock["now"] = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+    ask(world, world.alpha, "alpha", "q1", "问题一")
+    words = channel_message(world, "用方案 A", "wx-1")          # received 10:00, before the push
+    world.clock["now"] = datetime(2026, 11, 20, 10, 1, tzinfo=timezone.utc)
+    sync(world)
+    code = ledger(world)[0]["code_no"]
+    world.clock["now"] = datetime(2026, 11, 20, 10, 3, tzinfo=timezone.utc)
+    out = relay(world, channel_message(world, f"Q{code}", "wx-2"))
+    assert out["relayed_message_id"] == words and out["results"][0]["outcome"] == "relayed"
+    assert out["results"][0]["subject"].endswith("(received 2026-11-20T10:00:00Z)")
+    # The relayed message older than an existing answer: superseded, even when the codes-only
+    # message itself came after that answer.
+    ask(world, world.alpha, "alpha", "q2", "问题二")
+    world.clock["now"] = datetime(2026, 11, 20, 10, 10, tzinfo=timezone.utc)
+    sync(world)
+    code2 = ledger(world)[1]["code_no"]
+    world.clock["now"] = datetime(2026, 11, 20, 10, 11, tzinfo=timezone.utc)
+    old = channel_message(world, "用 B", "wx-3")
+    world.clock["now"] = datetime(2026, 11, 20, 10, 12, tzinfo=timezone.utc)
+    newer = relay(world, channel_message(world, f"Q{code2} 用 C", "s-1", channel="slack", sender=SLACK))
+    assert newer["results"][0]["outcome"] == "relayed"
+    world.clock["now"] = datetime(2026, 11, 20, 10, 13, tzinfo=timezone.utc)
+    out = relay(world, channel_message(world, f"Q{code2}", "wx-4"))
+    assert out["relayed_message_id"] == old and out["results"][0]["outcome"] == "superseded"
 
 
 def test_after_a_relay_the_question_is_answered_everywhere_and_the_inbound_rate_is_unchanged(world):

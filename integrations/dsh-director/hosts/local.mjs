@@ -59,6 +59,10 @@ async function writeJson(file, value) {
 }
 /** Who answered when nothing says: the owner of this local host (plugin step 15). */
 export const LOCAL_OWNER = 'owner:local';
+/** What the standalone steward tells its owner to type (the commands in local-commands.mjs). */
+const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
+const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
+  + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
 /** A local project id is a directory name: the backend's key rule, so a project keeps its id elsewhere. */
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const ANSWER_FILE = /^answer-([A-Za-z0-9._:-]{1,64})\.json$/;
@@ -301,11 +305,14 @@ export function localHost(options = {}) {
       // Plugin step 12: run the root session as the steward (needs roles.json's steward).
       ...(options.rootRole ? { rootRole: options.rootRole } : {}),
     },
-    /** The startup / post-compaction snapshot: the work items and the notes. */
-    async context() {
+    /** The startup / post-compaction snapshot: the work items and the notes; for the steward
+     *  also how its owner answers and decides here (step 15: steward.md speaks of Slack,
+     *  WeChat and a dashboard, none of which a standalone DSH has). */
+    async context(role) {
       let notes = '';
       try { notes = await readFile(files.notes, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      return JSON.stringify({ work: await items(), notes });
+      return JSON.stringify({ work: await items(), notes, ...(role === 'steward' ? { owner_commands: STEWARD_OWNER_COMMANDS
+        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + '.' } : {}) });
     },
     async progress(body) {
       await mkdir(root, { recursive: true });

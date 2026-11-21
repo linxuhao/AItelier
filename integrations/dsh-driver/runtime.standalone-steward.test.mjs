@@ -204,6 +204,7 @@ test('real pinned DSH, two boots: a standalone steward - the owner answers, appr
     assert.match(shown.text, /^Profile \(version /);
     // A command is the owner's: neither the line nor its answer is part of any model request.
     assert.ok(!requests.some(r => r.text.includes('/approve p-1') || r.text.includes('Open proposals')), 'a command reached the model');
+    assert.ok(rootRequests().some(r => r.text.includes('/approve <id> or /decline <id>')), 'the steward was not told how its owner decides here');
     checkTools(1, 0);
     const before = rootRequests().length;
     proc.kill('SIGTERM'); await once(proc, 'exit');

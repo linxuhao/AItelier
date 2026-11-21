@@ -316,6 +316,16 @@ test('local host, step 15: one project whose files do not parse is reported as s
   assert.deepEqual(listed.map(p => [p.project_id, p.error ?? null]), [['alpha', null], ['beta', null], ['broken', 'unreadable']]);
 });
 
+test('local host, step 15: the steward\'s snapshot tells it how its owner answers and decides in this DSH', async () => {
+  const { root, projectsDir } = await projectsFixture();
+  const plain = JSON.parse(await localHost({ root }).context('steward')).owner_commands;
+  assert.match(plain, /\/questions .*\/answer <id> <text>/);
+  assert.doesNotMatch(plain, /approve/, 'no projectsDir: no proposals to decide');
+  const full = JSON.parse(await localHost({ root, projectsDir }).context('steward')).owner_commands;
+  assert.match(full, /\/proposals .*\/approve <id> or \/decline <id> \[reason\]/);
+  assert.equal(JSON.parse(await localHost({ root, projectsDir }).context('director')).owner_commands, undefined, 'the director\'s snapshot is unchanged');
+});
+
 test('local host, step 15: proposals - create_project only; the owner approves with /approve, the project appears whole, the steward is woken', async () => {
   const { root, projectsDir } = await projectsFixture();
   const host = localHost({ root, ...required, projectsDir, pollMs: 10 });

@@ -1028,12 +1028,28 @@ class DriverInbox:
 
 
     def active_standing(self):
+        """The NEWEST eight standing notices, returned in delivery-seq order.
+
+        This feeds the post-compaction guidance block, which is a resume prompt:
+        a standing notice a driver has not worked under yet outranks one it was
+        sent long ago, so the SELECTION runs backwards over the recency key
+        (``ORDER BY d.seq DESC LIMIT 8``) — the forward LIMIT kept the first
+        eight deliveries the driver ever received, i.e. exactly the ones it
+        already knows. The rows are then flipped back into the order this has
+        always returned them (ascending ``seq``, delivery order), so a reader
+        walking ``items`` front to back still reads oldest -> newest.
+
+        ``matched_total`` is unchanged: the count of every matching standing
+        notice, not just the page — the caller turns the difference into
+        ``omitted``.
+        """
         self._authorize(self.driver_id)
         if not self.driver_id:
             return []
         with self.store.transaction() as conn:
             rows = [dict(r) for r in conn.execute(
-                "SELECT m.*,d.delivery_id,d.seq,d.status FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE d.target_driver_id=? AND m.delivery_mode='standing' AND d.status IN ('unread','acknowledged') ORDER BY d.seq LIMIT 8", (self.driver_id,))]
+                "SELECT m.*,d.delivery_id,d.seq,d.status FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE d.target_driver_id=? AND m.delivery_mode='standing' AND d.status IN ('unread','acknowledged') ORDER BY d.seq DESC LIMIT 8", (self.driver_id,))]
+            rows.reverse()
             total=conn.execute("SELECT COUNT(*) FROM driver_inbox_messages m JOIN driver_inbox_deliveries d USING(message_id) WHERE d.target_driver_id=? AND m.delivery_mode='standing' AND d.status IN ('unread','acknowledged')", (self.driver_id,)).fetchone()[0]
             return {"items":rows,"matched_total":total}
 

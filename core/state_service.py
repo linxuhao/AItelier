@@ -129,6 +129,15 @@ def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
 _UNDECLARED_TRUST = object()
 
 
+# What a post-compaction guidance block keeps: how many rows, and the character
+# budget the projection must fit. The row SELECTION is core.director_messaging's
+# `_newest_rows`, which drains the reader's forward pages - the same helper
+# `project_active_standing` uses for the fallback projection a host renders when
+# the server does not advertise this operation.
+_GUIDANCE_SLICE = 8
+_GUIDANCE_BUDGET = 3000
+
+
 class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator",
                  runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST, driver_id=None,
@@ -211,25 +220,41 @@ class StateService:
 
     @writer_only_read('driver_postcompact_guidance')
     def driver_postcompact_guidance(self, project_id, standing_only: bool = False):
+        """What a driver should REMEMBER when it resumes, in bounded form.
+
+        The block is a resume prompt, so recency is the whole point: the newest
+        standing rules are the ones the driver has not worked under yet, while
+        the oldest have already shaped every compaction before this one. Each
+        slice is therefore selected from the NEWEST end (``_newest_rows``
+        drains the forward-paged read), the union is kept in one deterministic
+        ascending order, the newest ``_GUIDANCE_SLICE`` rows of it survive, and
+        the character budget is spent by dropping from the OLD end. ``included``
+        and ``omitted`` keep their meaning: how many rows the projection carries
+        and how many matched rows it left out (a count, never a list).
+        """
         from core.state_driver_notes import _redact
+        from core.director_messaging import _newest_rows
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
             raise StateGraphError("private_guidance")
-        standing = self.director_messages.list_director_messages(project_id,limit=8,
-                       delivery_mode="standing",statuses=["unread","acknowledged"],protocol_version="v3")["result"]
+        standing, standing_total = _newest_rows(functools.partial(
+            self.director_messages.list_director_messages, project_id,
+            delivery_mode="standing", statuses=["unread", "acknowledged"],
+            protocol_version="v3"), slice_size=_GUIDANCE_SLICE)
         if standing_only:
             # Owner standing-only selection: skip the broadcast transient query
             # and its count entirely; only the current project standing and the
             # authenticated driver's own standing notices project. The typed
             # optional default False preserves the original aggregate exactly.
-            transient = {"items": [], "matched_total": 0}
+            transient, transient_total = [], 0
         else:
-            transient = self.director_messages.list_director_messages(project_id,limit=8,
-                           delivery_mode="transient",ack_mode="broadcast",needs_my_ack=True,
-                           statuses=["unread","acknowledged"],protocol_version="v3")["result"]
-        mail = {"items":standing["items"]+transient["items"]}
-        total = standing["matched_total"]+transient["matched_total"]
+            transient, transient_total = _newest_rows(functools.partial(
+                self.director_messages.list_director_messages, project_id,
+                delivery_mode="transient", ack_mode="broadcast", needs_my_ack=True,
+                statuses=["unread", "acknowledged"], protocol_version="v3"),
+                slice_size=_GUIDANCE_SLICE)
+        total = standing_total + transient_total
         rows = []
-        for item in mail["items"]:
+        for item in standing + transient:
             m, d = item["message"], item["delivery"]
             if m["delivery_mode"] == "standing" or (item.get("ack_mode")=="broadcast"
                     and self.driver_id in item.get("pending_drivers",[])):
@@ -244,13 +269,15 @@ class StateService:
                              "delivery_id":m["delivery_id"],"subject":_redact(m["subject"]),
                              "body_excerpt":_redact(m["body"])[:320],"created_at":m["created_at"]})
         rows.sort(key=lambda m:(m["created_at"],m["message_id"]))
-        kept=rows[:8]
+        kept=rows[-_GUIDANCE_SLICE:]
         import json
         while True:
             text="\n".join(json.dumps(m,ensure_ascii=False,sort_keys=True) for m in kept)
-            if len(text)<=3000:
+            if len(text)<=_GUIDANCE_BUDGET:
                 break
-            kept.pop()
+            # Every row here is one of the newest slice; the budget gives way at
+            # the OLD end, so the newest row is the last one to be dropped.
+            kept.pop(0)
         return {"schema":"aitelier.driver-guidance.v1","project_id":project_id,
                 "driver_id":self.driver_id,"standing_only":standing_only,
                 "projection":text,"included":len(kept),

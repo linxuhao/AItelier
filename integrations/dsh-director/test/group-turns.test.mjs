@@ -19,12 +19,9 @@ let ids = 0;
 const message = (text, source = { kind: 'dsh-director-runtime-event' }) => ({ id: 'm' + ++ids, role: 'user', content: [{ type: 'text', text }], source });
 const group = (text, ref = 'r1', qid = 'q' + ids) => message(text, { kind: GROUP_SOURCE, channel: 'wechat', group_ref: ref, group_label: '家庭群', question_ids: [qid], sender_refs: ['wxid_m'] });
 const turns = () => new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group-turns-')), limits: GROUP_LIMITS });
-// The steward's tools today (roles.json steward.presented + the adapter's + step 22's).
-const STEWARD_TOOLS = ['memory_search', 'memory_read', 'memory_note', 'memory_profile_update', 'memory_forget', 'portfolio_projects',
-  'portfolio_project', 'portfolio_conversation', 'portfolio_inbox', 'private_inbox', 'portfolio_inbox_acknowledge',
-  'private_inbox_acknowledge', 'propose', 'withdraw_proposal', 'request_wechat_qr', 'handoff', 'idle_dormant', 'ask_owner',
-  'close_question', 'grep_chat_history', 'send_user_message', 'reply_to_director', 'schedule_list', 'schedule_set',
-  'schedule_delete', 'relay_answer', 'family_memory_note', 'family_memory_show'];
+// The steward's tools in roles.json (a host's own tools are refused the same way: the guard is a
+// whitelist; integrations/dsh-driver/steward.groups.test.mjs checks the adapter's by name).
+const STEWARD_TOOLS = JSON.parse(readFileSync(join(here, '../roles.json'), 'utf8')).steward.presented;
 
 test('the plugin keeps its group bounds as code constants, none of them a backend or bridge key', () => {
   assert.deepEqual({ ...GROUP_LIMITS }, { mergeMax: 5, turnToolCalls: 6, recentChars: 1500 });
@@ -90,7 +87,7 @@ test('pause: after a group turn the five writes wait for the owner; a broken pau
   g.pause();
   g.split([message('a director letter')], 1);
   for (const name of PAUSED_TOOLS) assert.equal(g.guard(name), pausedRefusal, name);
-  for (const name of ['send_user_message', 'ask_owner', 'portfolio_inbox']) assert.equal(g.guard(name), undefined, name);
+  for (const name of ['ask_owner', 'portfolio_inbox', 'memory_search']) assert.equal(g.guard(name), undefined, name);
   g.unpause();
   assert.equal(g.guard('memory_note'), undefined);
   writeFileSync(g.pauseFile, '{broken');
@@ -98,7 +95,11 @@ test('pause: after a group turn the five writes wait for the owner; a broken pau
   // A restart (a new object over the same directory) keeps it.
   const again = new GroupTurns({ stateDir: dirname(g.pauseFile), limits: GROUP_LIMITS });
   again.split([message('x')], 1);
-  assert.equal(again.guard('schedule_set'), pausedRefusal);
+  assert.equal(again.guard('propose'), pausedRefusal);
+  // A host's own writes join the pause.
+  const hosted = new GroupTurns({ stateDir: dirname(g.pauseFile), limits: GROUP_LIMITS, pausedTools: ['host_write'] });
+  hosted.split([message('x')], 1);
+  assert.equal(hosted.guard('host_write'), pausedRefusal);
 });
 
 test('snapshot: no injection in a group turn, and it is still owed to the next owner turn', async () => {

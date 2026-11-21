@@ -26,9 +26,9 @@ export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfol
   'family_memory_show']));
 /** The family memory is for group turns only (7.7.8a, platform director 420). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
-/** Refused in an owner turn after a group turn until the owner writes again (7.7.5). */
-export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose', 'schedule_set',
-  'reply_to_director']));
+/** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
+ *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
+export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose']));
 export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project and the family memory tools; your last words are your reply to the group';
 export const familyRefusal = 'family memory is for group turns only';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';
@@ -127,8 +127,9 @@ export function filterCompactionRequest(options, events, createUserMessage) {
 
 /** Turn bookkeeping for the root session: audience, merge bounds, the guard and the pause. */
 export class GroupTurns {
-  constructor({ stateDir, limits, log = () => {} }) {
+  constructor({ stateDir, limits, log = () => {}, pausedTools = [] }) {
     Object.assign(this, { limits, log });
+    this.pausedTools = new Set([...PAUSED_TOOLS, ...pausedTools]);
     this.pauseFile = stateDir ? join(stateDir, 'group-pause.json') : undefined;
     this.current = undefined;
   }
@@ -170,7 +171,7 @@ export class GroupTurns {
       return undefined;
     }
     if (FAMILY_TOOLS.has(name)) return familyRefusal;
-    if (this.paused() && PAUSED_TOOLS.has(name)) return pausedRefusal;
+    if (this.paused() && this.pausedTools.has(name)) return pausedRefusal;
     return undefined;
   }
 

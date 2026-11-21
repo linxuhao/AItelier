@@ -70,3 +70,23 @@ test('the runtime: in a group turn every tool request carries the header, the ho
   await host.groups.list();
   assert.deepEqual(calls.map(c => [c.path, c.readAs]), [['/api/state/query/project_catalog', 'public'], ['/api/state/query/list_owner_groups', undefined]]);
 });
+
+test('after a group turn the adapter\'s own writes wait for the owner too; the guard refuses its tools in a group turn', async () => {
+  const { GroupTurns, groupTurnRefusal, pausedRefusal } = await import('../dsh-director/lib/group-turns.mjs');
+  const { GROUP_LIMITS } = await import('../dsh-director/lib/channels.mjs');
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const ops = groupOps({ request: async () => ({}) });
+  assert.deepEqual(ops.pausedTools, ['schedule_set', 'reply_to_director']);
+  const turns = new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'adapter-pause-')), limits: GROUP_LIMITS, pausedTools: ops.pausedTools });
+  const msg = kind => ({ id: kind, role: 'user', content: [], source: kind === 'g' ? { kind: 'dsh-director-group', channel: 'wechat', group_ref: 'r1', question_ids: ['q'] } : { kind: 'e' } });
+  turns.split([msg('g')], 1);
+  for (const name of ['send_user_message', 'reply_to_director', 'schedule_list', 'schedule_set', 'schedule_delete', 'relay_answer'])
+    assert.equal(turns.guard(name), groupTurnRefusal, name);
+  turns.pause();
+  turns.split([msg('e')], 1);
+  assert.equal(turns.guard('schedule_set'), pausedRefusal);
+  assert.equal(turns.guard('reply_to_director'), pausedRefusal);
+  assert.equal(turns.guard('send_user_message'), undefined);
+});

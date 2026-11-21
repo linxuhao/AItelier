@@ -124,6 +124,8 @@ async function run(t, { steward, mode = 'tool' }) {
       if (name === 'record_channel_delivery') return send({ message_id: body.message_id, recorded: true });
       if (name === 'report_channel_status') return send({ recorded: true, channel: body.channel, connected: body.connected, at: 't' });
       if (name === 'complete_owner_channel_login_request') return send({ request_id: body.request_id, status: 'done' });
+      // Step 23: the steward's host records each turn's audience before its first step.
+      if (name === 'set_steward_turn_audience') return send({ recorded: true, turn: body.turn, audience: body.audience });
       return send({ detail: 'unexpected ' + name }, 422);
     }
     if (url.startsWith('/api/state/query/')) {

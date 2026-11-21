@@ -38,7 +38,7 @@
  *  (ctx.commands; not registered when the process has none) - see local-commands.mjs:
  *  /questions, /answer <id> <text>, /proposals, /approve <id>, /decline <id> [reason], /profile,
  *  /purge <id>, /forget <id> [reason], /restore <id> (the last two wake the steward with one line,
- *  inbox/owner-memory-<ms>-<n>.txt). A DSH command carries no user identity, so whatever the owner decides through
+ *  inbox/owner-memory-<ms>-<n>-<random hex>.txt). A DSH command carries no user identity, so whatever the owner decides through
  *  them is recorded as owner:local (answered_by, decided_by).
  *  With `projectsDir` (a directory whose every subdirectory is one local host root, its name
  *  the project id) the host also offers the steward `portfolio` (those projects, read-only) and
@@ -46,7 +46,7 @@
  *  project.json, notes.md (the goal) and work.json (one work item per seed node). */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
 import { registerOwnerCommands } from './local-commands.mjs';
@@ -68,6 +68,11 @@ export const LOCAL_OWNER = 'owner:local';
 const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
 const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
   + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
+/** With memory: memory_forget refuses here (no_owner_channel - a DSH command carries no owner
+ *  message to cite), so the steward sends its owner to the commands that forget and restore. */
+const STEWARD_MEMORY_COMMANDS = '; they see their resident profile with /profile, forget one memory entry with /forget <id> [reason]'
+  + ' and bring it back with /restore <id>, or remove one from every version, for good, with /purge <id>.'
+  + ' When memory_forget refuses with no_owner_channel, give them /forget <id> [reason] instead';
 /** One page of a portfolio answer, as the backend adapter's steward host pages one (steward-host.mjs
  *  NODES_CHARS): as many entries as fit while the whole answer stays under this many characters,
  *  and at least one, so a walk always moves forward. */
@@ -75,7 +80,16 @@ export const PAGE_CHARS = 9000;
 /** Open questions shown in portfolio.project: the newest, with their total. */
 export const OPEN_QUESTIONS_SHOWN = 20;
 /** A proposal whose request_key comes again in one of these states answers the retry with
- *  itself; after a decline, a failure or a withdrawal the same proposal makes a new card. */
+ *  itself; after a decline, a failure or a withdrawal the same proposal makes a new card.
+ *  Director 472 accepted this difference from steward-host.mjs, within these bounds:
+ *  - steward-host replays a key whatever the status, because there the backend executes
+ *    proposals and a replay must never execute twice; here the host executes create_project
+ *    itself, and declined/failed/withdrawn let the same body make a new card, so the recovery
+ *    advice "propose it again" works after a failure;
+ *  - the key is a digest of kind, the stored payload, the trimmed reason and supersedes: a retry
+ *    replays only when it repeats the same reason and supersedes verbatim; any change is a new card;
+ *  - the two answers stay distinct: { proposed: false, duplicate: true, proposal_id, status }
+ *    for a replay, { proposed: true, proposal_id, status: 'open' } for a new card. */
 const REPLAYED = new Set(['open', 'executing', 'done', 'superseded']);
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 /** A local project id is a directory name: the backend's key rule, so a project keeps its id elsewhere. */
@@ -259,11 +273,13 @@ export function localHost(options = {}) {
       ...(proposal.result ? { result: proposal.result } : {}) }) + '\n');
     await rename(file + '.tmp', file);
   };
-  /** An owner's memory command (/forget, /restore) as a wake event: one line in its own inbox file. */
+  /** An owner's memory command (/forget, /restore) as a wake event: one line in its own inbox file.
+   *  The counter starts again at a restart, so a random suffix keeps a wake from one process
+   *  life from overwriting an undelivered one from the last, even within the same millisecond. */
   let wakes = 0;
   const wakeLine = async line => {
     await mkdir(files.inbox, { recursive: true });
-    const file = join(files.inbox, `owner-memory-${Date.now()}-${++wakes}.txt`);
+    const file = join(files.inbox, `owner-memory-${Date.now()}-${++wakes}-${randomBytes(4).toString('hex')}.txt`);
     await writeFile(file + '.tmp', line + '\n');
     await rename(file + '.tmp', file);
   };
@@ -305,6 +321,9 @@ export function localHost(options = {}) {
       if (supersedes !== undefined && own(all, supersedes)?.status !== 'open') return { refused: 'not_open', reason: `${supersedes} is not an open proposal` };
       // A number is never given twice: the last one given is kept apart from proposals.json
       // (written first), so a proposal deleted from it by hand does not free its id.
+      // Director 472: because the seq file is written before proposals.json, a proposals.json
+      // write that fails burns that number - the next proposal skips it, never reuses it.
+      // Accepted: a gap in the numbers is harmless, a reused id is not.
       const numbers = Object.keys(all).map(key => /^p-(\d+)$/.exec(key)?.[1]).filter(Boolean).map(Number);
       const last = Math.max(0, Number((await readJson(files.proposalSeq, {})).last) || 0, ...numbers);
       const id = 'p-' + (last + 1);
@@ -400,7 +419,7 @@ export function localHost(options = {}) {
       let notes = '';
       try { notes = await readFile(files.notes, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       return JSON.stringify({ work: await items(), notes, ...(role === 'steward' ? { owner_commands: STEWARD_OWNER_COMMANDS
-        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + '.' } : {}) });
+        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + (options.memory ? STEWARD_MEMORY_COMMANDS : '') + '.' } : {}) });
     },
     async progress(body) {
       await mkdir(root, { recursive: true });

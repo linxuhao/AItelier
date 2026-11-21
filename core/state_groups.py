@@ -120,7 +120,17 @@ _STEMS = "甲乙丙丁戊己庚辛壬癸"
 # Crockford base32 (no I L O U).
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _GROUP_CODE = re.compile(r"G([%s]{8})" % _CROCKFORD)
-_PATHS = ("/home/", "/app/", "/tmp/")
+# The exit check's host paths (7.7.7 item 3), a closed enumeration of the forms the steward's
+# context and this host carry: the home forms (`~/` covers ~/.AItelier and ~/.aitelier-secrets),
+# the container's /app/ and the system roots. Matched as substrings of the NFKC-folded body,
+# so a full-width ／ or ～ is the same path. A web address is not a host path: http(s) URLs are
+# taken out before the match, so 'https://apps.apple.com/cn/app/…' or a site's '/home/' page
+# passes (a host path dressed as a URL's path is a rewording, like any paraphrase, 7.7.2).
+# Ordinary text with slashes ('A/B 测试', 'and/or', '3/4') names none of them and passes.
+_PATHS = ("~/", "/home/", "/root/", "/app/", "/tmp/", "/srv/", "/opt/", "/var/", "/etc/", "/run/")
+# The URL's characters are a narrow set (no '~', ',', ';', quotes or brackets), so a URL never
+# swallows a path written right after it ('https://x.cn，~/.AItelier' is still withheld).
+_WEB_URL = re.compile(r"https?://[a-z0-9\-._:/?#@%&=+]*")
 # The platform's own name (also the private project `aitelier`'s id) and the steward's own
 # project are the exit check's only exemptions (7.7.7 item 2).
 _EXEMPT_TERMS = frozenset({"aitelier", "aitelier-home"})
@@ -604,7 +614,8 @@ class StateGroups:
         for term in private_terms(conn):
             if (folded.find(term) >= 0 and len(term) >= 2) if _cjk(term) else _ascii_word(term, folded):
                 return "private_project"
-        if any(path in text for path in _PATHS):
+        bare = _WEB_URL.sub(" ", folded)
+        if any(path in bare for path in _PATHS):
             return "host_path"
         return None
 

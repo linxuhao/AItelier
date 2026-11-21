@@ -288,6 +288,31 @@ def test_each_shape_alone_is_withheld(world, projects, body, reason):
     assert rows(world, "SELECT withheld_reason FROM state_group_messages WHERE kind='reply'") == [(reason,)]
 
 
+@pytest.mark.parametrize("body", [
+    "资料在 ~/.AItelier/director/reports 里", "装在 /opt/aitelier-dsh 下", "服务在 /srv/app", "日志 /var/log/x",
+    "配置 /etc/systemd/x", "密钥 /run/aitelier-secrets", "在 /root/x", "全角的 ～／.AItelier／director", "目录 ／ｏｐｔ／x",
+    "看 https://apps.apple.com/cn/app/id1，文件在~/.AItelier", "https://example.com，/opt/x"])
+def test_the_host_path_forms_the_steward_context_carries_are_withheld(world, body):
+    """Director 477 N2: the enumeration covers the home forms and the system roots, full-width
+    forms fold to the same path, and a URL right before a path does not hide it."""
+    bound_group(world)
+    question = ask(world, "m1")
+    assert reply(world, question["message_id"], body)["withheld"] is True, body
+    assert rows(world, "SELECT withheld_reason FROM state_group_messages WHERE kind='reply'") == [("host_path",)]
+
+
+@pytest.mark.parametrize("body", [
+    "A/B 测试做完了", "周末和/或周日都行", "比分 3/4", "下载：https://apps.apple.com/cn/app/id1234",
+    "官网首页 https://example.com/home/ 有说明", "https://example.org/opt/in?x=1 是退订链接"])
+def test_ordinary_slashes_and_web_addresses_are_not_host_paths(world, body):
+    """... while ordinary words with slashes pass, and so do web addresses: an http(s) URL is
+    taken out before the path match (7.7.7 item 3, as documented on _PATHS)."""
+    bound_group(world)
+    question = ask(world, "m1")
+    sent = reply(world, question["message_id"], body)
+    assert sent["withheld"] is False and sent["text"].endswith(body), (body, sent)
+
+
 def test_the_platform_name_and_a_public_project_pass_and_a_live_group_code_is_withheld(world, projects, monkeypatch):
     bound_group(world, key="bg-a")
     question = ask(world, "m1")

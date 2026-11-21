@@ -1135,6 +1135,8 @@ class StateChannels:
             # starts the outage's clock when the channel goes down, and up_since when it comes back.
             prev = conn.execute("SELECT * FROM state_owner_channel_status WHERE channel=?", (channel,)).fetchone()
             if not connected and detail in STATUS_PLACEHOLDERS:
+                # qr_svg is cleared on purpose: a QR from before the placeholder (say, of a plugin
+                # now stopped) can no longer be scanned, so the dashboard must not keep showing it.
                 conn.execute("INSERT INTO state_owner_channel_status(channel,connected,detail,qr_svg,at,live) "
                              "VALUES(?,0,?,NULL,?,0) ON CONFLICT(channel) DO UPDATE SET live=0,detail=excluded.detail,"
                              "qr_svg=NULL,at=excluded.at", (channel, detail, stamp))

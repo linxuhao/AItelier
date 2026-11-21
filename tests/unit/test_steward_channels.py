@@ -671,18 +671,21 @@ def test_an_undated_channel_message_has_no_channel_time_and_its_row_no_key(world
                    {"message_ids": [out["message_id"]]})["sources"][out["message_id"]]["channel_at"] is None
 
 
-def test_a_channel_time_far_ahead_is_not_stored_and_a_late_one_is(world, caplog):
+def test_a_channel_time_far_ahead_is_not_stored_and_a_late_one_is(world, caplog, monkeypatch):
     """A channel clock more than CHANNEL_AT_MAX_AHEAD fast is not a send time; a message
     that arrives hours after it was sent is exactly what the time is for."""
     bind(world)
     now = state_channels._now()
+    monkeypatch.setattr(state_channels, "_now", lambda: now)
+    edge = state_channels.CHANNEL_AT_MAX_AHEAD
+    assert edge == timedelta(minutes=2)
     with caplog.at_level(logging.WARNING, logger="core.state_channels"):
-        ahead = relay(world, "from the future", "ts-1", channel_at=(now + timedelta(minutes=3)).isoformat())
+        ahead = relay(world, "from the future", "ts-1", channel_at=(now + edge + timedelta(seconds=1)).isoformat())
     assert _source_row(world, ahead["message_id"])["channel_at"] is None
     assert "channel_at" not in _inbox_row(world, ahead["message_id"])
     assert "channel_at not stored" in caplog.text
-    near = relay(world, "a skewed but usable clock", "ts-2", channel_at=(now + timedelta(minutes=1)).isoformat())
-    assert _source_row(world, near["message_id"])["channel_at"] is not None
+    near = relay(world, "a skewed but usable clock", "ts-2", channel_at=(now + edge).isoformat())
+    assert _source_row(world, near["message_id"])["channel_at"] == (now + edge).isoformat()
     late_at = now - timedelta(hours=3)
     late = relay(world, "sent three hours ago", "ts-3", channel_at=late_at.isoformat())
     assert _source_row(world, late["message_id"])["channel_at"] == late_at.isoformat()

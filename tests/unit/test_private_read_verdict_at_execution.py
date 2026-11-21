@@ -68,6 +68,7 @@ _ARGS = {
     "list_owner_channels": {},
     "list_owner_channel_login_requests": {},
     "message_sources": {"message_ids": [C.CHANNEL_MESSAGE]},
+    "list_pushed_owner_questions": {},
 }
 
 
@@ -108,9 +109,10 @@ def _steward_reader(trusted, tmp_path):
                         project_read_trusted=True)
 
 
-# Step 19: the channel reads answer the owner's session or the steward too.
+# Step 19: the channel reads answer the owner's session or the steward too; step 22's
+# pushed-questions read the same.
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
-                       "list_owner_channel_login_requests", "message_sources"}
+                       "list_owner_channel_login_requests", "message_sources", "list_pushed_owner_questions"}
 
 
 def _classify(call):

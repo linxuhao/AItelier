@@ -1068,7 +1068,7 @@ export interface StewardConnectionInput {
   header_name?: string | null; visibility: StewardVisibility; enabled: boolean;
 }
 export type StewardToolChange = {raw_name: string} & Partial<Pick<StewardConnectionTool,
-  'allowed' | 'outward' | 'egress' | 'blocked_args' | 'daily_cap'>>;
+  'allowed' | 'outward' | 'egress' | 'blocked_args' | 'daily_cap' | 'schema_sha256'>>;
 export function listStewardConnections(): Promise<StewardConnections> {
   return _get('/api/steward/connections');
 }

@@ -238,7 +238,7 @@ export async function replyToLetter({ request, project, me, inbox, deliveryId, t
   const letter = await findLetter({ request, project, me, inbox, deliveryId, signal });
   if (!letter || !letter.sender) return { refused: 'unknown_delivery', reason: `no ${inbox} letter ${deliveryId} addressed to you` };
   const subject = ('Re: ' + (letter.subject ?? '')).slice(0, 200);
-  const key = `reply:${deliveryId}:${digest(text)}`;
+  const key = `reply:${deliveryId}:${digest(body)}`;
   const answer = inbox === 'private'
     ? request('/api/state/commands/send_driver_message', { request_key: key, subject, body,
       target_driver_id: letter.sender, reply_to_delivery_id: deliveryId }, signal)

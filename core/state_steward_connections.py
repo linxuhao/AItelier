@@ -272,6 +272,7 @@ HOST_LITERALS = ("127.0.0.1", "0.0.0.0", "::1")
 # Every lookup of a connection's (or a reserved service's) address goes through this
 # one resolver; tests replace it.
 RESOLVER = socket.getaddrinfo
+ROUTE_TABLE = "/proc/net/route"
 
 
 def host_addresses() -> list[str]:
@@ -279,6 +280,31 @@ def host_addresses() -> list[str]:
     in the backend's environment: a connection resolving to one is refused on any port."""
     raw = os.environ.get("AITELIER_STEWARD_HOST_ADDRESSES", "")
     return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+def route_gateways() -> set[str]:
+    """Each docker network's gateway, read from the backend's route table: the default
+    route's gateway, and for a directly attached network its first address (docker's
+    gateway). Both are the host itself, reserved whether or not
+    AITELIER_STEWARD_HOST_ADDRESSES names them (7.8.4)."""
+    def dotted(raw: int) -> str:  # the table is little-endian hex
+        return ".".join(str((raw >> s) & 0xFF) for s in (0, 8, 16, 24))
+    found = set()
+    try:
+        with open(ROUTE_TABLE) as handle:
+            for line in handle.readlines()[1:]:
+                fields = line.split()
+                if len(fields) < 8:
+                    continue
+                destination, gateway, mask = (int(fields[i], 16) for i in (1, 2, 7))
+                if gateway:
+                    found.add(dotted(gateway))
+                elif mask:
+                    network = int.from_bytes(destination.to_bytes(4, "little"), "big")
+                    found.add(str(ipaddress.IPv4Address(network + 1)))
+    except (OSError, ValueError):
+        return set()
+    return found
 
 
 def _resolve(host: str, resolver) -> set[str]:
@@ -317,7 +343,7 @@ def check_url(url: str) -> tuple[str, str, int]:
 
 def reserved_addresses(resolver=None) -> set[str]:
     resolver = resolver or RESOLVER
-    reserved = set(HOST_LITERALS) | set(host_addresses())
+    reserved = set(HOST_LITERALS) | set(host_addresses()) | route_gateways()
     for name in RESERVED_SERVICES + HOST_NAMES:
         reserved |= _resolve(name, resolver)
     return reserved
@@ -582,6 +608,15 @@ class StateStewardConnections:
                               moment, conn_id))
                 if old["url"] != url:
                     conn.execute("UPDATE state_steward_connection_tools SET egress=1 WHERE conn_id=?", (conn_id,))
+                if old["visibility"] == "private" and visibility == "public":
+                    # The public default (7.8.4, 7.8.10a): url / *_url arguments blocked, added only.
+                    for tool in conn.execute("SELECT raw_name,definition_json,blocked_args FROM "
+                                             "state_steward_connection_tools WHERE conn_id=?", (conn_id,)).fetchall():
+                        blocked = set(json.loads(tool["blocked_args"]))
+                        added = blocked | set(_url_params(json.loads(tool["definition_json"]).get("inputSchema")))
+                        if added != blocked:
+                            conn.execute("UPDATE state_steward_connection_tools SET blocked_args=? WHERE conn_id=? "
+                                         "AND raw_name=?", (json.dumps(sorted(added)), conn_id, tool["raw_name"]))
             result = self._public(conn, self._row(conn, conn_id))
         tools_changed()
         return result
@@ -598,7 +633,9 @@ class StateStewardConnections:
 
     def tools_set(self, conn_id, tools):
         """The owner's ticks, per tool: allowed, outward, egress, blocked_args, daily_cap.
-        A field left out is unchanged. Allowing pins the definition read now."""
+        A field left out is unchanged. Allowing names the schema_sha256 the owner was
+        shown and pins it; a definition that changed since is refused
+        (`definition_changed`), never approved unseen (7.8.4)."""
         self._owner()
         if not isinstance(tools, list) or not tools or len(tools) > 500:
             raise StateGraphError("invalid_tools")
@@ -606,7 +643,7 @@ class StateStewardConnections:
             self._row(conn, conn_id)
             for item in tools:
                 if not isinstance(item, dict) or not isinstance(item.get("raw_name"), str) or set(item) - {
-                        "raw_name", "allowed", "outward", "egress", "blocked_args", "daily_cap"}:
+                        "raw_name", "allowed", "outward", "egress", "blocked_args", "daily_cap", "schema_sha256"}:
                     raise StateGraphError("invalid_tools")
                 row = conn.execute("SELECT * FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
                                    (conn_id, item["raw_name"])).fetchone()
@@ -620,6 +657,8 @@ class StateStewardConnections:
                         sets.append(f"{flag}=?")
                         params.append(int(item[flag]))
                 if item.get("allowed") is True:
+                    if item.get("schema_sha256") != row["schema_sha256"]:
+                        raise StateGraphError(f"definition_changed: {item['raw_name']} - read the tools again")
                     sets.append("allowed_sha256=?")
                     params.append(row["schema_sha256"])
                 if "blocked_args" in item:
@@ -696,7 +735,7 @@ class StateStewardConnections:
             return {"conn_id": conn_id, "error": "probe_failed:" + type(exc).__name__}
         record_discovery(self.store, conn_id, listed.get("tools") or [], listed.get("instructions"))
         with self.store.transaction() as conn:
-            return self._tools(conn, conn_id)
+            return self._tools(conn, conn_id, instructions=self.steward.is_owner_session())
 
     def _probe_error(self, conn_id, code):
         with self.store.transaction(write=True) as conn:
@@ -748,7 +787,7 @@ class StateStewardConnections:
         self._owner_or_steward()
         with self.store.transaction() as conn:
             self._row(conn, conn_id)
-            return self._tools(conn, conn_id)
+            return self._tools(conn, conn_id, instructions=self.steward.is_owner_session())
 
     def _public(self, conn, row) -> dict:
         tools = conn.execute("SELECT allowed,outward,allowed_sha256,schema_sha256 FROM state_steward_connection_tools "
@@ -766,7 +805,9 @@ class StateStewardConnections:
                                                and t["allowed_sha256"] != t["schema_sha256"]),
                                 "new": sum(1 for t in tools if not t["allowed"] and not t["allowed_sha256"])}}
 
-    def _tools(self, conn, conn_id) -> dict:
+    def _tools(self, conn, conn_id, *, instructions=True) -> dict:
+        """One connection's tools. The server's `instructions` text is the owner's panel
+        alone, never the steward's context (7.8.4)."""
         row = self._row(conn, conn_id)
         rows = conn.execute("SELECT * FROM state_steward_connection_tools WHERE conn_id=? ORDER BY raw_name",
                             (conn_id,)).fetchall()
@@ -784,8 +825,11 @@ class StateStewardConnections:
                           "allowed": bool(t["allowed"]), "outward": bool(t["outward"]), "egress": bool(t["egress"]),
                           "blocked_args": json.loads(t["blocked_args"]), "daily_cap": t["daily_cap"],
                           "first_seen_at": t["first_seen_at"], "last_seen_at": t["last_seen_at"], "state": state})
-        return {"conn_id": conn_id, "instructions": row["instructions"], "last_probe_at": row["last_probe_at"],
-                "last_error": row["last_error"], "tools": tools}
+        answer = {"conn_id": conn_id, "instructions": row["instructions"], "last_probe_at": row["last_probe_at"],
+                  "last_error": row["last_error"], "tools": tools}
+        if not instructions:
+            del answer["instructions"]
+        return answer
 
 
 def ensure_schema(db) -> None:

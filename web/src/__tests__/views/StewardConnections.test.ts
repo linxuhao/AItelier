@@ -4,7 +4,8 @@
  *    visibility, enabled, tool counts and where its last change came from;
  *  - "Read tools" probes, then lists every tool with its description as plain text and
  *    the five ticks; a changed tool is marked and comes back unticked; Save sends the
- *    ticks of every tool;
+ *    ticks of every tool with the definition hash it showed (the server refuses to allow
+ *    a definition that changed since); the daily cap can be typed and cleared;
  *  - the add form saves the connection, and a header value only through the secret call;
  *  - a pending fallback restart shows its line and the "Restart steward" button.
  *  The API is mocked throughout. */
@@ -81,9 +82,27 @@ describe('the connections tab', () => {
     await fireEvent.click(view.container.querySelector('[data-conn-save-tools]')!);
     await waitFor(() => expect(api.setStewardConnectionTools).toHaveBeenCalledTimes(1));
     expect(api.setStewardConnectionTools.mock.calls[0]).toEqual(['media', [
-      {raw_name: 'ocr_image', allowed: true, outward: true, egress: true, blocked_args: ['image_url'], daily_cap: null},
-      {raw_name: 'web_search', allowed: false, outward: false, egress: true, blocked_args: [], daily_cap: 5},
+      {raw_name: 'ocr_image', allowed: true, outward: true, egress: true, blocked_args: ['image_url'], daily_cap: null,
+        schema_sha256: 'a'},
+      {raw_name: 'web_search', allowed: false, outward: false, egress: true, blocked_args: [], daily_cap: 5,
+        schema_sha256: 'b'},
     ]]);
+  });
+
+  it('a typed daily cap is saved as a number and a cleared one as none; the tab stays usable', async () => {
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(conn(view.container)).not.toBeNull());
+    await fireEvent.click(conn(view.container).querySelector('[data-conn-probe]')!);
+    await waitFor(() => expect(view.container.querySelector('[data-tool="ocr_image"]')).not.toBeNull());
+    const capOf = (name: string) => view.container.querySelector(`[data-tool="${name}"] [data-tick="cap"]`) as HTMLInputElement;
+    await fireEvent.input(capOf('ocr_image'), {target: {value: '7'}});
+    await fireEvent.input(capOf('web_search'), {target: {value: ''}});
+    const save = view.container.querySelector('[data-conn-save-tools]') as HTMLButtonElement;
+    await fireEvent.click(save);
+    await waitFor(() => expect(api.setStewardConnectionTools).toHaveBeenCalledTimes(1));
+    const sent = api.setStewardConnectionTools.mock.calls[0][1] as {raw_name: string; daily_cap: number | null}[];
+    expect(sent.map(c => [c.raw_name, c.daily_cap])).toEqual([['ocr_image', 7], ['web_search', null]]);
+    await waitFor(() => expect(save.disabled).toBe(false));
   });
 
   it('adds a header connection: the value goes only through the secret call', async () => {

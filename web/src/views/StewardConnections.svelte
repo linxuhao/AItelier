@@ -16,7 +16,8 @@
   let editing = $state<(StewardConnectionInput & {isNew: boolean; secret: string}) | null>(null);
   let open = $state<string | null>(null);
   let tools = $state<StewardConnectionTool[]>([]), toolsError = $state(''), instructions = $state<string | null>(null);
-  let drafts = $state<Record<string, StewardToolChange & {blocked: string; cap: string}>>({});
+  // `cap` is bound to a number input: Svelte stores a number, or null when it is cleared.
+  let drafts = $state<Record<string, StewardToolChange & {blocked: string; cap: string | number | null}>>({});
   let deleteAsk = $state(false), target = $state<string | null>(null);
   function failed(e: unknown) { error = String(e instanceof Error ? e.message : e); }
   async function load() {
@@ -61,13 +62,16 @@
   async function saveTools() {
     if (!open || busy) return;
     busy = 'tools'; toolsError = ''; notice = '';
-    const changes: StewardToolChange[] = tools.map(r => {
-      const d = drafts[r.raw_name];
-      const cap = d.cap.trim() === '' ? null : Number(d.cap);
-      return {raw_name: r.raw_name, allowed: d.allowed, outward: d.outward, egress: d.egress,
-        blocked_args: d.blocked.split(',').map(s => s.trim()).filter(Boolean), daily_cap: cap};
-    });
     try {
+      // Each tool names the definition it was shown: the server refuses to allow one that
+      // changed since (definition_changed), so a save never approves a description unseen.
+      const changes: StewardToolChange[] = tools.map(r => {
+        const d = drafts[r.raw_name];
+        const cap = d.cap === null || d.cap === undefined || String(d.cap).trim() === '' ? null : Number(d.cap);
+        return {raw_name: r.raw_name, allowed: d.allowed, outward: d.outward, egress: d.egress,
+          blocked_args: d.blocked.split(',').map(s => s.trim()).filter(Boolean), daily_cap: cap,
+          schema_sha256: r.schema_sha256};
+      });
       const answer = await setStewardConnectionTools(open, changes);
       tools = answer.tools; draftsOf(answer.tools); notice = t('steward.connSaved');
       await load();

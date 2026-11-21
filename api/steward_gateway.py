@@ -50,6 +50,7 @@ SERVER_INFO = {"name": "aitelier-steward-gateway", "version": "1"}
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 MAX_BODY = 40 * 1024 * 1024
 STREAMS_PER_DRIVER = 4
+SERVED_KEPT = 64  # sessions whose last listed hash is remembered (a killed client sends no DELETE)
 KEEPALIVE_SECONDS = 15.0
 RETRY_MS = 30000
 COALESCE_SECONDS = 1.0
@@ -235,6 +236,21 @@ async def _call_tool(session, raw_name: str, arguments: dict):
     return await session.send_request(request, types.CallToolResult)
 
 
+def _session_lost(exc: BaseException) -> bool:
+    """The upstream session is gone, as the mcp client reports it: a 404 becomes
+    ErrorData(32600, "Session terminated"), a reader that ended becomes
+    ErrorData(CONNECTION_CLOSED, "Connection closed"); a send on a closed stream raises
+    anyio's closed/broken-resource errors; httpx raises a TransportError."""
+    import anyio
+    from mcp.shared.exceptions import McpError
+    from mcp.types import CONNECTION_CLOSED
+    if isinstance(exc, McpError):
+        return (exc.error.code, exc.error.message) in ((32600, "Session terminated"),
+                                                       (CONNECTION_CLOSED, "Connection closed"))
+    return isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream,
+                            httpx.TransportError))
+
+
 def fingerprint(row) -> tuple:
     return (row["url"], row["auth_kind"], row["header_name"], row["generation"])
 
@@ -256,6 +272,7 @@ class Gateway:
         self.locks: dict[str, asyncio.Lock] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
         self.pending: asyncio.Task | None = None
+        self.dirty = False  # a change arrived while a coalesced check was already running
         self.tasks: set[asyncio.Task] = set()
         self.checker: asyncio.Task | None = None
         self.started = False
@@ -300,13 +317,17 @@ class Gateway:
             self.loop.call_soon_threadsafe(self.changed)
 
     def changed(self):
-        """`steward_tools_changed()`: coalesce one second, then compare the hash."""
+        """`steward_tools_changed()`: coalesce one second, then compare the hash; a change
+        that lands while that check runs gets one more check after it."""
+        self.dirty = True
         if self.pending is None or self.pending.done():
             self.pending = self.spawn(self._coalesced())
 
     async def _coalesced(self):
-        await asyncio.sleep(COALESCE_SECONDS)
-        await self.check()
+        while self.dirty:
+            await asyncio.sleep(COALESCE_SECONDS)
+            self.dirty = False
+            await self.check()
 
     async def _check_loop(self):
         try:
@@ -443,19 +464,20 @@ class Gateway:
         return future.result(timeout=OPEN_TIMEOUT + UPSTREAM_TIMEOUT + 10)
 
     async def call(self, row: dict, raw_name: str, arguments, *, retry: bool):
-        from mcp.shared.exceptions import McpError
+        """Forward one call. Only a lost session (the client's 404 "Session terminated",
+        its "Connection closed", a closed stream or a transport failure) drops the session
+        and, for a non-outward tool, reopens it once; any other error - a JSON-RPC error
+        or an answer that does not parse - is the upstream's answer, passed on as it is."""
         for attempt in (1, 2):
             upstream = await self.upstream(row)
             try:
                 result = await asyncio.wait_for(_call_tool(upstream.session, raw_name, arguments), UPSTREAM_TIMEOUT)
                 return result.model_dump(mode="json", by_alias=True, exclude_none=True)
-            except McpError as exc:
-                if "terminated" not in str(exc).lower() and "not found" not in str(exc).lower():
-                    raise
-                broken = exc
             except asyncio.TimeoutError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - the session itself failed
+            except Exception as exc:  # noqa: BLE001 - judged just below
+                if not _session_lost(exc):
+                    raise
                 broken = exc
             logger.info("steward gateway: upstream session of %s failed (%s)", row["conn_id"], type(broken).__name__)
             await self.drop(row["conn_id"])
@@ -482,7 +504,10 @@ class Gateway:
             entries = await asyncio.to_thread(self._serve, driver["driver_id"])
             digest = sc.effective_hash(entries)
             if session_id:
+                self.served.pop(session_id, None)
                 self.served[session_id] = digest
+                while len(self.served) > SERVED_KEPT:
+                    del self.served[next(iter(self.served))]
             return {"jsonrpc": "2.0", "id": mid, "result": {"tools": [e["tool"] for e in entries]}}
         if method == "tools/call":
             return await self.tools_call(mid, message.get("params") or {}, driver)
@@ -670,4 +695,7 @@ async def get(request: Request):
 async def delete(request: Request):
     if steward_driver(request) is None:
         return _forbidden()
+    session_id = request.headers.get("mcp-session-id")
+    if session_id:
+        gateway(request.app).served.pop(session_id, None)
     return Response(status_code=200)

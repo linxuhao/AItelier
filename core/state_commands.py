@@ -1332,7 +1332,8 @@ class StewardConnectionRef(Request):
 class StewardConnectionToolsSet(Request):
     conn_id: str = Field(min_length=1, max_length=40)
     tools: list[dict[str, Any]] = Field(min_length=1, max_length=500, description=(
-        "[{raw_name, allowed?, outward?, egress?, blocked_args?, daily_cap?}]; a field left out is unchanged"))
+        "[{raw_name, allowed?, outward?, egress?, blocked_args?, daily_cap?, schema_sha256?}]; a field left out "
+        "is unchanged; allowed=true needs the schema_sha256 that was shown (else definition_changed)"))
 
 
 class StewardConnectionSecretSet(Request):

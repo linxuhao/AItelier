@@ -1178,6 +1178,10 @@ test('step 24.1a: a letter written while the turn read outside content starts wi
   assert.equal(writes[0][1].body, EXTERNAL_CONTENT_LINE + '\n\nnoted');
   await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted again' });
   assert.equal(writes[1][1].body, 'noted again', 'unmarked turns write exactly what was said');
+  // The request key follows the body sent: the same words marked and unmarked are two
+  // replies, never one key with two bodies (an idempotency conflict).
+  await replyToLetter({ ...base, inbox: 'private', deliveryId: 'd-priv', text: 'noted' });
+  assert.notEqual(writes[2][1].request_key, writes[0][1].request_key);
   // The handoff: the same line, before the owner's quoted words.
   const sent = [];
   let external = true;

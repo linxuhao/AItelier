@@ -57,10 +57,11 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
-      # Step 24.1a (design-steward 7.8.4, 7.8.5): the host's own addresses (docker
-      # gateways, LAN, tailnet) no steward connection may resolve to, and the source
-      # address(es) the DSH host reaches the steward gateway from (empty: loopback and
-      # this container's default gateway). Set in .env from the step-0 measurement.
+      # Step 24.1a (design-steward 7.8.4, 7.8.5): the host's own addresses (LAN,
+      # tailnet; docker gateways are reserved without them) no steward connection may
+      # resolve to, and the source address(es) the DSH host reaches the steward gateway
+      # from - REQUIRED before go-live (empty: loopback and this container's default
+      # gateway, a guess). Set in .env from the step-0 measurement; see .env.example.
       AITELIER_STEWARD_HOST_ADDRESSES: "${AITELIER_STEWARD_HOST_ADDRESSES:-}"
       AITELIER_STEWARD_GATEWAY_SOURCES: "${AITELIER_STEWARD_GATEWAY_SOURCES:-}"
       # MCP Host allowlist is operator-configurable; `:*` is FastMCP's official

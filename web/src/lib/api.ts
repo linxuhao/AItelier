@@ -964,6 +964,41 @@ export function unbindOwnerChannel(channel: OwnerChannelName): Promise<unknown> 
 export function setDefaultOwnerChannel(channel: OwnerChannelName | null): Promise<unknown> {
   return _put('/api/steward/channels/default', {channel});
 }
+// ── The family group (step 23, design 7.7). Owner session only. One group per channel.
+export interface GroupMember { sender_ref: string; label: string; named: boolean }
+export interface GroupRecord {
+  message_id: string; direction: 'in' | 'out'; kind: string; accepted: number; sender_ref: string | null;
+  sender_role: 'owner' | 'member' | null; sender_label: string | null; body: string | null; original: string | null;
+  withheld_reason: string | null; reply_to: string | null; answered_by: string | null; at: string;
+}
+export interface FamilyMemoryEntry { entry_id: string; text: string; at: string; added_by_role: string | null; added_by_label: string | null }
+export interface OwnerGroup {
+  channel: OwnerChannelName; group_ref: string; label: string | null; mention_prefix: string; bound_at: string;
+  messages_30d: number; last_message_at: string | null; members: GroupMember[];
+  messages?: GroupRecord[]; family_note?: {text: string; updated_at: string} | null; family_memory?: FamilyMemoryEntry[];
+}
+export function listOwnerGroups(channel?: OwnerChannelName): Promise<{groups: OwnerGroup[]}> {
+  return _get('/api/steward/groups' + (channel ? '?channel=' + encodeURIComponent(channel) : ''));
+}
+export function createGroupCode(channel: OwnerChannelName, label?: string): Promise<{code: string; expires_at: string}> {
+  return _post('/api/steward/groups/' + encodeURIComponent(channel) + '/code', label ? {label} : undefined);
+}
+export function unbindOwnerGroup(channel: OwnerChannelName): Promise<unknown> {
+  return _del('/api/steward/groups/' + encodeURIComponent(channel));
+}
+export function clearGroupRecords(channel: OwnerChannelName): Promise<unknown> {
+  return _post('/api/steward/groups/' + encodeURIComponent(channel) + '/clear');
+}
+export function nameGroupMember(channel: OwnerChannelName, senderRef: string, label: string): Promise<unknown> {
+  return _put('/api/steward/groups/' + encodeURIComponent(channel) + '/members/' + encodeURIComponent(senderRef), {label});
+}
+export function setFamilyNote(channel: OwnerChannelName, text: string): Promise<unknown> {
+  return _put('/api/steward/groups/' + encodeURIComponent(channel) + '/family-note', {text});
+}
+export function deleteFamilyMemory(channel: OwnerChannelName, entryId?: string): Promise<unknown> {
+  return _del('/api/steward/groups/' + encodeURIComponent(channel) + '/family-memory' + (entryId ? '?entry_id=' + encodeURIComponent(entryId) : ''));
+}
+
 /** Where a steward-conversation message came from ('in') or was mirrored to ('out'). */
 export interface MessageSource {
   direction: 'in' | 'out'; channel: OwnerChannelName; sender_ref: string | null;

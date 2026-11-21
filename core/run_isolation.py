@@ -41,7 +41,6 @@ CONTROLLED race the regressions reproduce; the actual root cause of the historic
 D7A incident is UNKNOWN and is not asserted here.
 
 
-
 Worktree deletion is deliberately conservative. `is_disposable` is the pure
 safety predicate; `reap_released_worktrees` may remove only RUN-OWNED worktrees
 after the run is terminal + quiet + clean AND its branch is provably integrated
@@ -577,8 +576,6 @@ def declare_isolation(db, run_id: str, project_id: str, config_name: str) -> Non
                    config_name=config_name, repo_mode=repo_mode)
 
 
-
-
 def _resume_existing(db, existing: dict, run_id: str, project_id: str,
                      config_name: str) -> dict:
     """Return the one decision already made for this run.
@@ -605,7 +602,6 @@ def _resume_existing(db, existing: dict, run_id: str, project_id: str,
         _acquire_lease(db, canonical_checkout(existing["source_repo"]),
                        run_id, config_name)
     return existing
-
 
 
 def _provision_for_run(db, *, run_id, project_id, config_name, repo_mode,
@@ -740,7 +736,6 @@ def _run_provision_lock(run_id: str):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-
 
 
 def _bootstrap_source(db, project_id: str, source: str) -> str:

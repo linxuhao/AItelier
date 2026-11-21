@@ -202,6 +202,12 @@ class StateService:
         from core.state_groups import StateGroups
         self.groups = StateGroups(self.store, actor, driver_id, steward=self.steward, channels=self.channels,
                                   public_view=self.public_view)
+        # Step 25 C11: a group reminder's binding and exit check are the group module's.
+        self.steward.groups = self.groups
+        # Step 25 C4: the two family lists (core.state_lists), written from a group turn too.
+        from core.state_lists import StateLists
+        self.lists = StateLists(self.store, actor, driver_id, steward=self.steward, groups=self.groups,
+                                public_view=self.public_view)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

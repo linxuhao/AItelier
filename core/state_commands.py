@@ -1211,6 +1211,11 @@ class CreateStewardSchedule(Project):
     schedule: dict[str, Any] = Field(description=_SCHEDULE)
     tz: str | None = Field(default=None, min_length=1, max_length=64, description=_TZ)
     enabled: bool = True
+    # Step 25 C11 (design-steward 7.9.4): family_group posts the instruction - then the exact
+    # words for the group, at most 500 characters - into the bound family group; channel names
+    # which group when both channels have one.
+    target: Literal["owner", "family_group"] = "owner"
+    channel: Literal["slack", "wechat"] | None = None
 
 
 class UpdateStewardSchedule(Project):
@@ -1222,6 +1227,8 @@ class UpdateStewardSchedule(Project):
     schedule: dict[str, Any] | None = Field(default=None, description=_SCHEDULE)
     tz: str | None = Field(default=None, min_length=1, max_length=64, description=_TZ)
     enabled: bool | None = None
+    target: Literal["owner", "family_group"] | None = None
+    channel: Literal["slack", "wechat"] | None = None
 
 
 class DeleteStewardSchedule(Project):
@@ -1363,6 +1370,45 @@ class ListFamilyMemory(Request):
     turn: str = Field(min_length=1, max_length=64)
 
 
+class PostGroupNotice(Project):
+    """Step 25 C11: the steward's HOST posts a group reminder that fired (text and group from
+    the schedule row)."""
+    request_key: str = Field(min_length=1, max_length=320)
+    schedule_id: str = Field(min_length=1, max_length=64)
+    due_at: str = Field(min_length=1, max_length=64)
+
+
+# Step 25 C4: the family lists (core.state_lists, design-steward 7.9.5). `turn` is the turn a
+# group turn's tool request is made in; with the public-read header it is required and must be
+# the recorded turn of a bound group's audience (it is ignored without the header).
+_LIST = Literal["shopping", "todo"]
+
+
+class ListListItems(Request):
+    list: _LIST | None = None
+    include_done: bool = True
+    turn: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class AddListItems(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    list: _LIST
+    items: list[str] = Field(min_length=1, max_length=10)
+    turn: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class CheckListItems(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    item_ids: list[str] = Field(min_length=1, max_length=50)
+    done: bool = True
+    turn: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class RemoveListItems(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    item_ids: list[str] = Field(min_length=1, max_length=50)
+
+
 class ListGroupRecent(Request):
     channel: _CHANNEL
     group_ref: str = Field(min_length=1, max_length=200)
@@ -1406,6 +1452,7 @@ READ_REQUESTS = {
     "list_owner_channel_login_requests": Empty,
     "due_channel_alerts": Empty,
     "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": ListFamilyMemory,
+    "list_list_items": ListListItems,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1492,6 +1539,8 @@ WRITER_ONLY_READS = frozenset({
     # Step 23: the bound family groups, a group's recent exchanges and the family memory.
     # Private tables.
     "list_owner_groups", "list_group_recent", "list_family_memory",
+    # Step 25 C4: the family lists. A private table.
+    "list_list_items",
 })
 
 
@@ -1562,6 +1611,8 @@ WRITE_REQUESTS = {
     "bind_owner_group": BindOwnerGroup, "relay_group_message": RelayGroupMessage,
     "post_group_reply": PostGroupReply, "set_steward_turn_audience": SetStewardTurnAudience,
     "note_family_memory": NoteFamilyMemory,
+    "post_group_notice": PostGroupNotice,
+    "add_list_items": AddListItems, "check_list_items": CheckListItems, "remove_list_items": RemoveListItems,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1943,6 +1994,11 @@ def _handlers(service) -> dict:
         "list_owner_groups": service.groups.list_owner_groups,
         "list_group_recent": service.groups.list_group_recent,
         "list_family_memory": service.groups.list_family_memory,
+        "post_group_notice": service.groups.post_group_notice,
+        "list_list_items": service.lists.list_items,
+        "add_list_items": service.lists.add_items,
+        "check_list_items": service.lists.check_items,
+        "remove_list_items": service.lists.remove_items,
     }
 
 
@@ -2057,14 +2113,21 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status",
     "complete_owner_channel_login_request", "claim_channel_alert", "record_channel_alert",
     "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
-    "note_family_memory"})
-# Step 23: the one write a public-view service (a group turn's tool request, carrying
-# X-AItelier-Read-As) may make; every other write is public_view_read_only. Its handler
-# judges the recorded turn audience (core.state_groups.StateGroups._family_group).
-PUBLIC_VIEW_WRITES = frozenset({"note_family_memory"})
-# ... and the reads it is made trusted for (api.state_graph_routers.get_service): the family
-# memory pair, both refused there without a group audience.
+    "note_family_memory",
+    # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
+    # with the schedule row that fired (the model has no tool for it); the three list writes are
+    # the family list tools (add and check from a group turn too, remove in an owner turn only).
+    "post_group_notice", "add_list_items", "check_list_items", "remove_list_items"})
+# Step 23: the writes a public-view service (a group turn's tool request, carrying
+# X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
+# judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds
+# the family lists' add and check (owner 2026-11-21: lists are edited in the group).
+PUBLIC_VIEW_WRITES = frozenset({"note_family_memory", "add_list_items", "check_list_items"})
+# ... and the actions it is made trusted for (api.state_graph_routers.get_service): the family
+# memory pair and the lists' read and two writes, each refused without a group audience of the
+# turn the request names.
 FAMILY_MEMORY_ACTIONS = frozenset({"note_family_memory", "list_family_memory"})
+GROUP_TURN_ACTIONS = FAMILY_MEMORY_ACTIONS | {"list_list_items", "add_list_items", "check_list_items"}
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is
@@ -2184,10 +2247,11 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("mutating action is not available on the read surface")
     if getattr(service, "public_view", False) is True:
         # Step 23: X-AItelier-Read-As narrows the request to an anonymous reader. A service
-        # made trusted for it (the family memory pair only) serves nothing else.
+        # made trusted for it (the family memory pair and the family lists only) serves
+        # nothing else.
         if action in WRITE_REQUESTS and action not in PUBLIC_VIEW_WRITES:
             raise StateGraphError(f"public_view_read_only: {action} is not available to a public-view request")
-        if not _anonymous(service) and action not in FAMILY_MEMORY_ACTIONS:
+        if not _anonymous(service) and action not in GROUP_TURN_ACTIONS:
             raise ProjectPrivate()
     if action in WRITE_REQUESTS:
         # Write allowed; before validation and dispatch, the steward restriction.

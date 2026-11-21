@@ -74,6 +74,8 @@ _ARGS = {
     "list_group_recent": {"channel": "wechat", "group_ref": "room-canary"},
     # The turn the reader's request is made in: the one _family_reader records (477 N1).
     "list_family_memory": {"turn": "1"},
+    # Step 25 C4: the family lists (core/state_lists.py), the steward's read in an owner turn.
+    "list_list_items": {},
 }
 
 
@@ -118,7 +120,9 @@ def _steward_reader(trusted, tmp_path):
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
                        "list_owner_channel_login_requests", "message_sources", "due_channel_alerts",
                        # Step 23: the steward's host reads its groups and a group's recent exchanges.
-                       "list_owner_groups", "list_group_recent"}
+                       "list_owner_groups", "list_group_recent",
+                       # Step 25 C4: the family lists (the steward, the owner's session, a group turn).
+                       "list_list_items"}
 
 
 def _family_reader(steward):

@@ -11,6 +11,10 @@ Scheduled reminders (step 16, design-steward 7.4): the owner creates, edits,
 deletes and previews them here; the list is the owner's or the steward's. The
 steward itself writes them through its State commands.
 
+Group reminders (step 25 C11, design-steward 7.9.4) are schedules with target family_group;
+the family lists (step 25 C4, 7.9.5) are the owner's here too: view, add, check, remove and
+clear the done items (owner session only).
+
 Chat channels (step 19, design-steward 7.2): the owner issues a binding code, unbinds,
 picks the default channel and asks for a new WeChat login QR here (owner session only);
 the binding list and the messages' sources are the owner's (the steward reads them
@@ -154,6 +158,10 @@ class ScheduleCreate(BaseModel):
     schedule: dict
     tz: str = Field(min_length=1, max_length=64)
     enabled: bool = True
+    # Step 25 C11 (design-steward 7.9.4): 「发到：我 / 家庭群」; channel names the group when both
+    # channels have one.
+    target: Literal["owner", "family_group"] = "owner"
+    channel: Literal["slack", "wechat"] | None = None
 
 
 class ScheduleUpdate(BaseModel):
@@ -164,6 +172,8 @@ class ScheduleUpdate(BaseModel):
     schedule: dict | None = None
     tz: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
+    target: Literal["owner", "family_group"] | None = None
+    channel: Literal["slack", "wechat"] | None = None
 
 
 class SchedulePreview(BaseModel):
@@ -198,7 +208,7 @@ def list_schedules(service=Depends(get_service)):
 def create_schedule(body: ScheduleCreate, service=Depends(get_service)):
     _owner(service)
     return _schedule_call(service.steward.create_schedule, body.title, body.instruction, body.schedule,
-                          tz=body.tz, enabled=body.enabled, as_owner=True)
+                          tz=body.tz, enabled=body.enabled, as_owner=True, target=body.target, channel=body.channel)
 
 
 @router.post("/schedules/preview", dependencies=[Depends(authz.require_writer)])
@@ -213,7 +223,7 @@ def update_schedule(schedule_id: str, body: ScheduleUpdate, service=Depends(get_
     _owner(service)
     return _schedule_call(service.steward.update_schedule, schedule_id, body.expected_version, title=body.title,
                           instruction=body.instruction, schedule=body.schedule, tz=body.tz, enabled=body.enabled,
-                          as_owner=True)
+                          as_owner=True, target=body.target, channel=body.channel)
 
 
 @router.delete("/schedules/{schedule_id}", dependencies=[Depends(authz.require_writer)])
@@ -386,3 +396,51 @@ def pending_groups(service=Depends(get_service)):
 def pick_pending_group(body: PendingPick, service=Depends(get_service)):
     _owner(service)
     return _group_call(service.groups.pick_pending_group, body.channel, body.room_ref)
+
+
+# --- the family lists (step 25 C4, design-steward 7.9.5) -----------------------------------
+# The owner's session only. Adding passes the family group's exit check (422 withheld: <kind>).
+
+ListName = Literal["shopping", "todo"]
+
+
+class ListAdd(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[str] = Field(min_length=1, max_length=10)
+
+
+class ListCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_ids: list[str] = Field(min_length=1, max_length=50)
+    done: bool = True
+
+
+@router.get("/lists", dependencies=[Depends(authz.require_reader)])
+def family_lists(service=Depends(get_service)):
+    """Both family lists: each item with who added it, when, and who checked it."""
+    _owner(service)
+    return _group_call(lambda: service.lists.list_items(as_owner=True))
+
+
+@router.post("/lists/{list_name}/items", dependencies=[Depends(authz.require_writer)])
+def add_list_items(list_name: ListName, body: ListAdd, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(lambda: service.lists.add_items(list_name, body.items, as_owner=True))
+
+
+@router.post("/lists/check", dependencies=[Depends(authz.require_writer)])
+def check_list_items(body: ListCheck, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(lambda: service.lists.check_items(body.item_ids, body.done, as_owner=True))
+
+
+@router.delete("/lists/items/{item_id}", dependencies=[Depends(authz.require_writer)])
+def remove_list_item(item_id: str, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(lambda: service.lists.remove_items([item_id], as_owner=True))
+
+
+@router.post("/lists/clear-done", dependencies=[Depends(authz.require_writer)])
+def clear_done_list_items(list_name: ListName | None = None, service=Depends(get_service)):
+    _owner(service)
+    return _group_call(lambda: service.lists.clear_done(list_name))

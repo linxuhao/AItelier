@@ -21,7 +21,13 @@ What the backend decides here, in code, never the model nor the message text:
 - the turn audience the steward's host records each turn (`set_steward_turn_audience`):
   the family memory (`note_family_memory`, `list_family_memory`) is accepted only on a
   request with the public-read header that names the recorded turn (`turn`), whose
-  recorded audience is a bound group.
+  recorded audience is a bound group;
+- the group reminders (step 25 C11, design-steward 7.9.4): `post_group_notice` posts a
+  reminder's text, the owner's exact words, taken from the schedule row (never from the
+  call) after that row fired for that due time, to the group the row recorded if that binding
+  still stands, through the same exit check, at most group_notices_per_hour per group (apart
+  from the 60 questions) and within the account's 120 outbound messages an hour. No model
+  turn: the host sends it like a reply.
 
 None of these writes a State event and none notifies a subscriber: a group message must
 never reach the steward as an owner-audience runtime event (7.7.7). Logs carry channel,
@@ -100,6 +106,10 @@ GROUP_LIMITS = MappingProxyType({
     "fresh_minutes": 10, "retention_days": 30,
     # One reply is one WeChat message (the bridge splits at 1500): quote line + body <= this.
     "reply_chars": 1400,
+    # Step 25 C11 (design-steward 7.9.4): the owner's group reminders, counted apart from the 60
+    # questions: a group gets at most 60 + 1 + 1 + 20 + 6 = 88 messages an hour, under the
+    # bridge's 90 backstop; every one also counts toward account_out_per_hour.
+    "group_notices_per_hour": 6,
 })
 # The family memory (7.7.8a, director 420): bounded, the same 30 days as the group rows.
 FAMILY_LIMITS = MappingProxyType({"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000})
@@ -111,6 +121,11 @@ PICK_PENDING_GROUPS = False
 # What the group sees instead of a withheld reply: the same words steward.md tells the model
 # to use for "no such project" and "cannot say here", so the three read alike (7.7.7).
 WITHHELD_TEXT = "这个我在群里答不了。"
+# What the owner is told when the exit check holds something back (a reminder or a list item,
+# step 25): which kind of thing it found, never the thing itself.
+WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "private_project":
+                                     "the name or id of a project that is not public",
+                                     "host_path": "a path on the host"})
 QUOTA_NOTICE = "问得太多了，过一会儿再问。"
 BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
@@ -304,7 +319,15 @@ class StateGroups:
                 for table in ("state_group_messages", "state_group_members", "state_family_memory",
                               "state_family_note"):
                     conn.execute(f"DELETE FROM {table} WHERE channel=? AND group_ref=?", (channel, group))
-        return {"unbound": row is not None, "channel": channel}
+                # Step 25 C11 (7.9.4): the reminders made for this binding stop; a new binding
+                # (even of the same group: a new bound_at) never revives them.
+                disabled = conn.execute(
+                    "UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,updated_by='owner',"
+                    "updated_at=? WHERE target='family_group' AND target_channel=? AND target_group_ref=? AND "
+                    "target_bound_at=? AND deleted_at IS NULL AND enabled=1",
+                    (_now().isoformat(), channel, group, row["bound_at"])).rowcount
+        return {"unbound": row is not None, "channel": channel,
+                **({"reminders_disabled": disabled} if row is not None else {})}
 
     def clear_group_messages(self, channel):
         self.steward._owner()
@@ -662,6 +685,71 @@ class StateGroups:
             self._log("reply withheld " + reason, channel, group, None, len(body.encode("utf-8")))
         return out
 
+    def post_group_notice(self, project_id, request_key, schedule_id, due_at):
+        """A group reminder that fired, posted by the steward's HOST (step 25 C11, 7.9.4). The
+        text and the group come from the schedule row, never from the call. In ONE transaction:
+        the row fired for exactly this due time (`last_due_at`), is a family_group reminder
+        and is not deleted (else not_fired; a once row is disabled by its fire, so `enabled` is
+        not read); the binding it recorded (channel, group_ref, bound_at) still stands (else
+        group_unbound, and the row is disabled); the exit check passes (else withheld, with the
+        kind); the group has had fewer than group_notices_per_hour reminders this hour (else
+        group_notice_budget) and the account fewer than account_out_per_hour outbound messages
+        (else group_quota_account). Then one outbound row (kind 'notice'); no State event. A
+        refusal posts nothing and is answered as {refused, reason?, title}: the host tells the
+        owner, never retries. Answered once per request_key (the replay says duplicate)."""
+        try:
+            due = datetime.fromisoformat(due_at)
+        except (TypeError, ValueError):
+            raise StateGraphError("invalid_request: due_at must be an ISO 8601 time") from None
+        if due.tzinfo is None:
+            raise StateGraphError("invalid_request: due_at must carry its UTC offset")
+        request_hash = _hash([schedule_id, due_at])
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "post_group_notice", request_key, request_hash)
+            if replay is not None:
+                return {**replay, "duplicate": True}
+            row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=?", (schedule_id,)).fetchone()
+            refused, detail = None, None
+            if (row is None or row["deleted_at"] is not None or row["target"] != "family_group"
+                    or not row["last_due_at"] or datetime.fromisoformat(row["last_due_at"]) != due):
+                refused = "not_fired"
+            else:
+                channel, group = row["target_channel"], row["target_group_ref"]
+                live = conn.execute("SELECT 1 FROM state_owner_groups WHERE channel=? AND group_ref=? AND bound_at=? "
+                                    "AND revoked_at IS NULL", (channel, group, row["target_bound_at"])).fetchone()
+                hour = (moment - timedelta(hours=1)).isoformat()
+                if live is None:
+                    refused = "group_unbound"
+                    conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL "
+                                 "WHERE schedule_id=?", (schedule_id,))
+                elif (detail := self.exit_check(conn, row["instruction"], moment)) is not None:
+                    refused = "withheld"
+                elif self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
+                                 "direction='out' AND kind='notice' AND at>?",
+                                 (channel, group, hour)) >= GROUP_LIMITS["group_notices_per_hour"]:
+                    refused = "group_notice_budget"
+                elif self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND direction='out' "
+                                 "AND at>?", (channel, hour)) >= GROUP_LIMITS["account_out_per_hour"]:
+                    refused = "group_quota_account"
+            title = row["title"] if row is not None else None
+            if refused is not None:
+                result = {"refused": refused, "title": title, **({"reason": detail} if detail else {})}
+            else:
+                body = row["instruction"].strip()
+                message_id = self._out_row(conn, channel, group, "notice", body, moment, request_key=request_key)
+                self._retain(conn, moment)
+                result = {"posted": True, "message_id": message_id, "channel": channel, "group_ref": group,
+                          "text": body, "title": title}
+            out = self.steward._record(conn, "post_group_notice", request_key, request_hash, result)
+        if refused is not None:
+            self._log("notice refused " + refused, row["target_channel"] if row is not None else None,
+                      row["target_group_ref"] if row is not None else None, None)
+        else:
+            self._log("notice posted", channel, group, None, len(body.encode("utf-8")))
+        return out
+
     def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None):
         """The steward's host records whose turn this is, before the turn's first step runs
         (7.7.3 item 5). One row, overwritten; no event."""
@@ -681,24 +769,40 @@ class StateGroups:
                           group["group_ref"] if audience == "group" else None, json.dumps(refs), _now().isoformat()))
         return {"recorded": True, "turn": str(turn), "audience": audience}
 
-    def _family_group(self, conn, turn):
-        """The bound group whose turn this is, or refused: only a request with the
-        public-read header (a group turn's tool) that names the turn the host recorded last
-        (`turn`, the plugin's open turn) whose recorded audience is a group bound now
-        (7.7.8a). The record is one overwritten row; naming its turn means a stale row can
-        serve no turn but the one it was written for (director 477 N1): the next turn is
-        recorded before its first step runs, so a request of that turn never meets the
-        previous turn's row as its own."""
-        if not self.public_view:
-            raise StateGraphError("family_memory_group_turn_only: family memory is read and written in group "
-                                  "turns only")
+    def group_turn(self, conn, turn, code):
+        """The audience record of the group turn a public-view request (a group turn's tool)
+        names, or refused with `code`: the request names the turn the host recorded last
+        (`turn`, the plugin's open turn) and that turn's recorded audience is a group bound now
+        (7.7.8a; the family lists the same, 7.9.5). The record is one overwritten row; naming
+        its turn means a stale row can serve no turn but the one it was written for (director
+        477 N1): the next turn is recorded before its first step runs, so a request of that turn
+        never meets the previous turn's row as its own."""
         self.steward._steward(conn)
         row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1").fetchone()
         if row is None or row["audience"] != "group" or self._live_group(conn, row["channel"], row["group_ref"]) is None:
-            raise StateGraphError("family_memory_group_turn_only: this turn is not a bound group's")
+            raise StateGraphError(f"{code}: this turn is not a bound group's")
         if not isinstance(turn, str) or row["turn"] != turn:
-            raise StateGraphError("family_memory_group_turn_only: this request is not the recorded turn's")
+            raise StateGraphError(f"{code}: this request is not the recorded turn's")
         return row
+
+    def turn_asker(self, conn, turn_row):
+        """Who asked in this group turn, from the audience record (never from the call):
+        (role, sender_ref, label) of the one sender of the turn's questions, or - a turn that
+        merged several askers' questions - ('member', None, None)."""
+        refs = set(json.loads(turn_row["sender_refs_json"]))
+        sender = next(iter(refs)) if len(refs) == 1 else None
+        account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
+                               (turn_row["channel"],)).fetchone()
+        role = "owner" if sender is not None and account is not None and account[0] == sender else "member"
+        return role, sender, self._label_of(conn, turn_row["channel"], turn_row["group_ref"], sender, role)
+
+    def _family_group(self, conn, turn):
+        """The family memory's group: only from a group turn (the public-read header and the
+        recorded turn, group_turn)."""
+        if not self.public_view:
+            raise StateGraphError("family_memory_group_turn_only: family memory is read and written in group "
+                                  "turns only")
+        return self.group_turn(conn, turn, "family_memory_group_turn_only")
 
     def note_family_memory(self, project_id, request_key, text, turn):
         text = unicodedata.normalize("NFKC", str(text)).strip()
@@ -721,11 +825,7 @@ class StateGroups:
                 raise StateConflict("family_memory_full: ask your owner to clear some on the dashboard")
             # "Who added it" is the turn's asker; a turn that merged several askers' questions
             # cannot tell which of them asked to remember, so it names nobody.
-            refs = set(json.loads(turn["sender_refs_json"]))
-            sender = next(iter(refs)) if len(refs) == 1 else None
-            account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
-                                   (channel,)).fetchone()
-            role = "owner" if sender is not None and account is not None and account[0] == sender else "member"
+            role, sender, _label = self.turn_asker(conn, turn)
             entry_id = "fam-" + secrets.token_hex(8)
             conn.execute("INSERT INTO state_family_memory(entry_id,channel,group_ref,text,added_by_role,added_by_ref,at) "
                          "VALUES(?,?,?,?,?,?,?)", (entry_id, channel, group, text, role, sender, moment.isoformat()))

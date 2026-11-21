@@ -4,7 +4,7 @@ from fastapi import Depends, Request
 from api.authz import (is_via_cloudflare, may_read_private, request_actor, request_identity,
                        require_reader, require_writer)
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
-from core.state_commands import FAMILY_MEMORY_ACTIONS
+from core.state_commands import GROUP_TURN_ACTIONS
 from core.state_service import StateService
 
 from api.state_http import create_state_router
@@ -47,13 +47,14 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
     # group turn. It is judged per request (this dependency builds a new service every
     # time) and can only narrow: without a credential, in test mode or with the gate off
     # the request is still anonymous, and `execute` refuses every write
-    # (public_view_read_only). The one exception is the family memory pair, which a
-    # trusted credential reaches with the header only (core.state_groups judges the
-    # recorded turn audience); that service serves nothing else (core.state_commands.execute).
+    # (public_view_read_only). The exceptions are the family memory pair and the family lists'
+    # read and two writes (step 25 C4), which a trusted credential reaches with the header
+    # only (core.state_groups.group_turn judges the recorded turn audience and the turn the
+    # request names); that service serves nothing else (core.state_commands.execute).
     public_view = request.headers.get(READ_AS_HEADER) is not None
     trusted = may_read_private(request)
     if public_view:
-        trusted = trusted and request.path_params.get("action") in FAMILY_MEMORY_ACTIONS
+        trusted = trusted and request.path_params.get("action") in GROUP_TURN_ACTIONS
     service = StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
                            runtime_factory=lambda: (get_skillflow(), get_config_registry()),
                            project_read_trusted=trusted,

@@ -1,0 +1,261 @@
+"""The family lists (step 25 C4, design-steward 7.9.5): a shopping list and a to-do list.
+
+Two lists of the FAMILY, never private to the owner: whatever is on them the bound family
+group can read, whoever added it (steward.md says so). Who may do what:
+
+- the steward in a family-group turn (its tool's request carries the public-read header and
+  names the turn the host recorded with a bound group's audience, core.state_groups
+  .group_turn - the same gate as the family memory): show, add, check / uncheck. This is
+  step 23's one explicit write exception besides the family memory (owner 2026-11-21);
+- the steward in an owner turn (its request carries no header): show, add, check, remove;
+- the owner on the dashboard (owner session): everything, and clearing the done items.
+
+Who added or checked an item is taken by the backend, never from the call: in a group turn
+the asker the audience record names (one sender: that member's dashboard name, else
+「家庭群」), in an owner turn the steward, on the dashboard the owner. Every item passes the
+family group's exit check when it is ADDED, from wherever (core.state_groups.exit_check): a
+hit is refused `withheld` with its kind, so nothing on a list can make a group reply
+withheld later. The bounds are LIST_LIMITS. No write emits a State event (nothing wakes
+anyone, 7.7.7). The table is private (core.state_privacy.PRIVATE_STATE_TABLES).
+"""
+from __future__ import annotations
+
+import secrets
+import unicodedata
+from datetime import timedelta
+from types import MappingProxyType
+
+from core.state_graph import StateConflict, StateGraphError
+from core.state_privacy import UntrustedDatabase, writer_only_read
+from core.state_steward import _hash
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS state_steward_list_items (
+ item_id TEXT PRIMARY KEY,
+ list TEXT NOT NULL CHECK(list IN ('shopping','todo')),
+ text TEXT NOT NULL,
+ added_by_role TEXT NOT NULL CHECK(added_by_role IN ('owner','member','steward')),
+ added_by_ref TEXT, added_by_label TEXT NOT NULL,
+ added_via TEXT NOT NULL CHECK(added_via IN ('group','owner_dm','dashboard')),
+ added_at TEXT NOT NULL,
+ done_at TEXT, done_by_role TEXT, done_by_ref TEXT, done_by_label TEXT,
+ deleted_at TEXT);
+CREATE INDEX IF NOT EXISTS state_steward_list_items_open ON state_steward_list_items(list, deleted_at, done_at);
+"""
+
+LISTS = ("shopping", "todo")
+# Design-steward 7.9.5: at most 10 items per add, 100 open items per list, 100 characters an
+# item; a checked item is deleted 30 days after it was checked (the group rows' 30 days).
+LIST_LIMITS = MappingProxyType({"per_add": 10, "open_per_list": 100, "item_chars": 100, "done_days": 30,
+                                "per_check": 50})
+GROUP_LABEL = "家庭群"
+STEWARD_LABEL = "管家"
+OWNER_LABEL = "业主"
+GROUP_TURN_ONLY = "lists_group_turn_only"
+
+
+def _now():
+    from core import state_groups
+    return state_groups._now()
+
+
+def _clean(text) -> str:
+    return unicodedata.normalize("NFKC", str(text)).strip()
+
+
+class StateLists:
+    def __init__(self, store, actor, driver_id=None, steward=None, groups=None, public_view=False):
+        self.store, self.actor, self.driver_id = store, actor, driver_id
+        self.steward, self.groups = steward, groups
+        self.project_read_trusted = store.project_read_trusted
+        self.public_view = public_view
+        if not isinstance(store.db, UntrustedDatabase):
+            with store.db.get_connection() as conn:
+                conn.executescript(SCHEMA)
+                conn.commit()
+
+    # ---------------------------------------------------------------- who is writing
+    def _caller(self, conn, turn, as_owner, project_id=None):
+        """(role, ref, label, via) of this call, from the credential and the audience record."""
+        if as_owner:
+            self.steward._owner()
+            return "owner", None, OWNER_LABEL, "dashboard"
+        if self.public_view:
+            if not isinstance(turn, str) or not turn:
+                raise StateGraphError("invalid_request: a group turn's list request names its turn")
+            row = self.groups.group_turn(conn, turn, GROUP_TURN_ONLY)
+            role, ref, label = self.groups.turn_asker(conn, row)
+            return role, ref, label or GROUP_LABEL, "group"
+        self.steward._steward(conn, project_id)
+        return "steward", None, STEWARD_LABEL, "owner_dm"
+
+    @staticmethod
+    def _retain(conn, moment):
+        cutoff = (moment - timedelta(days=LIST_LIMITS["done_days"])).isoformat()
+        conn.execute("DELETE FROM state_steward_list_items WHERE done_at<? OR deleted_at<?", (cutoff, cutoff))
+
+    @staticmethod
+    def _label(conn, role, ref, stored):
+        """The name shown now: a member's current dashboard name (a rename shows, the key is
+        the sender_ref), else what was stored."""
+        if role == "member" and ref is not None:
+            row = conn.execute("SELECT label FROM state_group_members WHERE sender_ref=? AND label IS NOT NULL "
+                               "LIMIT 1", (ref,)).fetchone()
+            if row is not None:
+                return row[0]
+        return stored
+
+    def _item(self, conn, row):
+        return {"item_id": row["item_id"], "list": row["list"], "text": row["text"],
+                "added_by": self._label(conn, row["added_by_role"], row["added_by_ref"], row["added_by_label"]),
+                "added_by_role": row["added_by_role"], "added_via": row["added_via"], "added_at": row["added_at"],
+                "done": row["done_at"] is not None, "done_at": row["done_at"],
+                "done_by": self._label(conn, row["done_by_role"], row["done_by_ref"], row["done_by_label"])
+                if row["done_at"] is not None else None}
+
+    def _keyed(self, conn, operation, request_key, request_hash):
+        return self.steward._replay(conn, operation, request_key, request_hash) if request_key else None
+
+    def _record(self, conn, operation, request_key, request_hash, result):
+        return self.steward._record(conn, operation, request_key, request_hash, result) if request_key else result
+
+    # ---------------------------------------------------------------- reads
+    @writer_only_read("list_list_items")
+    def list_items(self, list=None, include_done=True, turn=None, project_id=None, as_owner=False):
+        """Both lists (or one): open items oldest first, then the checked ones newest first."""
+        if list is not None and list not in LISTS:
+            raise StateGraphError("invalid_list: shopping or todo")
+        with self.store.transaction() as conn:
+            self._caller(conn, turn, as_owner, project_id)
+            out = {}
+            for name in ([list] if list else LISTS):
+                rows = conn.execute("SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL AND "
+                                    "done_at IS NULL ORDER BY added_at, rowid", (name,)).fetchall()
+                if include_done:
+                    rows += conn.execute("SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL "
+                                         "AND done_at IS NOT NULL ORDER BY done_at DESC, rowid DESC LIMIT 100",
+                                         (name,)).fetchall()
+                out[name] = [self._item(conn, r) for r in rows]
+        return {"lists": out}
+
+    # ---------------------------------------------------------------- writes
+    def add_items(self, list, items, project_id=None, request_key=None, turn=None, as_owner=False):
+        """Add up to per_add items. An item equal (after NFKC and trimming) to an open item of
+        the same list is that item, not a second one. Every new item passes the exit check;
+        one hit refuses the whole add (withheld: <kind>). A list would pass open_per_list:
+        list_full, nothing added."""
+        if list not in LISTS:
+            raise StateGraphError("invalid_list: shopping or todo")
+        if not isinstance(items, (tuple, type([]))) or not items:
+            raise StateGraphError("invalid_request: items is a nonempty list of texts")
+        if len(items) > LIST_LIMITS["per_add"]:
+            raise StateGraphError(f"too_many_items: at most {LIST_LIMITS['per_add']} items at a time")
+        texts = []
+        for item in items:
+            cleaned = _clean(item)
+            if not cleaned:
+                raise StateGraphError("empty_item")
+            if len(cleaned) > LIST_LIMITS["item_chars"]:
+                raise StateGraphError(f"item_too_long: at most {LIST_LIMITS['item_chars']} characters")
+            if cleaned not in texts:
+                texts.append(cleaned)
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            role, ref, label, via = self._caller(conn, turn, as_owner, project_id)
+            request_hash = _hash(["add", list, texts, via, ref])
+            replay = self._keyed(conn, "add_list_items", request_key, request_hash)
+            if replay is not None:
+                return replay
+            self._retain(conn, moment)
+            existing = {r["text"]: r for r in conn.execute(
+                "SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL AND done_at IS NULL", (list,))}
+            new = [t for t in texts if t not in existing]
+            for text in new:
+                reason = self.groups.exit_check(conn, text, moment)
+                if reason is not None:
+                    from core.state_groups import WITHHELD_REASONS
+                    raise StateGraphError(f"withheld: {reason} ({WITHHELD_REASONS[reason]}); nothing was added")
+            if len(existing) + len(new) > LIST_LIMITS["open_per_list"]:
+                raise StateConflict(f"list_full: at most {LIST_LIMITS['open_per_list']} open items on a list; "
+                                    "check or remove some first")
+            added = {}
+            for text in new:
+                item_id = "li-" + secrets.token_hex(8)
+                conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_by_ref,"
+                             "added_by_label,added_via,added_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (item_id, list, text, role, ref, label, via, moment.isoformat()))
+                added[text] = item_id
+            result = {"items": [{**self._item(conn, existing[t] if t in existing else conn.execute(
+                "SELECT * FROM state_steward_list_items WHERE item_id=?", (added[t],)).fetchone()),
+                "added": t in added} for t in texts]}
+            return self._record(conn, "add_list_items", request_key, request_hash, result)
+
+    def check_items(self, item_ids, done=True, project_id=None, request_key=None, turn=None, as_owner=False):
+        """Check (done) or uncheck items; an id that is not on a list is answered in `unknown`."""
+        ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
+        if not ids or len(ids) > LIST_LIMITS["per_check"]:
+            raise StateGraphError(f"invalid_request: 1 to {LIST_LIMITS['per_check']} item_ids")
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            role, ref, label, via = self._caller(conn, turn, as_owner, project_id)
+            request_hash = _hash(["check", ids, bool(done), via, ref])
+            replay = self._keyed(conn, "check_list_items", request_key, request_hash)
+            if replay is not None:
+                return replay
+            self._retain(conn, moment)
+            changed, unknown = [], []
+            for item_id in ids:
+                if done:
+                    hit = conn.execute("UPDATE state_steward_list_items SET done_at=COALESCE(done_at,?),"
+                                       "done_by_role=COALESCE(done_by_role,?),done_by_ref=CASE WHEN done_at IS NULL "
+                                       "THEN ? ELSE done_by_ref END,done_by_label=COALESCE(done_by_label,?) "
+                                       "WHERE item_id=? AND deleted_at IS NULL",
+                                       (moment.isoformat(), role, ref, label, item_id)).rowcount
+                else:
+                    hit = conn.execute("UPDATE state_steward_list_items SET done_at=NULL,done_by_role=NULL,"
+                                       "done_by_ref=NULL,done_by_label=NULL WHERE item_id=? AND deleted_at IS NULL",
+                                       (item_id,)).rowcount
+                if hit:
+                    changed.append(self._item(conn, conn.execute(
+                        "SELECT * FROM state_steward_list_items WHERE item_id=?", (item_id,)).fetchone()))
+                else:
+                    unknown.append(item_id)
+            result = {"items": changed, "unknown": unknown}
+            return self._record(conn, "check_list_items", request_key, request_hash, result)
+
+    def remove_items(self, item_ids, project_id=None, request_key=None, as_owner=False):
+        """Remove items (the owner's turn or dashboard; never a group turn)."""
+        if self.public_view:
+            raise StateGraphError("public_view_read_only: remove_list_items is not available to a group turn")
+        ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
+        if not ids or len(ids) > LIST_LIMITS["per_check"]:
+            raise StateGraphError(f"invalid_request: 1 to {LIST_LIMITS['per_check']} item_ids")
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self._caller(conn, None, as_owner, project_id)
+            request_hash = _hash(["remove", ids])
+            replay = self._keyed(conn, "remove_list_items", request_key, request_hash)
+            if replay is not None:
+                return replay
+            removed = [i for i in ids if conn.execute(
+                "UPDATE state_steward_list_items SET deleted_at=? WHERE item_id=? AND deleted_at IS NULL",
+                (moment.isoformat(), i)).rowcount]
+            self._retain(conn, moment)
+            result = {"removed": removed, "unknown": [i for i in ids if i not in removed]}
+            return self._record(conn, "remove_list_items", request_key, request_hash, result)
+
+    def clear_done(self, list=None):
+        """The dashboard's 「清空已完成」: remove every checked item (of one list or both)."""
+        self.steward._owner()
+        if list is not None and list not in LISTS:
+            raise StateGraphError("invalid_list: shopping or todo")
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            sql, args = ("UPDATE state_steward_list_items SET deleted_at=? WHERE done_at IS NOT NULL AND "
+                         "deleted_at IS NULL"), [moment.isoformat()]
+            if list is not None:
+                sql += " AND list=?"
+                args.append(list)
+            cleared = conn.execute(sql, args).rowcount
+            self._retain(conn, moment)
+        return {"cleared": cleared}

@@ -335,11 +335,12 @@ export const autoReplyBody = text => {
  *  retry after a lost answer is State's replay and a second, different text is refused
  *  (idempotency_conflict) instead of becoming a second reply. */
 export async function forwardFinalText({ request, project, me, text, input = '', signal }) {
-  const body = autoReplyBody(text);
-  if (!body) return { forwarded: false, reason: 'only_clock_text' };
   const waiting = (await unansweredOwnerMessages({ request, project, me, signal }))
     .filter(m => input.includes(m.message_id));
   if (!waiting.length) return { forwarded: false };
+  // Checked after `waiting`: the reason means an owner was left without the reply.
+  const body = autoReplyBody(text);
+  if (!body) return { forwarded: false, reason: 'only_clock_text' };
   const newest = waiting.at(-1);
   try {
     const result = await request('/api/state/commands/send_user_message', { request_key: `auto-reply:${newest.message_id}`,

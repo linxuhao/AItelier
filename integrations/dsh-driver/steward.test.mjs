@@ -1103,17 +1103,19 @@ test('message time 3.6: the system clock lines the steward copied to the start o
   const long = clock + '\n' + 'x'.repeat(9000);
   assert.equal(autoReplyBody(long), 'x'.repeat(7990) + '\n[…]', 'stripped first, then clipped to 8000');
   assert.equal(autoReplyBody(long), autoReplyBody(long), 'the same words give the same body (one reply key, one mirror)');
-  // Only clock lines: nothing is sent, and State is not even asked.
+  // Only clock lines: nothing is sent; the reason is given only when an owner message was waiting.
   const calls = [];
   const request = async (path, body) => { calls.push(path); return { messages: [owner('o1', '2026-11-20T10:13:00Z', '现在几点？')], next_cursor: null }; };
   assert.deepEqual(await forwardFinalText({ request, project: 'aitelier-home', me: 'drv-home', text: clock + '\n' + clock, input: 'o1' }),
     { forwarded: false, reason: 'only_clock_text' });
-  assert.deepEqual(calls, [], 'no send_user_message, no read');
+  assert.deepEqual(await forwardFinalText({ request, project: 'aitelier-home', me: 'drv-home', text: clock, input: 'nobody' }),
+    { forwarded: false }, 'nobody waiting: no reply was dropped');
+  assert.deepEqual(calls, ['/api/state/query/list_user_conversation', '/api/state/query/list_user_conversation'], 'reads only, no send_user_message');
   const sent = await forwardFinalText({ request: async (path, body) => (path.endsWith('/list_user_conversation')
     ? { messages: [owner('o1', '2026-11-20T10:13:00Z', '现在几点？')], next_cursor: null } : (calls.push(body), { result: { message_id: 'r1' } })),
   project: 'aitelier-home', me: 'drv-home', text: clock + '\n现在是巴黎 11:14。', input: 'o1' });
   assert.deepEqual(sent, { forwarded: true, reply_to: 'o1', message_id: 'r1' });
-  assert.equal(calls[0].body, '现在是巴黎 11:14。', 'the stored reply carries no clock line');
+  assert.equal(calls.at(-1).body, '现在是巴黎 11:14。', 'the stored reply carries no clock line');
 });
 
 test('iss-4a503609 (a)(b): the steward\'s texts name only what it has; the director\'s are byte-for-byte today\'s', async () => {

@@ -111,6 +111,12 @@ test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check 
   assert.equal(o.guard('propose'), pausedRefusal);
 });
 
+test('director 505: list_show states its bound on checked items where the model reads it, and how the rest is counted', () => {
+  const source = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8');
+  const description = source.match(/name: 'list_show',\s*description: '((?:[^'\\]|\\.)*)'/)?.[1] ?? '';
+  for (const bound of ['100 checked items', 'newest first', 'done_total', 'done_more', 'done_not_shown']) assert.ok(description.includes(bound), bound);
+});
+
 test('guard: an unknown audience reads as a group; an owner turn never gets the family memory tools', () => {
   const g = turns();
   assert.equal(g.guard('memory_note'), groupTurnRefusal);

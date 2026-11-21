@@ -51,9 +51,10 @@ CREATE INDEX IF NOT EXISTS state_steward_list_items_open ON state_steward_list_i
 
 LISTS = ("shopping", "todo")
 # Design-steward 7.9.5: at most 10 items per add, 100 open items per list, 100 characters an
-# item; a checked item is deleted 30 days after it was checked (the group rows' 30 days).
+# item; a checked item is deleted 30 days after it was checked (the group rows' 30 days). A read
+# shows at most 100 checked items of a list, newest first, and counts the rest (director 505).
 LIST_LIMITS = MappingProxyType({"per_add": 10, "open_per_list": 100, "item_chars": 100, "done_days": 30,
-                                "per_check": 50})
+                                "per_check": 50, "done_shown": 100})
 GROUP_LABEL = "家庭群"
 STEWARD_LABEL = "管家"
 OWNER_LABEL = "业主"
@@ -160,21 +161,29 @@ class StateLists:
     # ---------------------------------------------------------------- reads
     @writer_only_read("list_list_items")
     def list_items(self, list=None, include_done=True, turn=None, project_id=None, as_owner=False):
-        """Both lists (or one): open items oldest first, then the checked ones newest first."""
+        """Both lists (or one): open items oldest first, then the checked ones newest first.
+
+        At most LIST_LIMITS["done_shown"] (100) checked items of a list are shown, while a
+        checked item is kept done_days (30): with the checked items, `done_total` counts each
+        list's checked items and `done_more` how many of them are not shown (director 505)."""
         if list is not None and list not in LISTS:
             raise StateGraphError("invalid_list: shopping or todo")
         with self.store.transaction() as conn:
             self._caller(conn, turn, as_owner, project_id)
-            out = {}
+            out, total, more = {}, {}, {}
             for name in ([list] if list else LISTS):
                 rows = conn.execute("SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL AND "
                                     "done_at IS NULL ORDER BY added_at, rowid", (name,)).fetchall()
                 if include_done:
-                    rows += conn.execute("SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL "
-                                         "AND done_at IS NOT NULL ORDER BY done_at DESC, rowid DESC LIMIT 100",
-                                         (name,)).fetchall()
+                    done = conn.execute("SELECT * FROM state_steward_list_items WHERE list=? AND deleted_at IS NULL "
+                                        "AND done_at IS NOT NULL ORDER BY done_at DESC, rowid DESC LIMIT ?",
+                                        (name, LIST_LIMITS["done_shown"])).fetchall()
+                    total[name] = conn.execute("SELECT COUNT(*) FROM state_steward_list_items WHERE list=? AND "
+                                               "deleted_at IS NULL AND done_at IS NOT NULL", (name,)).fetchone()[0]
+                    more[name] = total[name] - len(done)
+                    rows += done
                 out[name] = [self._item(conn, r) for r in rows]
-        return {"lists": out}
+        return {"lists": out, **({"done_total": total, "done_more": more} if include_done else {})}
 
     # ---------------------------------------------------------------- writes
     def add_items(self, list, items, project_id=None, request_key=None, turn=None, as_owner=False):

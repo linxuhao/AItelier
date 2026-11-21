@@ -675,14 +675,20 @@ export function publicProjectSummary(summary) {
  *  `done_by` null). The model reads that as these words, never a blank. */
 export const LIST_FORMER_ADDED = '曾由一位成员添加';
 export const LIST_FORMER_DONE = '曾由一位成员勾掉';
+/** Director 505: a read shows at most 100 checked items of a list; the backend counts the rest
+ *  (`done_more`), and the model reads that count as these words per list (`done_not_shown`). */
+export const listDoneNotShown = n => `另有 ${n} 条已勾掉的未显示`;
 export function listWhoShown(answer) {
   if (!answer || typeof answer !== 'object') return answer;
   const item = i => (i && typeof i === 'object' ? { ...i, added_by: i.added_by ?? LIST_FORMER_ADDED,
     ...(i.done ? { done_by: i.done_by ?? LIST_FORMER_DONE } : {}) } : i);
   const items = v => (Array.isArray(v) ? v.map(item) : v);
+  const notShown = Object.entries(answer.done_more && typeof answer.done_more === 'object' ? answer.done_more : {})
+    .filter(([, n]) => Number.isInteger(n) && n > 0).map(([name, n]) => [name, listDoneNotShown(n)]);
   return { ...answer, ...('items' in answer ? { items: items(answer.items) } : {}),
     ...(answer.lists && typeof answer.lists === 'object'
-      ? { lists: Object.fromEntries(Object.entries(answer.lists).map(([name, v]) => [name, items(v)])) } : {}) };
+      ? { lists: Object.fromEntries(Object.entries(answer.lists).map(([name, v]) => [name, items(v)])) } : {}),
+    ...(notShown.length ? { done_not_shown: Object.fromEntries(notShown) } : {}) };
 }
 
 /** Step 23 (design-steward 7.7): the host side of the family group, over the State commands

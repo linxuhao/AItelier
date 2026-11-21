@@ -321,8 +321,15 @@ test('local host, step 15: the steward\'s snapshot tells it how its owner answer
   const plain = JSON.parse(await localHost({ root }).context('steward')).owner_commands;
   assert.match(plain, /\/questions .*\/answer <id> <text>/);
   assert.doesNotMatch(plain, /approve/, 'no projectsDir: no proposals to decide');
+  assert.doesNotMatch(plain, /\/forget|\/restore/, 'no memory: no memory commands');
   const full = JSON.parse(await localHost({ root, projectsDir }).context('steward')).owner_commands;
   assert.match(full, /\/proposals .*\/approve <id> or \/decline <id> \[reason\]/);
+  assert.doesNotMatch(full, /\/forget/);
+  // With memory: memory_forget refuses (no_owner_channel), so the steward is told to give its owner /forget.
+  const remembering = JSON.parse(await localHost({ root, projectsDir, memory: { userId: 'owner' } }).context('steward')).owner_commands;
+  assert.match(remembering, /\/forget <id> \[reason\] and bring it back with \/restore <id>\. When memory_forget refuses with no_owner_channel, give them \/forget <id> \[reason\] instead\.$/);
+  assert.ok(remembering.startsWith(full.slice(0, -1)), 'the memory commands are added after the others');
+  assert.equal(JSON.parse(await localHost({ root, memory: { userId: 'owner' } }).context('director')).owner_commands, undefined);
   assert.equal(JSON.parse(await localHost({ root, projectsDir }).context('director')).owner_commands, undefined, 'the director\'s snapshot is unchanged');
 });
 
@@ -479,6 +486,11 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     assert.equal(done.kind, 'success', done.text);
     assert.match(done.text, /"purged":true/);
     assert.deepEqual((await store.read(['t-t1-0'])).not_found, ['t-t1-0']);
+    // A purged id: /forget says purged, without the /restore hint that /restore would refuse.
+    const forgetPurged = await commands.run('forget', ' t-t1-0');
+    assert.equal(forgetPurged.kind, 'error');
+    assert.equal(forgetPurged.text, 'Not forgotten t-t1-0: purged - it was removed for good and cannot be restored');
+    assert.match((await commands.run('restore', ' t-t1-0')).text, /^Not restored t-t1-0: purged/);
     await commands.run('purge', ' t-nope');
     assert.match((await commands.run('purge', ` t-nope ${PURGE_WORD}`)).text, /unknown_ids/);
     events.stop(); await events.done;
